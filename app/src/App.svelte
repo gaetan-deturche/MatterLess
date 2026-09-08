@@ -17,6 +17,8 @@
   import Kept from "./lib/Kept.svelte";
   import BrowseChannels from "./lib/BrowseChannels.svelte";
   import NewConversation from "./lib/NewConversation.svelte";
+  import ChannelMenu from "./lib/ChannelMenu.svelte";
+  import AddMembers from "./lib/AddMembers.svelte";
   import ProfileCard from "./lib/ProfileCard.svelte";
   import Scrollbar from "./lib/Scrollbar.svelte";
 
@@ -27,6 +29,11 @@
   /** The server asked for a second factor, so the code screen replaces the
    *  credentials one. Only ever set by a sign-in that got that far. */
   let mfaNeeded = $state(false);
+
+  /** The channel a right-click opened a menu on, and where the pointer was. */
+  let channelMenu: { channel: api.ChannelSummary; x: number; y: number } | null = $state(null);
+  /** The channel whose member picker is open. */
+  let addingTo: api.ChannelSummary | null = $state(null);
   let error = $state("");
   let busy = $state(false);
 
@@ -555,6 +562,25 @@
       log.debug("sidebar.regrouping", { team: teamId });
       void loadSidebar();
     }, SIDEBAR_COALESCE_MS);
+  }
+
+  /// Re-reads membership after a menu action changed it, and moves off a
+  /// channel the reader is no longer in.
+  async function refreshChannels() {
+    const meta = store.meta();
+    if (!meta) return;
+    try {
+      const list = await api.refreshMembership(meta.meId, meta.displayMode);
+      store.setChannelList(list);
+      // Leaving from the menu can take the channel being read out from under
+      // it, which the sidebar would show but the stream would not.
+      if (active && !list.some((entry) => entry.id === active)) {
+        const next = list[0];
+        if (next) await select(next.id);
+      }
+    } catch (error) {
+      log.warn("membership.refresh.failed", { error: String(error) });
+    }
   }
 
   async function loadSidebar() {
@@ -2066,6 +2092,10 @@
             class:muted={unread?.muted}
             class:unread={asking}
             onclick={() => select(channel.id)}
+            oncontextmenu={(event) => {
+              event.preventDefault();
+              channelMenu = { channel, x: event.clientX, y: event.clientY };
+            }}
           >
             <ChannelIcon {channel} />
             <span class="name">{channel.display_name}</span>
@@ -2419,6 +2449,35 @@
       {/if}
       {#if error}<p class="error">{error}</p>{/if}
     </main>
+    {#if channelMenu}
+      <ChannelMenu
+        channel={channelMenu.channel}
+        at={{ x: channelMenu.x, y: channelMenu.y }}
+        meId={info?.meId ?? ""}
+        groups={(store.sidebarGroups() ?? []).filter(
+          (group) => group.team_id === channelMenu!.channel.team_id,
+        )}
+        favorite={(store.sidebarGroups() ?? []).some(
+          (group) =>
+            group.category_type === "favorites" &&
+            group.channels.some((held) => held.id === channelMenu!.channel.id),
+        )}
+        onaddmembers={() => (addingTo = channelMenu!.channel)}
+        onchanged={() => {
+          void loadSidebar();
+          void refreshChannels();
+        }}
+        onclose={() => (channelMenu = null)}
+      />
+    {/if}
+    {#if addingTo}
+      <AddMembers
+        channelId={addingTo.id}
+        channelName={addingTo.display_name}
+        onadded={() => void loadSidebar()}
+        onclose={() => (addingTo = null)}
+      />
+    {/if}
     {#if startingConversation}
       <NewConversation
         onclose={() => (startingConversation = false)}

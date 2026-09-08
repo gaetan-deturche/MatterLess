@@ -665,6 +665,59 @@ impl RestClient {
         .await
     }
 
+    /// Mutes or unmutes a channel for this reader.
+    ///
+    /// There is no "muted" field to set: a muted channel is one whose membership
+    /// only counts unread on a mention, which is exactly what `is_muted` reads
+    /// back off the other side.
+    pub async fn set_channel_muted(
+        &self,
+        channel_id: &str,
+        user_id: &str,
+        muted: bool,
+    ) -> Result<()> {
+        let path = format!("/channels/{channel_id}/members/{user_id}/notify_props");
+        let body = serde_json::json!({
+            "mark_unread": if muted { "mention" } else { "all" },
+        });
+        let response = self
+            .send(self.builder(Method::PUT, &path)?.json(&body))
+            .await?;
+        if response.status().is_success() {
+            Ok(())
+        } else {
+            Err(Error::Protocol(format!(
+                "muting the channel: {}",
+                response.status()
+            )))
+        }
+    }
+
+    /// Rewrites a team's sidebar categories.
+    ///
+    /// The server replaces each category wholesale, `channel_ids` and all, so
+    /// moving one channel means sending two categories: the one losing it and
+    /// the one gaining it.
+    pub async fn update_sidebar_categories(
+        &self,
+        user_id: &str,
+        team_id: &str,
+        categories: &[SidebarCategory],
+    ) -> Result<()> {
+        let path = format!("/users/{user_id}/teams/{team_id}/channels/categories");
+        let response = self
+            .send(self.builder(Method::PUT, &path)?.json(categories))
+            .await?;
+        if response.status().is_success() {
+            Ok(())
+        } else {
+            Err(Error::Protocol(format!(
+                "moving the channel: {}",
+                response.status()
+            )))
+        }
+    }
+
     /// Leaves a channel.
     ///
     /// The server refuses for a direct or group message -- those are left by

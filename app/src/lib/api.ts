@@ -256,6 +256,34 @@ export const session = () => invoke<{ signed_in: boolean; server: string }>("ses
  *  rather than a failure. */
 export type SignIn = { outcome: "signed_in"; username: string } | { outcome: "mfa_required" };
 
+/** Marks a whole channel unread, from its newest message down. */
+export const markChannelUnread = (channel_id: string, me_id: string) =>
+  invoke<void>("mark_channel_unread", { channelId: channel_id, meId: me_id });
+
+export const setChannelMuted = (channel_id: string, me_id: string, muted: boolean) =>
+  invoke<void>("set_channel_muted", { channelId: channel_id, meId: me_id, muted });
+
+/** Moves a channel into one of the team's sidebar categories. Favouriting is
+ *  this with the favourites category as the target. */
+export const moveChannel = (
+  channel_id: string,
+  team_id: string,
+  category_id: string,
+  me_id: string,
+) =>
+  invoke<void>("move_channel", {
+    channelId: channel_id,
+    teamId: team_id,
+    categoryId: category_id,
+    meId: me_id,
+  });
+
+export const addChannelMember = (channel_id: string, user_id: string) =>
+  invoke<void>("add_channel_member", { channelId: channel_id, userId: user_id });
+
+export const channelLink = (channel_id: string) =>
+  invoke<string>("channel_link", { channelId: channel_id });
+
 export const signIn = (login_id: string, password: string, mfa_token?: string) =>
   invoke<SignIn>("sign_in", { loginId: login_id, password, mfaToken: mfa_token ?? null });
 export const bootstrap = () => invoke<Bootstrap>("bootstrap");

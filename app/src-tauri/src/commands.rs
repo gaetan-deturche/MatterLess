@@ -3535,6 +3535,171 @@ pub async fn join_channel(
 }
 
 /// Leaves a channel.
+/// Marks a whole channel unread, from its newest message down.
+///
+/// The newest post is asked for rather than taken from the store: the store
+/// holds what has been read, and a channel opened long ago can be behind the
+/// server by exactly the messages this is meant to mark.
+#[tauri::command]
+pub async fn mark_channel_unread(
+    state: State<'_, AppState>,
+    channel_id: String,
+    me_id: String,
+) -> Reply<()> {
+    let newest = state.rest.posts(&channel_id, 1).await.map_err(fail)?;
+    let Some(post_id) = newest.order.first().cloned() else {
+        // An empty channel has nothing to be unread about.
+        return Ok(());
+    };
+    let member = state
+        .rest
+        .set_post_unread(&me_id, &post_id)
+        .await
+        .map_err(fail)?;
+    tracing::info!(channel = %channel_id, unread = member.msg_count, "channel marked unread");
+    let store = state.store.clone();
+    let held = member.clone();
+    tokio::task::spawn_blocking(move || store.upsert_channel_members(&[held]))
+        .await
+        .map_err(fail)?
+        .map_err(fail)?;
+    let _ = state.to_engine.send(EngineMsg::Refreshed(channel_id)).await;
+    Ok(())
+}
+
+/// Mutes or unmutes a channel.
+#[tauri::command]
+pub async fn set_channel_muted(
+    state: State<'_, AppState>,
+    channel_id: String,
+    me_id: String,
+    muted: bool,
+) -> Reply<()> {
+    state
+        .rest
+        .set_channel_muted(&channel_id, &me_id, muted)
+        .await
+        .map_err(fail)?;
+    tracing::info!(channel = %channel_id, muted, "channel mute changed");
+    Ok(())
+}
+
+/// Moves a channel into one of the team's sidebar categories.
+///
+/// The move is computed here rather than in the shell because it needs the
+/// whole category set: the channel has to be taken out of wherever it is before
+/// it can go anywhere, and the server is sent both halves at once. Favouriting
+/// is the same operation with the `favorites` category as its target, which is
+/// why there is no separate call for it -- the sidebar reads categories, so
+/// writing anything else would leave the two disagreeing.
+#[tauri::command]
+pub async fn move_channel(
+    state: State<'_, AppState>,
+    channel_id: String,
+    team_id: String,
+    category_id: String,
+    me_id: String,
+) -> Reply<()> {
+    let held = state
+        .rest
+        .sidebar_categories(&me_id, &team_id)
+        .await
+        .map_err(fail)?;
+    let mut changed: Vec<matterless_core::model::SidebarCategory> = Vec::new();
+    for category in &held.categories {
+        let holds = category.channel_ids.iter().any(|id| id == &channel_id);
+        let wanted = category.id == category_id;
+        if holds == wanted {
+            continue;
+        }
+        let mut copy = category.clone();
+        if wanted {
+            // Newest first within the category it arrives in, which is where
+            // the official client puts it too.
+            copy.channel_ids.insert(0, channel_id.clone());
+        } else {
+            copy.channel_ids.retain(|id| id != &channel_id);
+        }
+        changed.push(copy);
+    }
+    if changed.is_empty() {
+        return Ok(());
+    }
+    state
+        .rest
+        .update_sidebar_categories(&me_id, &team_id, &changed)
+        .await
+        .map_err(fail)?;
+
+    // The store is what the sidebar is drawn from, so it is refreshed here
+    // rather than left for the next full `sidebar` call.
+    let fresh = state
+        .rest
+        .sidebar_categories(&me_id, &team_id)
+        .await
+        .map_err(fail)?;
+    let store = state.store.clone();
+    let team = team_id.clone();
+    let categories = fresh.categories.clone();
+    tokio::task::spawn_blocking(move || store.upsert_sidebar(&team, &categories))
+        .await
+        .map_err(fail)?
+        .map_err(fail)?;
+    tracing::info!(channel = %channel_id, categories = changed.len(), "channel moved");
+    Ok(())
+}
+
+/// Adds somebody else to a channel.
+#[tauri::command]
+pub async fn add_channel_member(
+    state: State<'_, AppState>,
+    channel_id: String,
+    user_id: String,
+) -> Reply<()> {
+    // The same endpoint a join goes through -- adding somebody is joining them.
+    state
+        .rest
+        .join_channel(&channel_id, &user_id)
+        .await
+        .map_err(fail)?;
+    tracing::info!(channel = %channel_id, "member added to a channel");
+    Ok(())
+}
+
+/// A link to the channel itself, for the clipboard.
+#[tauri::command]
+pub async fn channel_link(state: State<'_, AppState>, channel_id: String) -> Reply<String> {
+    let store = state.store.clone();
+    let probe = channel_id.clone();
+    let named = tokio::task::spawn_blocking(
+        move || -> matterless_store::Result<Option<(String, String)>> {
+            let Some(channel) = store.channel(&probe)? else {
+                return Ok(None);
+            };
+            // A direct message belongs to no team; any team the reader is on
+            // resolves the link, as it does for a post permalink.
+            let team = if channel.team_id.is_empty() {
+                store.any_team_name()?
+            } else {
+                store.team_name(&channel.team_id)?
+            };
+            Ok(team.map(|team| (team, channel.name)))
+        },
+    )
+    .await
+    .map_err(fail)?
+    .map_err(fail)?;
+    let (team_name, channel_name) =
+        named.ok_or_else(|| "no team to build a link from".to_string())?;
+    let base = state.rest.base_url().to_string();
+    let link = format!(
+        "{}/{team_name}/channels/{channel_name}",
+        base.trim_end_matches('/')
+    );
+    tracing::debug!(channel = %channel_id, "channel link built");
+    Ok(link)
+}
+
 #[tauri::command]
 pub async fn leave_channel(
     state: State<'_, AppState>,
