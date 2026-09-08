@@ -251,8 +251,13 @@ export type UiDelta =
   | { kind: "connection"; connected: boolean; resync: boolean };
 
 export const session = () => invoke<{ signed_in: boolean; server: string }>("session");
+/** How a sign-in attempt ended. Needing a second factor is an outcome rather
+ *  than an error: the password was right, and what follows is another screen
+ *  rather than a failure. */
+export type SignIn = { outcome: "signed_in"; username: string } | { outcome: "mfa_required" };
+
 export const signIn = (login_id: string, password: string, mfa_token?: string) =>
-  invoke<string>("sign_in", { loginId: login_id, password, mfaToken: mfa_token ?? null });
+  invoke<SignIn>("sign_in", { loginId: login_id, password, mfaToken: mfa_token ?? null });
 export const bootstrap = () => invoke<Bootstrap>("bootstrap");
 
 export interface SidebarGroup {

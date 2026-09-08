@@ -215,16 +215,38 @@ pub async fn sign_in(
     login_id: String,
     password: String,
     mfa_token: Option<String>,
-) -> Reply<String> {
-    let user = state
+) -> Reply<SignIn> {
+    match state
         .rest
         .login(&login_id, &password, mfa_token.as_deref())
         .await
-        .map_err(fail)?;
-    if let Some(matterless_core::AuthToken::Session(token)) = state.rest.token() {
-        crate::store_token(&token).map_err(fail)?;
+    {
+        Ok(user) => {
+            if let Some(matterless_core::AuthToken::Session(token)) = state.rest.token() {
+                crate::store_token(&token).map_err(fail)?;
+            }
+            Ok(SignIn::SignedIn {
+                username: user.username,
+            })
+        }
+        // Not an error the reader should read: the password was right and the
+        // account simply has a second factor. Reported as an outcome so the
+        // sign-in screen can ask for the code instead of showing a failure.
+        Err(matterless_core::Error::MfaRequired) => Ok(SignIn::MfaRequired),
+        Err(other) => Err(fail(other)),
     }
-    Ok(user.username)
+}
+
+/// How a sign-in attempt ended.
+///
+/// Two *outcomes* rather than a result and an error, because needing a second
+/// factor is not a failure -- it is the next step, and the screen that follows
+/// is different from the one an error would show.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum SignIn {
+    SignedIn { username: String },
+    MfaRequired,
 }
 
 /// Paints from SQLite first, then refreshes in the background.
