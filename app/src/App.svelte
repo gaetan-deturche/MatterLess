@@ -24,6 +24,9 @@
   let loginId = $state("");
   let password = $state("");
   let mfaToken = $state("");
+  /** The server asked for a second factor, so the code screen replaces the
+   *  credentials one. Only ever set by a sign-in that got that far. */
+  let mfaNeeded = $state(false);
   let error = $state("");
   let busy = $state(false);
 
@@ -1707,18 +1710,39 @@
     busy = true;
     error = "";
     try {
-      const username = await api.signIn(loginId, password, mfaToken || undefined);
-      log.info("signed.in", { username });
+      // The credentials go up again with the code, because a Mattermost login
+      // is one call either way -- there is no half-authenticated state on the
+      // server to attach the second factor to.
+      const outcome = await api.signIn(loginId, password, mfaNeeded ? mfaToken : undefined);
+      if (outcome.outcome === "mfa_required") {
+        mfaNeeded = true;
+        log.info("sign.in.mfa.asked", {});
+        return;
+      }
+      log.info("signed.in", { username: outcome.username });
       password = "";
       mfaToken = "";
+      mfaNeeded = false;
       signedIn = true;
       await start();
     } catch (thrown) {
       error = String(thrown);
-      log.failure("sign.in.failed", thrown);
+      log.failure("sign.in.failed", thrown, { mfa: mfaNeeded });
     } finally {
       busy = false;
     }
+  }
+
+  /** Back to the credentials, discarding a code that was never accepted. */
+  function backToCredentials() {
+    mfaNeeded = false;
+    mfaToken = "";
+    error = "";
+  }
+
+  /** Puts the caret in the code box the moment that screen appears. */
+  function takeFocus(node: HTMLInputElement) {
+    node.focus();
   }
 
   // A channel is marked read only after this much *focused* time in front of
@@ -1920,22 +1944,45 @@
         {#if error}<p class="error">{error}</p>{/if}
       </form>
     {:else}
+      <!-- The code is a screen of its own, and only for the accounts that are
+           asked for one. A field labelled "if asked" makes every reader decide
+           whether it applies to them; the server already knows. -->
       <form onsubmit={submit}>
         <h1>MatterLess</h1>
-        <p class="hint">
-          Signing in to {server}.
-          <button type="button" class="linkish" onclick={() => (server = "")}>change</button>
-        </p>
-        <label>Email or username<input bind:value={loginId} autocomplete="username" /></label>
-        <label
-          >Password<input
-            type="password"
-            bind:value={password}
-            autocomplete="current-password"
-          /></label
-        >
-        <label>MFA code (if asked)<input bind:value={mfaToken} inputmode="numeric" /></label>
-        <button type="submit" disabled={busy}>{busy ? "Signing in…" : "Sign in"}</button>
+        {#if mfaNeeded}
+          <p class="hint">
+            {loginId} has two-factor sign-in. Enter the code from your authenticator.
+          </p>
+          <label
+            >Authentication code<input
+              bind:value={mfaToken}
+              use:takeFocus
+              inputmode="numeric"
+              autocomplete="one-time-code"
+              spellcheck="false"
+            /></label
+          >
+          <button type="submit" disabled={busy || !mfaToken.trim()}>
+            {busy ? "Checking…" : "Sign in"}
+          </button>
+          <p class="hint">
+            <button type="button" class="linkish" onclick={backToCredentials}>Start over</button>
+          </p>
+        {:else}
+          <p class="hint">
+            Signing in to {server}.
+            <button type="button" class="linkish" onclick={() => (server = "")}>change</button>
+          </p>
+          <label>Email or username<input bind:value={loginId} autocomplete="username" /></label>
+          <label
+            >Password<input
+              type="password"
+              bind:value={password}
+              autocomplete="current-password"
+            /></label
+          >
+          <button type="submit" disabled={busy}>{busy ? "Signing in…" : "Sign in"}</button>
+        {/if}
         {#if error}<p class="error">{error}</p>{/if}
       </form>
     {/if}
