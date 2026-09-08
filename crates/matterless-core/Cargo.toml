@@ -26,4 +26,12 @@ tracing = "0.1.44"
 url = "2.5.8"
 
 [dev-dependencies]
-tokio = { version = "1.53.1", features = ["test-util", "macros", "rt"] }
+# `net` and `io-util` are for the one-shot HTTP server the upload test talks to;
+# named here rather than relied on transitively.
+tokio = { version = "1.53.1", features = [
+    "test-util",
+    "macros",
+    "rt",
+    "net",
+    "io-util",
+] }

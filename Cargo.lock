@@ -2427,6 +2427,7 @@ dependencies = [
  "matterless-render",
  "matterless-store",
  "matterless-sync",
+ "rustls",
  "serde",
  "serde_json",
  "tauri",

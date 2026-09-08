@@ -402,6 +402,17 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
 }
 
 pub fn run() {
+    // Before anything opens a connection. `reqwest` names its provider itself,
+    // but the WebSocket goes through `tokio-tungstenite`, which asks rustls to
+    // pick one -- and rustls panics rather than choose when the binary carries
+    // both. `aws-lc-rs` is the one reqwest already uses.
+    if rustls::crypto::aws_lc_rs::default_provider()
+        .install_default()
+        .is_err()
+    {
+        tracing::debug!("a rustls crypto provider was already installed");
+    }
+
     // Created before the builder because a URI scheme has to be registered on
     // it, before any managed state exists.
     let shared_media = Arc::new(media::MediaCache::default());
