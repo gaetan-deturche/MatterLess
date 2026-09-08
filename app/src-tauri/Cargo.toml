@@ -1,0 +1,52 @@
+[package]
+name = "matterless-app"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+name = "matterless_app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[dependencies]
+anyhow = "1.0.104"
+keyring = { version = "3.6.3", features = ["windows-native"] }
+matterless-core = { version = "0.1.0", path = "../../crates/matterless-core" }
+matterless-render = { version = "0.1.0", path = "../../crates/matterless-render" }
+matterless-store = { version = "0.1.0", path = "../../crates/matterless-store" }
+matterless-sync = { version = "0.1.0", path = "../../crates/matterless-sync" }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+# `tray-icon` and `image-png` are what a tray needs: the icon is decoded from
+# the PNG the bundler already ships, so nothing new is added to the tree.
+tauri = { version = "2.11.5", features = ["tray-icon", "image-png"] }
+tauri-plugin-notification = "2.4.0"
+# Start with Windows, written as a registry Run entry rather than a shortcut, so
+# it needs no installer step and can be toggled from the app.
+tauri-plugin-autostart = "2"
+# The updater, and the process plugin it needs to restart into the new build.
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+tracing = "0.1.44"
+tracing-appender = "0.2.5"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+
+# The taskbar badge sets its number in the system UI font, rasterised by GDI:
+# already in the lockfile via Tauri, so this pulls nothing new.
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.61.3", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    # Showing a window without activating it, which Tauri's own `show()` cannot
+    # do: see `reveal_quietly`.
+    "Win32_UI_WindowsAndMessaging",
+] }
+# Toasts are raised here rather than through tauri-plugin-notification, whose
+# Windows path registers no activation handler, so a click had nowhere to go.
+# Already in the lockfile: notify-rust pulls the same version.
+tauri-winrt-notification = "0.7.3"
+
+[build-dependencies]
+tauri-build = { version = "2.6.3", features = [] }

@@ -1,0 +1,62 @@
+# Tag a version, get an installer and an update the running app can find.
+#
+# The updater is the reason this is more than "build and attach": Tauri's
+# updater checks a JSON endpoint, and the signature in it is what stops an
+# update being anything the network feels like handing over. The private half
+# of that key lives only in this repository's secrets and must never be in the
+# tree.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  release:
+    runs-on: windows-latest
+    permissions:
+      # `tauri-action` creates the release and uploads to it.
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # The same key as CI, so a tag build restores the cache that main builds
+      # filled rather than compiling the world.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: matterless-windows
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: app
+        run: npm ci
+
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Generated once with `npm run tauri signer generate`; the public half
+          # is in `tauri.conf.json` and the private half is only ever here.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          projectPath: app
+          tagName: ${{ github.ref_name }}
+          releaseName: MatterLess ${{ github.ref_name }}
+          releaseBody: |
+            Installer below. An installed build updates itself from here.
+          # Published, not left as a draft: the updater reads the release's
+          # `latest.json`, and a draft is invisible to it -- an unreleased
+          # release means every client silently stays on the old version.
+          releaseDraft: false
+          prerelease: false
+          # NSIS only. The lesson is from Auger: the MSI target needs WiX and
+          # buys nothing here, and the updater is wired for NSIS.
+          args: --bundles nsis,updater

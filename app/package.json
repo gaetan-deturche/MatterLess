@@ -1,0 +1,32 @@
+{
+  "name": "matterless",
+  "version": "1.0.0",
+  "description": "",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "check": "svelte-check --tsconfig ./tsconfig.json",
+    "tauri": "tauri",
+    "dev:app": "tauri dev --config src-tauri/tauri.dev.conf.json",
+    "dev:app:bg": "tauri dev --config ../Claude/tauri.background.conf.json"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "devDependencies": {
+    "@sveltejs/vite-plugin-svelte": "^7.3.0",
+    "@tauri-apps/cli": "^2.11.4",
+    "@tsconfig/svelte": "^5.0.8",
+    "svelte": "^5.57.0",
+    "svelte-check": "^4.7.6",
+    "tslib": "^2.8.1",
+    "typescript": "^6.0.3",
+    "vite": "^8.2.2"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.11.1",
+    "@tauri-apps/plugin-notification": "^2.4.0"
+  },
+  "private": true
+}

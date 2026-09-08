@@ -1,0 +1,19 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "MatterLess Dev",
+  "identifier": "com.gaetandeturche.matterless.dev",
+  "app": {
+    "windows": [
+      {
+        "title": "MatterLess (dev)",
+        "width": 1280,
+        "height": 820,
+        "minWidth": 720,
+        "minHeight": 480,
+        "dragDropEnabled": false,
+        "focus": false,
+        "visible": false
+      }
+    ]
+  }
+}

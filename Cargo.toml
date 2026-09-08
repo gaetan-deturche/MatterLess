@@ -1,0 +1,12 @@
+[workspace]
+members = ["app/src-tauri","crates/matterless-core", "crates/matterless-probe", "crates/matterless-render", "crates/matterless-store", "crates/matterless-sync"]
+resolver = "2"
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

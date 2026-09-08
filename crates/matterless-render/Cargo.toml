@@ -1,0 +1,12 @@
+[package]
+name = "matterless-render"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+matterless-core = { version = "0.1.0", path = "../matterless-core" }
+pulldown-cmark = { version = "0.13.4", default-features = false, features = ["simd", "html"] }
+serde = { version = "1.0.229", features = ["derive", "rc"] }
+serde_json = "1.0.151"
