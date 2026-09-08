@@ -28,5 +28,12 @@ Claude/icon-sheet.png
 # A minted session token is a bearer credential: never committed, wherever it
 # is written.
 tools/.mm_token.json
+# The updater's signing key. Whoever holds the private half can push an update
+# to every install, so it never goes near the repository -- only into the
+# repository's secrets. The `.pub` half is safe, but is kept out too: the copy
+# that matters is the one pasted into tauri.conf.json.
+tools/updater.key
+tools/updater.key.pub
+*.key
 .mm_token.json
 .gate.db*
