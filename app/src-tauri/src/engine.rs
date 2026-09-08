@@ -145,6 +145,12 @@ fn conversation_label(channel: Option<matterless_core::Channel>) -> (String, boo
 #[derive(Debug, Default)]
 struct ToastText {
     author: String,
+    /// Who wrote it, so an unresolved name can be fetched.
+    author_id: String,
+    /// False when `author` is standing in as a raw id because the local store
+    /// has never met this person -- which a fresh install has not, for almost
+    /// everybody.
+    resolved: bool,
     /// The conversation's name, or what kind of conversation it is.
     channel: String,
     preview: String,
@@ -236,7 +242,29 @@ impl Runner {
     }
 
     fn emit(&self, delta: UiDelta) {
-        tracing::debug!(delta = ?delta, "emitting");
+        // A notification carries the message itself, and the log never holds
+        // message text: its length says as much about "did the preview build"
+        // without keeping a word of it.
+        if let UiDelta::Notify {
+            channel_id,
+            post_id,
+            author,
+            preview,
+            direct,
+            ..
+        } = &delta
+        {
+            tracing::debug!(
+                %channel_id,
+                %post_id,
+                %author,
+                preview_chars = preview.chars().count(),
+                direct,
+                "emitting a notification"
+            );
+        } else {
+            tracing::debug!(delta = ?delta, "emitting");
+        }
         if let Some(subscriber) = &self.subscriber
             && let Err(error) = subscriber.send(delta)
         {
@@ -254,19 +282,66 @@ impl Runner {
         let Ok(Some(post)) = store.post(post_id) else {
             return ToastText::default();
         };
-        let author = store
+        let known = store
             .users_by_ids(std::slice::from_ref(&post.user_id))
             .ok()
-            .and_then(|found| found.get(&post.user_id).map(|user| user.username.clone()))
-            .unwrap_or_else(|| post.user_id.clone());
+            .and_then(|found| found.get(&post.user_id).map(|user| user.username.clone()));
 
         let (channel, direct) = conversation_label(store.channel(&post.channel_id).ok().flatten());
         ToastText {
-            author,
+            resolved: known.is_some(),
+            author: known.unwrap_or_else(|| post.user_id.clone()),
+            author_id: post.user_id.clone(),
             channel,
             preview: preview_of(&post.message),
             direct,
         }
+    }
+
+    /// Fetches a stranger's name, then sends the notification.
+    ///
+    /// Only for an author the store has never seen: on a fresh install that is
+    /// most people, and falling back to the raw id put `jpztezkyefyydkp79o63`
+    /// in a toast where the name belonged. One request, off the hot path, and
+    /// the toast waits for it rather than being shown twice.
+    fn notify_once_named(&self, channel_id: String, post_id: String, text: ToastText) {
+        let Some(subscriber) = self.subscriber.clone() else {
+            return;
+        };
+        let rest = Arc::clone(&self.rest);
+        let store = Arc::clone(self.engine.store());
+        tauri::async_runtime::spawn(async move {
+            let mut author = text.author;
+            match rest
+                .users_by_ids(std::slice::from_ref(&text.author_id))
+                .await
+            {
+                Ok(fetched) => {
+                    if let Some(found) = fetched.iter().find(|user| user.id == text.author_id) {
+                        author = found.username.clone();
+                    }
+                    let held = fetched.clone();
+                    // Kept, so the next message from this person needs no fetch.
+                    let _ = tokio::task::spawn_blocking(move || store.upsert_users(&held)).await;
+                }
+                Err(error) => {
+                    // The id still says something happened, which is better
+                    // than staying silent about a message.
+                    tracing::warn!(%error, "could not name the author of a notification");
+                }
+            }
+            let delta = UiDelta::Notify {
+                channel_id,
+                post_id,
+                author,
+                channel: text.channel,
+                preview: text.preview,
+                direct: text.direct,
+            };
+            if let Err(error) = subscriber.send(delta) {
+                tracing::warn!(%error, "the ui delta channel is gone");
+            }
+        });
     }
 
     /// Translates engine deltas into the narrow set the UI needs.
@@ -290,14 +365,18 @@ impl Runner {
                     // focus and thread following; nothing is re-decided here.
                     if notify && arrival == Arrival::Live {
                         let text = self.notification_text(&post_id);
-                        self.emit(UiDelta::Notify {
-                            channel_id,
-                            post_id,
-                            author: text.author,
-                            channel: text.channel,
-                            preview: text.preview,
-                            direct: text.direct,
-                        });
+                        if text.resolved {
+                            self.emit(UiDelta::Notify {
+                                channel_id,
+                                post_id,
+                                author: text.author,
+                                channel: text.channel,
+                                preview: text.preview,
+                                direct: text.direct,
+                            });
+                        } else {
+                            self.notify_once_named(channel_id, post_id, text);
+                        }
                     }
                 }
                 Delta::PostTombstoned { channel_id, .. } => touched = Some(channel_id),
