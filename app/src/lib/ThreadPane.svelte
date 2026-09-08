@@ -7,6 +7,7 @@
   // than the height bookkeeping would.
   import MessageList from "./MessageList.svelte";
   import Composer from "./Composer.svelte";
+  import Scrollbar from "./Scrollbar.svelte";
   import * as api from "./api";
   import * as store from "./store.svelte";
   import * as log from "./log";
@@ -15,6 +16,33 @@
 
   let payload = $state<api.ThreadPayload | undefined>();
   let busy = $state(false);
+
+  // The same thumb the channel draws, for the same reason: two scrollbars that
+  // behave differently in one window read as a bug even when both work. This
+  // side is the easy case -- the rows are really mounted, so the numbers come
+  // straight off the element instead of from a virtualiser's estimates.
+  let scroller: HTMLElement | undefined = $state();
+  let scrollTop = $state(0);
+  let viewport = $state(0);
+  let content = $state(0);
+
+  function measure() {
+    if (!scroller) return;
+    scrollTop = scroller.scrollTop;
+    viewport = scroller.clientHeight;
+    content = scroller.scrollHeight;
+  }
+
+  $effect(() => {
+    if (!scroller) return;
+    measure();
+    // Replies arriving and images loading both change the height without any
+    // scrolling, and neither fires a scroll event.
+    const watcher = new ResizeObserver(measure);
+    watcher.observe(scroller);
+    for (const child of Array.from(scroller.children)) watcher.observe(child);
+    return () => watcher.disconnect();
+  });
 
   /** Loads the pane and reports what it drew. Returns the payload so callers
    *  can act on it without re-reading state Svelte may not have narrowed. */
@@ -90,12 +118,24 @@
     <button type="button" class="close" onclick={onclose} aria-label="Close thread">×</button>
   </header>
 
-  <div class="scroll">
-    <MessageList
-      compact
-      rows={payload?.rows}
-      channelId={`thread/${rootId}`}
-      virtualise={false}
+  <div class="scroll-frame">
+    <div class="scroll" bind:this={scroller} onscroll={measure}>
+      <MessageList
+        compact
+        rows={payload?.rows}
+        channelId={`thread/${rootId}`}
+        virtualise={false}
+      />
+    </div>
+    <Scrollbar
+      top={scrollTop}
+      {viewport}
+      {content}
+      onmove={(to) => {
+        if (scroller) scroller.scrollTop = to;
+        measure();
+      }}
+      ondragging={() => {}}
     />
   </div>
 
@@ -174,5 +214,18 @@
   }
   /* `overflow-anchor: none` for the same reason as the channel scroller: this
      pane grows as replies arrive, and the browser's anchoring fights a drag. */
-  .scroll { flex: 1; overflow-y: auto; min-height: 0; overflow-anchor: none; }
+  .scroll-frame {
+    position: relative;
+    display: grid;
+    flex: 1;
+    min-height: 0;
+  }
+  .scroll {
+    overflow-y: auto;
+    min-height: 0;
+    /* Hidden, not absent: the element still scrolls and `Scrollbar` draws the
+       thumb, exactly as the channel does. */
+    scrollbar-width: none;
+    overflow-anchor: none;
+  }
 </style>
