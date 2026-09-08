@@ -1,0 +1,64 @@
+# Every push and pull request: the four checks this project actually runs.
+#
+# Windows only, and that is deliberate rather than lazy: the app is a Tauri
+# Windows client, the taskbar badge and the tray are `windows-rs` behind
+# `cfg(windows)`, and a Linux runner would compile neither. Testing on a
+# platform the code does not target proves the parts that were never in doubt.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # So a check can be re-run after a flake without an empty commit.
+  workflow_dispatch:
+
+# A new push supersedes the run in flight for the same ref.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      # The key is shared with the release workflow on purpose: a tag build
+      # otherwise starts from an empty cache and recompiles the whole tree,
+      # which is minutes of runner time for nothing.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: matterless-windows
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: app
+        run: npm ci
+
+      # Ordered cheapest-first, so an obvious failure is reported in seconds
+      # rather than after a full build.
+      - name: Formatting
+        run: cargo fmt --all --check
+
+      - name: Types and Svelte
+        working-directory: app
+        run: npx svelte-check --threshold warning --fail-on-warnings
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Tests
+        run: cargo test --workspace
