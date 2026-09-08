@@ -2963,7 +2963,14 @@
     display: grid;
     /* Header, stream, typing line, composer. */
     grid-template-rows: auto 1fr auto auto;
+    /* And one column, held to the width of this element. Named rather than
+       left implicit: an implicit column is `auto`, which sizes to its widest
+       child's min-content -- measured at 921px against a 698px main with a
+       thread open, so the header, stream, typing line and composer all painted
+       223px over the divider and into the thread pane. */
+    grid-template-columns: minmax(0, 1fr);
     min-height: 0;
+    min-width: 0;
     /* The jump-to-newest button floats over the stream. */
     position: relative;
   }
