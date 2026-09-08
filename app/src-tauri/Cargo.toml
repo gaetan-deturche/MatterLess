@@ -10,6 +10,11 @@ name = "matterless_app_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [dependencies]
+# Named here only to choose the process-wide TLS provider. Two of the app's
+# dependencies pull rustls with different providers -- reqwest with `aws-lc-rs`,
+# the updater plugin with `ring` -- and with both compiled in rustls refuses to
+# guess and panics on the first connection it is asked to make.
+rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs"] }
 anyhow = "1.0.104"
 keyring = { version = "3.6.3", features = ["windows-native"] }
 matterless-core = { version = "0.1.0", path = "../../crates/matterless-core" }

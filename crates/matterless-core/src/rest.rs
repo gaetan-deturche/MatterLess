@@ -126,12 +126,17 @@ impl RestClient {
     }
 
     /// Sends the request, honouring the limiter and retrying once on a 429.
+    ///
+    /// The copy for that retry is taken opportunistically rather than demanded.
+    /// A streamed body cannot be replayed, so `try_clone` returns nothing for an
+    /// upload -- and insisting on a copy up front meant every attachment failed
+    /// before a byte of it was sent.
     async fn send(&self, builder: RequestBuilder) -> Result<Response> {
+        let mut pending = Some(builder);
         for attempt in 0..2 {
             self.limiter.acquire().await;
-            let attempt_builder = builder
-                .try_clone()
-                .ok_or_else(|| Error::Protocol("request body is not retryable".into()))?;
+            let attempt_builder = pending.take().expect("a builder for each attempt");
+            let copy = attempt_builder.try_clone();
             let response = attempt_builder.send().await?;
 
             if let Some(version) = response
@@ -143,6 +148,11 @@ impl RestClient {
             }
 
             if response.status() == StatusCode::TOO_MANY_REQUESTS && attempt == 0 {
+                // Nothing to send a second time: hand the 429 back and let the
+                // caller see the server's own answer.
+                let Some(copy) = copy else {
+                    return Ok(response);
+                };
                 let retry_after = response
                     .headers()
                     .get("retry-after")
@@ -152,6 +162,7 @@ impl RestClient {
                     .min(30);
                 tracing::warn!(retry_after, "rate limited, backing off");
                 tokio::time::sleep(Duration::from_secs(retry_after)).await;
+                pending = Some(copy);
                 continue;
             }
             return Ok(response);
@@ -993,5 +1004,106 @@ mod file_tests {
         let hostile = format!("padding{boundary}padding").into_bytes();
         let second = multipart_boundary(&hostile);
         assert!(!contains(&hostile, second.as_bytes()));
+    }
+}
+
+#[cfg(test)]
+mod send_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    /// True once the whole declared body has arrived, so the fake server does
+    /// not answer half an upload.
+    fn body_complete(seen: &[u8]) -> bool {
+        let Some(headers_end) = seen.windows(4).position(|window| window == b"\r\n\r\n") else {
+            return false;
+        };
+        // The header block is ASCII; the body after it may be anything.
+        let headers = String::from_utf8_lossy(&seen[..headers_end]);
+        let declared = headers
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                if name.eq_ignore_ascii_case("content-length") {
+                    value.trim().parse::<usize>().ok()
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(0);
+        seen.len() >= headers_end + 4 + declared
+    }
+
+    /// Answers exactly one request with an empty JSON object, and hands back
+    /// every byte it read. Enough to settle the only question here: whether the
+    /// request reached a socket at all.
+    async fn one_shot_server() -> (String, tokio::task::JoinHandle<Vec<u8>>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let address = listener.local_addr().expect("address");
+        let served = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept");
+            let mut seen: Vec<u8> = Vec::new();
+            let mut chunk = [0u8; 4096];
+            loop {
+                let read = socket.read(&mut chunk).await.expect("read");
+                if read == 0 {
+                    break;
+                }
+                seen.extend_from_slice(&chunk[..read]);
+                if body_complete(&seen) {
+                    break;
+                }
+            }
+            let answer = concat!(
+                "HTTP/1.1 200 OK\r\n",
+                "Content-Type: application/json\r\n",
+                "Content-Length: 2\r\n\r\n",
+                "{}"
+            );
+            socket.write_all(answer.as_bytes()).await.expect("write");
+            socket.flush().await.expect("flush");
+            seen
+        });
+        (format!("http://{address}"), served)
+    }
+
+    /// The regression this guards: `send` used to demand a clone of the request
+    /// so it could replay a 429, and a streamed body cannot be cloned -- so
+    /// every attachment failed before a byte was sent, with the bare message
+    /// "request body is not retryable".
+    #[tokio::test]
+    async fn a_streamed_upload_reaches_the_server() {
+        let (base, served) = one_shot_server().await;
+        let client = RestClient::new(&base).expect("client");
+
+        let reached = Arc::new(AtomicU64::new(0));
+        let whole = Arc::new(AtomicU64::new(0));
+        let progress: UploadProgress = {
+            let reached = Arc::clone(&reached);
+            let whole = Arc::clone(&whole);
+            Arc::new(move |so_far, total| {
+                reached.store(so_far, Ordering::SeqCst);
+                whole.store(total, Ordering::SeqCst);
+            })
+        };
+
+        let payload = b"the file's bytes";
+        let response = client
+            .upload_file("channel-id", "holiday.png", payload, Some(progress))
+            .await
+            .expect("a streamed upload must not be refused before it is sent");
+        assert!(response.file_infos.is_empty());
+
+        let request = served.await.expect("server");
+        assert!(contains(&request, payload));
+        assert!(contains(&request, b"name=\"channel_id\""));
+        assert!(contains(&request, b"filename=\"holiday.png\""));
+        // Progress ran to the end, and that end is the whole multipart body
+        // rather than just the payload.
+        assert_eq!(reached.load(Ordering::SeqCst), whole.load(Ordering::SeqCst));
+        assert!(whole.load(Ordering::SeqCst) > payload.len() as u64);
     }
 }
