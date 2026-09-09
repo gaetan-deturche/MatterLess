@@ -1,0 +1,15 @@
+[package]
+name = "matterless-view"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+cosmic-text = "0.19"
+matterless-layout = { path = "../matterless-layout" }
+matterless-paint = { path = "../matterless-paint" }
+matterless-render = { path = "../matterless-render" }
+# The Vulkan backend is selected explicitly at instance creation; wgpu is the
+# API on top of it rather than an abstraction over which one to use.
+wgpu = "26"
+winit = "0.30"
+pollster = "0.4"
