@@ -13,6 +13,7 @@
 //! chat.
 
 pub mod hit;
+pub mod input;
 pub mod solve;
 
 /// Straight RGBA, the same order the painter takes.
