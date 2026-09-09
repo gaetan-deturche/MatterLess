@@ -2913,9 +2913,14 @@ dependencies = [
  "anyhow",
  "keyring",
  "matterless-core",
+ "matterless-layout",
+ "matterless-paint",
  "matterless-render",
  "matterless-store",
  "matterless-sync",
+ "matterless-view",
+ "pollster",
+ "raw-window-handle",
  "rustls",
  "serde",
  "serde_json",
@@ -2930,6 +2935,7 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+ "wgpu",
  "windows 0.61.3",
 ]
 

@@ -466,6 +466,24 @@ export const attachFile = (
 export const onAttachment = (handle: (payload: AttachmentEvent) => void) =>
   listen<AttachmentEvent>("attachment", (event) => handle(event.payload));
 
+/** Where the page has left room for the native list, in physical pixels. */
+export interface ListBounds {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/** Puts the native list over that rectangle. Answers false when the native list
+ *  is not enabled, which is the normal case: the DOM list is still the one that
+ *  ships, and this is how the page finds out which it is drawing. */
+export const placeNativeList = (channelId: string, bounds: ListBounds) =>
+  invoke<boolean>("place_native_list", { channelId, bounds });
+
+export const scrollNativeList = (by: number) => invoke<void>("scroll_native_list", { by });
+
+export const hideNativeList = () => invoke<void>("hide_native_list");
+
 /** One followed thread, ready to draw. */
 export interface ThreadListing {
   root_id: string;

@@ -15,10 +15,16 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 # the updater plugin with `ring` -- and with both compiled in rustls refuses to
 # guess and panics on the first connection it is asked to make.
 rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs"] }
+wgpu = "26"
+raw-window-handle = "0.6"
 anyhow = "1.0.104"
 keyring = { version = "3.6.3", features = ["windows-native"] }
 matterless-core = { version = "0.1.0", path = "../../crates/matterless-core" }
+matterless-layout = { version = "0.1.0", path = "../../crates/matterless-layout" }
+matterless-paint = { version = "0.1.0", path = "../../crates/matterless-paint" }
 matterless-render = { version = "0.1.0", path = "../../crates/matterless-render" }
+# The list renderer, without its standalone window: this process already has one.
+matterless-view = { version = "0.1.0", path = "../../crates/matterless-view", default-features = false }
 matterless-store = { version = "0.1.0", path = "../../crates/matterless-store" }
 matterless-sync = { version = "0.1.0", path = "../../crates/matterless-sync" }
 serde = { version = "1.0.229", features = ["derive"] }
@@ -47,7 +53,10 @@ windows = { version = "0.61.3", features = [
     # Showing a window without activating it, which Tauri's own `show()` cannot
     # do: see `reveal_quietly`.
     "Win32_UI_WindowsAndMessaging",
+    # The child window the native list is drawn on.
+    "Win32_System_LibraryLoader",
 ] }
+pollster = "0.4"
 # Toasts are raised here rather than through tauri-plugin-notification, whose
 # Windows path registers no activation handler, so a click had nowhere to go.
 # Already in the lockfile: notify-rust pulls the same version.

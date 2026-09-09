@@ -3537,6 +3537,124 @@ pub async fn join_channel(
 }
 
 /// Leaves a channel.
+/// Where the page has left room for the native list, in physical pixels.
+#[derive(Debug, Clone, Copy, Deserialize)]
+pub struct ListBounds {
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+}
+
+/// Puts the native list over the rectangle the page reserved, and draws it.
+///
+/// The page owns the layout of everything around the list and reports where the
+/// hole is; this only fills it. That division is deliberate: the sidebar, the
+/// header and the composer never had the problem the native list solves, and
+/// rewriting them would be cost with no return.
+///
+/// Off unless asked for. `MATTERLESS_NATIVE_LIST=1` turns it on, so the DOM list
+/// stays the one that ships until this one is better than it.
+#[cfg(windows)]
+#[tauri::command]
+pub async fn place_native_list(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    channel_id: String,
+    bounds: ListBounds,
+) -> Reply<bool> {
+    if std::env::var("MATTERLESS_NATIVE_LIST").unwrap_or_default() != "1" {
+        return Ok(false);
+    }
+    let Some(window) = app.get_webview_window("main") else {
+        return Ok(false);
+    };
+    // Taken as a number and dropped here: an `HWND` is not `Send`, and holding
+    // one across the await below makes the whole command's future unsendable.
+    let handle: isize = {
+        let hwnd = window
+            .hwnd()
+            .map_err(|error| format!("no window handle: {error}"))?;
+        hwnd.0 as isize
+    };
+
+    let rows = plan_rows_for(&state, &channel_id).await?;
+    let mut held = state.native_list.lock().expect("native list");
+    if held.is_none() {
+        *held = Some(crate::native_list::NativeList::new(handle).map_err(fail)?);
+    }
+    let Some(list) = held.as_mut() else {
+        return Ok(false);
+    };
+    list.place(
+        crate::native_list::Bounds {
+            x: bounds.x,
+            y: bounds.y,
+            width: bounds.width,
+            height: bounds.height,
+        },
+        Some(&rows),
+    );
+    list.jump_to_newest();
+    list.show(true);
+    list.render();
+    Ok(true)
+}
+
+/// Scrolls the native list and redraws it.
+#[cfg(windows)]
+#[tauri::command]
+pub async fn scroll_native_list(state: State<'_, AppState>, by: f32) -> Reply<()> {
+    let mut held = state.native_list.lock().expect("native list");
+    if let Some(list) = held.as_mut() {
+        list.scroll_by(by);
+        list.render();
+    }
+    Ok(())
+}
+
+/// Hides the native list, for when the page draws something over its rectangle.
+#[cfg(windows)]
+#[tauri::command]
+pub async fn hide_native_list(state: State<'_, AppState>) -> Reply<()> {
+    let held = state.native_list.lock().expect("native list");
+    if let Some(list) = held.as_ref() {
+        list.show(false);
+    }
+    Ok(())
+}
+
+/// The rows a channel draws, planned exactly as the DOM list's are.
+///
+/// The same page and the same `plan_channel`: two planners would be two answers,
+/// and the whole point of the native list is that there is only one.
+#[cfg(windows)]
+async fn plan_rows_for(state: &AppState, channel_id: &str) -> Result<Vec<Row>, String> {
+    let me = state.rest.verify_me().await.map_err(fail)?;
+    let store = state.store.clone();
+    let channel = channel_id.to_string();
+    let me_id = me.id.clone();
+    tokio::task::spawn_blocking(move || -> Result<Vec<Row>, String> {
+        let posts = store.channel_page(&channel, None, 200).map_err(fail)?;
+        let mut authors: Vec<String> = posts.iter().map(|post| post.user_id.clone()).collect();
+        authors.sort();
+        authors.dedup();
+        let people = store.users_by_ids(&authors).map_err(fail)?;
+        let mut options = PlanOptions::new(ThreadMode::Collapsed, &me_id);
+        options.author_names = people
+            .iter()
+            .map(|(id, user)| (id.clone(), user.username.clone()))
+            .collect();
+        options.author_avatars = people
+            .iter()
+            .map(|(id, user)| (id.clone(), user.last_picture_update))
+            .collect();
+        Ok(plan_channel(&posts, &HashMap::new(), &options))
+    })
+    .await
+    .map_err(fail)?
+}
+
 /// One followed thread, ready to draw in the threads view.
 #[derive(Debug, Clone, Serialize)]
 pub struct ThreadListing {

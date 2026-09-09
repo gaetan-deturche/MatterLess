@@ -20,6 +20,8 @@ mod commands;
 mod engine;
 mod filecache;
 mod media;
+#[cfg(windows)]
+mod native_list;
 mod pending;
 mod render_cache;
 mod taskbar;
@@ -83,6 +85,13 @@ pub struct AppState {
     /// Optimistic sends, in memory only. Shared with the engine task, which
     /// clears an entry when the server echoes it back.
     pub pending: Arc<pending::PendingPosts>,
+    /// The native message list, once the page has asked for it.
+    ///
+    /// Behind a lock and an `Option`: it owns a window and a GPU device, so it
+    /// is built on first use rather than at start-up, and a build without it is
+    /// the app exactly as it was.
+    #[cfg(windows)]
+    pub native_list: crate::native_list::Shared,
     /// Files uploaded but not yet claimed by a post.
     pub uploads: Arc<uploads::Uploads>,
     /// The server's `MaxFileSize`, read at bootstrap. Zero until then, which
@@ -683,6 +692,8 @@ pub fn run() {
                 rest: Arc::clone(&rest),
                 pending: Arc::clone(&pending),
                 uploads,
+                #[cfg(windows)]
+                native_list: Default::default(),
                 max_file_size: Arc::new(std::sync::atomic::AtomicI64::new(0)),
                 connected: Arc::clone(&connected),
                 allow_svg,
@@ -760,6 +771,12 @@ pub fn run() {
             commands::pinned_messages,
             commands::browse_channels,
             commands::join_channel,
+            #[cfg(windows)]
+            commands::place_native_list,
+            #[cfg(windows)]
+            commands::scroll_native_list,
+            #[cfg(windows)]
+            commands::hide_native_list,
             commands::followed_threads,
             commands::install_update,
             commands::mark_channel_unread,

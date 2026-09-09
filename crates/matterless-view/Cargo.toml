@@ -13,8 +13,21 @@ matterless-store = { path = "../matterless-store" }
 # The Vulkan backend is selected explicitly at instance creation; wgpu is the
 # API on top of it rather than an abstraction over which one to use.
 wgpu = "26"
-winit = "0.30"
-pollster = "0.4"
+# Only the standalone window needs these; the app supplies its own surface from
+# the Tauri window, so they stay out of its dependency tree.
+winit = { version = "0.30", optional = true }
+pollster = { version = "0.4", optional = true }
 # Headless verification: the same rows written out as an image, for a machine
 # with no display and for comparing against the DOM list.
-png = "0.18"
+png = { version = "0.18", optional = true }
+
+[features]
+# On by default so the standalone window is one command; the app turns it off,
+# because it supplies its own surface from the Tauri window and has no use for
+# a second windowing library.
+default = ["window"]
+window = ["winit", "pollster", "png"]
+
+[[bin]]
+name = "matterless-view"
+required-features = ["window"]

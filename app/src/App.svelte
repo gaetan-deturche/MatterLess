@@ -31,6 +31,43 @@
    *  credentials one. Only ever set by a sign-in that got that far. */
   let mfaNeeded = $state(false);
 
+  /** The native list is drawing the stream, so the DOM one steps aside.
+   *
+   *  Decided by the backend, not here: `place_native_list` answers false unless
+   *  it is switched on, so the page asks and believes the answer rather than
+   *  carrying its own copy of the setting. */
+  let nativeList = $state(false);
+
+  /** Tells the native list where the stream's rectangle is, in physical pixels.
+   *
+   *  The page keeps the layout -- sidebar, header, composer, panels -- and only
+   *  reports the hole. A child window cannot be laid out by CSS, so this is the
+   *  seam between the two, and it is deliberately one number in one direction. */
+  async function placeNative() {
+    const channelId = store.activeChannel();
+    if (!channelId || !scroller) return;
+    const box = scroller.getBoundingClientRect();
+    const ratio = window.devicePixelRatio || 1;
+    try {
+      nativeList = await api.placeNativeList(channelId, {
+        x: Math.round(box.left * ratio),
+        y: Math.round(box.top * ratio),
+        width: Math.round(box.width * ratio),
+        height: Math.round(box.height * ratio),
+      });
+      if (nativeList) {
+        log.info("native.list.placed", {
+          channel: channelId,
+          width: Math.round(box.width * ratio),
+          height: Math.round(box.height * ratio),
+        });
+      }
+    } catch (error) {
+      log.warn("native.list.failed", { error: String(error) });
+      nativeList = false;
+    }
+  }
+
   /** A newer build the server is offering. Nothing has been downloaded yet. */
   let updateOffered = $state("");
   let updating = $state(false);
@@ -2638,7 +2675,7 @@
              is false in tauri.conf.json, so the webview sees the drop rather
              than the window swallowing it. -->
         <!-- svelte-ignore a11y_no_static_element_interactions -->
-        <div class="scroll-frame">
+        <div class="scroll-frame" class:native={nativeList}>
         <div
           class="scroll"
           class:opening
@@ -2646,9 +2683,15 @@
           class:dropping
           bind:this={scroller}
           onscroll={onScroll}
-          onwheel={() => {
+          onwheel={(event) => {
             abandonOpening();
             noteGesture();
+            // The native surface has no input of its own yet, so the page is
+            // still where a wheel arrives and it passes the delta on.
+            if (nativeList) {
+              event.preventDefault();
+              void api.scrollNativeList(-event.deltaY);
+            }
           }}
           onpointerdown={abandonOpening}
           onkeydown={() => {
@@ -3386,6 +3429,12 @@
     position: relative;
     display: grid;
     min-height: 0;
+  }
+  /* The native surface is drawing this rectangle. The scroller stays -- it is
+     what the wheel arrives on, and what reports where the rectangle is -- but
+     what it holds is not drawn twice. */
+  .scroll-frame.native .scroll {
+    visibility: hidden;
   }
   .scroll {
     overflow-y: auto;
