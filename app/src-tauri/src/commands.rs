@@ -3535,6 +3535,33 @@ pub async fn join_channel(
 }
 
 /// Leaves a channel.
+/// Installs the update the reader has just agreed to, and restarts into it.
+///
+/// The check is made again here rather than holding the earlier one: an
+/// `Update` cannot be parked between two commands, and one extra request is a
+/// small price for the reader deciding when this happens rather than the app
+/// deciding for them.
+#[tauri::command]
+pub async fn install_update(app: tauri::AppHandle) -> Reply<()> {
+    use tauri_plugin_updater::UpdaterExt;
+    let updater = app.updater().map_err(fail)?;
+    let Some(update) = updater.check().await.map_err(fail)? else {
+        // It went away between the offer and the answer, which is not a failure
+        // worth showing: this build is simply already current.
+        tracing::info!("nothing to install after all");
+        return Ok(());
+    };
+    let version = update.version.clone();
+    tracing::info!(version = %version, "installing an update the reader accepted");
+    // The closures are progress hooks this build has nothing to draw with yet.
+    update
+        .download_and_install(|_, _| {}, || {})
+        .await
+        .map_err(fail)?;
+    tracing::info!(version = %version, "updated; restarting");
+    app.restart();
+}
+
 /// Marks a whole channel unread, from its newest message down.
 ///
 /// The newest post is asked for rather than taken from the store: the store

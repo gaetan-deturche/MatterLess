@@ -30,6 +30,33 @@
    *  credentials one. Only ever set by a sign-in that got that far. */
   let mfaNeeded = $state(false);
 
+  /** A newer build the server is offering. Nothing has been downloaded yet. */
+  let updateOffered = $state("");
+  let updating = $state(false);
+  let updateFailed = $state("");
+
+  $effect(() => {
+    const stop = api.onUpdateAvailable((version) => {
+      updateOffered = version;
+      log.info("update.offered", { version });
+    });
+    return () => void stop.then((off) => off());
+  });
+
+  async function acceptUpdate() {
+    if (updating) return;
+    updating = true;
+    updateFailed = "";
+    try {
+      // Does not return: the app restarts into the new build.
+      await api.installUpdate();
+    } catch (thrown) {
+      updateFailed = String(thrown);
+      log.failure("update.install.failed", thrown, { version: updateOffered });
+      updating = false;
+    }
+  }
+
   /** The channel a right-click opened a menu on, and where the pointer was. */
   let channelMenu: { channel: api.ChannelSummary; x: number; y: number } | null = $state(null);
   /** The channel whose member picker is open. */
@@ -2463,6 +2490,20 @@
       {/if}
       {#if error}<p class="error">{error}</p>{/if}
     </main>
+    {#if updateOffered}
+      <!-- An offer, not a notice: nothing is fetched or replaced until this is
+           accepted, and it can be dismissed for the rest of the session. -->
+      <div class="update" role="status">
+        <span>MatterLess {updateOffered} is available.</span>
+        {#if updateFailed}<span class="failed">{updateFailed}</span>{/if}
+        <button type="button" class="primary" disabled={updating} onclick={acceptUpdate}>
+          {updating ? "Installing…" : "Install and restart"}
+        </button>
+        <button type="button" disabled={updating} onclick={() => (updateOffered = "")}>
+          Not now
+        </button>
+      </div>
+    {/if}
     {#if channelMenu}
       <ChannelMenu
         channel={channelMenu.channel}
@@ -2644,6 +2685,44 @@
   }
   .shell.threaded.searching > .divider {
     display: none;
+  }
+  .update {
+    position: fixed;
+    z-index: 90;
+    right: 16px;
+    bottom: 16px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 12px;
+    border: 1px solid var(--rule);
+    border-radius: 8px;
+    background: var(--surface);
+    box-shadow: 0 8px 24px rgb(0 0 0 / 0.35);
+    font-size: 13px;
+  }
+  .update button {
+    font: inherit;
+    font-size: 12.5px;
+    padding: 5px 10px;
+    border: 1px solid var(--rule);
+    border-radius: 5px;
+    background: var(--ground);
+    color: var(--ink);
+    cursor: pointer;
+  }
+  .update button.primary {
+    background: var(--signal);
+    border-color: var(--signal);
+    color: #fff;
+  }
+  .update button:disabled {
+    opacity: 0.55;
+    cursor: default;
+  }
+  .update .failed {
+    color: var(--flag);
+    font-size: 11.5px;
   }
   .divider {
     cursor: col-resize;

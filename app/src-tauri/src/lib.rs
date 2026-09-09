@@ -31,6 +31,7 @@ use matterless_core::RestClient;
 use matterless_store::Store;
 use matterless_sync::SyncEngine;
 use std::sync::Arc;
+use tauri::Emitter;
 use tauri::Manager;
 use tokio::sync::mpsc;
 
@@ -291,14 +292,14 @@ fn check_for_update(app: &tauri::AppHandle) {
             Ok(Some(update)) => {
                 let version = update.version.clone();
                 tracing::info!(version = %version, "an update is available");
-                // Downloaded and installed in one call; the closures are
-                // progress hooks this build has nothing to draw with yet.
-                match update.download_and_install(|_, _| {}, || {}).await {
-                    Ok(()) => {
-                        tracing::info!(version = %version, "updated; restarting");
-                        app.restart();
-                    }
-                    Err(error) => tracing::warn!(%error, "the update did not install"),
+                // Offered, never taken. Replacing the program someone is
+                // running -- and restarting it under them -- is theirs to
+                // agree to, so all that happens here is that the shell is told
+                // there is something to accept. `install_update` is the only
+                // path that writes anything, and only a reader's click reaches
+                // it.
+                if let Err(error) = app.emit("update.available", version) {
+                    tracing::warn!(%error, "could not offer the update");
                 }
             }
             Ok(None) => tracing::debug!("already the newest build"),
@@ -713,6 +714,7 @@ pub fn run() {
             commands::pinned_messages,
             commands::browse_channels,
             commands::join_channel,
+            commands::install_update,
             commands::mark_channel_unread,
             commands::set_channel_muted,
             commands::move_channel,
