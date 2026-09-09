@@ -281,15 +281,32 @@ impl NativeList {
         let target = frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
-        self.view.draw(
+        // Built here rather than by the renderer: the list is one contributor
+        // to a frame now, and this window happens to hold only that one.
+        let mut scene = matterless_paint::Scene::default();
+        scene.clip_to(
+            0.0,
+            0.0,
+            self.bounds.width as f32,
+            self.bounds.height as f32,
+        );
+        let mut top = -self.scroll;
+        for row in &self.laid {
+            let bottom = top + row.height;
+            if bottom >= 0.0 && top <= self.bounds.height as f32 {
+                let pieces =
+                    self.painter
+                        .pieces_of(&mut self.fonts, row, top, &self.theme, &self.palette);
+                scene.extend(pieces);
+            }
+            top = bottom;
+        }
+        self.view.draw_scene(
             &target,
             &mut self.fonts,
-            &mut self.painter,
-            &self.laid,
-            self.scroll,
+            &scene,
             (self.bounds.width as u32, self.bounds.height as u32),
-            &self.theme,
-            &self.palette,
+            self.palette.ground,
         );
         frame.present();
     }

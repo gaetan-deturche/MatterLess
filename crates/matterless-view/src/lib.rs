@@ -16,8 +16,7 @@ pub mod sidebar;
 use atlas::{Atlas, SIDE};
 use cosmic_text::SwashCache;
 use matterless_layout::Fonts;
-use matterless_layout::row::{RowLayout, Theme};
-use matterless_paint::{Palette, Piece};
+use matterless_paint::Piece;
 
 /// One corner of a quad, in pixels and atlas coordinates.
 #[repr(C)]
@@ -180,6 +179,9 @@ fn push_quad(into: &mut Vec<Vertex>, rect: [f32; 4], uv: [f32; 4], colour: [f32;
     into.extend_from_slice(&corners);
 }
 
+/// One layer's vertices and the rectangle they are clipped to.
+type Span = (std::ops::Range<u32>, (f32, f32, f32, f32));
+
 /// The GPU side of the list: a device, a pipeline, an atlas and a vertex buffer.
 pub struct View {
     pub device: wgpu::Device,
@@ -315,48 +317,47 @@ impl View {
         }
     }
 
-    /// Draws the rows that fall inside the viewport.
+    /// Draws a whole frame: every panel, each clipped to its own rectangle.
     ///
-    /// Only those rows: the list is unbounded, and building geometry for
-    /// forty thousand messages to show thirty of them is the same mistake
-    /// virtualising the DOM was there to avoid.
-    #[allow(clippy::too_many_arguments)]
-    pub fn draw(
+    /// One pass per layer, because the scissor is set per draw. A window is a
+    /// handful of panels, so that is a handful of draws -- and the alternative,
+    /// clipping each shape on the CPU, would mean rebuilding geometry whenever
+    /// a panel moved.
+    pub fn draw_scene(
         &mut self,
         target: &wgpu::TextureView,
         fonts: &mut Fonts,
-        painter: &mut matterless_paint::Painter,
-        rows: &[RowLayout],
-        scroll: f32,
+        scene: &matterless_paint::Scene,
         size: (u32, u32),
-        theme: &Theme,
-        palette: &Palette,
+        ground: [u8; 4],
     ) {
         let viewport = Viewport {
             size: [size.0 as f32, size.1 as f32],
-            scroll,
+            // Scrolling is baked into the positions by whoever built the scene;
+            // a panel that scrolls is not the renderer's business.
+            scroll: 0.0,
             padding: 0.0,
         };
         self.queue
             .write_buffer(&self.uniform, 0, viewport_bytes(&viewport));
 
+        // One buffer for the frame, with each layer's span remembered.
         let mut quads: Vec<Vertex> = Vec::new();
-        let mut top = 0.0_f32;
-        let bottom = scroll + size.1 as f32;
-        for row in rows {
-            let height = row.height;
-            if top + height >= scroll && top <= bottom {
-                let pieces = painter.pieces_of(fonts, row, top, theme, palette);
-                vertices_of(
-                    &pieces,
-                    &self.queue,
-                    fonts,
-                    &mut self.cache,
-                    &mut self.atlas,
-                    &mut quads,
-                );
+        let mut spans: Vec<Span> = Vec::new();
+        for layer in &scene.layers {
+            let from = quads.len() as u32;
+            vertices_of(
+                &layer.pieces,
+                &self.queue,
+                fonts,
+                &mut self.cache,
+                &mut self.atlas,
+                &mut quads,
+            );
+            let to = quads.len() as u32;
+            if to > from {
+                spans.push((from..to, layer.clip));
             }
-            top += height;
         }
 
         if quads.len() > self.capacity {
@@ -375,22 +376,22 @@ impl View {
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("list"),
+                label: Some("frame"),
             });
         {
-            let ground = wgpu::Color {
-                r: palette.ground[0] as f64 / 255.0,
-                g: palette.ground[1] as f64 / 255.0,
-                b: palette.ground[2] as f64 / 255.0,
+            let clear = wgpu::Color {
+                r: ground[0] as f64 / 255.0,
+                g: ground[1] as f64 / 255.0,
+                b: ground[2] as f64 / 255.0,
                 a: 1.0,
             };
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("list"),
+                label: Some("frame"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: target,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(ground),
+                        load: wgpu::LoadOp::Clear(clear),
                         store: wgpu::StoreOp::Store,
                     },
                     depth_slice: None,
@@ -403,7 +404,19 @@ impl View {
                 pass.set_pipeline(&self.pipeline);
                 pass.set_bind_group(0, &self.bindings, &[]);
                 pass.set_vertex_buffer(0, self.vertices.slice(..));
-                pass.draw(0..quads.len() as u32, 0..1);
+                for (range, clip) in spans {
+                    // Clamped to the surface: a scissor outside it is a
+                    // validation error, and a panel can be dragged past the edge.
+                    let x = clip.0.max(0.0).min(size.0 as f32) as u32;
+                    let y = clip.1.max(0.0).min(size.1 as f32) as u32;
+                    let width = (clip.2.min(size.0 as f32 - x as f32)).max(0.0) as u32;
+                    let height = (clip.3.min(size.1 as f32 - y as f32)).max(0.0) as u32;
+                    if width == 0 || height == 0 {
+                        continue;
+                    }
+                    pass.set_scissor_rect(x, y, width, height);
+                    pass.draw(range, 0..1);
+                }
             }
         }
         self.queue.submit(Some(encoder.finish()));

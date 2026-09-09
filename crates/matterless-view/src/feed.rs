@@ -28,6 +28,48 @@ pub fn default_store() -> Option<std::path::PathBuf> {
     )
 }
 
+/// One channel, as the sidebar needs it.
+pub struct Listed {
+    pub id: String,
+    pub label: String,
+    pub unread: i64,
+    pub mentions: i64,
+    pub muted: bool,
+}
+
+/// Every channel in the store, most recently active first.
+///
+/// The same order the sidebar's "recent" sorting uses, and the only order that
+/// makes sense without the server's category arrangement -- which this reads
+/// none of, deliberately: it is a feed for the port, not the sidebar the app
+/// will eventually have.
+pub fn channels(store: &Store, me_id: &str) -> Vec<Listed> {
+    store
+        .channels_with_unread(me_id)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(channel, unread)| Listed {
+            label: if channel.display_name.is_empty() {
+                channel.name.clone()
+            } else {
+                channel.display_name.clone()
+            },
+            id: channel.id,
+            unread: unread.messages,
+            mentions: unread.mentions,
+            muted: unread.muted,
+        })
+        .collect()
+}
+
+/// Opens the store, read-only.
+pub fn open(path: &Path) -> Result<Store, String> {
+    if !path.is_file() {
+        return Err(format!("{} is not a database", path.display()));
+    }
+    Store::open(path).map_err(|error| format!("open {}: {error}", path.display()))
+}
+
 /// The channel with the most recent message, which is the one worth opening.
 fn busiest(store: &Store) -> Option<String> {
     // Every channel the reader is in, newest first. The user id is only used to
@@ -44,6 +86,27 @@ fn busiest(store: &Store) -> Option<String> {
 /// `me_id` only decides which messages count as the reader's own and which
 /// mentions are theirs; an empty one draws every message as somebody else's,
 /// which is wrong in styling but not in height.
+/// Reads a channel from an already-open store and plans it.
+pub fn rows_of(store: &Store, channel_id: &str, me_id: &str) -> Result<Vec<Row>, String> {
+    let posts = store
+        .channel_page(channel_id, None, PAGE)
+        .map_err(|error| format!("read {channel_id}: {error}"))?;
+    let mut authors: Vec<String> = posts.iter().map(|post| post.user_id.clone()).collect();
+    authors.sort();
+    authors.dedup();
+    let people = store.users_by_ids(&authors).unwrap_or_default();
+    let mut options = PlanOptions::new(ThreadMode::Collapsed, me_id);
+    options.author_names = people
+        .iter()
+        .map(|(id, user)| (id.clone(), user.username.clone()))
+        .collect();
+    options.author_avatars = people
+        .iter()
+        .map(|(id, user)| (id.clone(), user.last_picture_update))
+        .collect();
+    Ok(plan_channel(&posts, &HashMap::new(), &options))
+}
+
 pub fn rows_from(
     path: &Path,
     channel_id: Option<String>,

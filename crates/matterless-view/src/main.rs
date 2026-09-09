@@ -9,9 +9,13 @@
 
 use matterless_layout::Fonts;
 use matterless_layout::row::{RowLayout, Theme, lay_out};
-use matterless_paint::{Painter, Palette};
+use matterless_paint::{Painter, Palette, Scene};
+use matterless_ui::input::{Event as UiEvent, Input};
+// Aliased: `Node` is a markdown node in this file already, and a box here.
 use matterless_render::markdown::Node;
 use matterless_render::{PostRow, Row};
+use matterless_ui::{Axis, Node as Boxed, Placed, Rect, Size};
+use matterless_view::sidebar::{Canvas, Entry, Sidebar};
 use std::sync::Arc;
 use winit::application::ApplicationHandler;
 use winit::event::{MouseScrollDelta, WindowEvent};
@@ -115,6 +119,9 @@ fn conversation() -> Vec<Row> {
     rows
 }
 
+/// The sidebar's width. Fixed, as it is in the app today.
+const SIDEBAR: f32 = 260.0;
+
 struct App {
     window: Option<Arc<Window>>,
     surface: Option<wgpu::Surface<'static>>,
@@ -128,6 +135,11 @@ struct App {
     theme: Theme,
     palette: Palette,
     scroll: f32,
+    /// The store, kept open: switching channel is a read, not a reload.
+    store: Option<matterless_store::Store>,
+    sidebar: Sidebar,
+    input: Input,
+    placed: Vec<Placed>,
 }
 
 impl App {
@@ -176,7 +188,27 @@ impl App {
     }
 
     fn new() -> Self {
-        Self {
+        // The store is opened once and kept: switching channel is a read.
+        let store = matterless_view::feed::default_store()
+            .and_then(|path| matterless_view::feed::open(&path).ok());
+        let listed = store
+            .as_ref()
+            .map(|store| matterless_view::feed::channels(store, ""))
+            .unwrap_or_default();
+        let sidebar = Sidebar::new(
+            listed
+                .into_iter()
+                .map(|channel| Entry::Channel {
+                    id: channel.id,
+                    label: channel.label,
+                    unread: channel.unread,
+                    mentions: channel.mentions,
+                    muted: channel.muted,
+                })
+                .collect(),
+        );
+        let (channel, rows) = Self::feed();
+        let mut app = Self {
             window: None,
             surface: None,
             view: None,
@@ -184,12 +216,98 @@ impl App {
             size: (1000, 760),
             fonts: Fonts::new(),
             painter: Painter::new(),
-            rows: Self::feed().1,
+            rows,
             laid: Vec::new(),
             theme: Theme::default(),
             palette: Palette::default(),
             scroll: 0.0,
+            store,
+            sidebar,
+            input: Input::default(),
+            placed: Vec::new(),
+        };
+        app.sidebar.selected = Some(channel);
+        app
+    }
+
+    /// The window as boxes: a fixed sidebar, and the stream taking the rest.
+    fn shell(&self) -> Vec<Placed> {
+        let tree = Boxed::new("shell", Size::Grow(1.0))
+            .axis(Axis::Row)
+            .with(Boxed::new("sidebar-panel", Size::Fixed(SIDEBAR)))
+            .with(Boxed::new("stream", Size::Grow(1.0)));
+        matterless_ui::solve::solve(
+            &tree,
+            Rect::new(0.0, 0.0, self.size.0 as f32, self.size.1 as f32),
+        )
+    }
+
+    fn sidebar_rect(&self) -> Rect {
+        Rect::new(0.0, 0.0, SIDEBAR, self.size.1 as f32)
+    }
+
+    fn stream_rect(&self) -> Rect {
+        Rect::new(
+            SIDEBAR,
+            0.0,
+            (self.size.0 as f32 - SIDEBAR).max(0.0),
+            self.size.1 as f32,
+        )
+    }
+
+    fn redraw(&self) {
+        if let Some(window) = &self.window {
+            window.request_redraw();
         }
+    }
+
+    /// Reads a channel and lays it out, then shows its newest message.
+    fn open_channel(&mut self, channel: &str) {
+        let Some(store) = self.store.as_ref() else {
+            return;
+        };
+        match matterless_view::feed::rows_of(store, channel, "") {
+            Ok(rows) => {
+                self.rows = rows;
+                self.relayout();
+                let total: f32 = self.laid.iter().map(|row| row.height).sum();
+                self.scroll = (total - self.stream_rect().height).max(0.0);
+            }
+            Err(why) => eprintln!("{channel}: {why}"),
+        }
+    }
+
+    /// Everything the frame draws, in one scene.
+    fn scene(&mut self) -> Scene {
+        let mut scene = Scene::default();
+        let sidebar = self.sidebar_rect();
+        let stream = self.stream_rect();
+
+        scene.clip_to(sidebar.x, sidebar.y, sidebar.width, sidebar.height);
+        let boxes = self.sidebar.boxes(sidebar);
+        let mut canvas = Canvas {
+            scene: &mut scene,
+            painter: &mut self.painter,
+            fonts: &mut self.fonts,
+            palette: &self.palette,
+        };
+        self.sidebar.draw(&mut canvas, &boxes, sidebar, &self.input);
+
+        scene.clip_to(stream.x, stream.y, stream.width, stream.height);
+        let mut top = stream.y - self.scroll;
+        for row in &self.laid {
+            let bottom = top + row.height;
+            if bottom >= stream.y && top <= stream.bottom() {
+                let pieces =
+                    self.painter
+                        .pieces_of(&mut self.fonts, row, top, &self.theme, &self.palette);
+                // Shifted into the stream's column: the row plan is laid out
+                // from zero and knows nothing of the panel it lands in.
+                scene.extend(pieces.into_iter().map(|piece| shift(piece, stream.x)));
+            }
+            top = bottom;
+        }
+        scene
     }
 
     /// Lays the whole conversation out for the current width.
@@ -198,7 +316,7 @@ impl App {
     /// scroll position, which is the property that makes this list honest.
     fn relayout(&mut self) {
         self.theme = Theme {
-            width: self.size.0 as f32,
+            width: self.stream_rect().width,
             ..Theme::default()
         };
         self.laid = self
@@ -303,19 +421,71 @@ impl ApplicationHandler for App {
                     window.request_redraw();
                 }
             }
+            WindowEvent::CursorMoved { position, .. } => {
+                self.placed = self.shell();
+                let mut boxes = self.placed.clone();
+                boxes.extend(self.sidebar.boxes(self.sidebar_rect()));
+                self.input.apply(
+                    UiEvent::PointerMoved {
+                        x: position.x as f32,
+                        y: position.y as f32,
+                    },
+                    &boxes,
+                );
+                self.redraw();
+            }
+            WindowEvent::CursorLeft { .. } => {
+                self.input.apply(UiEvent::PointerLeft, &[]);
+                self.redraw();
+            }
+            WindowEvent::MouseInput { state, button, .. } => {
+                if button != winit::event::MouseButton::Left {
+                    return;
+                }
+                let boxes = self.sidebar.boxes(self.sidebar_rect());
+                let event = if state == winit::event::ElementState::Pressed {
+                    UiEvent::PointerPressed
+                } else {
+                    UiEvent::PointerReleased
+                };
+                self.input.apply(event, &boxes);
+                let within = self.sidebar_rect();
+                if let Some(channel) = self.sidebar.react(&self.input, &boxes, within) {
+                    self.open_channel(&channel);
+                }
+                self.redraw();
+            }
             WindowEvent::MouseWheel { delta, .. } => {
                 let by = match delta {
                     MouseScrollDelta::LineDelta(_, lines) => lines * self.theme.line_height * 3.0,
                     MouseScrollDelta::PixelDelta(position) => position.y as f32,
                 };
-                let total: f32 = self.laid.iter().map(|row| row.height).sum();
-                let reach = (total - self.size.1 as f32).max(0.0);
-                self.scroll = (self.scroll - by).clamp(0.0, reach);
-                if let Some(window) = &self.window {
-                    window.request_redraw();
+                let boxes = self.sidebar.boxes(self.sidebar_rect());
+                self.input.apply(UiEvent::Wheel { x: 0.0, y: by }, &boxes);
+                let within = self.sidebar_rect();
+                // The sidebar takes it when the pointer is over the sidebar;
+                // otherwise the stream does. One wheel, two panels, and the
+                // pointer decides -- which is what `wheel_over` is for.
+                let over_sidebar = self
+                    .input
+                    .wheel_over(&boxes, |name| name == "sidebar")
+                    .is_some();
+                if over_sidebar {
+                    self.sidebar.react(&self.input, &boxes, within);
+                } else {
+                    let total: f32 = self.laid.iter().map(|row| row.height).sum();
+                    let reach = (total - self.stream_rect().height).max(0.0);
+                    self.scroll = (self.scroll - by).clamp(0.0, reach);
                 }
+                self.redraw();
             }
             WindowEvent::RedrawRequested => {
+                if self.surface.is_none() || self.view.is_none() {
+                    return;
+                }
+                let scene = self.scene();
+                let size = self.size;
+                let ground = self.palette.ground;
                 let (Some(surface), Some(view)) = (&self.surface, &mut self.view) else {
                     return;
                 };
@@ -325,17 +495,10 @@ impl ApplicationHandler for App {
                 let target = frame
                     .texture
                     .create_view(&wgpu::TextureViewDescriptor::default());
-                view.draw(
-                    &target,
-                    &mut self.fonts,
-                    &mut self.painter,
-                    &self.laid,
-                    self.scroll,
-                    self.size,
-                    &self.theme,
-                    &self.palette,
-                );
+                view.draw_scene(&target, &mut self.fonts, &scene, size, ground);
                 frame.present();
+                // A frame's worth of input has been acted on.
+                self.input.settle();
             }
             _ => {}
         }
@@ -390,6 +553,37 @@ fn snapshot(path: &std::path::Path, width: u32) -> Result<(), String> {
         path.display()
     );
     Ok(())
+}
+
+/// Moves a piece sideways into its panel.
+fn shift(piece: matterless_paint::Piece, by: f32) -> matterless_paint::Piece {
+    use matterless_paint::Piece;
+    match piece {
+        Piece::Fill {
+            x,
+            y,
+            width,
+            height,
+            colour,
+        } => Piece::Fill {
+            x: x + by,
+            y,
+            width,
+            height,
+            colour,
+        },
+        Piece::Text { glyphs, ink, faint } => Piece::Text {
+            glyphs: glyphs
+                .into_iter()
+                .map(|glyph| matterless_paint::PlacedGlyph {
+                    x: glyph.x + by as i32,
+                    ..glyph
+                })
+                .collect(),
+            ink,
+            faint,
+        },
+    }
 }
 
 fn main() {
