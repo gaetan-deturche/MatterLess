@@ -132,15 +132,48 @@ pub enum Piece {
 /// renderer draws them and there is one place where drawing happens.
 #[derive(Debug, Default, Clone)]
 pub struct Scene {
+    pub layers: Vec<Layer>,
+}
+
+/// A group of pieces and the rectangle they are confined to.
+///
+/// Panels sit side by side and their contents overrun them: a message wider
+/// than the stream, a channel name longer than the sidebar. Clipping is what
+/// keeps each panel's spill inside itself, and it is per group because the GPU
+/// sets it once per draw rather than per shape.
+#[derive(Debug, Clone)]
+pub struct Layer {
+    pub clip: (f32, f32, f32, f32),
     pub pieces: Vec<Piece>,
 }
 
 impl Scene {
+    /// Starts a group clipped to `rect`. Everything drawn after this belongs to
+    /// it until the next one.
+    pub fn clip_to(&mut self, x: f32, y: f32, width: f32, height: f32) {
+        self.layers.push(Layer {
+            clip: (x, y, width.max(0.0), height.max(0.0)),
+            pieces: Vec::new(),
+        });
+    }
+
+    fn current(&mut self) -> &mut Layer {
+        if self.layers.is_empty() {
+            // Unclipped until told otherwise, so a caller that only wants to
+            // draw does not have to think about panels.
+            self.layers.push(Layer {
+                clip: (0.0, 0.0, f32::MAX, f32::MAX),
+                pieces: Vec::new(),
+            });
+        }
+        self.layers.last_mut().expect("a layer")
+    }
+
     pub fn fill(&mut self, x: f32, y: f32, width: f32, height: f32, colour: [u8; 4]) {
         if width <= 0.0 || height <= 0.0 {
             return;
         }
-        self.pieces.push(Piece::Fill {
+        self.current().pieces.push(Piece::Fill {
             x,
             y,
             width,
@@ -153,11 +186,13 @@ impl Scene {
         if glyphs.is_empty() {
             return;
         }
-        self.pieces.push(Piece::Text { glyphs, ink, faint });
+        self.current()
+            .pieces
+            .push(Piece::Text { glyphs, ink, faint });
     }
 
     pub fn extend(&mut self, pieces: impl IntoIterator<Item = Piece>) {
-        self.pieces.extend(pieces);
+        self.current().pieces.extend(pieces);
     }
 }
 
