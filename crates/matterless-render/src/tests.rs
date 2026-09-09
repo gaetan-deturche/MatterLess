@@ -1037,6 +1037,44 @@ fn image_info(id: &str, width: i32, height: i32) -> matterless_core::model::File
     }
 }
 
+/// Everything drawn inline shares the room when there is more than one of it,
+/// whatever it is made of.
+///
+/// A GIF and a video both fetch the *original* file -- a GIF's thumbnail is a
+/// still frame, and a video has no thumbnail at all -- and the box used to be
+/// picked from that choice, so both were drawn full size beside neighbours the
+/// same layout had shrunk to thumbnails.
+#[test]
+fn a_gif_and_a_video_share_a_gallery_like_a_picture() {
+    let gallery = FileLayout {
+        gallery: true,
+        full_res: false,
+        allow_svg: false,
+        pixel_ratio: 1.0,
+    };
+    let mut gif = image_info("f1", 800, 600);
+    gif.mime_type = "image/gif".into();
+    gif.extension = "gif".into();
+    let mut film = image_info("f2", 800, 600);
+    film.mime_type = "video/mp4".into();
+    film.extension = "mp4".into();
+    film.has_preview_image = false;
+
+    let picture = FileRef::from_info(&image_info("f3", 800, 600), gallery);
+    let animated = FileRef::from_info(&gif, gallery);
+    let video = FileRef::from_info(&film, gallery);
+
+    assert_eq!(
+        animated.box_width, picture.box_width,
+        "a gif shares the row rather than taking it"
+    );
+    assert_eq!(video.box_width, picture.box_width, "so does a video");
+    // And the rendition each fetches is still its own business.
+    assert_eq!(animated.variant, ImageVariant::Original);
+    assert_eq!(picture.variant, ImageVariant::Thumb);
+    assert!(video.video, "a playable container plays");
+}
+
 fn document_info(id: &str) -> matterless_core::model::FileInfo {
     matterless_core::model::FileInfo {
         id: id.into(),
