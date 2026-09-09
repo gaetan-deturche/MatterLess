@@ -1944,6 +1944,20 @@
   })();
 </script>
 
+<!-- The browser's own menu -- Back, Refresh, Save as, Print -- belongs to a
+     browser, and none of it does anything useful in a chat client. It is kept
+     only where it is the way to cut, copy and paste: inside an editable field,
+     or over a live selection. Anywhere else the webview underneath should not
+     be visible. -->
+<svelte:window
+  oncontextmenu={(event) => {
+    const target = event.target as HTMLElement | null;
+    if (target?.closest("input, textarea, [contenteditable='true']")) return;
+    if ((window.getSelection()?.toString() ?? "").trim().length > 0) return;
+    event.preventDefault();
+  }}
+/>
+
 {#if signedIn === undefined}
   <main class="centre"><p>Starting…</p></main>
 {:else if !signedIn}
