@@ -267,3 +267,99 @@ mod tests {
         assert!(cache.get("/avatar/u1?v=2").is_none());
     }
 }
+
+/// One `Range: bytes=…` request, resolved against a body of `total` bytes.
+///
+/// Only a single range is honoured: the multipart form exists in the spec, but
+/// no video element asks for it. `None` means "send the whole thing", which is
+/// also the answer for a range that cannot be satisfied -- a 416 would stop
+/// playback where a 200 merely wastes a little bandwidth.
+pub fn byte_range(header: Option<&str>, total: usize) -> Option<(usize, usize)> {
+    let spec = header?.trim().strip_prefix("bytes=")?;
+    if spec.contains(',') {
+        return None;
+    }
+    let (from, to) = spec.split_once('-')?;
+    let (start, end) = match (from.trim(), to.trim()) {
+        // `bytes=-500` is the *last* 500 bytes, not "from 0 to 500". A video
+        // element asks for exactly this to read the moov atom at the end of an
+        // unfaststarted MP4.
+        ("", last) => {
+            let last: usize = last.parse().ok()?;
+            if last == 0 {
+                return None;
+            }
+            (total.saturating_sub(last), total.checked_sub(1)?)
+        }
+        (first, "") => (first.parse().ok()?, total.checked_sub(1)?),
+        (first, last) => {
+            let end: usize = last.parse().ok()?;
+            (first.parse().ok()?, end.min(total.checked_sub(1)?))
+        }
+    };
+    if start > end || start >= total {
+        return None;
+    }
+    Some((start, end))
+}
+
+/// Answers with the whole body, or with the slice a `Range` asked for.
+///
+/// A video element seeks by asking for byte ranges, and treats a handler that
+/// only ever answers 200-with-everything as unseekable -- so the scrub bar does
+/// nothing and each seek refetches the file. `Accept-Ranges` is sent either way,
+/// because that header is what makes it ask in the first place.
+pub fn respond(
+    bytes: Vec<u8>,
+    content_type: String,
+    range: Option<&str>,
+) -> tauri::http::Response<Vec<u8>> {
+    let total = bytes.len();
+    match byte_range(range, total) {
+        Some((start, end)) => tauri::http::Response::builder()
+            .status(206)
+            .header("Content-Type", content_type)
+            .header("Accept-Ranges", "bytes")
+            .header("Content-Range", format!("bytes {start}-{end}/{total}"))
+            .body(bytes[start..=end].to_vec())
+            .expect("partial media response"),
+        None => tauri::http::Response::builder()
+            .header("Content-Type", content_type)
+            .header("Accept-Ranges", "bytes")
+            .body(bytes)
+            .expect("media response"),
+    }
+}
+
+#[cfg(test)]
+mod range_tests {
+    use super::byte_range;
+
+    #[test]
+    fn a_range_is_inclusive_at_both_ends() {
+        assert_eq!(byte_range(Some("bytes=0-99"), 1000), Some((0, 99)));
+        assert_eq!(byte_range(Some("bytes=100-"), 1000), Some((100, 999)));
+        // The last 500 bytes, which is how a player finds an MP4's index when
+        // it was not written for streaming.
+        assert_eq!(byte_range(Some("bytes=-500"), 1000), Some((500, 999)));
+    }
+
+    #[test]
+    fn an_end_past_the_body_is_clamped_rather_than_refused() {
+        assert_eq!(byte_range(Some("bytes=900-5000"), 1000), Some((900, 999)));
+    }
+
+    #[test]
+    fn anything_unusable_asks_for_the_whole_body() {
+        assert_eq!(byte_range(None, 1000), None);
+        assert_eq!(byte_range(Some("items=0-1"), 1000), None);
+        assert_eq!(byte_range(Some("bytes=0-1,5-6"), 1000), None, "multipart");
+        assert_eq!(
+            byte_range(Some("bytes=2000-3000"), 1000),
+            None,
+            "past the end"
+        );
+        assert_eq!(byte_range(Some("bytes=-0"), 1000), None);
+        assert_eq!(byte_range(Some("bytes=0-0"), 0), None, "empty body");
+    }
+}

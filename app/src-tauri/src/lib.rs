@@ -437,6 +437,12 @@ pub fn run() {
                 Some(query) => format!("{path}?{query}"),
                 None => path.clone(),
             };
+            // A video element seeks with these; everything else never sends one.
+            let range = request
+                .headers()
+                .get("Range")
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_string);
 
             let Some(route) = media::route_for(&path) else {
                 responder.respond(
@@ -456,12 +462,11 @@ pub fn run() {
             if media::fits_in_memory(&path) {
                 if let Some(held) = cache.get(&key) {
                     tracing::debug!(key = %key, bytes = held.bytes.len(), "media served from cache");
-                    responder.respond(
-                        tauri::http::Response::builder()
-                            .header("Content-Type", held.content_type.clone())
-                            .body(held.bytes.clone())
-                            .expect("cached response"),
-                    );
+                    responder.respond(media::respond(
+                        held.bytes.clone(),
+                        held.content_type.clone(),
+                        range.as_deref(),
+                    ));
                     return;
                 }
             }
@@ -500,12 +505,7 @@ pub fn run() {
                                 }),
                             );
                         }
-                        responder.respond(
-                            tauri::http::Response::builder()
-                                .header("Content-Type", content_type)
-                                .body(bytes)
-                                .expect("cached file response"),
-                        );
+                        responder.respond(media::respond(bytes, content_type, range.as_deref()));
                         return;
                     }
                 }
@@ -540,9 +540,7 @@ pub fn run() {
                                 }),
                             );
                         }
-                        tauri::http::Response::builder()
-                            .header("Content-Type", content_type)
-                            .body(bytes)
+                        Ok(media::respond(bytes, content_type, range.as_deref()))
                     }
                     // No avatar, no team icon: ordinary, and the page falls
                     // back to initials.

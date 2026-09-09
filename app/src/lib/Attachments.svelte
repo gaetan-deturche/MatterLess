@@ -14,7 +14,10 @@
 
   /** More than one picture, so they are drawn as a compact row of thumbnails
    *  at their own size rather than one stretched image each. */
-  const gallery = $derived(files.filter((file) => file.image).length > 1);
+  /** Several things drawn at their own size share the room rather than each
+   *  taking it. A player counts the same as a picture: the rule is about what
+   *  is drawn inline, not about what kind of file it is. */
+  const gallery = $derived(files.filter((file) => file.image || file.video).length > 1);
 
   /** Which file is open full-size, if any. */
   let opened: api.FileRef | null = $state(null);
@@ -110,6 +113,48 @@
           onerror={() => fellBack(file)}
         />
       </button>
+    {:else if file.video && gallery}
+      <!-- Sharing the room with other attachments: a poster, not a player.
+           Controls at 120px are unusable, and a row of players would each hold
+           a decoder and fetch metadata for a thumbnail nobody has asked to
+           watch. Clicking opens the one at full size. -->
+      <button
+        type="button"
+        class="shot poster"
+        style:width={`${file.box_width || 120}px`}
+        style:aspect-ratio={`${file.box_width || 16} / ${file.box_height || 9}`}
+        style:background-image={placeholder(file)}
+        title={file.name}
+        onclick={() => (opened = file)}
+      >
+        <!-- The first frame, decoded from the file itself. The server has no
+             thumbnail to offer for a video -- `/files/{id}/thumbnail` answers
+             400 for anything that is not an image -- and `#t=0.1` is what makes
+             the element decode a frame rather than show nothing: it seeks a
+             tenth of a second in, which reaches the file over the same byte
+             ranges the player uses. Not interactive; the button takes the
+             click. -->
+        <!-- svelte-ignore a11y_media_has_caption -->
+        <video src={`${media.file(file.id)}#t=0.1`} preload="metadata" muted playsinline
+        ></video>
+        <span class="play" aria-hidden="true">▶</span>
+      </button>
+    {:else if file.video}
+      <!-- The only attachment on the post, so it gets the room and plays in
+           place. `preload="metadata"` rather than `auto`: enough to size the
+           player and fill the scrub bar, without fetching the file until it is
+           asked for. Seeking works because the media handler answers byte
+           ranges. -->
+      <!-- svelte-ignore a11y_media_has_caption -->
+      <video
+        class="film"
+        controls
+        preload="metadata"
+        src={media.file(file.id)}
+        style:width={`${file.box_width || 480}px`}
+        style:aspect-ratio={`${file.box_width || 16} / ${file.box_height || 9}`}
+        title={file.name}
+      ></video>
     {:else}
       <div class="card" class:gone={file.archived}>
         <span class="kind">{(file.extension || "file").slice(0, 4).toUpperCase()}</span>
@@ -154,11 +199,23 @@
       if (event.key === "Enter" || event.key === " ") opened = null;
     }}
   >
-    <img
-      src={fullSource(opened)}
-      alt={opened.name}
-      onerror={() => opened && fellBack(opened)}
-    />
+    {#if opened.video}
+      <!-- svelte-ignore a11y_media_has_caption -->
+      <!-- svelte-ignore a11y_click_events_have_key_events -->
+      <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+      <video
+        src={media.file(opened.id)}
+        controls
+        autoplay
+        onclick={(event) => event.stopPropagation()}
+      ></video>
+    {:else}
+      <img
+        src={fullSource(opened)}
+        alt={opened.name}
+        onerror={() => opened && fellBack(opened)}
+      />
+    {/if}
     <div class="bar">
       <span class="name">{opened.name}</span>
       <span class="size">{readableSize(opened.size)}</span>
@@ -227,6 +284,42 @@
   }
   .card.gone {
     opacity: 0.6;
+  }
+  .film {
+    display: block;
+    max-width: 100%;
+    border-radius: 8px;
+    background: #000;
+  }
+  /* A poster is a `.shot` with a mark on it, so it sits in the row exactly as a
+     picture does. */
+  .poster {
+    position: relative;
+    background-color: #000;
+  }
+  .poster video {
+    display: block;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    /* The button around it is the control; the frame is only a picture. */
+    pointer-events: none;
+  }
+  .play {
+    position: absolute;
+    inset: 0;
+    display: grid;
+    place-items: center;
+    font-size: 22px;
+    color: #fff;
+    text-shadow: 0 1px 6px rgb(0 0 0 / 0.8);
+    pointer-events: none;
+  }
+  .lightbox video {
+    max-width: 92vw;
+    max-height: 84vh;
+    border-radius: 8px;
+    background: #000;
   }
   .kind {
     font-size: 10.5px;

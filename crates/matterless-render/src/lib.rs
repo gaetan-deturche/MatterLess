@@ -236,6 +236,8 @@ pub struct FileRef {
     pub height: i32,
     /// Renders inline as a picture rather than as a card.
     pub image: bool,
+    /// Plays inline rather than being offered as a download.
+    pub video: bool,
     /// Which of the server's three renditions to draw.
     pub variant: ImageVariant,
     /// The ~1 KB base64 JPEG from the post's metadata, shown blurred until the
@@ -330,6 +332,15 @@ impl FileRef {
         // nor preview, so both want the file itself however big it is.
         let rendered = !matches!(file.mime_type.as_str(), "image/gif" | "image/svg+xml");
 
+        // What a webview will actually play. The container is only half of it --
+        // an AVI or a MKV is refused whatever its extension says -- so the list
+        // is the formats WebView2 decodes rather than everything video-shaped.
+        let video = !file.archived
+            && matches!(
+                file.mime_type.as_str(),
+                "video/mp4" | "video/webm" | "video/ogg" | "video/quicktime"
+            );
+
         let variant = match (rendered, layout.gallery, layout.full_res) {
             (false, _, _) => ImageVariant::Original,
             (true, true, _) => ImageVariant::Thumb,
@@ -340,16 +351,26 @@ impl FileRef {
         // The box can never exceed the pixels actually being fetched, which is
         // the whole point of choosing a variant: a 120x66 thumbnail drawn 420
         // wide is a 3.5x upscale, and that is what "blurry" means here.
-        let (box_width, box_height) = match variant {
-            ImageVariant::Thumb => {
-                let (natural_width, natural_height) = fit_box(file.width, file.height, THUMB_BOX);
-                for_ratio(natural_width, natural_height, layout.pixel_ratio)
-            }
-            // A preview is at least 1920 wide and the original is whatever was
-            // uploaded, so both are larger than the box for anything but a
-            // small image -- and `fit_box` never upscales a small one.
-            ImageVariant::Preview | ImageVariant::Original => {
-                fit_box(file.width, file.height, IMAGE_BOX)
+        let (box_width, box_height) = if video {
+            // A player is not a rendition: the file itself is what plays, so
+            // there is no fetched-pixel budget to divide the box down to the way
+            // `for_ratio` does for a thumbnail. It still shares the room when
+            // there is more than one thing drawn inline.
+            let target = if layout.gallery { THUMB_BOX } else { IMAGE_BOX };
+            fit_box(file.width, file.height, target)
+        } else {
+            match variant {
+                ImageVariant::Thumb => {
+                    let (natural_width, natural_height) =
+                        fit_box(file.width, file.height, THUMB_BOX);
+                    for_ratio(natural_width, natural_height, layout.pixel_ratio)
+                }
+                // A preview is at least 1920 wide and the original is whatever was
+                // uploaded, so both are larger than the box for anything but a
+                // small image -- and `fit_box` never upscales a small one.
+                ImageVariant::Preview | ImageVariant::Original => {
+                    fit_box(file.width, file.height, IMAGE_BOX)
+                }
             }
         };
 
@@ -362,6 +383,7 @@ impl FileRef {
             width: file.width,
             height: file.height,
             image,
+            video,
             variant,
             mini_preview: file.mini_preview.clone(),
             box_width,
@@ -373,18 +395,25 @@ impl FileRef {
 
 /// Every attachment on a post, laid out as the post as a whole calls for.
 fn files_of(post: &Post, options: &PlanOptions) -> Vec<FileRef> {
-    let images = post
+    // Everything that draws at its own size rather than as a card, which is what
+    // decides whether one of them gets the room or they share it. A player
+    // counts: two videos stacked full width push the next post off the screen
+    // exactly as two pictures would.
+    let inline = post
         .metadata
         .files
         .iter()
         .filter(|file| {
-            !file.archived && (file.has_preview_image || file.mime_type.starts_with("image/"))
+            !file.archived
+                && (file.has_preview_image
+                    || file.mime_type.starts_with("image/")
+                    || file.mime_type.starts_with("video/"))
         })
         .count();
     let layout = FileLayout {
-        // One image gets the room; several get a row of thumbnails, which is
-        // both more compact and sharper than several stretched ones.
-        gallery: images > 1,
+        // One gets the room; several get a row of thumbnails, which is both more
+        // compact and sharper than several stretched ones.
+        gallery: inline > 1,
         full_res: options.full_res,
         allow_svg: options.allow_svg,
         pixel_ratio: options.pixel_ratio,

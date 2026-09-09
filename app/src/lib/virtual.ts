@@ -272,15 +272,25 @@ function fileExtra(row: Row): number {
   if (row.kind !== "post" && row.kind !== "continuation") return 0;
   const files = row.post.files ?? [];
   if (files.length === 0) return 0;
-  const boxes: WrapBox[] = files.map((file) =>
-    file.image
-      ? {
-          width: file.box_width || 320,
-          height: (file.box_height || 180) + SHOT_BORDER,
-          scales: true,
-        }
-      : { width: CARD_WIDTH, height: CARD_HEIGHT, scales: false },
-  );
+  const boxes: WrapBox[] = files.map((file) => {
+    if (file.image) {
+      return {
+        width: file.box_width || 320,
+        height: (file.box_height || 180) + SHOT_BORDER,
+        scales: true,
+      };
+    }
+    // A player is drawn at the same box an image would be, plus its controls,
+    // which the element adds inside its own height only once it has metadata.
+    if (file.video) {
+      return {
+        width: file.box_width || 480,
+        height: (file.box_height || 270) + SHOT_BORDER,
+        scales: true,
+      };
+    }
+    return { width: CARD_WIDTH, height: CARD_HEIGHT, scales: false };
+  });
   return ATTACHMENT_MARGINS + wrappedHeight(boxes, ATTACHMENT_GAP);
 }
 
