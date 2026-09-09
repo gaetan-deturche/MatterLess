@@ -16,12 +16,15 @@
 //! and where does each glyph sit", which a GPU renderer draws and which tests
 //! can check without a GPU at all.
 
+pub mod row;
+
 use cosmic_text::{Attrs, Buffer, Family, FontSystem, Metrics, Shaping, Weight};
 
 /// The fonts, loaded once. Building this scans the system's font directories,
 /// which is slow enough that it must not happen per row.
 pub struct Fonts {
-    system: FontSystem,
+    /// Visible to `row`, which lays out whole rows against the same fonts.
+    pub(crate) system: FontSystem,
 }
 
 impl Default for Fonts {
