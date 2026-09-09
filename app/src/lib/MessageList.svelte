@@ -113,6 +113,14 @@
    *  box comes from the observer, so it already excludes the stream's padding.
    */
   function columnWidth(element: HTMLElement) {
+    // Only the virtualised list may set this. `contentWidth` is one
+    // module-level value, and the thread pane mounts a list of its own: its
+    // ~300px column was overwriting the channel's ~700px one, so the channel's
+    // rows were estimated at the wrong width and every alternation cleared
+    // every learned base. Measured as a 2875px anchor correction, which the
+    // reader saw as the stream snapping back after they scrolled to the end.
+    // A thread mounts all its rows, so it needs no estimate to begin with.
+    if (!virtualise) return;
     const observer = new ResizeObserver((entries) => {
       const box = entries[0]?.contentBoxSize?.[0];
       if (box) virtual.setContentWidth(box.inlineSize);
