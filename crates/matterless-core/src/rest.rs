@@ -38,6 +38,20 @@ pub struct PublicChannel {
     pub delete_at: Timestamp,
 }
 
+/// One partial response: the bytes, their type, and the `Content-Range` the
+/// server answered with.
+///
+/// The range is kept verbatim rather than recomputed. A server may answer a
+/// narrower range than was asked for, and a player believes that header over
+/// anything the client assumed.
+#[derive(Debug, Clone)]
+pub struct BytesRange {
+    pub bytes: Vec<u8>,
+    pub content_type: String,
+    /// `bytes start-end/total`, absent when the server ignored the range.
+    pub content_range: Option<String>,
+}
+
 pub struct RestClient {
     /// Which server this client talks to.
     ///
@@ -396,6 +410,49 @@ impl RestClient {
     /// itself -- this is what the custom URI scheme resolves them through.
     /// `None` for a 404, which is an ordinary answer here: a user with no
     /// avatar and a team with no icon are both normal.
+    /// Fetches part of a file, asking the server for only that part.
+    ///
+    /// The point is not to end up with the whole file. A video element asks for
+    /// a few hundred kilobytes to draw its first frame, and fetching forty
+    /// megabytes to answer that -- which is what going through `fetch_bytes`
+    /// does -- costs the reader the entire file for a frame they never asked to
+    /// watch.
+    pub async fn fetch_range(&self, path: &str, range: &str) -> Result<Option<BytesRange>> {
+        let request = self
+            .builder(Method::GET, path)?
+            .header(reqwest::header::RANGE, range);
+        let response = self.send(request).await?;
+        if response.status() == StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        if !response.status().is_success() {
+            return Err(Error::Protocol(format!(
+                "fetch {path} {range}: {}",
+                response.status()
+            )));
+        }
+        let partial = response.status() == StatusCode::PARTIAL_CONTENT;
+        let header = |name: reqwest::header::HeaderName| {
+            response
+                .headers()
+                .get(name)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_string)
+        };
+        let content_type = header(reqwest::header::CONTENT_TYPE)
+            .unwrap_or_else(|| "application/octet-stream".into());
+        // A 200 means the server does not do ranges for this route, and the body
+        // is the whole file however little was asked for.
+        let content_range = partial
+            .then(|| header(reqwest::header::CONTENT_RANGE))
+            .flatten();
+        Ok(Some(BytesRange {
+            bytes: response.bytes().await?.to_vec(),
+            content_type,
+            content_range,
+        }))
+    }
+
     pub async fn fetch_bytes(&self, path: &str) -> Result<Option<(Vec<u8>, String)>> {
         let response = self.send(self.builder(Method::GET, path)?).await?;
         if response.status() == StatusCode::NOT_FOUND {

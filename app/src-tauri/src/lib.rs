@@ -510,6 +510,54 @@ pub fn run() {
                     }
                 }
 
+                // A range for something not already cached is forwarded rather
+                // than served by fetching everything and slicing: a player
+                // asking for the head of a 40 MB video should cost the head of
+                // a 40 MB video. The result is deliberately not cached -- a
+                // partial body is not the file, and storing it under the file's
+                // key would poison every later read.
+                if let Some(asked) = range.as_deref() {
+                    match rest.fetch_range(&route, asked).await {
+                        Ok(Some(part)) => {
+                            tracing::debug!(
+                                route = %route,
+                                bytes = part.bytes.len(),
+                                range = %asked,
+                                served = part.content_range.is_some(),
+                                "media range fetched"
+                            );
+                            let mut built = tauri::http::Response::builder()
+                                .header("Content-Type", part.content_type)
+                                .header("Accept-Ranges", "bytes");
+                            // Only a server that actually honoured the range may
+                            // be answered as partial; otherwise this is the whole
+                            // file and saying "206" would make a player wait
+                            // forever for bytes that already arrived.
+                            if let Some(content_range) = part.content_range {
+                                built = built.status(206).header("Content-Range", content_range);
+                            }
+                            responder.respond(
+                                built.body(part.bytes).expect("ranged media response"),
+                            );
+                            return;
+                        }
+                        Ok(None) => {
+                            responder.respond(
+                                tauri::http::Response::builder()
+                                    .status(404)
+                                    .body(Vec::new())
+                                    .expect("empty response"),
+                            );
+                            return;
+                        }
+                        Err(error) => {
+                            // Fall through to the whole-file path: a server that
+                            // refuses ranges should still play, slowly.
+                            tracing::debug!(%error, route = %route, "range refused");
+                        }
+                    }
+                }
+
                 let response = match rest.fetch_bytes(&route).await {
                     Ok(Some((bytes, content_type))) => {
                         // Logged because "did the image load" is otherwise only
