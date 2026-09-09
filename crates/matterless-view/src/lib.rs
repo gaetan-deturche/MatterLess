@@ -19,6 +19,18 @@ use cosmic_text::SwashCache;
 use matterless_layout::Fonts;
 use matterless_paint::Piece;
 
+/// The format the frame is written through, which is never an sRGB one.
+///
+/// The palette is authored in sRGB -- the same hex the stylesheet uses -- and
+/// both the browser and the CPU snapshot blend those bytes as they stand.
+/// Handing them to an sRGB surface encodes them a second time: the ground
+/// leaves the shader as 15/255 and lands as 69/255, which is how a near-black
+/// panel turns slate grey while the light text barely moves. Drawing through
+/// the plain view of the same surface keeps one encoding, stylesheet to screen.
+pub fn plain(format: wgpu::TextureFormat) -> wgpu::TextureFormat {
+    format.remove_srgb_suffix()
+}
+
 /// One corner of a quad, in pixels and atlas coordinates.
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
@@ -429,5 +441,37 @@ impl View {
             }
         }
         self.queue.submit(Some(encoder.finish()));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The invariant the whole palette rests on: nothing is encoded twice.
+    #[test]
+    fn the_frame_is_never_written_through_an_srgb_view() {
+        for format in [
+            wgpu::TextureFormat::Bgra8UnormSrgb,
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+            wgpu::TextureFormat::Bgra8Unorm,
+            wgpu::TextureFormat::Rgba8Unorm,
+        ] {
+            assert!(!plain(format).is_srgb(), "{format:?} stayed sRGB");
+        }
+    }
+
+    /// The plain view has to be the same texture read differently, or the
+    /// surface will not accept it.
+    #[test]
+    fn a_plain_format_is_left_alone() {
+        assert_eq!(
+            plain(wgpu::TextureFormat::Bgra8UnormSrgb),
+            wgpu::TextureFormat::Bgra8Unorm
+        );
+        assert_eq!(
+            plain(wgpu::TextureFormat::Bgra8Unorm),
+            wgpu::TextureFormat::Bgra8Unorm
+        );
     }
 }

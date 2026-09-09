@@ -88,6 +88,9 @@ pub struct NativeList {
     child: HWND,
     surface: wgpu::Surface<'static>,
     format: wgpu::TextureFormat,
+    /// The same surface read without its sRGB encoding: the palette is already
+    /// sRGB, and writing through the encoded view would apply it twice.
+    plain: wgpu::TextureFormat,
     view: matterless_view::View,
     fonts: Fonts,
     painter: Painter,
@@ -171,9 +174,12 @@ impl NativeList {
             pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default()))
                 .map_err(|error| format!("device: {error}"))?;
         let format = surface.get_capabilities(&adapter).formats[0];
+        let plain = matterless_view::plain(format);
         tracing::info!(
             adapter = %adapter.get_info().name,
             backend = ?adapter.get_info().backend,
+            surface = ?format,
+            drawn_through = ?plain,
             "native list surface created"
         );
 
@@ -181,7 +187,8 @@ impl NativeList {
             child,
             surface,
             format,
-            view: matterless_view::View::new(device, queue, format),
+            plain,
+            view: matterless_view::View::new(device, queue, plain),
             fonts: Fonts::new(),
             painter: Painter::new(),
             theme: Theme::default(),
@@ -219,7 +226,7 @@ impl NativeList {
                 height: bounds.height.max(1) as u32,
                 present_mode: wgpu::PresentMode::AutoVsync,
                 alpha_mode: wgpu::CompositeAlphaMode::Auto,
-                view_formats: Vec::new(),
+                view_formats: vec![self.plain],
                 desired_maximum_frame_latency: 2,
             },
         );
@@ -278,9 +285,11 @@ impl NativeList {
         let Ok(frame) = self.surface.get_current_texture() else {
             return;
         };
-        let target = frame
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
+        // Through the plain view, so the palette is not encoded twice.
+        let target = frame.texture.create_view(&wgpu::TextureViewDescriptor {
+            format: Some(self.plain),
+            ..Default::default()
+        });
         // Built here rather than by the renderer: the list is one contributor
         // to a frame now, and this window happens to hold only that one.
         let mut scene = matterless_paint::Scene::default();
