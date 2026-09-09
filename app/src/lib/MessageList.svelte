@@ -14,6 +14,7 @@
   import { tick } from "svelte";
   import type { Row } from "./api";
   import * as virtual from "./virtual";
+  import * as measureText from "./measure";
 
   // `scrollTop` and `viewportHeight` come from the scroller, which App owns
   // along with every decision about where the scroll sits. This component only
@@ -25,6 +26,8 @@
     viewportHeight = 0,
     liveScrollTop,
     onlayout,
+    onwidth,
+    pinned = "",
     virtualise = true,
     compact = false,
     frozen = false,
@@ -53,19 +56,32 @@
      *  wrong row -- and anchoring on the wrong row moves the view rather than
      *  holding it. */
     liveScrollTop?: () => number;
-    /** The row to keep still, once the corrected layout has been laid out.
+    /** The row to keep still, and where on the screen it was.
      *
-     *  Measured at the *bottom* edge of the viewport, not the top. A message
-     *  that re-wraps taller -- which is what opening the thread pane does to
-     *  every one of them at once -- grows downwards, so holding the top row
-     *  still pushes everything the reader was looking at off the bottom. Held
-     *  at the bottom instead, the growth goes into the history above, where
-     *  nothing was being read. */
-    onlayout?: (anchor: { key: string; within: number }) => void;
+     *  Chosen at the *bottom* edge of the viewport, not the top: a message that
+     *  re-wraps taller grows downwards, so holding the top row still pushes
+     *  what the reader was looking at off the bottom. Held at the bottom, the
+     *  growth goes into the history above, where nothing was being read.
+     *
+     *  `fromTop` is the row's real position on screen, not a computed offset.
+     *  The estimated one was measured 2322px out: opening the thread pane
+     *  changes the column width, which invalidates every learned height, and
+     *  an offset accumulated over four hundred re-estimated rows is a guess. */
+    onlayout?: (anchor: { key: string; fromTop: number }) => void;
+    /** The column's width changed and the estimator already knows it. Called
+     *  before the frame carrying that width is painted. */
+    onwidth?: () => void;
+    /** A row to keep mounted regardless of the scroll position, so the shell can
+     *  read its real position across a change that would otherwise drop it. */
+    pinned?: string;
   } = $props();
 
   /** Bumped by a measurement, to recompute a layout the estimates got wrong. */
   let revision = $state(0);
+  /** The mounted rows, for measuring an anchor's real position. */
+  let stream: HTMLElement | undefined = $state();
+  /** The avatar gutter is read from one row and then never again. */
+  let learnedInset = false;
 
   const layout = $derived.by(() => {
     revision;
@@ -73,7 +89,13 @@
   });
   const slice = $derived(
     virtualise
-      ? virtual.sliceOf(layout, rows?.length ?? 0, scrollTop, viewportHeight)
+      ? virtual.sliceOf(
+          layout,
+          rows?.length ?? 0,
+          scrollTop,
+          viewportHeight,
+          pinned ? (rows ?? []).findIndex((row) => virtual.rowKey(row) === pinned) : -1,
+        )
       : { start: 0, end: rows?.length ?? 0, padTop: 0, padBottom: 0 },
   );
 
@@ -130,7 +152,32 @@
     if (!virtualise) return;
     const observer = new ResizeObserver((entries) => {
       const box = entries[0]?.contentBoxSize?.[0];
-      if (box) virtual.setContentWidth(box.inlineSize);
+      // Told, not acted on. Everything the new layout needs is now known --
+      // `setContentWidth` has changed what the estimator answers -- so the shell
+      // can compute where the row it is holding has moved to and set the scroll
+      // there, in this frame, before anything is painted. Measuring instead
+      // meant waiting for the DOM, and writing spacers from inside this callback
+      // put the browser into an observer loop it resolves by deferring to the
+      // next frame, which is the frame the reader sees displaced.
+      if (box && virtual.setContentWidth(box.inlineSize)) {
+        // Out of the observer's own delivery, but still inside this frame.
+        //
+        // The shell scrolls in response, which changes what is mounted, which
+        // resizes observed elements -- and doing that *during* delivery makes
+        // the browser report an undelivered-notification loop and reflow again,
+        // which is a visible blink. A microtask runs after delivery has
+        // finished and still before the paint.
+        queueMicrotask(async () => {
+          // The spacers before the scroll. `layoutOf` answers for the new width
+          // now, so this rewrites them to the height the stream is about to
+          // have -- and only then is the shell's target reachable. Measured
+          // without it: the scroller was 1279px short of the new layout, so the
+          // write clamped and the rest arrived a frame later as a visible jump.
+          revision += 1;
+          await tick();
+          onwidth?.();
+        });
+      }
     });
     observer.observe(element);
     return {
@@ -168,7 +215,18 @@
   function invalidateLayout() {
     if (pendingLayout) return;
     pendingLayout = true;
-    requestAnimationFrame(async () => {
+    requestAnimationFrame(() => void applyLayout());
+  }
+
+  /** Recomputes the layout and hands the shell an anchor to restore.
+   *
+   *  Normally reached through `invalidateLayout`, which waits a frame so that a
+   *  burst of rows reporting separately becomes one recompute. A width change
+   *  calls it directly instead: every mounted row has just been measured, so
+   *  there is nothing left to coalesce, and waiting a frame would put the
+   *  displaced paint before the correction -- which is the flicker.
+   */
+  async function applyLayout() {
       pendingLayout = false;
 
       // Which row the reader is looking at, and how far into it they are.
@@ -182,11 +240,16 @@
       // so the browser clamped the write against the old scroll height and the
       // list appeared to rewind.
       const list = rows ?? [];
-      // The bottom edge, which is the part of the list being read.
+      // The bottom edge, which is the part of the list being read. Estimates are
+      // fine for *naming* the row; only its position has to be measured.
       const at = (liveScrollTop?.() ?? scrollTop) + viewportHeight;
       const index = virtual.indexAt(layout, list.length, at);
       const row = list[index];
-      const within = at - virtual.offsetOf(layout, index);
+      const key = row ? virtual.rowKey(row) : "";
+      const before = key
+        ? stream?.querySelector<HTMLElement>(`[data-key="${CSS.escape(key)}"]`)
+        : null;
+      const fromTop = before?.getBoundingClientRect().top ?? Number.NaN;
 
       revision += 1;
       // Flushed here, not left to the next frame: the corrected spacers have to
@@ -196,8 +259,10 @@
       // rolling back before snapping into place. `tick` is a microtask, so the
       // restore still happens before this frame is painted.
       await tick();
-      if (row) onlayout?.({ key: virtual.rowKey(row), within });
-    });
+      // Screen coordinates, compared against the same row after the relayout:
+      // the scroller itself does not move, so the difference is exactly the
+      // correction. A row that was not mounted has no position to hold.
+      if (row && Number.isFinite(fromTop)) onlayout?.({ key, fromTop });
   }
 
   function measured(element: HTMLElement, held: { key: string; row: Row }) {
@@ -205,6 +270,7 @@
     // and measuring the old one against the new element would teach the wrong
     // kind.
     let current = held;
+
 
     // The size comes from the observer's own entry, never from
     // `getBoundingClientRect`.
@@ -235,6 +301,16 @@
         }
       }
     });
+    // The fonts the estimator measures against come from a real row, once, and
+    // so does the width the avatar column takes off the text.
+    measureText.learnFonts(element);
+    if (!learnedInset) {
+      const body = element.querySelector<HTMLElement>(".body");
+      if (body && element.clientWidth > 0 && body.clientWidth > 0) {
+        virtual.setTextInset(element.clientWidth - body.clientWidth);
+        learnedInset = true;
+      }
+    }
     // No manual first measurement: a ResizeObserver delivers one for every
     // element it starts observing, and that delivery costs no reflow.
     observer.observe(element);
@@ -452,7 +528,7 @@
   };
 </script>
 
-<div class="stream" use:columnWidth>
+<div class="stream" bind:this={stream} use:columnWidth>
   {#if rows === undefined}
     <!-- The one legitimate second path: no entry for this key yet. -->
     <p class="placeholder">loading…</p>
@@ -465,15 +541,15 @@
     {#each rows.slice(slice.start, slice.end) as row (virtual.rowKey(row))}
       {@const key = virtual.rowKey(row)}
       {#if row.kind === "date_separator"}
-        <div class="separator" use:measured={{ key, row }}><span>{day(row.epoch_day)}</span></div>
+        <div class="separator" data-key={key} use:measured={{ key, row }}><span>{day(row.epoch_day)}</span></div>
       {:else if row.kind === "unread_divider"}
         <!-- Tagged so the shell can open the channel at this line rather than
              at the bottom: with many unread messages the divider is well above
              the viewport, which reads as it not being there at all. -->
-        <div class="unread" data-unread-divider use:measured={{ key, row }}><span>New messages</span></div>
+        <div class="unread" data-unread-divider data-key={key} use:measured={{ key, row }}><span>New messages</span></div>
       {:else if row.kind === "post" || row.kind === "continuation"}
         <article
-          use:measured={{ key, row }}
+          data-key={key} use:measured={{ key, row }}
           class="post"
           class:continuation={row.kind === "continuation"}
           class:pending={row.post.pending && !row.post.failed}
@@ -846,7 +922,7 @@
           class:unread={row.unread_replies > 0}
           type="button"
           onclick={() => store.setActiveThread(row.root_id)}
-          use:measured={{ key, row }}
+          data-key={key} use:measured={{ key, row }}
         >
           {#if row.participants.length}
             <!-- Who is in it, before how much of it there is: a face is quicker
@@ -881,9 +957,9 @@
       {:else if row.kind === "system"}
         <!-- The sentence is built in Rust, which can see `props`: this used to
              print the raw type, so a join read "join channel". -->
-        <p class="system" use:measured={{ key, row }}>{row.text}</p>
+        <p class="system" data-key={key} use:measured={{ key, row }}>{row.text}</p>
       {:else if row.kind === "deleted_root"}
-        <p class="system" use:measured={{ key, row }}>Message deleted — its replies remain.</p>
+        <p class="system" data-key={key} use:measured={{ key, row }}>Message deleted — its replies remain.</p>
       {/if}
     {/each}
     <div class="spacer" style:height="{Math.max(0, slice.padBottom - drift)}px"></div>

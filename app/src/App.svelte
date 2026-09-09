@@ -1300,7 +1300,108 @@
    *  it, which moves what is under the reader's cursor unless the slice is
    *  recomputed from the new layout.
    */
-  function onLayoutChanged(anchor: { key: string; within: number }) {
+  /** Where the reader was, captured before something changes the layout.
+   *
+   *  The list's own anchor is captured from a `ResizeObserver`, which fires
+   *  after the browser has already re-wrapped at the new width -- so by then
+   *  the rows have moved and the position it records is the one *after* the
+   *  jump. Measured 2322px out first, and -1194px out after that was corrected
+   *  with a measured position rather than an estimated one: both were the right
+   *  arithmetic on a reading taken too late. */
+  let heldPlace: { key: string; fromTop: number; at: number } | null = null;
+  /** Heights settle over several frames, so one capture serves the whole
+   *  settle; past this it would be anchoring to a place the reader has left. */
+  const PLACE_HOLD_MS = 600;
+  /** The pinned row, as the list needs it: reactive, so mounting follows the
+   *  capture rather than waiting for the next scroll. */
+  let heldKey = $state("");
+
+  /** The bottom-most row on screen, and where it is. */
+  function markPlace(): { key: string; fromTop: number; at: number } | null {
+    if (!scroller) return null;
+    const edge = scroller.getBoundingClientRect().bottom;
+    let held: HTMLElement | null = null;
+    for (const row of scroller.querySelectorAll<HTMLElement>("[data-key]")) {
+      if (row.getBoundingClientRect().top >= edge) break;
+      held = row;
+    }
+    const key = held?.dataset.key;
+    if (!held || !key) return null;
+    return { key, fromTop: held.getBoundingClientRect().top, at: performance.now() };
+  }
+
+  // Before the DOM is updated, not after: opening or closing the thread pane
+  // changes the stream's width in the same update, and this is the only moment
+  // the layout the reader was actually looking at still exists to be measured.
+  $effect.pre(() => {
+    openThread;
+    heldPlace = markPlace();
+    heldKey = heldPlace?.key ?? "";
+  });
+
+  /** The exact half of the two-step: the captured row is mounted now, so its
+   *  real position finishes what the estimate could only approximate. */
+  /** The column changed width, and the estimator already answers for the new
+   *  one. Where the held row has moved to is arithmetic, not a measurement.
+   *
+   *  Done here, synchronously, because this runs before the frame carrying the
+   *  new width is painted -- so the reader never sees the displaced position.
+   *  Reading it out of the DOM instead needs the spacers to be rewritten first,
+   *  which cannot happen until the next frame, which is one frame too late.
+   */
+  function placeAfterResize() {
+    const place = heldPlace;
+    const channelId = store.activeChannel();
+    if (!place || !scroller || !channelId) return;
+    if (performance.now() - place.at >= PLACE_HOLD_MS) return;
+    const rows = store.rowsOf(channelId) ?? [];
+    const index = rows.findIndex((row) => virtual.rowKey(row) === place.key);
+    if (index < 0) return;
+    // Where the row sat inside the viewport, which is what has to stay put.
+    const above = place.fromTop - scroller.getBoundingClientRect().top;
+    const layout = virtual.layoutOf(channelId, rows);
+    // Never past where the settled layout can hold us. Closing the pane makes
+    // every row shorter, so the content shrinks -- and a position the shrunken
+    // content cannot reach gets pulled back by the browser once the spacers
+    // catch up, which is a jump a few pixels wide arriving late. Measured on a
+    // close: 12px of headroom between the target and the old maximum, and the
+    // new maximum below it.
+    const reach = Math.max(0, virtual.offsetOf(layout, rows.length) - scroller.clientHeight);
+    const target = Math.min(reach, Math.max(0, virtual.offsetOf(layout, index) - above));
+    if (Math.abs(target - scroller.scrollTop) >= 1) {
+      setScrollTop(target, "width.settled");
+      log.debug("scroll.resized", {
+        to: target.toFixed(0),
+        landed: scroller.scrollTop.toFixed(0),
+        // Why a write lands short: the scroller can only reach
+        // `scrollHeight - clientHeight`, and the spacers decide scrollHeight.
+        max: (scroller.scrollHeight - scroller.clientHeight).toFixed(0),
+        height: scroller.scrollHeight.toFixed(0),
+        total: virtual.offsetOf(layout, rows.length).toFixed(0),
+      });
+    }
+    readViewport();
+  }
+
+  function refinePlace() {
+    const place = heldPlace;
+    if (!place || !scroller) return;
+    if (performance.now() - place.at >= PLACE_HOLD_MS) return;
+    const held = scroller.querySelector<HTMLElement>(
+      `[data-key="${CSS.escape(place.key)}"]`,
+    );
+    if (!held) return;
+    const correction = held.getBoundingClientRect().top - place.fromTop;
+    if (Math.abs(correction) >= 1) {
+      setScrollTop(scroller.scrollTop + correction, "layout.refine");
+      log.debug("scroll.refined", { by: correction.toFixed(0) });
+    }
+    heldPlace = null;
+    heldKey = "";
+    readViewport();
+  }
+
+  function onLayoutChanged(anchor: { key: string; fromTop: number }) {
     if (!scroller) return;
     // While a channel is opening, the divider is the anchor -- and a measured
     // row is exactly the event that moved it.
@@ -1334,18 +1435,74 @@
         return;
       }
       if (!channelId) return;
-      const rows = store.rowsOf(channelId) ?? [];
-      const index = rows.findIndex((row) => virtual.rowKey(row) === anchor.key);
-      if (index < 0) {
+      // The same row, measured again now that the corrected layout is in the
+      // DOM. Screen coordinates, so the difference between then and now *is*
+      // the correction -- no estimate is involved, which is the whole point:
+      // opening the thread pane changes the column width and invalidates every
+      // learned height, and an offset accumulated over four hundred re-guessed
+      // rows was landing 2322px out.
+      // A place captured before the width changed outranks the one the list
+      // reported after it -- but only while its row is still mounted. Falling
+      // through to the list's anchor rather than giving up: correcting to a
+      // slightly late reading beats not correcting at all, which is what
+      // bailing here did.
+      const row = (key: string) =>
+        scroller?.querySelector<HTMLElement>(`[data-key="${CSS.escape(key)}"]`) ?? null;
+      const fresh =
+        heldPlace && performance.now() - heldPlace.at < PLACE_HOLD_MS ? heldPlace : null;
+      let wanted: { key: string; fromTop: number } | null = fresh;
+      let held = wanted ? row(wanted.key) : null;
+
+      // The captured row is not mounted: narrowing the column made every row
+      // taller, so the one that was at the bottom edge moved down past the
+      // overscan and was dropped. Estimates cannot hold it exactly, but they
+      // can bring it back into the mounted window -- and the next pass, with it
+      // on screen, corrects from the DOM. Coarse, then exact.
+      if (!held && fresh) {
+        const rows = store.rowsOf(channelId) ?? [];
+        const index = rows.findIndex((entry) => virtual.rowKey(entry) === fresh.key);
+        if (index >= 0) {
+          const layout = virtual.layoutOf(channelId, rows);
+          const above = fresh.fromTop - scroller.getBoundingClientRect().top;
+          const near = Math.max(0, virtual.offsetOf(layout, index) - above);
+          if (Math.abs(near - scroller.scrollTop) >= 1) {
+            setScrollTop(near, "layout.reach");
+            log.debug("scroll.reached", { to: near.toFixed(0), row: index });
+            // Nothing else will ask again: the reach is a scroll, not a layout
+            // change, so no further `onlayout` follows it. The row is mounted
+            // now, so one frame later its real position can finish the job.
+            requestAnimationFrame(refinePlace);
+          }
+          readViewport();
+          return;
+        }
+      }
+
+      if (!held) {
+        wanted = anchor;
+        held = row(anchor.key);
+      }
+      if (!held || !wanted) {
+        log.debug("scroll.anchor.lost", { held: fresh ? "before" : "after" });
         readViewport();
         return;
       }
-      const layout = virtual.layoutOf(channelId, rows);
-      // The anchor is the viewport's bottom edge, so the scroll position that
-      // restores it is a viewport's height above it.
-      const target =
-        virtual.offsetOf(layout, index) + anchor.within - scroller.clientHeight;
-      const correction = target - scroller.scrollTop;
+      const correction = held.getBoundingClientRect().top - wanted.fromTop;
+      const target = scroller.scrollTop + correction;
+      // Settled: the row is where it was, so the capture has done its work.
+      if (fresh && wanted === fresh && Math.abs(correction) < 1) {
+        heldPlace = null;
+        heldKey = "";
+      }
+      // Every pass while a capture is live, whatever its size: "no line" was
+      // ambiguous between "did not run" and "ran and moved nothing".
+      if (fresh) {
+        log.debug("scroll.held", {
+          by: correction.toFixed(0),
+          from: wanted === fresh ? "before" : "after",
+          top: scroller.scrollTop.toFixed(0),
+        });
+      }
       // A sub-pixel difference is not worth a write: it would fight the
       // browser's own scrolling for no visible gain.
       if (Math.abs(correction) >= 1) {
@@ -1356,7 +1513,7 @@
       if (Math.abs(correction) >= 8) {
         log.debug("scroll.corrected", {
           by: correction.toFixed(0),
-          row: index,
+          held: fresh ? "before" : "after",
           // What moved the view last: a correction chasing our own write is a
           // loop, and this is what names the writer.
           after: lastScrollReason,
@@ -2518,6 +2675,8 @@
             {scrollTop}
             {viewportHeight}
             liveScrollTop={() => scroller?.scrollTop ?? 0}
+            pinned={heldKey}
+            onwidth={placeAfterResize}
             onlayout={onLayoutChanged}
             frozen={thumbDragging}
           />
