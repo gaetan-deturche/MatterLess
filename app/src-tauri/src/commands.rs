@@ -3553,6 +3553,10 @@ pub struct ListBounds {
 /// header and the composer never had the problem the native list solves, and
 /// rewriting them would be cost with no return.
 ///
+/// The window work is handed to the main thread. A child window's messages are
+/// answered by the thread that created it, so one built on a tokio worker -- as
+/// this was at first -- freezes the app the moment its parent talks to it.
+///
 /// Off unless asked for. `MATTERLESS_NATIVE_LIST=1` turns it on, so the DOM list
 /// stays the one that ships until this one is better than it.
 #[cfg(windows)]
@@ -3563,7 +3567,11 @@ pub async fn place_native_list(
     channel_id: String,
     bounds: ListBounds,
 ) -> Reply<bool> {
-    if std::env::var("MATTERLESS_NATIVE_LIST").unwrap_or_default() != "1" {
+    let wanted = std::env::var("MATTERLESS_NATIVE_LIST").unwrap_or_default();
+    if wanted != "1" {
+        // Logged, because "off" and "the flag never arrived" look identical from
+        // the page: both are a `false` and a DOM list.
+        tracing::debug!(flag = %wanted, "the native list was not asked for");
         return Ok(false);
     }
     let Some(window) = app.get_webview_window("main") else {
@@ -3579,48 +3587,76 @@ pub async fn place_native_list(
     };
 
     let rows = plan_rows_for(&state, &channel_id).await?;
-    let mut held = state.native_list.lock().expect("native list");
-    if held.is_none() {
-        *held = Some(crate::native_list::NativeList::new(handle).map_err(fail)?);
-    }
-    let Some(list) = held.as_mut() else {
-        return Ok(false);
-    };
-    list.place(
-        crate::native_list::Bounds {
-            x: bounds.x,
-            y: bounds.y,
-            width: bounds.width,
-            height: bounds.height,
-        },
-        Some(&rows),
-    );
-    list.jump_to_newest();
-    list.show(true);
-    list.render();
+    let shared = std::sync::Arc::clone(&state.native_list);
+    let (done, wait) = tokio::sync::oneshot::channel();
+    app.run_on_main_thread(move || {
+        let outcome = (|| -> Result<(), String> {
+            let mut held = shared.lock().map_err(|_| "the list is poisoned")?;
+            if held.is_none() {
+                *held = Some(crate::native_list::NativeList::new(handle)?);
+            }
+            let list = held.as_mut().ok_or("no list")?;
+            list.place(
+                crate::native_list::Bounds {
+                    x: bounds.x,
+                    y: bounds.y,
+                    width: bounds.width,
+                    height: bounds.height,
+                },
+                Some(&rows),
+            );
+            list.jump_to_newest();
+            list.show(true);
+            list.render();
+            Ok(())
+        })();
+        let _ = done.send(outcome);
+    })
+    .map_err(fail)?;
+    // Awaited rather than left to run: the page turns its own list off on the
+    // strength of the answer, so a `true` that has not happened yet would leave
+    // it showing nothing at all.
+    wait.await.map_err(fail)??;
     Ok(true)
 }
 
 /// Scrolls the native list and redraws it.
+///
+/// Dispatched and not awaited: a wheel arrives many times a second, and the
+/// page has nothing to do with the answer.
 #[cfg(windows)]
 #[tauri::command]
-pub async fn scroll_native_list(state: State<'_, AppState>, by: f32) -> Reply<()> {
-    let mut held = state.native_list.lock().expect("native list");
-    if let Some(list) = held.as_mut() {
-        list.scroll_by(by);
-        list.render();
-    }
+pub async fn scroll_native_list(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    by: f32,
+) -> Reply<()> {
+    let shared = std::sync::Arc::clone(&state.native_list);
+    app.run_on_main_thread(move || {
+        if let Ok(mut held) = shared.lock()
+            && let Some(list) = held.as_mut()
+        {
+            list.scroll_by(by);
+            list.render();
+        }
+    })
+    .map_err(fail)?;
     Ok(())
 }
 
 /// Hides the native list, for when the page draws something over its rectangle.
 #[cfg(windows)]
 #[tauri::command]
-pub async fn hide_native_list(state: State<'_, AppState>) -> Reply<()> {
-    let held = state.native_list.lock().expect("native list");
-    if let Some(list) = held.as_ref() {
-        list.show(false);
-    }
+pub async fn hide_native_list(app: tauri::AppHandle, state: State<'_, AppState>) -> Reply<()> {
+    let shared = std::sync::Arc::clone(&state.native_list);
+    app.run_on_main_thread(move || {
+        if let Ok(held) = shared.lock()
+            && let Some(list) = held.as_ref()
+        {
+            list.show(false);
+        }
+    })
+    .map_err(fail)?;
     Ok(())
 }
 

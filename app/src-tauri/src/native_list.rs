@@ -13,6 +13,14 @@
 //!
 //! Windows only, and openly so: `cfg(windows)` guards the whole module, and the
 //! app runs without it exactly as it did before.
+//!
+//! **Everything here runs on the main thread.** A window belongs to the thread
+//! that created it, and that thread must pump messages; resizing, painting and
+//! moving all send messages *synchronously* to the owning thread. Built on a
+//! tokio worker -- which has no message pump -- the first message the parent
+//! sent to this child had nobody to answer it, and the whole window froze. The
+//! commands that drive this hand their work to the main thread rather than
+//! doing it where they happen to run.
 
 #![cfg(windows)]
 
@@ -90,12 +98,18 @@ pub struct NativeList {
     scroll: f32,
 }
 
-// The child window handle is only ever touched from the thread that owns it;
-// the surface and device are `Send` in wgpu's own right.
+// SAFETY: the handle is only ever touched on the main thread, which is the
+// thread that created the window. This impl exists because the app's shared
+// state must be `Send`, not because the window may travel.
 unsafe impl Send for NativeList {}
 
 impl NativeList {
     /// Creates the child window over `parent` and a Vulkan surface on it.
+    ///
+    /// Main thread only. Asking for an adapter and a device costs a couple of
+    /// hundred milliseconds, once, and that is a visible pause -- but it is a
+    /// pause rather than the deadlock that building the window anywhere else
+    /// produced.
     pub fn new(parent: isize) -> Result<Self, String> {
         let parent = HWND(parent as *mut std::ffi::c_void);
         let child = unsafe {
