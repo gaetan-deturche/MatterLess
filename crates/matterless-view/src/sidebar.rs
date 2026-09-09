@@ -169,7 +169,7 @@ impl Sidebar {
                         label,
                         row.rect.x,
                         row.rect.y + 10.0,
-                        Run::label(row.rect.width).bold(),
+                        Run::label(f32::MAX).bold(),
                     );
                     scene.glyphs(glyphs, palette.faint, palette.faint);
                 }
@@ -200,16 +200,33 @@ impl Sidebar {
                     } else {
                         palette.faint
                     };
+                    // Never wrapped: a row is one line tall, and a name long
+                    // enough to wrap would run into the row beneath it. The
+                    // panel's own clip cuts it off instead, which is what
+                    // `overflow: hidden` did for the same rows in HTML.
                     let glyphs = painter.run(
                         fonts,
                         &format!("# {label}"),
                         row.rect.x + 6.0,
                         row.rect.y + 4.0,
-                        Run::label(row.rect.width - 40.0),
+                        Run::label(f32::MAX),
                     );
                     scene.glyphs(glyphs, ink, palette.faint);
                     let count = if *mentions > 0 { *mentions } else { *unread };
                     if count > 0 && !*muted {
+                        // Behind the number, so a long name is cut by the
+                        // count rather than running under it.
+                        scene.fill(
+                            row.rect.right() - 30.0,
+                            row.rect.y,
+                            30.0,
+                            row.rect.height,
+                            if chosen || input.hovered() == Some(name.as_str()) {
+                                palette.ground
+                            } else {
+                                palette.surface
+                            },
+                        );
                         let glyphs = painter.run(
                             fonts,
                             &count.to_string(),

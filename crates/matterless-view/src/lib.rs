@@ -116,9 +116,17 @@ pub fn vertices_of(
                 };
                 let (loud, quiet) = (shade(ink), shade(faint));
                 for glyph in glyphs {
-                    let rgba = if glyph.faint { quiet } else { loud };
                     let Some(slot) = atlas.slot(queue, fonts, cache, glyph.key) else {
                         continue;
+                    };
+                    // White for a glyph that brought its own colour, so the
+                    // shader's tint leaves it as it is.
+                    let rgba = if slot.colour {
+                        [1.0, 1.0, 1.0, 1.0]
+                    } else if glyph.faint {
+                        quiet
+                    } else {
+                        loud
                     };
                     // `left` and `top` are the bitmap's offset from the pen, and
                     // ignoring them puts every letter on its own baseline.

@@ -30,6 +30,8 @@ pub struct Slot {
     /// baseline.
     pub left: i32,
     pub top: i32,
+    /// The glyph carries its own colour -- an emoji -- so nothing may tint it.
+    pub colour: bool,
 }
 
 pub struct Atlas {
@@ -55,9 +57,12 @@ impl Atlas {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            // Coverage, not colour: one byte says how much of the pixel the
-            // glyph covers, and the colour comes from the vertex.
-            format: wgpu::TextureFormat::R8Unorm,
+            // Colour and coverage, not coverage alone. A letter is stored as
+            // white with the coverage in its alpha, so the vertex tints it; an
+            // emoji is stored as it is, and its vertex is white so nothing
+            // tints it. One format, one sampler, both kinds of glyph -- where
+            // a coverage-only atlas drew every emoji as a white silhouette.
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
@@ -71,9 +76,10 @@ impl Atlas {
             shelf_height: 0,
             full: false,
         };
-        // One opaque texel at the origin, so a solid rectangle is the same
-        // pipeline as a glyph: it samples this and multiplies by its colour.
-        atlas.write(queue, 0, 0, 1, 1, &[255]);
+        // One opaque white texel at the origin, so a solid rectangle is the
+        // same pipeline as a glyph: it samples this and multiplies by its
+        // colour.
+        atlas.write(queue, 0, 0, 1, 1, &[255, 255, 255, 255]);
         atlas
     }
 
@@ -91,7 +97,7 @@ impl Atlas {
             data,
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
-                bytes_per_row: Some(width),
+                bytes_per_row: Some(width * 4),
                 rows_per_image: Some(height),
             },
             wgpu::Extent3d {
@@ -128,11 +134,18 @@ impl Atlas {
             return None;
         }
 
-        // A mask is one byte per pixel already; a colour bitmap (an emoji) is
-        // four, and only its alpha is coverage here.
-        let mask: Vec<u8> = match image.content {
-            SwashContent::Mask | SwashContent::SubpixelMask => image.data.clone(),
-            SwashContent::Color => image.data.chunks_exact(4).map(|pixel| pixel[3]).collect(),
+        // A mask becomes white with its coverage in the alpha, so the vertex
+        // colour decides what shade the letter is. A colour bitmap is kept
+        // exactly as it is.
+        let coloured = matches!(image.content, SwashContent::Color);
+        let pixels: Vec<u8> = if coloured {
+            image.data.clone()
+        } else {
+            image
+                .data
+                .iter()
+                .flat_map(|coverage| [255, 255, 255, *coverage])
+                .collect()
         };
 
         let Some(slot) = self.reserve(width, height) else {
@@ -142,10 +155,11 @@ impl Atlas {
             self.slots.insert(key, None);
             return None;
         };
-        self.write(queue, slot.x, slot.y, width, height, &mask);
+        self.write(queue, slot.x, slot.y, width, height, &pixels);
         let slot = Slot {
             left: image.placement.left,
             top: image.placement.top,
+            colour: coloured,
             ..slot
         };
         self.slots.insert(key, Some(slot));
@@ -173,6 +187,7 @@ impl Atlas {
             height,
             left: 0,
             top: 0,
+            colour: false,
         };
         self.pen_x += width + 1;
         self.shelf_height = self.shelf_height.max(height);
