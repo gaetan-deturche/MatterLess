@@ -348,30 +348,26 @@ impl FileRef {
             (true, false, false) => ImageVariant::Preview,
         };
 
-        // The box can never exceed the pixels actually being fetched, which is
-        // the whole point of choosing a variant: a 120x66 thumbnail drawn 420
-        // wide is a 3.5x upscale, and that is what "blurry" means here.
-        let (box_width, box_height) = if video {
-            // A player is not a rendition: the file itself is what plays, so
-            // there is no fetched-pixel budget to divide the box down to the way
-            // `for_ratio` does for a thumbnail. It still shares the room when
-            // there is more than one thing drawn inline.
-            let target = if layout.gallery { THUMB_BOX } else { IMAGE_BOX };
-            fit_box(file.width, file.height, target)
-        } else {
-            match variant {
-                ImageVariant::Thumb => {
-                    let (natural_width, natural_height) =
-                        fit_box(file.width, file.height, THUMB_BOX);
-                    for_ratio(natural_width, natural_height, layout.pixel_ratio)
-                }
-                // A preview is at least 1920 wide and the original is whatever was
-                // uploaded, so both are larger than the box for anything but a
-                // small image -- and `fit_box` never upscales a small one.
-                ImageVariant::Preview | ImageVariant::Original => {
-                    fit_box(file.width, file.height, IMAGE_BOX)
-                }
+        // Two decisions, and they used to be one: *which* rendition to fetch,
+        // and how big to draw it. A GIF must fetch the original -- its
+        // thumbnail is a still frame -- and a video plays the file itself, but
+        // in a gallery both should still be drawn thumbnail-sized like
+        // everything beside them. So the box comes from the layout, and only
+        // the pixel-ratio trim comes from the variant.
+        let (box_width, box_height) = if layout.gallery {
+            let (natural_width, natural_height) = fit_box(file.width, file.height, THUMB_BOX);
+            if matches!(variant, ImageVariant::Thumb) {
+                // Only a fetched thumbnail has a pixel budget to divide the box
+                // down to; anything drawn from the original does not.
+                for_ratio(natural_width, natural_height, layout.pixel_ratio)
+            } else {
+                (natural_width, natural_height)
             }
+        } else {
+            // A preview is at least 1920 wide and an original is whatever was
+            // uploaded, so both are larger than the box for anything but a small
+            // image -- and `fit_box` never upscales a small one.
+            fit_box(file.width, file.height, IMAGE_BOX)
         };
 
         Self {
