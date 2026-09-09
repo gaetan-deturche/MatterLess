@@ -12,6 +12,7 @@
 // wrong for history that has not been on screen yet, and is corrected the moment
 // it is.
 import type { Row } from "./api";
+import * as measureText from "./measure";
 import * as log from "./log";
 import { previewImages } from "./store.svelte";
 
@@ -106,24 +107,63 @@ let contentWidth = DEFAULT_CONTENT_WIDTH;
 
 /** Told by the list, whose element is the one that actually has a width.
  *
- *  A change invalidates the learned per-kind bases -- each was recorded as
- *  `height - knownExtra - textExtra` at the old width -- and unsettles the rows
- *  whose height was fixed, so they can learn their new one. Measured heights
- *  are kept: a mounted row re-measures immediately, and an unmounted one is
- *  better off with a stale height than with none. */
-export function setContentWidth(width: number): void {
-  if (width < 200 || Math.abs(width - contentWidth) < 8) return;
+ *  A width change is a *perturbation*, not a reset. Everything learned is kept
+ *  as the starting estimate and only the settled flags are dropped, so mounted
+ *  rows re-measure and the bases converge on the new width.
+ *
+ *  It used to clear the learned bases outright, and that was the whole of a bug
+ *  worth naming: with the bases gone, every row the virtualiser had never
+ *  mounted fell back to a per-kind default, and an offset summed over four
+ *  hundred of them came out 2322px wrong. Worse, the row the anchor named was
+ *  then not the row on screen, so opening the thread pane lost the reader's
+ *  place entirely. A stale base is a few percent out; no base is a guess.
+ *
+ *  `lengths` is not touched either: it holds a character count, which no width
+ *  changes -- the line count is derived from it per call. */
+/** Answers whether the width actually changed, so the caller can react to it. */
+export function setContentWidth(width: number): boolean {
+  if (width < 200 || Math.abs(width - contentWidth) < 8) return false;
   contentWidth = width;
-  // A break counts as a line's worth of characters, so these depend on the
-  // width too.
-  lengths.clear();
-  learned.clear();
+  // Mounted rows report their new height; until they do, the computed one
+  // stands -- and it is computed for *this* width, where a height measured at
+  // the old one is simply wrong. Dropping the text rows' measurements is what
+  // lets the recomputed layout describe the new width rather than the old.
+  // A message's key is its bare post id; everything else carries a prefix
+  // saying what it is, and those rows are fixed height at any width.
+  const fixed = ["day/", "footer/", "system/", "deleted/", "unread"];
+  for (const heights of measured.values()) {
+    for (const key of [...heights.keys()]) {
+      if (!fixed.some((prefix) => key.startsWith(prefix))) heights.delete(key);
+    }
+  }
   settled.clear();
   seenAgain.clear();
+  return true;
+}
+
+/** What the avatar column and its gap take out of the width the text gets.
+ *
+ *  A message is a grid: `28px` for the face, a gap, then the body. Measuring
+ *  the wrap against the stream's full width made every line 36px longer than
+ *  the browser draws it -- about 5% at the narrow width, which is enough to put
+ *  the count a line out on a great many messages, and to put it out
+ *  *differently* at the two widths. Learned from the DOM rather than written
+ *  here, so the stylesheet stays the one place that decides it. */
+let textInset = 36;
+
+export function setTextInset(px: number): void {
+  if (!Number.isFinite(px) || px < 0 || px > 200 || px === textInset) return;
+  textInset = px;
+  wrapped.clear();
+}
+
+/** The width a line of body text actually gets. */
+function textWidth(): number {
+  return Math.max(80, contentWidth - textInset);
 }
 
 function charsPerLine(): number {
-  return Math.max(20, Math.round(contentWidth / AVERAGE_CHAR_PX));
+  return Math.max(20, Math.round(textWidth() / AVERAGE_CHAR_PX));
 }
 /** A line of body text, in pixels: 14px at 1.45 line-height. */
 const LINE = 20;
@@ -133,6 +173,8 @@ const LINE = 20;
  *  Walked once per row: the tree is small, but the layout is recomputed on
  *  every measurement and this must not be part of that cost. */
 const lengths = new Map<string, number>();
+/** Exact wrapped-line counts, with the width they were measured at. */
+const wrapped = new Map<string, { width: number; lines: number }>();
 
 function charactersIn(nodes: readonly unknown[]): number {
   let total = 0;
@@ -164,6 +206,21 @@ function charactersIn(nodes: readonly unknown[]): number {
 function textExtra(row: Row): number {
   if (row.kind !== "post" && row.kind !== "continuation") return 0;
   const key = rowKey(row);
+  const width = textWidth();
+  const cached = wrapped.get(key);
+  if (cached !== undefined && cached.width === width) {
+    return (cached.lines - 1) * LINE;
+  }
+  // Measured against the real font, so the wrap is the browser's own rather
+  // than an average glyph width. Keyed by width: the whole reason this exists
+  // is that the answer differs between the two widths the thread pane creates.
+  const exact = measureText.linesOf(row.post.nodes ?? [], width);
+  if (exact !== null) {
+    wrapped.set(key, { width, lines: exact });
+    return (exact - 1) * LINE;
+  }
+  // Nothing mounted yet, so no font to measure with. The average still beats
+  // reserving one line for everything.
   let characters = lengths.get(key);
   if (characters === undefined) {
     characters = charactersIn(row.post.nodes ?? []);
@@ -666,14 +723,29 @@ export function sliceOf(
   rowCount: number,
   scrollTop: number,
   viewportHeight: number,
+  /** A row that must stay mounted whatever the scroll position says.
+   *
+   *  The shell pins the row it is holding still across a width change. Every row
+   *  grows when the column narrows, so the one that was at the bottom edge moves
+   *  down past the overscan and is dropped -- and a row that is not in the DOM
+   *  cannot have its real position read, which is the only reading accurate
+   *  enough to restore. Pinned, it stays measurable and the correction is exact
+   *  instead of a coarse jump followed by a fix-up. */
+  pinned = -1,
 ): Slice {
   if (rowCount === 0) return { start: 0, end: 0, padTop: 0, padBottom: 0 };
   const at = (index: number) => layout.offsets[index] ?? 0;
   const top = Math.max(0, scrollTop - OVERSCAN_PX);
   const bottom = scrollTop + viewportHeight + OVERSCAN_PX;
-  const start = Math.max(0, upperBound(layout.offsets, rowCount, top) - 1);
+  let start = Math.max(0, upperBound(layout.offsets, rowCount, top) - 1);
   let end = start;
   while (end < rowCount && at(end) < bottom) end += 1;
+  if (pinned >= 0 && pinned < rowCount) {
+    // Widened rather than moved: the reader's viewport is still the reason for
+    // every other row in the slice.
+    start = Math.min(start, pinned);
+    end = Math.max(end, pinned + 1);
+  }
   return {
     start,
     end,
