@@ -93,6 +93,22 @@ pub struct ThreadState {
 /// Reply count, newest reply and distinct participants for one thread root.
 pub type ThreadRollup = (i64, Timestamp, Vec<String>);
 
+/// One followed thread, ready for a list of them.
+#[derive(Debug, Clone)]
+pub struct FollowedThread {
+    pub root_id: String,
+    pub channel_id: String,
+    pub reply_count: i64,
+    pub last_reply_at: Timestamp,
+    pub unread_replies: i64,
+    pub unread_mentions: i64,
+    pub is_urgent: bool,
+    /// Empty when the root post is not in the local store.
+    pub message: String,
+    /// Empty for the same reason.
+    pub author_id: String,
+}
+
 /// What the taskbar badge should show. The two parts are kept apart so the log
 /// says which rule produced the number.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -101,6 +117,12 @@ pub struct BadgeState {
     pub any_unread: bool,
     /// Messages that named you, across every channel that is not muted.
     pub mentions: i64,
+    /// Replies in followed threads that have not been read.
+    ///
+    /// Not part of `attention`: an unread reply is something to look at, not
+    /// something addressed to you, and the taskbar count is for the latter.
+    /// The sidebar's Threads entry is what draws this.
+    pub thread_unread: i64,
     /// Mentions inside followed threads.
     ///
     /// Additive rather than double-counted: with collapsed threads on, a reply
@@ -942,6 +964,7 @@ impl Store {
             self.thread_unread_totals()?
         };
         state.thread_mentions = unread_mentions;
+        state.thread_unread = unread_replies;
         if unread_replies > 0 {
             state.any_unread = true;
         }
@@ -1363,6 +1386,47 @@ impl Store {
     /// reply does not bump channel unread, so adding these to that count would
     /// be a blend of two models -- which the plan warns makes unread "subtly
     /// wrong forever".
+    /// Followed threads, most recently replied to first.
+    ///
+    /// Ordered by activity rather than by unread: a thread read an hour ago is
+    /// still the one being talked about, and a list that reordered itself the
+    /// moment something was read would move under the reader's hand.
+    ///
+    /// The root's text comes from the local posts table and may be empty: a
+    /// thread can be followed in a channel this reader has never opened, so
+    /// nothing guarantees its root was ever fetched. The caller fills those in.
+    pub fn followed_threads(&self, limit: u32) -> Result<Vec<FollowedThread>> {
+        let connection = self.lock();
+        let mut statement = connection.prepare(
+            "SELECT t.root_id, t.channel_id, t.reply_count, t.last_reply_at,
+                    t.unread_replies, t.unread_mentions, t.is_urgent,
+                    COALESCE(p.message, ''), COALESCE(p.user_id, '')
+             FROM threads t
+             LEFT JOIN posts p ON p.id = t.root_id
+             WHERE t.following = 1 AND t.delete_at = 0 AND t.last_reply_at > 0
+             ORDER BY t.last_reply_at DESC
+             LIMIT ?1",
+        )?;
+        let rows = statement.query_map([limit], |row| {
+            Ok(FollowedThread {
+                root_id: row.get(0)?,
+                channel_id: row.get(1)?,
+                reply_count: row.get(2)?,
+                last_reply_at: row.get(3)?,
+                unread_replies: row.get(4)?,
+                unread_mentions: row.get(5)?,
+                is_urgent: row.get::<_, i64>(6)? != 0,
+                message: row.get(7)?,
+                author_id: row.get(8)?,
+            })
+        })?;
+        let mut found = Vec::new();
+        for row in rows {
+            found.push(row?);
+        }
+        Ok(found)
+    }
+
     /// This reader's notification settings for one channel.
     ///
     /// Read per decision rather than cached: muting is a membership property

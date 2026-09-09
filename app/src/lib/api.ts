@@ -248,6 +248,7 @@ export type UiDelta =
       /** A direct or group message, where the person is the conversation. */
       direct: boolean;
     }
+  | { kind: "thread_changed"; root_id: string; channel_id: string }
   | { kind: "connection"; connected: boolean; resync: boolean };
 
 export const session = () => invoke<{ signed_in: boolean; server: string }>("session");
@@ -396,6 +397,8 @@ export interface BadgeReport {
   mentions: number;
   /** Mentions inside followed threads, which the server counts separately. */
   thread_mentions: number;
+  /** Unread replies in followed threads. Not part of `attention`. */
+  thread_unread: number;
   followed_unread: number;
 }
 
@@ -460,6 +463,25 @@ export const attachFile = (
  *  is the shape `listen` already has. */
 export const onAttachment = (handle: (payload: AttachmentEvent) => void) =>
   listen<AttachmentEvent>("attachment", (event) => handle(event.payload));
+
+/** One followed thread, ready to draw. */
+export interface ThreadListing {
+  root_id: string;
+  channel_id: string;
+  channel: string;
+  author: string;
+  author_id: string;
+  message: string;
+  reply_count: number;
+  last_reply_at: number;
+  unread_replies: number;
+  unread_mentions: number;
+  is_urgent: boolean;
+}
+
+/** The followed threads, newest activity first. Read from the local table, so
+ *  this is a query rather than a round trip. */
+export const followedThreads = () => invoke<ThreadListing[]>("followed_threads");
 
 /** Announces a newer build. Carries the version and nothing else: the app has
  *  not fetched or written anything at this point, and will not until asked. */

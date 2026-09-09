@@ -714,6 +714,7 @@ pub fn run() {
             commands::pinned_messages,
             commands::browse_channels,
             commands::join_channel,
+            commands::followed_threads,
             commands::install_update,
             commands::mark_channel_unread,
             commands::set_channel_muted,

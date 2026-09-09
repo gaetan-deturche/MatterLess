@@ -19,6 +19,7 @@
   import NewConversation from "./lib/NewConversation.svelte";
   import ChannelMenu from "./lib/ChannelMenu.svelte";
   import AddMembers from "./lib/AddMembers.svelte";
+  import Threads from "./lib/Threads.svelte";
   import ProfileCard from "./lib/ProfileCard.svelte";
   import Scrollbar from "./lib/Scrollbar.svelte";
 
@@ -256,6 +257,15 @@
    *  column: two lists side by side would leave the stream too narrow to read,
    *  and nobody consults both at once. */
   let keptMode: "saved" | "pinned" | null = $state(null);
+  /** The threads view, which is the only place an unread thread can be seen:
+   *  with collapsed threads a reply never touches its channel's counters. */
+  let threadsOpen = $state(false);
+  /** Bumped on every thread delta, so the list reloads while it is open. */
+  let threadsVersion = $state(0);
+  /** What the sidebar entry says. Kept beside the badge's own counts rather
+   *  than derived from the list, which is only loaded while the view is open. */
+  let threadUnread = $state(0);
+  let threadMentions = $state(0);
   /** Sets the reader's own presence. Do Not Disturb also silences toasts --
    *  the policy lives in Rust, and this is its input. */
   async function chooseStatus(status: string) {
@@ -1543,6 +1553,8 @@
       if (!meId) return;
       try {
         const badge = await api.updateBadge(meId);
+        threadUnread = badge.thread_unread;
+        threadMentions = badge.thread_mentions;
         log.debug("badge", {
           anyUnread: badge.any_unread,
           attention: badge.attention,
@@ -1603,6 +1615,10 @@
       case "status":
         store.setStatus(delta.user_id, delta.status);
         if (delta.user_id === store.meta()?.meId) ownStatus = delta.status;
+        break;
+      case "thread_changed":
+        threadsVersion += 1;
+        scheduleBadge();
         break;
       case "connection":
         store.setConnected(delta.connected);
@@ -2061,7 +2077,7 @@
   <div
     class="shell"
     class:threaded={openThread}
-    class:searching={searchOpen || keptMode !== null}
+    class:searching={searchOpen || keptMode !== null || threadsOpen}
     style:--thread-width="{threadWidth}px"
   >
     <aside>
@@ -2150,6 +2166,32 @@
             {/if}
           </button>
         {/snippet}
+
+        <!-- First in the list, because with collapsed threads a reply never
+             touches its channel's counters: this is the only row in the sidebar
+             that can say a thread is waiting. -->
+        <button
+          type="button"
+          class="threads-entry"
+          class:selected={threadsOpen}
+          class:unread={threadUnread > 0}
+          aria-pressed={threadsOpen}
+          onclick={() => {
+            threadsOpen = !threadsOpen;
+            if (threadsOpen) {
+              searchOpen = false;
+              keptMode = null;
+            }
+          }}
+        >
+          <span class="glyph">☰</span>
+          <span class="name">Threads</span>
+          {#if threadMentions > 0}
+            <span class="count mention">{threadMentions}</span>
+          {:else if threadUnread > 0}
+            <span class="count">{threadUnread}</span>
+          {/if}
+        </button>
 
         {#if sections.length}
           {#each sections as { group, heading } (group.id)}
@@ -2608,6 +2650,14 @@
         onclose={() => (searchOpen = false)}
         onjump={(channelId, postId) => void revealPost(channelId, postId)}
       />
+    {:else if threadsOpen}
+      <Threads
+        version={threadsVersion}
+        onclose={() => (threadsOpen = false)}
+        onopen={(channelId, rootId) => {
+          void select(channelId).then(() => store.setActiveThread(rootId));
+        }}
+      />
     {:else if keptMode}
       <Kept
         mode={keptMode}
@@ -2688,6 +2738,13 @@
   }
   .shell.threaded.searching > .divider {
     display: none;
+  }
+  /* A row of the channel list and nothing more: `nav button` supplies its
+     shape, hover, selection and unread treatment, so only its icon needs a
+     width to line its label up with the channels' below it. */
+  nav button.threads-entry .glyph {
+    width: 14px;
+    text-align: center;
   }
   .update {
     position: fixed;

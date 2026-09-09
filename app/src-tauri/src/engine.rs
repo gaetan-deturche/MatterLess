@@ -113,6 +113,8 @@ pub enum UiDelta {
         /// A direct or group message, where the person *is* the conversation.
         direct: bool,
     },
+    /// A followed thread gained a reply, or its read state moved.
+    ThreadChanged { root_id: String, channel_id: String },
     Connection {
         connected: bool,
         /// True when history may have a hole and a catch-up is needed.
@@ -394,7 +396,18 @@ impl Runner {
                 // A thread's counts live on its footer row, which is part of
                 // its channel's plan -- so this is a plan change like any
                 // other, and goes through the one render path.
-                Delta::ThreadChanged { channel_id, .. } => {
+                Delta::ThreadChanged {
+                    root_id,
+                    channel_id,
+                } => {
+                    // Two things change, not one. The footer's counts are part
+                    // of the channel's plan, and the threads view is its own
+                    // list ordered by activity -- so a reply can move any row
+                    // in it, not just this one.
+                    self.emit(UiDelta::ThreadChanged {
+                        root_id,
+                        channel_id: channel_id.clone(),
+                    });
                     if !channel_id.is_empty() {
                         touched = Some(channel_id);
                     }
