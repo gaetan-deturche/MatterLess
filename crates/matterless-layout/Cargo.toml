@@ -1,0 +1,11 @@
+[package]
+name = "matterless-layout"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+# Shaping, Unicode line breaking and layout. The reason this crate exists: a
+# row's height stops being predicted and becomes computed, which is what the
+# browser would never tell us before it had already drawn.
+cosmic-text = "0.19"
+matterless-render = { path = "../matterless-render" }
