@@ -181,12 +181,9 @@ impl Session {
             })
             .collect();
 
+        // Notification settings are read from the store per decision, and these
+        // members are already in it.
         let mut context = SyncContext::new(me.clone(), thread_mode);
-        for member in members {
-            context
-                .channel_notify_props
-                .insert(member.channel_id.clone(), member.notify_props.clone());
-        }
         context.window_focused = false;
 
         Ok(Self {

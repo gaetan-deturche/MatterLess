@@ -118,8 +118,7 @@ pub struct SyncContext {
     pub active_channel: Option<String>,
     pub window_focused: bool,
     pub status: String,
-    /// Channel id -> the member notify_props for this user.
-    pub channel_notify_props: HashMap<String, HashMap<String, String>>,
+
     /// Thread roots the user follows, for the collapsed-threads rule.
     pub followed_threads: std::collections::HashSet<String>,
 }
@@ -132,20 +131,21 @@ impl SyncContext {
             active_channel: None,
             window_focused: true,
             status: "online".to_string(),
-            channel_notify_props: HashMap::new(),
             followed_threads: std::collections::HashSet::new(),
         }
     }
 
+    /// `channel_props` is this reader's membership settings for the channel the
+    /// post arrived in, read fresh by the caller: muting is changed from this
+    /// client and from others, so there is no copy of it worth holding.
     fn notify_context<'a>(
         &'a self,
-        channel_id: &str,
         root_id: &str,
-        empty: &'a HashMap<String, String>,
+        channel_props: &'a HashMap<String, String>,
     ) -> NotifyContext<'a> {
         NotifyContext {
             me: &self.me,
-            channel_notify_props: self.channel_notify_props.get(channel_id).unwrap_or(empty),
+            channel_notify_props: channel_props,
             status: &self.status,
             active_channel: self.active_channel.as_deref(),
             window_focused: self.window_focused,
@@ -176,15 +176,11 @@ const TRICKLE_BUDGET: usize = 20;
 
 pub struct SyncEngine {
     store: Arc<Store>,
-    empty_props: HashMap<String, String>,
 }
 
 impl SyncEngine {
     pub fn new(store: Arc<Store>) -> Self {
-        Self {
-            store,
-            empty_props: HashMap::new(),
-        }
+        Self { store }
     }
 
     pub fn store(&self) -> &Arc<Store> {
@@ -442,6 +438,23 @@ impl SyncEngine {
                     channel_id,
                 }])
             }
+            // Stored, and nothing more: the notification rule reads these props
+            // from the store at the moment it decides, so writing them here is
+            // the whole of what has to happen. The sidebar's muted mark comes
+            // from the same row, which is why a delta follows.
+            Event::ChannelMemberUpdated { member } => {
+                self.store
+                    .upsert_channel_members(std::slice::from_ref(member.as_ref()))?;
+                // The sidebar's muted mark is read off the same row, so it is
+                // told; `unread` is the shape that carries it.
+                match self.store.unread(&member.channel_id, &context.me.id)? {
+                    Some(unread) => Ok(vec![Delta::UnreadChanged {
+                        channel_id: member.channel_id.clone(),
+                        unread,
+                    }]),
+                    None => Ok(Vec::new()),
+                }
+            }
             Event::ThreadFollowChanged {
                 thread_id,
                 following,
@@ -466,8 +479,16 @@ impl SyncEngine {
         in_stream: bool,
         context: &SyncContext,
     ) -> Delta {
-        let notify_context =
-            context.notify_context(&post.channel_id, &post.root_id, &self.empty_props);
+        let channel_props = self
+            .store
+            .channel_notify_props(&post.channel_id)
+            .unwrap_or_else(|error| {
+                // Settings that cannot be read must not swallow a message: an
+                // unwanted notification is recoverable, a missing one is not.
+                tracing::warn!(%error, "could not read a channel's notification settings");
+                HashMap::new()
+            });
+        let notify_context = context.notify_context(&post.root_id, &channel_props);
         let decision: NotifyDecision = notify::decide(post, &notify_context);
         Delta::PostUpserted {
             post_id: post.id.clone(),

@@ -1363,6 +1363,26 @@ impl Store {
     /// reply does not bump channel unread, so adding these to that count would
     /// be a blend of two models -- which the plan warns makes unread "subtly
     /// wrong forever".
+    /// This reader's notification settings for one channel.
+    ///
+    /// Read per decision rather than cached: muting is a membership property
+    /// that changes from this client, from another one, and from the server,
+    /// and a copy held in memory had no one place to be refreshed from. One
+    /// indexed lookup against a primary key, against a notification being wrong.
+    pub fn channel_notify_props(&self, channel_id: &str) -> Result<HashMap<String, String>> {
+        let connection = self.lock();
+        let found: Option<String> = connection
+            .query_row(
+                "SELECT notify_props FROM channel_members WHERE channel_id = ?1 LIMIT 1",
+                [channel_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(found
+            .and_then(|raw| serde_json::from_str(&raw).ok())
+            .unwrap_or_default())
+    }
+
     pub fn thread_unread_totals(&self) -> Result<(i64, i64)> {
         let connection = self.lock();
         Ok(connection.query_row(
