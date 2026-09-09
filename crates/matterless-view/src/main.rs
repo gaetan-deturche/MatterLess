@@ -199,23 +199,68 @@ impl App {
         // with each channel's *total* message count -- which looks like an
         // unread badge of four thousand. No reader, no counts.
         let me = std::env::var("MATTERLESS_ME").unwrap_or_default();
-        let listed = store
+        if me.is_empty() {
+            // Worth saying rather than leaving to be noticed: with no reader,
+            // neither half of a `<id>__<id>` slug can be ruled out, so a direct
+            // message may be named after the wrong person.
+            println!(
+                "MATTERLESS_ME is unset: counts are suppressed and a direct \
+                 message may be named after the wrong half of its pair"
+            );
+        }
+        let groups = store
             .as_ref()
-            .map(|store| matterless_view::feed::channels(store, &me))
+            .map(|store| matterless_view::sidebar_feed::groups(store, &me))
             .unwrap_or_default();
         let counted = !me.is_empty();
-        let sidebar = Sidebar::new(
-            listed
-                .into_iter()
-                .map(|channel| Entry::Channel {
+        // Flattened into one list of rows: the categories become headings, and
+        // a group with nothing in it is not worth a heading of its own.
+        let mut entries: Vec<Entry> = Vec::new();
+        for group in groups {
+            if group.channels.is_empty() {
+                continue;
+            }
+            // Named by its team when one contributes: two teams each bring a
+            // "Favorites" and a "Channels", and unqualified they read as
+            // duplicates of each other.
+            entries.push(Entry::Heading {
+                label: if group.team_name.is_empty() {
+                    group.display_name
+                } else {
+                    format!("{} -- {}", group.display_name, group.team_name)
+                },
+            });
+            for channel in group.channels {
+                entries.push(Entry::Channel {
+                    direct: channel.channel_type == "D" || channel.channel_type == "G",
                     id: channel.id,
-                    label: channel.label,
+                    label: channel.display_name,
                     unread: if counted { channel.unread } else { 0 },
                     mentions: if counted { channel.mentions } else { 0 },
                     muted: channel.muted,
+                });
+            }
+        }
+        println!(
+            "sidebar: {} groups, {} channels -- {}",
+            entries
+                .iter()
+                .filter(|entry| matches!(entry, Entry::Heading { .. }))
+                .count(),
+            entries
+                .iter()
+                .filter(|entry| matches!(entry, Entry::Channel { .. }))
+                .count(),
+            entries
+                .iter()
+                .filter_map(|entry| match entry {
+                    Entry::Heading { label } => Some(label.as_str()),
+                    Entry::Channel { .. } => None,
                 })
-                .collect(),
+                .collect::<Vec<&str>>()
+                .join(" > ")
         );
+        let sidebar = Sidebar::new(entries);
         let (channel, rows) = Self::feed();
         let mut app = Self {
             window: None,

@@ -234,6 +234,23 @@ impl Store {
         Ok(())
     }
 
+    /// Every team held locally, for naming the groups a sidebar shows.
+    ///
+    /// The counterpart to `upsert_teams`, which had no reader: a shell with no
+    /// network still has to tell one team's "Favorites" from another's.
+    pub fn teams(&self) -> Result<Vec<Team>> {
+        let connection = self.lock();
+        let mut statement = connection.prepare("SELECT id, name, display_name FROM teams")?;
+        let rows = statement.query_map([], |row| {
+            Ok(Team {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                display_name: row.get(2)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     pub fn upsert_channels(&self, channels: &[Channel]) -> Result<()> {
         let mut connection = self.lock();
         let transaction = connection.transaction()?;
