@@ -53,7 +53,14 @@
      *  wrong row -- and anchoring on the wrong row moves the view rather than
      *  holding it. */
     liveScrollTop?: () => number;
-    /** The row to keep still, once the corrected layout has been laid out. */
+    /** The row to keep still, once the corrected layout has been laid out.
+     *
+     *  Measured at the *bottom* edge of the viewport, not the top. A message
+     *  that re-wraps taller -- which is what opening the thread pane does to
+     *  every one of them at once -- grows downwards, so holding the top row
+     *  still pushes everything the reader was looking at off the bottom. Held
+     *  at the bottom instead, the growth goes into the history above, where
+     *  nothing was being read. */
     onlayout?: (anchor: { key: string; within: number }) => void;
   } = $props();
 
@@ -175,7 +182,8 @@
       // so the browser clamped the write against the old scroll height and the
       // list appeared to rewind.
       const list = rows ?? [];
-      const at = liveScrollTop?.() ?? scrollTop;
+      // The bottom edge, which is the part of the list being read.
+      const at = (liveScrollTop?.() ?? scrollTop) + viewportHeight;
       const index = virtual.indexAt(layout, list.length, at);
       const row = list[index];
       const within = at - virtual.offsetOf(layout, index);
