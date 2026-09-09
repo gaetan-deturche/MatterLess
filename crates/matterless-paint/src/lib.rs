@@ -362,7 +362,15 @@ impl Painter {
                             glyph.key,
                             colour,
                             |dx, dy, pixel| {
-                                canvas.blend(glyph.x + dx, glyph.y + dy, shade, pixel.a());
+                                // The pixel's own colour, not the requested one:
+                                // for a letter they are the same, and for an
+                                // emoji only the pixel knows.
+                                canvas.blend(
+                                    glyph.x + dx,
+                                    glyph.y + dy,
+                                    [pixel.r(), pixel.g(), pixel.b()],
+                                    pixel.a(),
+                                );
                             },
                         );
                     }

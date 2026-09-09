@@ -191,18 +191,23 @@ impl App {
         // The store is opened once and kept: switching channel is a read.
         let store = matterless_view::feed::default_store()
             .and_then(|path| matterless_view::feed::open(&path).ok());
+        // Without a reader there is no membership row, and the store answers
+        // with each channel's *total* message count -- which looks like an
+        // unread badge of four thousand. No reader, no counts.
+        let me = std::env::var("MATTERLESS_ME").unwrap_or_default();
         let listed = store
             .as_ref()
-            .map(|store| matterless_view::feed::channels(store, ""))
+            .map(|store| matterless_view::feed::channels(store, &me))
             .unwrap_or_default();
+        let counted = !me.is_empty();
         let sidebar = Sidebar::new(
             listed
                 .into_iter()
                 .map(|channel| Entry::Channel {
                     id: channel.id,
                     label: channel.label,
-                    unread: channel.unread,
-                    mentions: channel.mentions,
+                    unread: if counted { channel.unread } else { 0 },
+                    mentions: if counted { channel.mentions } else { 0 },
                     muted: channel.muted,
                 })
                 .collect(),

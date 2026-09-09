@@ -47,7 +47,9 @@ fn vertex(in: In) -> Out {
 
 @fragment
 fn fragment(in: Out) -> @location(0) vec4<f32> {
-    // The atlas holds coverage, not colour.
-    let coverage = textureSample(atlas, atlas_sampler, in.uv).r;
-    return vec4<f32>(in.colour.rgb, in.colour.a * coverage);
+    // A letter is white in the atlas with its coverage in the alpha, so this
+    // multiply tints it. An emoji carries its own colour and arrives with a
+    // white vertex, so the same multiply leaves it alone.
+    let texel = textureSample(atlas, atlas_sampler, in.uv);
+    return vec4<f32>(texel.rgb * in.colour.rgb, texel.a * in.colour.a);
 }
