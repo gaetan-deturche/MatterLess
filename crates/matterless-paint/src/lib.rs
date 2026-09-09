@@ -89,6 +89,38 @@ impl Default for Palette {
     }
 }
 
+/// One glyph, rasterised or not, at the place it belongs.
+///
+/// The unit both consumers share: the CPU snapshot rasterises it straight onto
+/// a buffer, and the GPU renderer looks it up in an atlas and emits a quad.
+/// Neither of them decides *where* -- that is settled here, once.
+#[derive(Debug, Clone, Copy)]
+pub struct PlacedGlyph {
+    pub key: cosmic_text::CacheKey,
+    pub x: i32,
+    pub y: i32,
+}
+
+/// A row reduced to what a renderer has to put on screen.
+///
+/// Kept as a list rather than drawn directly so the snapshot and the window
+/// draw the same thing. Two renderers walking the layout separately is exactly
+/// how the browser and the virtualiser came to disagree.
+#[derive(Debug, Clone)]
+pub enum Piece {
+    Fill {
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        colour: [u8; 4],
+    },
+    Text {
+        glyphs: Vec<PlacedGlyph>,
+        ink: [u8; 3],
+    },
+}
+
 /// Holds the rasterised glyphs between frames.
 ///
 /// Rasterising is the expensive half -- shaping is cheap by comparison -- so the
@@ -114,6 +146,73 @@ impl Painter {
     ///
     /// Every measurement is the layout's. Nothing here decides how wide a line
     /// is or how many of them there are: this walks what was already decided.
+    /// Reduces a laid-out row to the pieces a renderer puts on screen.
+    ///
+    /// The one place that turns layout into draw calls. Both renderers consume
+    /// this, so neither can drift from the other or from the measured heights.
+    pub fn pieces_of(
+        &mut self,
+        fonts: &mut Fonts,
+        row: &RowLayout,
+        top: f32,
+        theme: &Theme,
+        palette: &Palette,
+    ) -> Vec<Piece> {
+        let mut pieces = Vec::new();
+        for block in &row.blocks {
+            let x = theme.gutter + block.x;
+            let y = top + block.y;
+            match block.kind {
+                Kind::Separator => pieces.push(Piece::Fill {
+                    x: 0.0,
+                    y: y + block.height / 2.0,
+                    width: theme.width,
+                    height: 1.0,
+                    colour: [palette.faint[0], palette.faint[1], palette.faint[2], 255],
+                }),
+                // The avatar's square, so the gutter is visibly accounted for
+                // until faces are drawn.
+                Kind::Header => pieces.push(Piece::Fill {
+                    x: 0.0,
+                    y,
+                    width: 28.0,
+                    height: 28.0,
+                    colour: palette.surface,
+                }),
+                Kind::Code => {
+                    pieces.push(Piece::Fill {
+                        x,
+                        y,
+                        width: block.wrap,
+                        height: block.height,
+                        colour: palette.surface,
+                    });
+                    pieces.push(Piece::Text {
+                        glyphs: self.glyphs_of(fonts, block, x + 8.0, y + 8.0, theme),
+                        ink: palette.ink,
+                    });
+                }
+                Kind::Text => pieces.push(Piece::Text {
+                    glyphs: self.glyphs_of(fonts, block, x, y, theme),
+                    ink: palette.ink,
+                }),
+                Kind::Reactions | Kind::Attachment | Kind::Footer => {
+                    if block.height >= 1.0 {
+                        pieces.push(Piece::Fill {
+                            x,
+                            y,
+                            width: 120.0,
+                            height: (block.height - 4.0).max(1.0),
+                            colour: palette.surface,
+                        });
+                    }
+                }
+            }
+        }
+        pieces
+    }
+
+    /// Draws a row onto a CPU buffer, for a snapshot.
     pub fn paint_row(
         &mut self,
         canvas: &mut Canvas,
@@ -123,67 +222,31 @@ impl Painter {
         theme: &Theme,
         palette: &Palette,
     ) {
-        for block in &row.blocks {
-            let x = theme.gutter + block.x;
-            let y = top + block.y;
-            match block.kind {
-                Kind::Separator => {
-                    // A rule across the row, with the label's space left for it.
-                    let middle = y + block.height / 2.0;
-                    canvas.fill(
-                        0,
-                        middle as i32,
-                        canvas.width as i32,
-                        1,
-                        [palette.faint[0], palette.faint[1], palette.faint[2], 255],
-                    );
-                }
-                Kind::Header => {
-                    // The avatar's square, so the gutter is visibly accounted
-                    // for until faces are drawn.
-                    canvas.fill(0, y as i32, 28, 28, palette.surface);
-                }
-                Kind::Code => {
-                    canvas.fill(
-                        x as i32,
-                        y as i32,
-                        (block.wrap) as i32,
-                        block.height as i32,
-                        palette.surface,
-                    );
-                    self.draw_spans(
-                        canvas,
-                        fonts,
-                        Placed {
-                            block,
-                            x: x + 8.0,
-                            y: y + 8.0,
-                            theme,
-                            ink: palette.ink,
-                        },
-                    );
-                }
-                Kind::Text => {
-                    self.draw_spans(
-                        canvas,
-                        fonts,
-                        Placed {
-                            block,
-                            x,
-                            y,
-                            theme,
-                            ink: palette.ink,
-                        },
-                    );
-                }
-                Kind::Reactions | Kind::Attachment | Kind::Footer => {
-                    if block.height >= 1.0 {
-                        canvas.fill(
-                            x as i32,
-                            y as i32,
-                            120,
-                            (block.height - 4.0).max(1.0) as i32,
-                            palette.surface,
+        let pieces = self.pieces_of(fonts, row, top, theme, palette);
+        self.paint_pieces(canvas, fonts, &pieces);
+    }
+
+    /// Rasterises a draw list onto a CPU buffer.
+    pub fn paint_pieces(&mut self, canvas: &mut Canvas, fonts: &mut Fonts, pieces: &[Piece]) {
+        for piece in pieces {
+            match piece {
+                Piece::Fill {
+                    x,
+                    y,
+                    width,
+                    height,
+                    colour,
+                } => canvas.fill(*x as i32, *y as i32, *width as i32, *height as i32, *colour),
+                Piece::Text { glyphs, ink } => {
+                    let colour = Color::rgb(ink[0], ink[1], ink[2]);
+                    for glyph in glyphs {
+                        self.glyphs.with_pixels(
+                            fonts.system_mut(),
+                            glyph.key,
+                            colour,
+                            |dx, dy, pixel| {
+                                canvas.blend(glyph.x + dx, glyph.y + dy, *ink, pixel.a());
+                            },
                         );
                     }
                 }
@@ -191,28 +254,29 @@ impl Painter {
         }
     }
 
-    fn draw_spans(&mut self, canvas: &mut Canvas, fonts: &mut Fonts, at: Placed<'_>) {
-        let Placed {
-            block,
-            x,
-            y,
-            theme,
-            ink,
-        } = at;
+    /// Shapes a block's spans and reports where each glyph lands.
+    ///
+    /// Shaped against the layout's own wrap width, never the surface's: wrapping
+    /// anywhere else would break the lines somewhere other than where they were
+    /// counted, and the row would no longer be the height reserved for it.
+    fn glyphs_of(
+        &mut self,
+        fonts: &mut Fonts,
+        block: &Block,
+        x: f32,
+        y: f32,
+        theme: &Theme,
+    ) -> Vec<PlacedGlyph> {
         if block.spans.is_empty() {
-            return;
+            return Vec::new();
         }
         let line_height = if block.kind == Kind::Code {
             theme.code_line_height
         } else {
             theme.line_height
         };
-        let metrics = Metrics::new(block.size, line_height);
-        let mut buffer = Buffer::new(fonts.system_mut(), metrics);
+        let mut buffer = Buffer::new(fonts.system_mut(), Metrics::new(block.size, line_height));
         let mut shaped = buffer.borrow_with(fonts.system_mut());
-        // The layout's own wrap width, not this canvas's: drawing to a different
-        // width would break the line somewhere else and the row would no longer
-        // be the height that was reserved for it.
         shaped.set_size(Some(block.wrap), None);
         let spans: Vec<(&str, Attrs<'static>)> = block
             .spans
@@ -222,35 +286,19 @@ impl Painter {
         shaped.set_rich_text(spans, &Attrs::new(), Shaping::Advanced, None);
         shaped.shape_until_scroll(false);
 
-        let colour = Color::rgb(ink[0], ink[1], ink[2]);
-        let runs: Vec<_> = shaped
-            .layout_runs()
-            .map(|run| (run.line_y, run.glyphs.to_vec()))
-            .collect();
-        for (line_y, glyphs) in runs {
-            for glyph in &glyphs {
-                let physical = glyph.physical((x, y + line_y), 1.0);
-                self.glyphs.with_pixels(
-                    fonts.system_mut(),
-                    physical.cache_key,
-                    colour,
-                    |dx, dy, pixel| {
-                        canvas.blend(physical.x + dx, physical.y + dy, ink, pixel.a());
-                    },
-                );
+        let mut placed = Vec::new();
+        for run in shaped.layout_runs() {
+            for glyph in run.glyphs {
+                let physical = glyph.physical((x, y + run.line_y), 1.0);
+                placed.push(PlacedGlyph {
+                    key: physical.cache_key,
+                    x: physical.x,
+                    y: physical.y,
+                });
             }
         }
+        placed
     }
-}
-
-/// Where a block's spans go and how they look. Together rather than as six
-/// arguments, because they are one thing: a placed run of text.
-struct Placed<'a> {
-    block: &'a Block,
-    x: f32,
-    y: f32,
-    theme: &'a Theme,
-    ink: [u8; 3],
 }
 
 fn attrs_of(span: &TextSpan) -> Attrs<'static> {
