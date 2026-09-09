@@ -45,7 +45,16 @@
    *  seam between the two, and it is deliberately one number in one direction. */
   async function placeNative() {
     const channelId = store.activeChannel();
-    if (!channelId || !scroller) return;
+    // Both conditions, reported: "no channel yet" and "the scroller is not
+    // bound" are different problems and were indistinguishable as one silent
+    // early return.
+    if (!channelId || !scroller) {
+      log.debug("native.place.skipped", {
+        channel: channelId ?? "none",
+        scroller: scroller ? "bound" : "unbound",
+      });
+      return;
+    }
     const box = scroller.getBoundingClientRect();
     const ratio = window.devicePixelRatio || 1;
     try {
@@ -67,6 +76,16 @@
       nativeList = false;
     }
   }
+
+  // The rectangle moves when the channel changes, when the thread pane opens or
+  // closes, and when the window resizes. Each of those is a place call, and
+  // nothing else is: a child window repositioned every frame flickers.
+  $effect(() => {
+    store.activeChannel();
+    openThread;
+    viewportHeight;
+    void placeNative();
+  });
 
   /** A newer build the server is offering. Nothing has been downloaded yet. */
   let updateOffered = $state("");

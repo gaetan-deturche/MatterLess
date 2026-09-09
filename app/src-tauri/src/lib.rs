@@ -731,6 +731,12 @@ pub fn run() {
                 }
             }
 
+            // Said once at start-up: whether the native list is switched on is
+            // otherwise only visible as its absence.
+            tracing::info!(
+                native_list = %std::env::var("MATTERLESS_NATIVE_LIST").unwrap_or_default(),
+                "renderer for the message list"
+            );
             check_for_update(app.handle());
 
             if let Err(error) = build_tray(app.handle()) {
