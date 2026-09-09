@@ -2359,6 +2359,7 @@ pub struct BadgeReport {
     pub attention: i64,
     pub mentions: i64,
     pub thread_mentions: i64,
+    pub thread_unread: i64,
     pub followed_unread: i64,
 }
 
@@ -2420,6 +2421,7 @@ pub async fn update_badge(
         attention,
         mentions: badge.mentions,
         thread_mentions: badge.thread_mentions,
+        thread_unread: badge.thread_unread,
         followed_unread: badge.followed_unread,
     })
 }
@@ -3535,6 +3537,111 @@ pub async fn join_channel(
 }
 
 /// Leaves a channel.
+/// One followed thread, ready to draw in the threads view.
+#[derive(Debug, Clone, Serialize)]
+pub struct ThreadListing {
+    pub root_id: String,
+    pub channel_id: String,
+    /// The conversation it belongs to, named as the sidebar names it.
+    pub channel: String,
+    pub author: String,
+    pub author_id: String,
+    /// The root's text, whole. The view clamps it; truncating here would decide
+    /// how many lines fit, which only the view knows.
+    pub message: String,
+    pub reply_count: i64,
+    pub last_reply_at: i64,
+    pub unread_replies: i64,
+    pub unread_mentions: i64,
+    pub is_urgent: bool,
+}
+
+/// How many threads the view lists. Well past a screenful, and the endpoint
+/// that fills the table is already capped at the same order.
+const THREADS_LISTED: u32 = 100;
+
+/// The followed threads, newest activity first.
+///
+/// Read from the local table rather than the server: the websocket keeps it
+/// current -- every `thread_updated` upserts into it -- so a round trip would
+/// only fetch what is already here, and the list has to redraw the instant a
+/// reply lands rather than on the next poll.
+#[tauri::command]
+pub async fn followed_threads(state: State<'_, AppState>) -> Reply<Vec<ThreadListing>> {
+    let store = state.store.clone();
+    let held = tokio::task::spawn_blocking(move || store.followed_threads(THREADS_LISTED))
+        .await
+        .map_err(fail)?
+        .map_err(fail)?;
+
+    // A thread's root can be authored by somebody this store has never met, the
+    // same way a notification's can.
+    let wanted: Vec<String> = held
+        .iter()
+        .map(|thread| thread.author_id.clone())
+        .filter(|id| !id.is_empty())
+        .collect();
+    let store = state.store.clone();
+    let probe = wanted.clone();
+    let missing = tokio::task::spawn_blocking(move || {
+        probe
+            .is_empty()
+            .then(Vec::new)
+            .map_or_else(|| store.missing_user_ids(&probe), Ok)
+    })
+    .await
+    .map_err(fail)?
+    .map_err(fail)?;
+    if !missing.is_empty() {
+        if let Ok(fetched) = state.rest.users_by_ids(&missing).await {
+            let store = state.store.clone();
+            let _ = tokio::task::spawn_blocking(move || store.upsert_users(&fetched)).await;
+        }
+    }
+
+    let store = state.store.clone();
+    let summaries =
+        tokio::task::spawn_blocking(move || -> matterless_store::Result<Vec<ThreadListing>> {
+            let people = store.users_by_ids(&wanted)?;
+            let mut out = Vec::with_capacity(held.len());
+            for thread in held {
+                let channel = store.channel(&thread.channel_id)?;
+                let named = match channel {
+                    Some(channel) if !channel.display_name.is_empty() => channel.display_name,
+                    Some(channel) if !channel.name.is_empty() => channel.name,
+                    // A conversation with no name of its own is a direct or
+                    // group message, whose name is its people -- which the
+                    // sidebar already resolves and this list does not need to.
+                    _ => String::from("Conversation"),
+                };
+                let author = people
+                    .get(&thread.author_id)
+                    .map(|user| user.username.clone())
+                    .unwrap_or_else(|| thread.author_id.clone());
+                out.push(ThreadListing {
+                    root_id: thread.root_id,
+                    channel_id: thread.channel_id,
+                    channel: named,
+                    author,
+                    author_id: thread.author_id,
+                    message: thread.message,
+                    reply_count: thread.reply_count,
+                    last_reply_at: thread.last_reply_at,
+                    unread_replies: thread.unread_replies,
+                    unread_mentions: thread.unread_mentions,
+                    is_urgent: thread.is_urgent,
+                });
+            }
+            Ok(out)
+        })
+        .await
+        .map_err(fail)?
+        .map_err(fail)?;
+
+    tracing::debug!(threads = summaries.len(), "followed threads listed");
+    Ok(summaries)
+}
+
 /// Installs the update the reader has just agreed to, and restarts into it.
 ///
 /// The check is made again here rather than holding the earlier one: an
