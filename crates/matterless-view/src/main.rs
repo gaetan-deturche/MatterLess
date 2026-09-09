@@ -131,6 +131,50 @@ struct App {
 }
 
 impl App {
+    /// Real messages if the store can be read, and the sample if not.
+    ///
+    /// Falling back rather than refusing to start: the sample is what proves the
+    /// renderer, and it should still be reachable on a machine with no database
+    /// -- but the real rows are what prove the port, so they are tried first.
+    fn feed() -> (String, Vec<Row>) {
+        // Positional arguments only, with flags and their values dropped:
+        // taking `--snapshot` as a database path made `Store::open` create a
+        // file by that name, which then had no messages in it.
+        let mut positional = Vec::new();
+        let mut args = std::env::args().skip(1);
+        while let Some(arg) = args.next() {
+            if arg.starts_with("--") {
+                args.next();
+            } else {
+                positional.push(arg);
+            }
+        }
+        let mut positional = positional.into_iter();
+        let path = positional
+            .next()
+            .map(std::path::PathBuf::from)
+            .or_else(matterless_view::feed::default_store);
+        let channel = positional.next();
+        let me = std::env::var("MATTERLESS_ME").unwrap_or_default();
+        match path
+            .as_deref()
+            .map(|path| matterless_view::feed::rows_from(path, channel.clone(), &me))
+        {
+            Some(Ok((channel, rows))) => {
+                println!("channel {channel}: {} rows from the store", rows.len());
+                (channel, rows)
+            }
+            Some(Err(why)) => {
+                println!("the sample conversation ({why})");
+                ("sample".to_string(), conversation())
+            }
+            None => {
+                println!("the sample conversation (no store path)");
+                ("sample".to_string(), conversation())
+            }
+        }
+    }
+
     fn new() -> Self {
         Self {
             window: None,
@@ -140,7 +184,7 @@ impl App {
             size: (1000, 760),
             fonts: Fonts::new(),
             painter: Painter::new(),
-            rows: conversation(),
+            rows: Self::feed().1,
             laid: Vec::new(),
             theme: Theme::default(),
             palette: Palette::default(),
@@ -298,7 +342,71 @@ impl ApplicationHandler for App {
     }
 }
 
+/// Renders the feed to a file and exits, with no window and no GPU.
+///
+/// The same layout and the same draw list the window uses -- only the last step
+/// differs -- so this is how the port gets checked on a machine with no display,
+/// and how a page of real messages gets compared against the DOM list.
+fn snapshot(path: &std::path::Path, width: u32) -> Result<(), String> {
+    let mut fonts = Fonts::new();
+    let mut painter = Painter::new();
+    let palette = Palette::default();
+    let theme = Theme {
+        width: width as f32,
+        ..Theme::default()
+    };
+    let (channel, rows) = App::feed();
+    let laid: Vec<RowLayout> = rows
+        .iter()
+        .map(|row| lay_out(&mut fonts, row, &theme))
+        .collect();
+    let total: f32 = laid.iter().map(|row| row.height).sum();
+    // Capped: a channel of four hundred messages is taller than any image
+    // viewer wants, and the top of it is enough to judge the rendering.
+    let height = total.min(4000.0).ceil().max(1.0) as u32;
+
+    let mut canvas = matterless_paint::Canvas::new(width, height, palette.ground);
+    let mut top = 0.0_f32;
+    for row in &laid {
+        if top > height as f32 {
+            break;
+        }
+        painter.paint_row(&mut canvas, &mut fonts, row, top, &theme, &palette);
+        top += row.height;
+    }
+
+    let file = std::fs::File::create(path).map_err(|error| error.to_string())?;
+    let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), width, height);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    encoder
+        .write_header()
+        .map_err(|error| error.to_string())?
+        .write_image_data(&canvas.pixels)
+        .map_err(|error| error.to_string())?;
+    println!(
+        "{channel}: {} rows, {total:.0}px tall, written to {}",
+        laid.len(),
+        path.display()
+    );
+    Ok(())
+}
+
 fn main() {
+    // `--snapshot <file>` instead of a window, for a headless check.
+    let args: Vec<String> = std::env::args().collect();
+    if let Some(at) = args.iter().position(|arg| arg == "--snapshot") {
+        let path = args
+            .get(at + 1)
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::PathBuf::from("list.png"));
+        if let Err(why) = snapshot(&path, 1000) {
+            eprintln!("snapshot: {why}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
     let events = EventLoop::new().expect("an event loop");
     events.set_control_flow(ControlFlow::Wait);
     events.run_app(&mut App::new()).expect("the event loop");
