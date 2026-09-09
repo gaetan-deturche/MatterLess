@@ -91,6 +91,13 @@ pub struct Block {
     pub height: f32,
     pub lines: usize,
     pub kind: Kind,
+    /// What to draw, for a block that is text. Empty for the rest.
+    pub spans: Vec<TextSpan>,
+    /// The size the spans were measured at, which a heading raises.
+    pub size: f32,
+    /// The width the spans were wrapped to. A renderer that wraps to anything
+    /// else draws a different number of lines than the layout reserved.
+    pub wrap: f32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -108,16 +115,21 @@ pub enum Kind {
 }
 
 /// A piece of text with the styling that changes its width.
-struct Span {
-    text: String,
-    bold: bool,
-    italic: bool,
-    mono: bool,
+///
+/// Carried out of the layout rather than consumed by it: a renderer has to draw
+/// exactly what was measured, and re-deriving the spans from the markdown is how
+/// the two drift apart.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TextSpan {
+    pub text: String,
+    pub bold: bool,
+    pub italic: bool,
+    pub mono: bool,
 }
 
 /// One paragraph-like run of inline content, and how far it is pushed in.
 struct Line {
-    spans: Vec<Span>,
+    spans: Vec<TextSpan>,
     indent: f32,
     heading: bool,
 }
@@ -185,10 +197,10 @@ fn lines_of(nodes: &[Node], indent: f32, into: &mut Vec<Line>, code: &mut Vec<St
 }
 
 /// Collects inline content into styled spans.
-fn inline(nodes: &[Node], bold: bool, italic: bool, mono: bool, into: &mut Vec<Span>) {
+fn inline(nodes: &[Node], bold: bool, italic: bool, mono: bool, into: &mut Vec<TextSpan>) {
     for node in nodes {
         match node {
-            Node::Text { value } => into.push(Span {
+            Node::Text { value } => into.push(TextSpan {
                 text: value.clone(),
                 bold,
                 italic,
@@ -199,37 +211,37 @@ fn inline(nodes: &[Node], bold: bool, italic: bool, mono: bool, into: &mut Vec<S
                 inline(children, bold, true, mono, into)
             }
             Node::Link { children, .. } => inline(children, bold, italic, mono, into),
-            Node::InlineCode { value } | Node::InlineMath { value } => into.push(Span {
+            Node::InlineCode { value } | Node::InlineMath { value } => into.push(TextSpan {
                 text: value.clone(),
                 bold,
                 italic,
                 mono: true,
             }),
-            Node::UserMention { username, .. } => into.push(Span {
+            Node::UserMention { username, .. } => into.push(TextSpan {
                 text: format!("@{username}"),
                 bold,
                 italic,
                 mono,
             }),
-            Node::ChannelLink { name } => into.push(Span {
+            Node::ChannelLink { name } => into.push(TextSpan {
                 text: format!("~{name}"),
                 bold,
                 italic,
                 mono,
             }),
-            Node::Emoji { name, unicode } => into.push(Span {
+            Node::Emoji { name, unicode } => into.push(TextSpan {
                 text: unicode.clone().unwrap_or_else(|| format!(":{name}:")),
                 bold,
                 italic,
                 mono,
             }),
-            Node::SoftBreak | Node::HardBreak => into.push(Span {
+            Node::SoftBreak | Node::HardBreak => into.push(TextSpan {
                 text: "\n".to_string(),
                 bold,
                 italic,
                 mono,
             }),
-            Node::Image { alt, .. } => into.push(Span {
+            Node::Image { alt, .. } => into.push(TextSpan {
                 text: alt.clone(),
                 bold,
                 italic,
@@ -300,6 +312,9 @@ pub fn lay_out(fonts: &mut Fonts, row: &Row, theme: &Theme) -> RowLayout {
                     height: theme.separator_height,
                     lines: 1,
                     kind: Kind::Separator,
+                    spans: Vec::new(),
+                    size: theme.body_size,
+                    wrap: theme.text_width(),
                 }],
             };
         }
@@ -312,6 +327,9 @@ pub fn lay_out(fonts: &mut Fonts, row: &Row, theme: &Theme) -> RowLayout {
                     height: theme.footer_height,
                     lines: 1,
                     kind: Kind::Footer,
+                    spans: Vec::new(),
+                    size: theme.body_size,
+                    wrap: theme.text_width(),
                 }],
             };
         }
@@ -324,6 +342,9 @@ pub fn lay_out(fonts: &mut Fonts, row: &Row, theme: &Theme) -> RowLayout {
                     height: theme.line_height,
                     lines: 1,
                     kind: Kind::Text,
+                    spans: Vec::new(),
+                    size: theme.body_size,
+                    wrap: theme.text_width(),
                 }],
             };
         }
@@ -349,6 +370,9 @@ pub fn lay_out(fonts: &mut Fonts, row: &Row, theme: &Theme) -> RowLayout {
             height: theme.header_height,
             lines: 1,
             kind: Kind::Header,
+            spans: Vec::new(),
+            size: theme.body_size,
+            wrap: theme.text_width(),
         });
         y += theme.header_height;
     }
@@ -357,16 +381,25 @@ pub fn lay_out(fonts: &mut Fonts, row: &Row, theme: &Theme) -> RowLayout {
     let mut code = Vec::new();
     lines_of(nodes, 0.0, &mut lines, &mut code);
 
-    for line in &lines {
+    for line in lines {
         let x = line.indent * theme.indent;
-        let count = line_count(fonts, line, theme.text_width() - x, theme);
+        let wrap = theme.text_width() - x;
+        let count = line_count(fonts, &line, wrap, theme);
         let height = count as f32 * theme.line_height;
+        let size = if line.heading {
+            theme.body_size * 1.15
+        } else {
+            theme.body_size
+        };
         blocks.push(Block {
             y,
             x,
             height,
             lines: count,
             kind: Kind::Text,
+            spans: line.spans,
+            size,
+            wrap,
         });
         y += height + theme.block_gap;
     }
@@ -382,6 +415,14 @@ pub fn lay_out(fonts: &mut Fonts, row: &Row, theme: &Theme) -> RowLayout {
             height,
             lines: count,
             kind: Kind::Code,
+            spans: vec![TextSpan {
+                text: block.clone(),
+                bold: false,
+                italic: false,
+                mono: true,
+            }],
+            size: theme.code_size,
+            wrap: theme.text_width(),
         });
         y += height + theme.block_gap;
     }
@@ -396,6 +437,9 @@ pub fn lay_out(fonts: &mut Fonts, row: &Row, theme: &Theme) -> RowLayout {
             height,
             lines: 0,
             kind: Kind::Attachment,
+            spans: Vec::new(),
+            size: theme.body_size,
+            wrap: theme.text_width(),
         });
         y += height;
     }
@@ -407,6 +451,9 @@ pub fn lay_out(fonts: &mut Fonts, row: &Row, theme: &Theme) -> RowLayout {
             height: theme.reaction_height,
             lines: 1,
             kind: Kind::Reactions,
+            spans: Vec::new(),
+            size: theme.body_size,
+            wrap: theme.text_width(),
         });
         y += theme.reaction_height;
     }

@@ -34,6 +34,15 @@ impl Default for Fonts {
 }
 
 impl Fonts {
+    /// The loaded fonts, for a renderer that has to shape the very same text.
+    ///
+    /// Exposed rather than duplicated: a renderer with its own `FontSystem`
+    /// could resolve a different face for the same request and draw a different
+    /// number of lines than the layout reserved.
+    pub fn system_mut(&mut self) -> &mut FontSystem {
+        &mut self.system
+    }
+
     pub fn new() -> Self {
         Self {
             system: FontSystem::new(),
