@@ -74,13 +74,10 @@ fn now_ms() -> i64 {
 }
 
 /// Builds the notify context the engine needs from the member records.
-fn context_from(me: User, thread_mode: ThreadMode, members: &[ChannelMember]) -> SyncContext {
+fn context_from(me: User, thread_mode: ThreadMode, _members: &[ChannelMember]) -> SyncContext {
+    // The members are not copied in: notification settings are read from the
+    // store at the moment a decision is made, and these are already in it.
     let mut context = SyncContext::new(me, thread_mode);
-    for member in members {
-        context
-            .channel_notify_props
-            .insert(member.channel_id.clone(), member.notify_props.clone());
-    }
     // Deliberately "not looking at anything, window unfocused" so the
     // AlreadyLooking rule cannot mask a mislabelled notification.
     context.active_channel = None;

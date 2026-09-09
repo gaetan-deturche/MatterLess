@@ -1,5 +1,5 @@
 use crate::error::Result;
-use crate::model::{Post, Preference, Reaction, Timestamp, UserThread};
+use crate::model::{ChannelMember, Post, Preference, Reaction, Timestamp, UserThread};
 use serde::Deserialize;
 
 /// The raw frame as it arrives. `data` is deliberately untyped: each event puts
@@ -65,6 +65,15 @@ pub enum Event {
     },
     ChannelViewed {
         channel_id: String,
+    },
+    /// This reader's membership of a channel changed -- muting it, or changing
+    /// its notification level, here or on another device.
+    ///
+    /// The member carries `notify_props`, which is where muting lives, so
+    /// without this a channel muted elsewhere kept notifying until something
+    /// else happened to refetch membership.
+    ChannelMemberUpdated {
+        member: Box<ChannelMember>,
     },
     /// Read state changed elsewhere -- another device marking channels read.
     /// Without this, reading on your phone never clears the unread here.
@@ -139,6 +148,7 @@ impl Event {
             Event::Typing { .. } => "typing",
             Event::StatusChange { .. } => "status_change",
             Event::ChannelViewed { .. } => "channel_viewed",
+            Event::ChannelMemberUpdated { .. } => "channel_member_updated",
             Event::ChannelsViewed { .. } => "multiple_channels_viewed",
             Event::ReactionAdded(_) => "reaction_added",
             Event::ReactionRemoved(_) => "reaction_removed",
@@ -302,6 +312,16 @@ pub fn parse(envelope: &Envelope) -> Result<Option<Event>> {
                 channel_times: times,
             }
         }
+        // The server spells the payload key in camel case here, unlike the
+        // snake_case it uses for `post` and `thread`.
+        "channel_member_updated" => match decode_nested::<ChannelMember>(data, "channelMember")? {
+            Some(member) => Event::ChannelMemberUpdated {
+                member: Box::new(member),
+            },
+            None => Event::Other {
+                name: "channel_member_updated".into(),
+            },
+        },
         "reaction_added" | "reaction_removed" => {
             let Some(reaction) = decode_nested::<Reaction>(data, "reaction")? else {
                 return Ok(Some(Event::Other { name: name.into() }));
@@ -593,6 +613,32 @@ mod thread_event_tests {
             assert_eq!(timestamp, 1234);
             assert_eq!((unread_replies, unread_mentions), (2, 1));
         }
+    }
+
+    /// The member arrives under `channelMember`, in camel case -- unlike the
+    /// snake_case `post` and `thread` keys beside it -- and as an encoded string
+    /// rather than an object. The whole point of this event is `notify_props`,
+    /// so the test asserts the muting reaches through.
+    #[test]
+    fn a_channel_member_update_carries_its_notify_props() {
+        let member = r#"{"channel_id":"c1","user_id":"me","last_viewed_at":7,"msg_count":3,"mention_count":0,"notify_props":{"mark_unread":"mention"}}"#;
+        let frame = serde_json::json!({
+            "event": "channel_member_updated",
+            "data": { "channelMember": member },
+            "seq": 9,
+        })
+        .to_string();
+        let envelope: Envelope = serde_json::from_str(&frame).unwrap();
+        let Some(Event::ChannelMemberUpdated { member }) = parse(&envelope).unwrap() else {
+            panic!("not a member update");
+        };
+        assert_eq!(member.channel_id, "c1");
+        assert_eq!(member.user_id, "me");
+        assert_eq!(
+            member.notify_props.get("mark_unread").map(String::as_str),
+            Some("mention"),
+            "muting is the setting this event exists to carry"
+        );
     }
 
     /// An empty thread id means the whole team was marked read, which is a

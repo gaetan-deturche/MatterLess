@@ -366,6 +366,70 @@ fn resync_is_split_so_a_reconnect_is_not_114_blocking_fetches() {
     );
 }
 
+/// Muting is a membership property, and the decision has to read it from where
+/// membership actually lives.
+///
+/// `notify::decide` was already tested against injected props and passed, while
+/// the app notified on every muted channel for months: the context field those
+/// props were supposed to arrive in was never written outside the probes. This
+/// test puts the setting only in the store, which is the one place the app
+/// keeps it.
+#[test]
+fn a_muted_channel_does_not_notify_from_the_store_alone() {
+    let engine = engine();
+    let context = SyncContext::new(me(), ThreadMode::Flat);
+    engine
+        .store()
+        .upsert_channels(&[Channel {
+            id: "c1".into(),
+            team_id: "t1".into(),
+            channel_type: "O".into(),
+            name: "c1".into(),
+            display_name: "c1".into(),
+            total_msg_count: 0,
+            total_msg_count_root: 0,
+            last_post_at: 0,
+            delete_at: 0,
+        }])
+        .unwrap();
+
+    let mut muted = HashMap::new();
+    // What Mattermost calls muted: only a mention marks it unread.
+    muted.insert("mark_unread".to_string(), "mention".to_string());
+    engine
+        .store()
+        .upsert_channel_members(&[ChannelMember {
+            channel_id: "c1".into(),
+            user_id: "me".into(),
+            last_viewed_at: 0,
+            msg_count: 0,
+            msg_count_root: 0,
+            mention_count: 0,
+            mention_count_root: 0,
+            notify_props: muted,
+        }])
+        .unwrap();
+
+    let deltas = engine
+        .apply_event(
+            &Event::Posted {
+                post: Box::new(post("p1", 100, "")),
+                channel_id: "c1".into(),
+            },
+            &context,
+        )
+        .unwrap();
+
+    let notified = deltas.iter().any(|delta| match delta {
+        Delta::PostUpserted { notify, .. } => *notify,
+        _ => false,
+    });
+    assert!(
+        !notified,
+        "a plain message in a muted channel must not notify"
+    );
+}
+
 #[test]
 fn unread_delta_follows_a_live_post() {
     let engine = engine();
