@@ -1305,7 +1305,10 @@
         return;
       }
       const layout = virtual.layoutOf(channelId, rows);
-      const target = virtual.offsetOf(layout, index) + anchor.within;
+      // The anchor is the viewport's bottom edge, so the scroll position that
+      // restores it is a viewport's height above it.
+      const target =
+        virtual.offsetOf(layout, index) + anchor.within - scroller.clientHeight;
       const correction = target - scroller.scrollTop;
       // A sub-pixel difference is not worth a write: it would fight the
       // browser's own scrolling for no visible gain.
