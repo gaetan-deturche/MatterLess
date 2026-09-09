@@ -2583,6 +2583,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "matterless-paint"
+version = "0.1.0"
+dependencies = [
+ "cosmic-text",
+ "matterless-layout",
+ "matterless-render",
+ "png 0.18.1",
+]
+
+[[package]]
 name = "matterless-probe"
 version = "0.1.0"
 dependencies = [
