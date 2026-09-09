@@ -61,8 +61,10 @@ impl Atlas {
             // white with the coverage in its alpha, so the vertex tints it; an
             // emoji is stored as it is, and its vertex is white so nothing
             // tints it. One format, one sampler, both kinds of glyph -- where
-            // a coverage-only atlas drew every emoji as a white silhouette.
-            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            // a coverage-only atlas drew every emoji as a white silhouette. Plain
+            // rather than sRGB: these bytes are already sRGB and the frame is
+            // written without a second encoding, so sampling must not decode.
+            format: wgpu::TextureFormat::Rgba8Unorm,
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });

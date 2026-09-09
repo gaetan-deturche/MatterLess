@@ -128,6 +128,9 @@ struct App {
     surface: Option<wgpu::Surface<'static>>,
     view: Option<matterless_view::View>,
     format: wgpu::TextureFormat,
+    /// The same surface read without its sRGB encoding, which is what the
+    /// pipeline writes through.
+    plain: wgpu::TextureFormat,
     size: (u32, u32),
     fonts: Fonts,
     painter: Painter,
@@ -219,6 +222,7 @@ impl App {
             surface: None,
             view: None,
             format: wgpu::TextureFormat::Bgra8UnormSrgb,
+            plain: wgpu::TextureFormat::Bgra8Unorm,
             size: (1000, 760),
             fonts: Fonts::new(),
             painter: Painter::new(),
@@ -414,6 +418,7 @@ impl ApplicationHandler for App {
 
         let capabilities = surface.get_capabilities(&adapter);
         self.format = capabilities.formats[0];
+        self.plain = matterless_view::plain(self.format);
         let physical = window.inner_size();
         self.size = (physical.width.max(1), physical.height.max(1));
         surface.configure(
@@ -425,17 +430,19 @@ impl ApplicationHandler for App {
                 height: self.size.1,
                 present_mode: wgpu::PresentMode::AutoVsync,
                 alpha_mode: capabilities.alpha_modes[0],
-                view_formats: Vec::new(),
+                view_formats: vec![self.plain],
                 desired_maximum_frame_latency: 2,
             },
         );
 
         println!(
-            "adapter: {} ({:?})",
+            "adapter: {} ({:?}), surface {:?} drawn through {:?}",
             adapter.get_info().name,
-            adapter.get_info().backend
+            adapter.get_info().backend,
+            self.format,
+            self.plain
         );
-        self.view = Some(matterless_view::View::new(device, queue, self.format));
+        self.view = Some(matterless_view::View::new(device, queue, self.plain));
         self.surface = Some(surface);
         self.window = Some(window);
         self.relayout();
@@ -456,7 +463,7 @@ impl ApplicationHandler for App {
                             height: self.size.1,
                             present_mode: wgpu::PresentMode::AutoVsync,
                             alpha_mode: wgpu::CompositeAlphaMode::Auto,
-                            view_formats: Vec::new(),
+                            view_formats: vec![self.plain],
                             desired_maximum_frame_latency: 2,
                         },
                     );
@@ -540,15 +547,18 @@ impl ApplicationHandler for App {
                 let scene = self.scene();
                 let size = self.size;
                 let ground = self.palette.ground;
+                let plain = self.plain;
                 let (Some(surface), Some(view)) = (&self.surface, &mut self.view) else {
                     return;
                 };
                 let Ok(frame) = surface.get_current_texture() else {
                     return;
                 };
-                let target = frame
-                    .texture
-                    .create_view(&wgpu::TextureViewDescriptor::default());
+                // Through the plain view, so the palette is not encoded twice.
+                let target = frame.texture.create_view(&wgpu::TextureViewDescriptor {
+                    format: Some(plain),
+                    ..Default::default()
+                });
                 view.draw_scene(&target, &mut self.fonts, &scene, size, ground);
                 frame.present();
                 // A frame's worth of input has been acted on.
