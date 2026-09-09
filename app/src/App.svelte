@@ -3451,9 +3451,12 @@
   }
   /* The native surface is drawing this rectangle. The scroller stays -- it is
      what the wheel arrives on, and what reports where the rectangle is -- but
-     what it holds is not drawn twice. */
+     what it holds is not drawn twice.
+     `opacity`, not `visibility`: a hidden element is not hit-tested either, so
+     the wheel fell through to a parent with no handler and the list would not
+     scroll at all. */
   .scroll-frame.native .scroll {
-    visibility: hidden;
+    opacity: 0;
   }
   .scroll {
     overflow-y: auto;

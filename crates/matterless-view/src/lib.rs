@@ -105,14 +105,18 @@ pub fn vertices_of(
                     rgba,
                 );
             }
-            Piece::Text { glyphs, ink } => {
-                let rgba = [
-                    ink[0] as f32 / 255.0,
-                    ink[1] as f32 / 255.0,
-                    ink[2] as f32 / 255.0,
-                    1.0,
-                ];
+            Piece::Text { glyphs, ink, faint } => {
+                let shade = |colour: &[u8; 3]| {
+                    [
+                        colour[0] as f32 / 255.0,
+                        colour[1] as f32 / 255.0,
+                        colour[2] as f32 / 255.0,
+                        1.0,
+                    ]
+                };
+                let (loud, quiet) = (shade(ink), shade(faint));
                 for glyph in glyphs {
+                    let rgba = if glyph.faint { quiet } else { loud };
                     let Some(slot) = atlas.slot(queue, fonts, cache, glyph.key) else {
                         continue;
                     };
