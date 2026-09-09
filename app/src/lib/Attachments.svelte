@@ -84,8 +84,34 @@
     }
   }
 
+  /** Everything on this post the overlay can show: pictures and videos, in the
+   *  order they were attached. A file card is not among them -- there is
+   *  nothing to magnify -- so stepping never lands on one. */
+  const viewable = $derived(files.filter((file) => file.image || file.video));
+  const at = $derived.by(() => {
+    const held = opened;
+    return held ? viewable.findIndex((file) => file.id === held.id) : -1;
+  });
+
+  /** Steps the overlay, wrapping: with three attachments the step after the
+   *  last is the first, which is what a reader flicking through expects. */
+  function step(by: number) {
+    if (at < 0 || viewable.length < 2) return;
+    const next = (at + by + viewable.length) % viewable.length;
+    opened = viewable[next] ?? opened;
+  }
+
   function onKeyDown(event: KeyboardEvent) {
-    if (event.key === "Escape") opened = null;
+    if (!opened) return;
+    if (event.key === "Escape") {
+      opened = null;
+    } else if (event.key === "ArrowLeft") {
+      event.preventDefault();
+      step(-1);
+    } else if (event.key === "ArrowRight") {
+      event.preventDefault();
+      step(1);
+    }
   }
 </script>
 
@@ -216,7 +242,32 @@
         onerror={() => opened && fellBack(opened)}
       />
     {/if}
+    {#if viewable.length > 1}
+      <!-- Stopping the click here matters: the overlay closes on any click that
+           reaches it, and stepping is not closing. -->
+      <button
+        type="button"
+        class="step back"
+        aria-label="Previous attachment"
+        onclick={(event) => {
+          event.stopPropagation();
+          step(-1);
+        }}>‹</button
+      >
+      <button
+        type="button"
+        class="step on"
+        aria-label="Next attachment"
+        onclick={(event) => {
+          event.stopPropagation();
+          step(1);
+        }}>›</button
+      >
+    {/if}
     <div class="bar">
+      {#if viewable.length > 1}
+        <span class="size">{at + 1} / {viewable.length}</span>
+      {/if}
       <span class="name">{opened.name}</span>
       <span class="size">{readableSize(opened.size)}</span>
       {#if opened.width > 0}<span class="size">{opened.width}×{opened.height}</span>{/if}
@@ -314,6 +365,32 @@
     color: #fff;
     text-shadow: 0 1px 6px rgb(0 0 0 / 0.8);
     pointer-events: none;
+  }
+  .step {
+    position: absolute;
+    top: 50%;
+    transform: translateY(-50%);
+    display: grid;
+    place-items: center;
+    width: 40px;
+    height: 64px;
+    font: inherit;
+    font-size: 28px;
+    line-height: 1;
+    border: 0;
+    border-radius: 8px;
+    background: rgb(0 0 0 / 0.45);
+    color: #fff;
+    cursor: pointer;
+  }
+  .step:hover {
+    background: rgb(0 0 0 / 0.7);
+  }
+  .step.back {
+    left: 14px;
+  }
+  .step.on {
+    right: 14px;
   }
   .lightbox video {
     max-width: 92vw;
