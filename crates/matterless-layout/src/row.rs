@@ -39,6 +39,8 @@ pub struct Theme {
     pub footer_height: f32,
     /// How far a list item or a quote is pushed in.
     pub indent: f32,
+    /// The reader's own offset, so a timestamp says what their clock says.
+    pub utc_offset_minutes: i32,
 }
 
 impl Default for Theme {
@@ -60,6 +62,7 @@ impl Default for Theme {
             separator_height: 34.0,
             footer_height: 26.0,
             indent: 18.0,
+            utc_offset_minutes: 0,
         }
     }
 }
@@ -125,6 +128,9 @@ pub struct TextSpan {
     pub bold: bool,
     pub italic: bool,
     pub mono: bool,
+    /// Drawn in the quieter ink: a timestamp, a reaction's count, anything the
+    /// eye should pass over on its way to the message.
+    pub faint: bool,
 }
 
 /// One paragraph-like run of inline content, and how far it is pushed in.
@@ -205,6 +211,7 @@ fn inline(nodes: &[Node], bold: bool, italic: bool, mono: bool, into: &mut Vec<T
                 bold,
                 italic,
                 mono,
+                faint: false,
             }),
             Node::Strong { children } => inline(children, true, italic, mono, into),
             Node::Emphasis { children } | Node::Strike { children } => {
@@ -216,36 +223,42 @@ fn inline(nodes: &[Node], bold: bool, italic: bool, mono: bool, into: &mut Vec<T
                 bold,
                 italic,
                 mono: true,
+                faint: false,
             }),
             Node::UserMention { username, .. } => into.push(TextSpan {
                 text: format!("@{username}"),
                 bold,
                 italic,
                 mono,
+                faint: false,
             }),
             Node::ChannelLink { name } => into.push(TextSpan {
                 text: format!("~{name}"),
                 bold,
                 italic,
                 mono,
+                faint: false,
             }),
             Node::Emoji { name, unicode } => into.push(TextSpan {
                 text: unicode.clone().unwrap_or_else(|| format!(":{name}:")),
                 bold,
                 italic,
                 mono,
+                faint: false,
             }),
             Node::SoftBreak | Node::HardBreak => into.push(TextSpan {
                 text: "\n".to_string(),
                 bold,
                 italic,
                 mono,
+                faint: false,
             }),
             Node::Image { alt, .. } => into.push(TextSpan {
                 text: alt.clone(),
                 bold,
                 italic,
                 mono,
+                faint: false,
             }),
             _ => {}
         }
@@ -302,7 +315,27 @@ pub fn lay_out(fonts: &mut Fonts, row: &Row, theme: &Theme) -> RowLayout {
     let mut blocks = Vec::new();
     let mut y = 0.0_f32;
 
-    let (nodes, reactions, attachments, header) = match row {
+    /// A message's own time, on the reader's clock.
+    ///
+    /// Hours and minutes only. A date belongs to the separator above the run,
+    /// which is why one exists.
+    fn clock(at: i64, offset_minutes: i32) -> String {
+        let local = at / 1000 + i64::from(offset_minutes) * 60;
+        let day = local.rem_euclid(86_400);
+        format!("{:02}:{:02}", day / 3600, (day % 3600) / 60)
+    }
+
+    fn plain(text: String) -> TextSpan {
+        TextSpan {
+            text,
+            bold: false,
+            italic: false,
+            mono: false,
+            faint: false,
+        }
+    }
+
+    let (nodes, post, header) = match row {
         Row::DateSeparator { .. } | Row::UnreadDivider => {
             return RowLayout {
                 height: theme.separator_height,
@@ -348,29 +381,50 @@ pub fn lay_out(fonts: &mut Fonts, row: &Row, theme: &Theme) -> RowLayout {
                 }],
             };
         }
-        Row::Post { post } => (
-            post.nodes.as_slice(),
-            post.reactions.len(),
-            post.files.len(),
-            true,
-        ),
-        Row::Continuation { post } => (
-            post.nodes.as_slice(),
-            post.reactions.len(),
-            post.files.len(),
-            false,
-        ),
+        Row::Post { post } => (post.nodes.as_slice(), Some(post), true),
+        Row::Continuation { post } => (post.nodes.as_slice(), Some(post), false),
     };
+    let reactions = post.map(|post| post.reactions.len()).unwrap_or(0);
+    let attachments = post.map(|post| post.files.len()).unwrap_or(0);
 
     y += theme.row_padding;
     if header {
+        // Who and when, as text rather than a reserved rectangle: it is a line
+        // like any other and it is what tells one message from the next.
+        let mut spans = Vec::new();
+        if let Some(post) = post {
+            spans.push(TextSpan {
+                text: post.author_name.clone(),
+                bold: true,
+                italic: false,
+                mono: false,
+                faint: false,
+            });
+            spans.push(plain("   ".to_string()));
+            spans.push(TextSpan {
+                text: clock(post.create_at, theme.utc_offset_minutes),
+                bold: false,
+                italic: false,
+                mono: false,
+                faint: true,
+            });
+            if post.edited {
+                spans.push(TextSpan {
+                    text: "  edited".to_string(),
+                    bold: false,
+                    italic: false,
+                    mono: false,
+                    faint: true,
+                });
+            }
+        }
         blocks.push(Block {
             y,
             x: 0.0,
             height: theme.header_height,
             lines: 1,
             kind: Kind::Header,
-            spans: Vec::new(),
+            spans,
             size: theme.body_size,
             wrap: theme.text_width(),
         });
@@ -420,6 +474,7 @@ pub fn lay_out(fonts: &mut Fonts, row: &Row, theme: &Theme) -> RowLayout {
                 bold: false,
                 italic: false,
                 mono: true,
+                faint: false,
             }],
             size: theme.code_size,
             wrap: theme.text_width(),
@@ -445,13 +500,32 @@ pub fn lay_out(fonts: &mut Fonts, row: &Row, theme: &Theme) -> RowLayout {
     }
 
     if reactions > 0 {
+        // One line of "emoji count" pairs. The pill behind each is the
+        // renderer's business; the layout only says what the line says.
+        let mut spans = Vec::new();
+        if let Some(post) = post {
+            for reaction in &post.reactions {
+                let face = reaction
+                    .unicode
+                    .clone()
+                    .unwrap_or_else(|| format!(":{}:", reaction.emoji));
+                spans.push(plain(format!("{face} ")));
+                spans.push(TextSpan {
+                    text: format!("{}   ", reaction.count),
+                    bold: false,
+                    italic: false,
+                    mono: false,
+                    faint: true,
+                });
+            }
+        }
         blocks.push(Block {
             y,
             x: 0.0,
             height: theme.reaction_height,
             lines: 1,
             kind: Kind::Reactions,
-            spans: Vec::new(),
+            spans,
             size: theme.body_size,
             wrap: theme.text_width(),
         });

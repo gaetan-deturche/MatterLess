@@ -99,6 +99,9 @@ pub struct PlacedGlyph {
     pub key: cosmic_text::CacheKey,
     pub x: i32,
     pub y: i32,
+    /// Drawn in the quieter ink. Carried per glyph because one line mixes them:
+    /// an author's name and the time beside it are one shaped run.
+    pub faint: bool,
 }
 
 /// A row reduced to what a renderer has to put on screen.
@@ -118,6 +121,7 @@ pub enum Piece {
     Text {
         glyphs: Vec<PlacedGlyph>,
         ink: [u8; 3],
+        faint: [u8; 3],
     },
 }
 
@@ -170,15 +174,21 @@ impl Painter {
                     height: 1.0,
                     colour: [palette.faint[0], palette.faint[1], palette.faint[2], 255],
                 }),
-                // The avatar's square, so the gutter is visibly accounted for
-                // until faces are drawn.
-                Kind::Header => pieces.push(Piece::Fill {
-                    x: 0.0,
-                    y,
-                    width: 28.0,
-                    height: 28.0,
-                    colour: palette.surface,
-                }),
+                Kind::Header => {
+                    // The avatar's square, until faces are drawn.
+                    pieces.push(Piece::Fill {
+                        x: 0.0,
+                        y,
+                        width: 28.0,
+                        height: 28.0,
+                        colour: palette.surface,
+                    });
+                    pieces.push(Piece::Text {
+                        glyphs: self.glyphs_of(fonts, block, x, y, theme),
+                        ink: palette.ink,
+                        faint: palette.faint,
+                    });
+                }
                 Kind::Code => {
                     pieces.push(Piece::Fill {
                         x,
@@ -190,13 +200,20 @@ impl Painter {
                     pieces.push(Piece::Text {
                         glyphs: self.glyphs_of(fonts, block, x + 8.0, y + 8.0, theme),
                         ink: palette.ink,
+                        faint: palette.faint,
                     });
                 }
                 Kind::Text => pieces.push(Piece::Text {
                     glyphs: self.glyphs_of(fonts, block, x, y, theme),
                     ink: palette.ink,
+                    faint: palette.faint,
                 }),
-                Kind::Reactions | Kind::Attachment | Kind::Footer => {
+                Kind::Reactions => pieces.push(Piece::Text {
+                    glyphs: self.glyphs_of(fonts, block, x, y, theme),
+                    ink: palette.ink,
+                    faint: palette.faint,
+                }),
+                Kind::Attachment | Kind::Footer => {
                     if block.height >= 1.0 {
                         pieces.push(Piece::Fill {
                             x,
@@ -237,15 +254,16 @@ impl Painter {
                     height,
                     colour,
                 } => canvas.fill(*x as i32, *y as i32, *width as i32, *height as i32, *colour),
-                Piece::Text { glyphs, ink } => {
-                    let colour = Color::rgb(ink[0], ink[1], ink[2]);
+                Piece::Text { glyphs, ink, faint } => {
                     for glyph in glyphs {
+                        let shade = if glyph.faint { *faint } else { *ink };
+                        let colour = Color::rgb(shade[0], shade[1], shade[2]);
                         self.glyphs.with_pixels(
                             fonts.system_mut(),
                             glyph.key,
                             colour,
                             |dx, dy, pixel| {
-                                canvas.blend(glyph.x + dx, glyph.y + dy, *ink, pixel.a());
+                                canvas.blend(glyph.x + dx, glyph.y + dy, shade, pixel.a());
                             },
                         );
                     }
@@ -294,6 +312,7 @@ impl Painter {
                     key: physical.cache_key,
                     x: physical.x,
                     y: physical.y,
+                    faint: glyph.metadata == FAINT,
                 });
             }
         }
@@ -301,8 +320,16 @@ impl Painter {
     }
 }
 
+/// Marks a faint span so its glyphs can be told apart after shaping.
+const FAINT: usize = 1;
+
 fn attrs_of(span: &TextSpan) -> Attrs<'static> {
     let mut attrs = Attrs::new();
+    if span.faint {
+        // Metadata rides through shaping onto every glyph the span produces,
+        // which is how one run can be drawn in two colours.
+        attrs = attrs.metadata(FAINT);
+    }
     if span.mono {
         attrs = attrs.family(Family::Monospace);
     }
