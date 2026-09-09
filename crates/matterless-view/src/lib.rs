@@ -11,6 +11,7 @@
 
 pub mod atlas;
 pub mod feed;
+pub mod sidebar;
 
 use atlas::{Atlas, SIDE};
 use cosmic_text::SwashCache;

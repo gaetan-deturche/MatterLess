@@ -9,6 +9,7 @@ matterless-core = { path = "../matterless-core" }
 matterless-layout = { path = "../matterless-layout" }
 matterless-paint = { path = "../matterless-paint" }
 matterless-render = { path = "../matterless-render" }
+matterless-ui = { path = "../matterless-ui" }
 matterless-store = { path = "../matterless-store" }
 # The Vulkan backend is selected explicitly at instance creation; wgpu is the
 # API on top of it rather than an abstraction over which one to use.

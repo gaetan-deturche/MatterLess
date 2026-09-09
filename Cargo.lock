@@ -3039,6 +3039,7 @@ dependencies = [
  "matterless-paint",
  "matterless-render",
  "matterless-store",
+ "matterless-ui",
  "png 0.18.1",
  "pollster",
  "wgpu",
