@@ -461,6 +461,14 @@ export const attachFile = (
 export const onAttachment = (handle: (payload: AttachmentEvent) => void) =>
   listen<AttachmentEvent>("attachment", (event) => handle(event.payload));
 
+/** Announces a newer build. Carries the version and nothing else: the app has
+ *  not fetched or written anything at this point, and will not until asked. */
+export const onUpdateAvailable = (handle: (version: string) => void) =>
+  listen<string>("update.available", (event) => handle(event.payload));
+
+/** Downloads and installs the update, then restarts. Only ever from a click. */
+export const installUpdate = () => invoke<void>("install_update");
+
 /** One completion offered for `@`, `~` or `:`. */
 export interface Suggestion {
   /** What gets inserted. */
