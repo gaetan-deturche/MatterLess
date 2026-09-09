@@ -1,0 +1,9 @@
+[package]
+name = "matterless-sidebar"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+matterless-core = { path = "../matterless-core" }
+serde = { version = "1", features = ["derive"] }
+tracing = "0.1"

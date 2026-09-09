@@ -23,6 +23,7 @@ matterless-core = { version = "0.1.0", path = "../../crates/matterless-core" }
 matterless-layout = { version = "0.1.0", path = "../../crates/matterless-layout" }
 matterless-paint = { version = "0.1.0", path = "../../crates/matterless-paint" }
 matterless-render = { version = "0.1.0", path = "../../crates/matterless-render" }
+matterless-sidebar = { version = "0.1.0", path = "../../crates/matterless-sidebar" }
 # The list renderer, without its standalone window: this process already has one.
 matterless-view = { version = "0.1.0", path = "../../crates/matterless-view", default-features = false }
 matterless-store = { version = "0.1.0", path = "../../crates/matterless-store" }

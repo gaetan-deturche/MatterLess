@@ -2916,6 +2916,7 @@ dependencies = [
  "matterless-layout",
  "matterless-paint",
  "matterless-render",
+ "matterless-sidebar",
  "matterless-store",
  "matterless-sync",
  "matterless-view",
@@ -3000,6 +3001,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "matterless-sidebar"
+version = "0.1.0"
+dependencies = [
+ "matterless-core",
+ "serde",
+ "tracing",
+]
+
+[[package]]
 name = "matterless-store"
 version = "0.1.0"
 dependencies = [
@@ -3038,6 +3048,7 @@ dependencies = [
  "matterless-layout",
  "matterless-paint",
  "matterless-render",
+ "matterless-sidebar",
  "matterless-store",
  "matterless-ui",
  "png 0.18.1",

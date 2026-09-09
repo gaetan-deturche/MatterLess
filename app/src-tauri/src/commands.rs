@@ -52,22 +52,9 @@ pub struct SessionInfo {
     pub server: String,
 }
 
-#[derive(Serialize, Clone)]
-pub struct ChannelSummary {
-    /// The other person in a direct message, whose avatar labels it.
-    ///
-    /// `None` for a channel and for a group message: a group has several
-    /// people, so it gets an icon rather than a face.
-    pub counterpart_id: Option<String>,
-    pub id: String,
-    pub team_id: String,
-    pub display_name: String,
-    pub channel_type: String,
-    pub last_post_at: i64,
-    pub unread: i64,
-    pub mentions: i64,
-    pub muted: bool,
-}
+// Both shells need these, and the native window cannot reach a Tauri command,
+// so the shapes and the rules that order them live in their own crate.
+pub use matterless_sidebar::{ChannelSummary, Group as SidebarGroup};
 
 #[derive(Serialize)]
 pub struct Bootstrap {
@@ -435,7 +422,7 @@ async fn summarise(
     let counterparts: Vec<String> = summaries
         .iter()
         .filter(|(channel, _)| channel.channel_type == "D")
-        .filter_map(|(channel, _)| direct_message_counterpart(&channel.name, me_id))
+        .filter_map(|(channel, _)| matterless_sidebar::counterpart(&channel.name, me_id))
         .collect();
     hydrate_users(state, counterparts.clone()).await?;
     let names = {
@@ -459,9 +446,9 @@ async fn summarise(
             // does not even follow.
             let (messages, mentions) = unread.visible(collapsed);
             ChannelSummary {
-                display_name: label_for_channel(&channel, me_id, &names),
+                display_name: matterless_sidebar::label(&channel, me_id, &names),
                 counterpart_id: if channel.channel_type == "D" {
-                    direct_message_counterpart(&channel.name, me_id)
+                    matterless_sidebar::counterpart(&channel.name, me_id)
                 } else {
                     None
                 },
@@ -917,22 +904,13 @@ pub async fn sidebar(
             .map_err(fail)?
             .unwrap_or_default()
     };
-    let mut team_order: HashMap<String, usize> = arranged
-        .split(',')
-        .map(str::trim)
-        .filter(|id| !id.is_empty())
-        .enumerate()
-        .map(|(index, id)| (id.to_string(), index))
-        .collect();
-    // Anything the preference does not mention keeps the API's order, after
-    // the teams that were arranged.
-    let mut next = team_order.len();
-    for team in &teams {
-        if !team_order.contains_key(&team.id) {
-            team_order.insert(team.id.clone(), next);
-            next += 1;
-        }
-    }
+    let team_order = matterless_sidebar::team_order(
+        &arranged,
+        &teams
+            .iter()
+            .map(|team| team.id.clone())
+            .collect::<Vec<String>>(),
+    );
 
     // Every channel the reader is in, already carrying its unread and its
     // label, so grouping is a rearrangement rather than a second set of reads.
@@ -945,9 +923,8 @@ pub async fn sidebar(
             .map_err(fail)?
     };
     let rows = summarise(&state, &me_id, &display_mode, summaries).await?;
-    let by_id: HashMap<String, ChannelSummary> =
-        rows.into_iter().map(|row| (row.id.clone(), row)).collect();
 
+    // The categories as the reader arranged them, stored above.
     let stored = {
         let store = state.store.clone();
         tokio::task::spawn_blocking(move || store.sidebar())
@@ -955,86 +932,7 @@ pub async fn sidebar(
             .map_err(fail)?
             .map_err(fail)?
     };
-
-    let mut groups: Vec<SidebarGroup> = Vec::new();
-    let mut directs: Option<SidebarGroup> = None;
-    let mut placed: std::collections::HashSet<String> = std::collections::HashSet::new();
-
-    for (category, channel_ids) in stored {
-        let mut channels: Vec<ChannelSummary> = channel_ids
-            .iter()
-            .filter_map(|id| by_id.get(id).cloned())
-            .collect();
-        sort_group(&mut channels, &category.sorting);
-
-        if category.category_type == "direct_messages" {
-            // Merged across teams: the same conversations, listed once.
-            let group = directs.get_or_insert_with(|| SidebarGroup {
-                id: "direct_messages".to_string(),
-                display_name: "Direct messages".to_string(),
-                sort_order: category.sort_order,
-                category_type: category.category_type.clone(),
-                team_id: String::new(),
-                team_name: String::new(),
-                collapsed: category.collapsed,
-                channels: Vec::new(),
-            });
-            for channel in channels {
-                if placed.insert(channel.id.clone()) {
-                    group.channels.push(channel);
-                }
-            }
-            continue;
-        }
-
-        for channel in &channels {
-            placed.insert(channel.id.clone());
-        }
-        groups.push(SidebarGroup {
-            id: category.id,
-            display_name: category.display_name,
-            sort_order: category.sort_order,
-            category_type: category.category_type,
-            team_name: team_names
-                .get(&category.team_id)
-                .cloned()
-                .unwrap_or_default(),
-            team_id: category.team_id,
-            collapsed: category.collapsed,
-            channels,
-        });
-    }
-
-    // Favourites first, then the reader's own groups, then the ungrouped
-    // remainder -- and direct messages last, appended below.
-    //
-    // By category *kind* rather than by name: sorting alphabetically put
-    // "Channels" above "Favorites", which is the opposite of what a sidebar
-    // should lead with. The server's `sort_order` breaks ties, so several custom
-    // categories keep the order they were arranged in.
-    groups.sort_by_key(|group| {
-        let kind = match group.category_type.as_str() {
-            "favorites" => 0,
-            "custom" => 1,
-            "channels" => 2,
-            _ => 3,
-        };
-        (
-            team_order
-                .get(&group.team_id)
-                .copied()
-                .unwrap_or(usize::MAX),
-            kind,
-            group.sort_order,
-            group.display_name.clone(),
-        )
-    });
-
-    // DMs last, as they are in each team's own order.
-    if let Some(mut group) = directs {
-        sort_group(&mut group.channels, "recent");
-        groups.push(group);
-    }
+    let groups = matterless_sidebar::arrange(rows, stored, &team_names, &team_order);
 
     // Whether the reader groups unread channels separately. Reported rather
     // than applied: which channels are unread changes with every message and
@@ -1053,29 +951,6 @@ pub async fn sidebar(
         .as_deref()
             == Some("true")
     };
-
-    // Anything the categories did not mention still has to be reachable: a
-    // channel joined seconds ago is in no category until the server says so.
-    let mut loose: Vec<ChannelSummary> = by_id
-        .into_values()
-        .filter(|channel| !placed.contains(&channel.id))
-        .collect();
-    if !loose.is_empty() {
-        sort_group(&mut loose, "recent");
-        tracing::debug!(count = loose.len(), "channels outside any category");
-        groups.push(SidebarGroup {
-            id: "uncategorised".to_string(),
-            display_name: "Other".to_string(),
-            // Ungrouped, so it sits with the ungrouped: after the reader's own
-            // categories, before direct messages.
-            sort_order: i64::MAX,
-            category_type: "channels".to_string(),
-            team_id: String::new(),
-            team_name: String::new(),
-            collapsed: false,
-            channels: loose,
-        });
-    }
 
     tracing::info!(
         groups = groups.len(),
@@ -1105,38 +980,6 @@ pub struct SidebarPayload {
     /// The reader groups unread channels separately. Applied in the shell,
     /// where "which channels are unread" is live.
     pub separate_unreads: bool,
-}
-
-/// Orders one group on the terms its category asks for.
-fn sort_group(channels: &mut [ChannelSummary], sorting: &str) {
-    match sorting {
-        // Already in the reader's own order, straight from `channel_ids`.
-        "manual" => {}
-        "recent" => channels.sort_by_key(|channel| std::cmp::Reverse(channel.last_post_at)),
-        // Empty means the server left it at its default, which is alphabetical.
-        _ => channels.sort_by(|left, right| {
-            left.display_name
-                .to_lowercase()
-                .cmp(&right.display_name.to_lowercase())
-        }),
-    }
-}
-
-/// One drawn section of the sidebar.
-#[derive(Serialize, Clone)]
-pub struct SidebarGroup {
-    pub id: String,
-    pub display_name: String,
-    /// The server's own order within a team, which breaks ties between several
-    /// custom categories.
-    pub sort_order: i64,
-    /// `favorites`, `custom`, `channels` or `direct_messages`.
-    pub category_type: String,
-    pub team_id: String,
-    /// Shown when more than one team contributes groups.
-    pub team_name: String,
-    pub collapsed: bool,
-    pub channels: Vec<ChannelSummary>,
 }
 
 /// One category of standard emoji, ready to draw.
@@ -1333,27 +1176,6 @@ fn name_display_mode(client_config: &HashMap<String, String>) -> String {
         .unwrap_or_else(|| "username".to_string())
 }
 
-/// What to put in the sidebar. A DM has no display name of its own.
-fn label_for_channel(
-    channel: &matterless_core::Channel,
-    me_id: &str,
-    names: &HashMap<String, String>,
-) -> String {
-    if !channel.display_name.is_empty() {
-        return channel.display_name.clone();
-    }
-    if channel.channel_type == "D" {
-        let counterpart = direct_message_counterpart(&channel.name, me_id);
-        return match counterpart {
-            Some(id) if id == me_id => "You".to_string(),
-            Some(id) => names.get(&id).cloned().unwrap_or(id),
-            None => channel.name.clone(),
-        };
-    }
-    // Group DMs fall back to their generated name until participants are named.
-    channel.name.clone()
-}
-
 /// Fetches any of these users we do not already hold, in one request.
 ///
 /// An author or a DM counterpart has to be resolvable to a name, and doing that
@@ -1445,17 +1267,6 @@ async fn hydrate_users(state: &AppState, ids: Vec<String>) -> Result<usize, Stri
         .map_err(fail)?
         .map_err(fail)?;
     Ok(wanted)
-}
-
-/// A direct message has no display name of its own: the name is
-/// `<userA>__<userB>`, and what a person expects to see is the other party.
-fn direct_message_counterpart(channel_name: &str, me_id: &str) -> Option<String> {
-    let (left, right) = channel_name.split_once("__")?;
-    if left == right {
-        // A note-to-self channel: both halves are you.
-        return Some(me_id.to_string());
-    }
-    Some(if left == me_id { right } else { left }.to_string())
 }
 
 fn thread_mode_from(text: &str) -> ThreadMode {
@@ -4372,7 +4183,7 @@ async fn hits_for(
             .iter()
             .filter_map(|post| store.channel(&post.channel_id).ok().flatten())
             .filter(|channel| channel.channel_type == "D")
-            .filter_map(|channel| direct_message_counterpart(&channel.name, &viewer))
+            .filter_map(|channel| matterless_sidebar::counterpart(&channel.name, &viewer))
             .collect();
         let named = store.users_by_ids(&counterparts)?;
         let names: HashMap<String, String> = named
@@ -4383,7 +4194,7 @@ async fn hits_for(
         let mut rows = Vec::with_capacity(posts.len());
         for post in posts {
             let channel_label = match store.channel(&post.channel_id)? {
-                Some(channel) => label_for_channel(&channel, &viewer, &names),
+                Some(channel) => matterless_sidebar::label(&channel, &viewer, &names),
                 None => post.channel_id.clone(),
             };
             // The same cache the stream uses, keyed by post and edit: a result

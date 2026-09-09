@@ -28,40 +28,6 @@ pub fn default_store() -> Option<std::path::PathBuf> {
     )
 }
 
-/// One channel, as the sidebar needs it.
-pub struct Listed {
-    pub id: String,
-    pub label: String,
-    pub unread: i64,
-    pub mentions: i64,
-    pub muted: bool,
-}
-
-/// Every channel in the store, most recently active first.
-///
-/// The same order the sidebar's "recent" sorting uses, and the only order that
-/// makes sense without the server's category arrangement -- which this reads
-/// none of, deliberately: it is a feed for the port, not the sidebar the app
-/// will eventually have.
-pub fn channels(store: &Store, me_id: &str) -> Vec<Listed> {
-    store
-        .channels_with_unread(me_id)
-        .unwrap_or_default()
-        .into_iter()
-        .map(|(channel, unread)| Listed {
-            label: if channel.display_name.is_empty() {
-                channel.name.clone()
-            } else {
-                channel.display_name.clone()
-            },
-            id: channel.id,
-            unread: unread.messages,
-            mentions: unread.mentions,
-            muted: unread.muted,
-        })
-        .collect()
-}
-
 /// Opens the store, read-only.
 pub fn open(path: &Path) -> Result<Store, String> {
     if !path.is_file() {

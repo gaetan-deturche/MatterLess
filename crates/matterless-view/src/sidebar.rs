@@ -32,6 +32,9 @@ pub enum Entry {
         unread: i64,
         mentions: i64,
         muted: bool,
+        /// A direct or group message, which is sigilled by a person rather than
+        /// by a hash.
+        direct: bool,
     },
 }
 
@@ -179,6 +182,7 @@ impl Sidebar {
                     unread,
                     mentions,
                     muted,
+                    direct,
                 } => {
                     let chosen = self.selected.as_deref() == Some(id.as_str());
                     if chosen || input.hovered() == Some(name.as_str()) {
@@ -204,9 +208,10 @@ impl Sidebar {
                     // enough to wrap would run into the row beneath it. The
                     // panel's own clip cuts it off instead, which is what
                     // `overflow: hidden` did for the same rows in HTML.
+                    let sigil = if *direct { "@" } else { "#" };
                     let glyphs = painter.run(
                         fonts,
-                        &format!("# {label}"),
+                        &format!("{sigil} {label}"),
                         row.rect.x + 6.0,
                         row.rect.y + 4.0,
                         Run::label(f32::MAX),
@@ -258,6 +263,7 @@ mod tests {
                 unread: 0,
                 mentions: 0,
                 muted: false,
+                direct: false,
             },
             Entry::Channel {
                 id: "two".into(),
@@ -265,6 +271,7 @@ mod tests {
                 unread: 3,
                 mentions: 1,
                 muted: false,
+                direct: false,
             },
         ])
     }
@@ -334,6 +341,7 @@ mod tests {
                     unread: 0,
                     mentions: 0,
                     muted: false,
+                    direct: false,
                 })
                 .collect(),
         );
