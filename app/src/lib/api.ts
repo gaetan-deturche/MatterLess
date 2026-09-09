@@ -52,6 +52,8 @@ export interface FileRef {
   height: number;
   /** Drawn inline as a picture rather than as a card. */
   image: boolean;
+  /** Played inline rather than offered as a download. */
+  video: boolean;
   variant: ImageVariant;
   /** A ~1 KB base64 JPEG from the post's metadata: a placeholder that costs no
    *  request. */
