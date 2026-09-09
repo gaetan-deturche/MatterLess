@@ -11,6 +11,7 @@
 
 pub mod atlas;
 pub mod feed;
+pub mod header;
 pub mod sidebar;
 
 use atlas::{Atlas, SIDE};

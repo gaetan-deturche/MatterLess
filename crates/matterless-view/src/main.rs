@@ -15,6 +15,7 @@ use matterless_ui::input::{Event as UiEvent, Input};
 use matterless_render::markdown::Node;
 use matterless_render::{PostRow, Row};
 use matterless_ui::{Axis, Node as Boxed, Placed, Rect, Size};
+use matterless_view::header::{self, Header};
 use matterless_view::sidebar::{Canvas, Entry, Sidebar};
 use std::sync::Arc;
 use winit::application::ApplicationHandler;
@@ -235,12 +236,18 @@ impl App {
         app
     }
 
-    /// The window as boxes: a fixed sidebar, and the stream taking the rest.
+    /// The window as boxes: a fixed sidebar, and beside it a column holding the
+    /// header over the stream.
     fn shell(&self) -> Vec<Placed> {
         let tree = Boxed::new("shell", Size::Grow(1.0))
             .axis(Axis::Row)
             .with(Boxed::new("sidebar-panel", Size::Fixed(SIDEBAR)))
-            .with(Boxed::new("stream", Size::Grow(1.0)));
+            .with(
+                Boxed::new("column", Size::Grow(1.0))
+                    .axis(Axis::Column)
+                    .with(Boxed::new("header", Size::Fixed(header::HEIGHT)))
+                    .with(Boxed::new("stream", Size::Grow(1.0))),
+            );
         matterless_ui::solve::solve(
             &tree,
             Rect::new(0.0, 0.0, self.size.0 as f32, self.size.1 as f32),
@@ -251,13 +258,35 @@ impl App {
         Rect::new(0.0, 0.0, SIDEBAR, self.size.1 as f32)
     }
 
-    fn stream_rect(&self) -> Rect {
+    /// Everything right of the sidebar: the header and the stream together.
+    fn column_rect(&self) -> Rect {
         Rect::new(
             SIDEBAR,
             0.0,
             (self.size.0 as f32 - SIDEBAR).max(0.0),
             self.size.1 as f32,
         )
+    }
+
+    fn stream_rect(&self) -> Rect {
+        header::below(self.column_rect())
+    }
+
+    /// The open channel's name, which is what the header says.
+    fn title(&self) -> String {
+        let Some(open) = self.sidebar.selected.as_deref() else {
+            return String::new();
+        };
+        self.sidebar
+            .entries
+            .iter()
+            .find_map(|entry| match entry {
+                Entry::Channel { id, label, .. } if id == open => Some(label.clone()),
+                _ => None,
+            })
+            // The sample feed has no sidebar row behind it, and an id is a poor
+            // name but better than an empty strip.
+            .unwrap_or_else(|| open.to_string())
     }
 
     fn redraw(&self) {
@@ -286,6 +315,7 @@ impl App {
     fn scene(&mut self) -> Scene {
         let mut scene = Scene::default();
         let sidebar = self.sidebar_rect();
+        let strip = header::strip(self.column_rect());
         let stream = self.stream_rect();
 
         scene.clip_to(sidebar.x, sidebar.y, sidebar.width, sidebar.height);
@@ -297,6 +327,19 @@ impl App {
             palette: &self.palette,
         };
         self.sidebar.draw(&mut canvas, &boxes, sidebar, &self.input);
+
+        // Read before the painter is borrowed, and given its own layer after: a
+        // name too long for the strip is cut by the clip rather than running
+        // along the top of the first message.
+        let header = Header::new(self.title());
+        scene.clip_to(strip.x, strip.y, strip.width, strip.height);
+        let mut canvas = Canvas {
+            scene: &mut scene,
+            painter: &mut self.painter,
+            fonts: &mut self.fonts,
+            palette: &self.palette,
+        };
+        header.draw(&mut canvas, strip);
 
         scene.clip_to(stream.x, stream.y, stream.width, stream.height);
         let mut top = stream.y - self.scroll;
@@ -330,7 +373,7 @@ impl App {
             .map(|row| lay_out(&mut self.fonts, row, &self.theme))
             .collect();
         let total: f32 = self.laid.iter().map(|row| row.height).sum();
-        let reach = (total - self.size.1 as f32).max(0.0);
+        let reach = (total - self.stream_rect().height).max(0.0);
         self.scroll = self.scroll.clamp(0.0, reach);
     }
 }
@@ -465,19 +508,25 @@ impl ApplicationHandler for App {
                     MouseScrollDelta::LineDelta(_, lines) => lines * self.theme.line_height * 3.0,
                     MouseScrollDelta::PixelDelta(position) => position.y as f32,
                 };
-                let boxes = self.sidebar.boxes(self.sidebar_rect());
+                let mut boxes = self.sidebar.boxes(self.sidebar_rect());
+                boxes.extend(header::boxes(self.column_rect()));
                 self.input.apply(UiEvent::Wheel { x: 0.0, y: by }, &boxes);
                 let within = self.sidebar_rect();
-                // The sidebar takes it when the pointer is over the sidebar;
-                // otherwise the stream does. One wheel, two panels, and the
-                // pointer decides -- which is what `wheel_over` is for.
-                let over_sidebar = self
+                // One wheel, three panels, and the pointer decides which of them
+                // it belongs to -- which is what `wheel_over` is for. The header
+                // takes it and does nothing, so turning the wheel over a fixed
+                // strip does not move the messages under it.
+                if self
                     .input
                     .wheel_over(&boxes, |name| name == "sidebar")
-                    .is_some();
-                if over_sidebar {
+                    .is_some()
+                {
                     self.sidebar.react(&self.input, &boxes, within);
-                } else {
+                } else if self
+                    .input
+                    .wheel_over(&boxes, |name| name == "header")
+                    .is_none()
+                {
                     let total: f32 = self.laid.iter().map(|row| row.height).sum();
                     let reach = (total - self.stream_rect().height).max(0.0);
                     self.scroll = (self.scroll - by).clamp(0.0, reach);
