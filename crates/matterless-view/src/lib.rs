@@ -10,6 +10,7 @@
 //! DOM list came from.
 
 pub mod atlas;
+pub mod feed;
 
 use atlas::{Atlas, SIDE};
 use cosmic_text::SwashCache;
