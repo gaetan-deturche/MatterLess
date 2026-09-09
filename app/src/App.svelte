@@ -569,6 +569,32 @@
     log.debug("sidebar.team.reached", { team: teamId });
   }
 
+  /** Scrolls the sidebar to the direct messages.
+   *
+   *  They have no team icon to reach them from: every team's direct-message
+   *  category holds the same conversations, so they are merged into one group
+   *  that belongs to no team and sits below all of them.
+   */
+  function goToDirects() {
+    const row = sidebar?.querySelector<HTMLElement>("[data-directs]");
+    if (!row) return;
+    row.scrollIntoView({ block: "start", behavior: "smooth" });
+    log.debug("sidebar.directs.reached", {});
+  }
+
+  /** What the direct messages are holding, for the rail's own row. */
+  const directUnread = $derived.by(() => {
+    let messages = 0;
+    let mentions = 0;
+    for (const group of arranged) {
+      if (group.category_type !== "direct_messages") continue;
+      const sum = tally(group.channels);
+      messages += sum.messages;
+      mentions += sum.mentions;
+    }
+    return { messages, mentions };
+  });
+
   /** What each team is holding, by team id.
    *
    *  Derived over every group rather than the visible ones, because a team's
@@ -2140,6 +2166,21 @@
                 {/if}
               </button>
             {/each}
+            <!-- The one destination in this list no team icon reaches. -->
+            <button
+              type="button"
+              class="directs"
+              title="Direct messages"
+              aria-label="Direct messages"
+              onclick={goToDirects}
+            >
+              <span class="initial">✉</span>
+              {#if directUnread.mentions > 0}
+                <span class="pip mention">{directUnread.mentions}</span>
+              {:else if directUnread.messages > 0}
+                <span class="pip"></span>
+              {/if}
+            </button>
           </div>
         {/if}
       <nav bind:this={sidebar}>
@@ -2235,7 +2276,20 @@
             <!-- The row is a heading with an action beside it, not one
                  control: collapsing the category and adding to it are different
                  things, and a button cannot be nested inside a button. -->
-            <div class="group-row" class:unreads={group.category_type === "unreads"}>
+            {#if !group.team_name}
+              <!-- A group belonging to no team: the merged direct messages, and
+                   the synthesised unreads. Separators are drawn by team
+                   headings, so a teamless group had nothing above it and ran
+                   straight on from whatever came before. Its own element rather
+                   than a border on the row, so the rule lines up with the team
+                   rules and the group's label does not move. -->
+              <div class="parting" aria-hidden="true"></div>
+            {/if}
+            <div
+              class="group-row"
+              class:unreads={group.category_type === "unreads"}
+              data-directs={group.category_type === "direct_messages" ? "1" : undefined}
+            >
             <button
               class="group"
               class:unreads={group.category_type === "unreads"}
@@ -3057,6 +3111,25 @@
   .group-row {
     display: flex;
     align-items: center;
+  }
+  /* The same inset and spacing a team heading's rule has, so the two read as
+     one kind of division rather than two. */
+  .parting {
+    margin: 18px 12px 4px;
+    border-top: 1px solid var(--rule);
+  }
+  /* So scrolling to the direct messages leaves the rule above them on screen,
+     rather than putting the group flush against the top edge. */
+  [data-directs] {
+    scroll-margin-top: 22px;
+  }
+  /* A rail row like the teams', but with no image to sit behind: the team
+     fallback is positioned under its icon, so this one is put back in flow and
+     centred by the button itself. */
+  .rail .directs .initial {
+    position: static;
+    z-index: auto;
+    font-size: 15px;
   }
   .group-row .add {
     flex: none;
