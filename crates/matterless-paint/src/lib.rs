@@ -125,6 +125,70 @@ pub enum Piece {
     },
 }
 
+/// A frame's worth of drawing, built up piece by piece.
+///
+/// The message list produces these from a row plan; the sidebar, the header and
+/// the composer produce them from boxes. Both end in the same list, so the same
+/// renderer draws them and there is one place where drawing happens.
+#[derive(Debug, Default, Clone)]
+pub struct Scene {
+    pub pieces: Vec<Piece>,
+}
+
+impl Scene {
+    pub fn fill(&mut self, x: f32, y: f32, width: f32, height: f32, colour: [u8; 4]) {
+        if width <= 0.0 || height <= 0.0 {
+            return;
+        }
+        self.pieces.push(Piece::Fill {
+            x,
+            y,
+            width,
+            height,
+            colour,
+        });
+    }
+
+    pub fn glyphs(&mut self, glyphs: Vec<PlacedGlyph>, ink: [u8; 3], faint: [u8; 3]) {
+        if glyphs.is_empty() {
+            return;
+        }
+        self.pieces.push(Piece::Text { glyphs, ink, faint });
+    }
+
+    pub fn extend(&mut self, pieces: impl IntoIterator<Item = Piece>) {
+        self.pieces.extend(pieces);
+    }
+}
+
+/// How a run of interface text is drawn. Not `row::Style`, which describes a
+/// message body: this is for a channel name, a button, a heading.
+#[derive(Debug, Clone, Copy)]
+pub struct Run {
+    pub size: f32,
+    pub line_height: f32,
+    pub bold: bool,
+    /// Where it wraps. Interface text is usually given more room than it needs
+    /// and clipped by its box instead.
+    pub wrap: f32,
+}
+
+impl Run {
+    pub fn label(wrap: f32) -> Self {
+        Self {
+            size: 13.0,
+            line_height: 18.0,
+            bold: false,
+            wrap,
+        }
+    }
+
+    pub fn bold(mut self) -> Self {
+        self.bold = true;
+        self
+    }
+}
+
 /// Holds the rasterised glyphs between frames.
 ///
 /// Rasterising is the expensive half -- shaping is cheap by comparison -- so the
@@ -270,6 +334,47 @@ impl Painter {
                 }
             }
         }
+    }
+
+    /// Shapes one run of interface text and reports where each glyph lands.
+    ///
+    /// `y` is the run's *top*, not its baseline: every other measurement in
+    /// this app is a box, and a caller that has just been handed a rectangle
+    /// should not have to know about baselines to put text in it.
+    pub fn run(
+        &mut self,
+        fonts: &mut Fonts,
+        text: &str,
+        x: f32,
+        y: f32,
+        run: Run,
+    ) -> Vec<PlacedGlyph> {
+        if text.is_empty() {
+            return Vec::new();
+        }
+        let mut buffer = Buffer::new(fonts.system_mut(), Metrics::new(run.size, run.line_height));
+        let mut shaped = buffer.borrow_with(fonts.system_mut());
+        shaped.set_size(Some(run.wrap), None);
+        let mut attrs = Attrs::new();
+        if run.bold {
+            attrs = attrs.weight(Weight::BOLD);
+        }
+        shaped.set_text(text, &attrs, Shaping::Advanced, None);
+        shaped.shape_until_scroll(false);
+
+        let mut placed = Vec::new();
+        for line in shaped.layout_runs() {
+            for glyph in line.glyphs {
+                let physical = glyph.physical((x, y + line.line_y), 1.0);
+                placed.push(PlacedGlyph {
+                    key: physical.cache_key,
+                    x: physical.x,
+                    y: physical.y,
+                    faint: false,
+                });
+            }
+        }
+        placed
     }
 
     /// Shapes a block's spans and reports where each glyph lands.
