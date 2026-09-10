@@ -44,6 +44,9 @@ pub enum Update {
     /// from whatever thread the platform fires its callback on, and delivered
     /// like everything else on the one that owns the window.
     Activated(String),
+    /// Older history arrived and is in the store. `more` is false once the
+    /// beginning of the channel has been reached, so the window stops asking.
+    Older { channel_id: String, more: bool },
     /// A picture arrived, decoded to straight RGBA and ready for the atlas.
     ///
     /// Decoded on the socket thread rather than the drawing one: a JPEG is
@@ -68,6 +71,13 @@ pub enum Ask {
         root_id: String,
         message: String,
     },
+    /// Tell the server this channel has been seen, and record the watermark.
+    ///
+    /// Without it a channel stays unread however long it is looked at, and the
+    /// sidebar is permanently wrong.
+    MarkRead { channel_id: String },
+    /// Fetch a page of older history and store it.
+    LoadOlder { channel_id: String },
     /// Fetch a picture, decoded to fit the box the layout reserved for it.
     ///
     /// The size is asked for rather than settled later because a picture scaled
@@ -196,6 +206,7 @@ async fn run(
             return;
         }
     };
+    let me_id = me.id.clone();
     println!("signed in as {}", me.username);
     wake.wake(Update::SignedIn {
         id: me.id.clone(),
@@ -259,6 +270,59 @@ async fn run(
                             channel_id,
                             failed,
                         });
+                    }
+                    Ask::MarkRead { channel_id } => {
+                        if let Err(error) = rest.view_channel(&me_id, &channel_id).await {
+                            // Not worth surfacing: the next look at the channel
+                            // tries again.
+                            eprintln!("marking {channel_id} read: {error}");
+                            continue;
+                        }
+                        // The server's own clock, taken from the newest post
+                        // rather than read locally: this is compared against
+                        // post times later, and mixing clocks would eventually
+                        // hide the unread divider for good on a machine whose
+                        // clock runs fast.
+                        let watermark = engine.store().newest_post_at(&channel_id).unwrap_or(0);
+                        if let Err(error) =
+                            engine
+                                .store()
+                                .mark_channel_viewed(&channel_id, &me_id, watermark)
+                        {
+                            eprintln!("recording that {channel_id} was read: {error}");
+                        }
+                    }
+                    Ask::LoadOlder { channel_id } => {
+                        let held = engine.store().sync_state(&channel_id).ok().flatten();
+                        let Some(held) = held else { continue };
+                        if held.reached_beginning || held.oldest_post_id.is_empty() {
+                            wake.wake(Update::Older {
+                                channel_id,
+                                more: false,
+                            });
+                            continue;
+                        }
+                        match rest
+                            .posts_before(&channel_id, &held.oldest_post_id, 200)
+                            .await
+                        {
+                            Ok(list) => {
+                                let more = !list.prev_post_id.is_empty();
+                                let fetched = list.order.len();
+                                if let Err(error) = engine.apply_post_list(
+                                    &channel_id,
+                                    &list,
+                                    matterless_sync::Arrival::Backfill,
+                                    &context,
+                                    0,
+                                ) {
+                                    eprintln!("storing older history: {error}");
+                                }
+                                println!("{channel_id}: {fetched} older messages, more: {more}");
+                                wake.wake(Update::Older { channel_id, more });
+                            }
+                            Err(error) => eprintln!("older history for {channel_id}: {error}"),
+                        }
                     }
                     Ask::Fetch { key, width, height } => {
                         let Some(route) = route_for(&key) else {

@@ -15,9 +15,9 @@ use matterless_store::Store;
 use std::collections::HashMap;
 use std::path::Path;
 
-/// How many messages to read. Well past a screenful, so scrolling has somewhere
-/// to go, and far short of the whole history, which is unbounded.
-const PAGE: u32 = 400;
+/// How many messages a channel opens with. Well past a screenful, so scrolling
+/// has somewhere to go, and far short of the whole history, which is unbounded.
+pub const PAGE: u32 = 400;
 
 /// Where the dev build keeps its database.
 pub fn default_store() -> Option<std::path::PathBuf> {
@@ -59,9 +59,10 @@ pub fn rows_of(
     channel_id: &str,
     me_id: &str,
     outstanding: &[PendingPost],
+    depth: u32,
 ) -> Result<Vec<Row>, String> {
     let mut posts = store
-        .channel_page(channel_id, None, PAGE)
+        .channel_page(channel_id, None, depth)
         .map_err(|error| format!("read {channel_id}: {error}"))?;
     let mut authors: Vec<String> = posts.iter().map(|post| post.user_id.clone()).collect();
     authors.sort();

@@ -180,6 +180,13 @@ struct App {
     /// What a clicked notification does. Held once and shared with every toast,
     /// because each one outlives the call that raised it.
     clicked: Option<Arc<matterless_view::toast::Clicked>>,
+    /// How far back the open channel is read. Grows as older pages arrive.
+    depth: u32,
+    /// True while a page of history is in flight, so the same page is not asked
+    /// for once per frame while the reader sits at the top.
+    loading_older: bool,
+    /// False once the beginning of the channel has been reached.
+    more_history: bool,
 }
 
 impl App {
@@ -283,6 +290,9 @@ impl App {
             asked: std::collections::HashSet::new(),
             arrived: Vec::new(),
             clicked: None,
+            depth: matterless_view::feed::PAGE,
+            loading_older: false,
+            more_history: true,
         };
         app.sidebar.selected = Some(channel);
         // Focused before anything is clicked: a chat window that needs a click
@@ -535,6 +545,16 @@ impl App {
                 println!("reader is {username}");
                 self.signed_in(&id);
             }
+            Update::Older { channel_id, more } => {
+                self.more_history = more;
+                self.loading_older = false;
+                if self.sidebar.selected.as_deref() == Some(channel_id.as_str()) {
+                    // Deeper, so the read that follows brings back what was
+                    // just stored rather than the same newest page again.
+                    self.depth += 200;
+                    self.hold_place();
+                }
+            }
             Update::Activated(channel_id) => {
                 // Clicking a notification is the reader saying they want to be
                 // looking at that conversation.
@@ -734,6 +754,60 @@ impl App {
         self.reread_channel(&channel);
     }
 
+    /// Re-reads the channel now that older history is behind it, keeping the
+    /// reader on the message they were looking at.
+    ///
+    /// Older messages are added *above*, so the scroll has to grow by exactly
+    /// what was added or the view jumps by a page. That is the problem the DOM
+    /// list never solved and it is arithmetic here, because every height is
+    /// known before anything is drawn.
+    fn hold_place(&mut self) {
+        let Some(store) = self.store.clone() else {
+            return;
+        };
+        let Some(channel) = self.sidebar.selected.clone() else {
+            return;
+        };
+        let before = self.stream.total();
+        let outstanding = self.outstanding.for_channel(&channel);
+        match matterless_view::feed::rows_of(&store, &channel, &self.me, &outstanding, self.depth) {
+            Ok(rows) => {
+                self.stream.rows = rows;
+                self.relayout();
+                let grew = self.stream.total() - before;
+                let within = self.stream_rect();
+                self.stream.scroll =
+                    (self.stream.scroll + grew).clamp(0.0, self.stream.reach(within));
+                println!("older history: the list grew by {grew:.0}px");
+            }
+            Err(why) => eprintln!("{channel}: {why}"),
+        }
+    }
+
+    /// Asks for another page of history when the reader nears the top.
+    ///
+    /// Guarded so the same page is not asked for once per frame while they sit
+    /// there, and stopped for good once the channel has no more to give.
+    fn want_older(&mut self) {
+        if self.loading_older || !self.more_history {
+            return;
+        }
+        let within = self.stream_rect();
+        // Within a screenful of the top, so the page is on its way before the
+        // reader arrives at the end of what is there.
+        if self.stream.scroll > within.height {
+            return;
+        }
+        let (Some(link), Some(channel)) = (self.link.as_ref(), self.sidebar.selected.clone())
+        else {
+            return;
+        };
+        self.loading_older = true;
+        link.send(matterless_view::live::Ask::LoadOlder {
+            channel_id: channel,
+        });
+    }
+
     /// The root of the open thread, if one is open.
     fn open_root(&self) -> Option<String> {
         let name = &self.thread.as_ref()?.name;
@@ -755,6 +829,7 @@ impl App {
             channel,
             &self.me,
             &self.outstanding.for_channel(channel),
+            self.depth,
         ) {
             Ok(rows) => {
                 self.stream.rows = rows;
@@ -926,15 +1001,28 @@ impl App {
             channel,
             &self.me,
             &self.outstanding.for_channel(channel),
+            self.depth,
         ) {
             Ok(rows) => {
                 self.stream.rows = rows;
                 // A thread from the channel just left has nothing to do with
                 // the one just opened.
                 self.thread = None;
+                // A different channel starts from its newest page: the depth
+                // reached in the last one says nothing about this one.
+                self.depth = matterless_view::feed::PAGE;
+                self.more_history = true;
+                self.loading_older = false;
                 self.relayout();
                 let within = self.stream_rect();
                 self.stream.to_bottom(within);
+                // Opening a channel is reading it, and a channel that stays
+                // unread however long it is looked at makes the sidebar a lie.
+                if let Some(link) = self.link.as_ref() {
+                    link.send(matterless_view::live::Ask::MarkRead {
+                        channel_id: channel.to_string(),
+                    });
+                }
             }
             Err(why) => eprintln!("{channel}: {why}"),
         }
@@ -1270,6 +1358,7 @@ impl ApplicationHandler<Update> for App {
                 self.sidebar.react(&self.input, &boxes, sidebar);
                 let stream = self.stream_rect();
                 self.stream.react(&self.input, &boxes, stream);
+                self.want_older();
                 if let Some(within) = self.thread_stream_rect()
                     && let Some(thread) = self.thread.as_mut()
                 {
