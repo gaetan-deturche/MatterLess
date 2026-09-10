@@ -207,6 +207,10 @@ struct App {
     more_history: bool,
 }
 
+/// How many followed threads the list holds. Well past what anybody reads in
+/// one sitting, and the store answers instantly either way.
+const THREADS: u32 = 200;
+
 /// The height kept for the "somebody is typing" line, above each composer.
 const TYPING: f32 = 16.0;
 
@@ -1360,6 +1364,12 @@ impl App {
                 // pretending.
                 self.sidebar.selected = Some(found.channel_id.clone());
                 self.open_channel(&found.channel_id);
+                // And the thread, when the row is about one -- which is the
+                // whole point of a list of threads, and right for a saved
+                // reply too.
+                if !found.root_id.is_empty() {
+                    self.open_thread(&found.root_id);
+                }
                 return;
             }
             self.input = input;
@@ -2059,6 +2069,16 @@ impl ApplicationHandler<Update> for App {
                         link.send(matterless_view::live::Ask::Pinned {
                             channel_id: channel,
                         });
+                    }
+                }
+                // Answered from the store, so it is filled the moment it
+                // opens rather than after a round trip.
+                if down && self.input.chord(Key::Char('t')) {
+                    self.listing.expect("Threads");
+                    if let Some(store) = self.store.clone() {
+                        let found = matterless_view::listing::followed(&store, &self.me, THREADS);
+                        println!("Threads: {} followed", found.len());
+                        self.listing.fill(found);
                     }
                 }
                 if down && self.input.chord(Key::Char('f')) {
