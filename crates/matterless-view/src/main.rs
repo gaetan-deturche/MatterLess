@@ -126,6 +126,8 @@ fn conversation() -> Vec<Row> {
 const SIDEBAR: f32 = 260.0;
 /// The thread pane's width when one is open.
 const THREAD: f32 = 420.0;
+/// What the thread pane's reply box answers to.
+const THREAD_COMPOSER: &str = "thread-composer";
 
 struct App {
     window: Option<Arc<Window>>,
@@ -150,6 +152,10 @@ struct App {
     input: Input,
     placed: Vec<Placed>,
     composer: Composer,
+    /// The thread pane's own reply box. Kept across a close so a half-written
+    /// reply survives glancing back at the channel, and cleared when a
+    /// different thread opens.
+    thread_composer: Composer,
     /// Copy and paste within this window. Crossing to another process needs a
     /// platform clipboard, which is a dependency this window does not have yet.
     clipboard: String,
@@ -291,7 +297,12 @@ impl App {
             sidebar,
             input: Input::default(),
             placed: Vec::new(),
-            composer: Composer::new(),
+            composer: Composer::new(composer::NAME),
+            thread_composer: {
+                let mut reply = Composer::new(THREAD_COMPOSER);
+                reply.placeholder = "Reply".to_string();
+                reply
+            },
             clipboard: String::new(),
         };
         app.sidebar.selected = Some(channel);
@@ -322,7 +333,11 @@ impl App {
                 Boxed::new("thread-panel", Size::Fixed(THREAD))
                     .axis(Axis::Column)
                     .with(Boxed::new("thread-header", Size::Fixed(header::HEIGHT)))
-                    .with(Boxed::new("thread", Size::Grow(1.0))),
+                    .with(Boxed::new("thread", Size::Grow(1.0)))
+                    .with(Boxed::new(
+                        THREAD_COMPOSER,
+                        Size::Fixed(self.thread_composer.height()),
+                    )),
             );
         }
         matterless_ui::solve::solve(
@@ -380,6 +395,21 @@ impl App {
         self.composer.strip(header::below(self.channel_rect()))
     }
 
+    /// Everything in the thread pane below its header: the replies and the box
+    /// to write one in.
+    fn thread_body(&self) -> Option<Rect> {
+        Some(header::below(self.thread_rect()?))
+    }
+
+    /// The thread's replies, above its reply box.
+    fn thread_stream_rect(&self) -> Option<Rect> {
+        Some(self.thread_composer.above(self.thread_body()?))
+    }
+
+    fn thread_composer_rect(&self) -> Option<Rect> {
+        Some(self.thread_composer.strip(self.thread_body()?))
+    }
+
     /// The open channel's name, which is what the header says.
     fn title(&self) -> String {
         let Some(open) = self.sidebar.selected.as_deref() else {
@@ -412,8 +442,8 @@ impl App {
         let mut boxes = self.shell();
         boxes.extend(self.sidebar.boxes(self.sidebar_rect()));
         boxes.extend(self.stream.boxes(self.stream_rect()));
-        if let (Some(thread), Some(rect)) = (&self.thread, self.thread_rect()) {
-            boxes.extend(thread.boxes(header::below(rect)));
+        if let (Some(thread), Some(rect)) = (&self.thread, self.thread_stream_rect()) {
+            boxes.extend(thread.boxes(rect));
         }
         boxes
     }
@@ -463,15 +493,20 @@ impl App {
         let mut stream = Stream::new(thread_name(root_id));
         stream.rows = matterless_render::plan_thread(&root, &replies, &options);
         println!("thread {root_id}: {} rows", stream.rows.len());
+        // A reply half-written to one thread does not belong in another. It
+        // survives closing and reopening the same one, which is the case worth
+        // keeping.
+        self.thread_composer.clear(&mut self.fonts);
         self.thread = Some(stream);
+        // Writing is what the pane is for, so it opens focused.
+        self.input.focus_on(THREAD_COMPOSER);
         // The pane takes width from the channel, so both have to be laid out
         // again before anything is drawn against the old one.
         self.relayout();
-        if let Some(rect) = self.thread_rect() {
-            let within = header::below(rect);
-            if let Some(thread) = self.thread.as_mut() {
-                thread.to_bottom(within);
-            }
+        if let Some(within) = self.thread_stream_rect()
+            && let Some(thread) = self.thread.as_mut()
+        {
+            thread.to_bottom(within);
         }
     }
 
@@ -483,8 +518,11 @@ impl App {
 
     /// Hands the frame's input to the widgets that want it.
     fn react(&mut self) {
-        let within = header::below(self.column_rect());
-        let was = self.composer.height();
+        let was = (self.composer.height(), self.thread_composer.height());
+
+        // Both boxes are offered the frame. Each one checks whether it holds
+        // focus, so only the one the reader is in takes the keystrokes.
+        let within = header::below(self.channel_rect());
         let sent = self
             .composer
             .react(&mut self.fonts, &self.input, within, &mut self.clipboard);
@@ -493,11 +531,22 @@ impl App {
             // not what anybody said.
             println!("composer: sent {} characters", text.chars().count());
         }
-        let width = self.column_rect().width;
+        let width = self.channel_rect().width;
         self.composer.lay_out(&mut self.fonts, width);
-        // Only when the box actually grew or shrank. Every keystroke would
+
+        if let Some(body) = self.thread_body() {
+            let replied =
+                self.thread_composer
+                    .react(&mut self.fonts, &self.input, body, &mut self.clipboard);
+            if let Some(text) = replied {
+                println!("thread: replied {} characters", text.chars().count());
+            }
+            self.thread_composer.lay_out(&mut self.fonts, body.width);
+        }
+
+        // Only when a box actually grew or shrank. Every keystroke would
         // otherwise re-lay-out four hundred messages to learn nothing moved.
-        if self.composer.height() != was {
+        if (self.composer.height(), self.thread_composer.height()) != was {
             self.relayout();
         }
     }
@@ -564,7 +613,9 @@ impl App {
         // spill into the conversation it came from.
         if let (Some(thread), Some(pane)) = (&self.thread, self.thread_rect()) {
             let strip = header::strip(pane);
-            let rows = header::below(pane);
+            // Above the reply box, not the whole pane: replies drawn behind it
+            // would show through the box's own margin.
+            let rows = self.thread_composer.above(header::below(pane));
             let title = Header::new(format!("Thread -- {} replies", thread.rows.len()));
             scene.clip_to(strip.x, strip.y, strip.width, strip.height);
             let mut canvas = Canvas {
@@ -583,6 +634,19 @@ impl App {
                 palette: &self.palette,
             };
             thread.draw(&mut canvas, rows, &self.input);
+
+            if let Some(strip) = self.thread_composer_rect() {
+                scene.clip_to(strip.x, strip.y, strip.width, strip.height);
+                let focused = self.input.focus() == Some(THREAD_COMPOSER);
+                let body = header::below(pane);
+                let mut canvas = Canvas {
+                    scene: &mut scene,
+                    painter: &mut self.painter,
+                    fonts: &mut self.fonts,
+                    palette: &self.palette,
+                };
+                self.thread_composer.draw(&mut canvas, body, focused);
+            }
         }
 
         // Its own layer last, so the caret and the box sit over the stream
@@ -617,11 +681,13 @@ impl App {
         self.stream.clamp(stream);
 
         if let Some(pane) = self.thread_rect() {
-            let within = header::below(pane);
-            if let Some(thread) = self.thread.as_mut() {
-                thread.lay_out(&mut self.fonts, within.width);
-                thread.clamp(within);
-            }
+            self.thread_composer.lay_out(&mut self.fonts, pane.width);
+        }
+        if let Some(within) = self.thread_stream_rect()
+            && let Some(thread) = self.thread.as_mut()
+        {
+            thread.lay_out(&mut self.fonts, within.width);
+            thread.clamp(within);
         }
     }
 }
@@ -820,11 +886,10 @@ impl ApplicationHandler for App {
                 self.sidebar.react(&self.input, &boxes, sidebar);
                 let stream = self.stream_rect();
                 self.stream.react(&self.input, &boxes, stream);
-                if let Some(pane) = self.thread_rect() {
-                    let within = header::below(pane);
-                    if let Some(thread) = self.thread.as_mut() {
-                        thread.react(&self.input, &boxes, within);
-                    }
+                if let Some(within) = self.thread_stream_rect()
+                    && let Some(thread) = self.thread.as_mut()
+                {
+                    thread.react(&self.input, &boxes, within);
                 }
                 self.redraw();
             }

@@ -22,6 +22,10 @@ use matterless_ui::{Placed, Rect};
 /// The text being written, and where the caret is in it.
 pub struct Composer {
     editor: Editor<'static>,
+    /// What this box answers to. A name rather than a constant because the
+    /// channel and the thread each have one, and a click has to land in the
+    /// right one.
+    pub name: String,
     /// Drawn when there is nothing written, so the box says what it is for.
     pub placeholder: String,
     /// True once anything has been typed, so an empty buffer can be told from
@@ -29,7 +33,7 @@ pub struct Composer {
     pub touched: bool,
 }
 
-/// What the box is called when a pointer is tested against it.
+/// What the channel's own composer is called.
 pub const NAME: &str = "composer";
 
 const SIZE: f32 = 14.0;
@@ -44,14 +48,15 @@ const MAX_LINES: usize = 8;
 
 impl Default for Composer {
     fn default() -> Self {
-        Self::new()
+        Self::new(NAME)
     }
 }
 
 impl Composer {
-    pub fn new() -> Self {
+    pub fn new(name: impl Into<String>) -> Self {
         Self {
             editor: Editor::new(Buffer::new_empty(Metrics::new(SIZE, LINE))),
+            name: name.into(),
             placeholder: "Write a message".to_string(),
             touched: false,
         }
@@ -127,7 +132,7 @@ impl Composer {
     /// does not scroll the conversation behind.
     pub fn boxes(&self, within: Rect) -> Vec<Placed> {
         vec![Placed {
-            name: NAME.to_string(),
+            name: self.name.clone(),
             rect: self.strip(within),
             depth: 1,
         }]
@@ -146,18 +151,18 @@ impl Composer {
         clipboard: &mut String,
     ) -> Option<String> {
         let inner = self.box_of(within).inset(PADDING);
-        let focused = input.focus() == Some(NAME);
+        let focused = input.focus() == Some(self.name.as_str());
 
         // The pointer puts the caret where it was clicked, and dragging from
         // there selects. Coordinates are the buffer's own, so the box's origin
         // comes off first.
         if let Some((x, y)) = input.pointer_at()
-            && input.pressed() == Some(NAME)
+            && input.pressed() == Some(self.name.as_str())
         {
             let at = ((x - inner.x) as i32, (y - inner.y) as i32);
             // The frame the button went down places the caret; every frame
             // after that drags a selection from it.
-            let action = if input.pressed_now() == Some(NAME) {
+            let action = if input.pressed_now() == Some(self.name.as_str()) {
                 Action::Click { x: at.0, y: at.1 }
             } else {
                 Action::Drag { x: at.0, y: at.1 }
