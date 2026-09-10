@@ -18,6 +18,7 @@ use matterless_ui::{Axis, Node as Boxed, Placed, Rect, Size};
 use matterless_view::composer::{self, Composer};
 use matterless_view::header::{self, Header};
 use matterless_view::sidebar::{Canvas, Entry, Sidebar};
+use matterless_view::stream::Stream;
 use std::sync::Arc;
 use winit::application::ApplicationHandler;
 use winit::event::{MouseScrollDelta, WindowEvent};
@@ -123,6 +124,8 @@ fn conversation() -> Vec<Row> {
 
 /// The sidebar's width. Fixed, as it is in the app today.
 const SIDEBAR: f32 = 260.0;
+/// The thread pane's width when one is open.
+const THREAD: f32 = 420.0;
 
 struct App {
     window: Option<Arc<Window>>,
@@ -135,11 +138,12 @@ struct App {
     size: (u32, u32),
     fonts: Fonts,
     painter: Painter,
-    rows: Vec<Row>,
-    laid: Vec<RowLayout>,
-    theme: Theme,
+    /// The open channel.
+    stream: Stream,
+    /// The open thread, when there is one. A second stream rather than a
+    /// second kind of panel: a thread is the same rows in a narrower column.
+    thread: Option<Stream>,
     palette: Palette,
-    scroll: f32,
     /// The store, kept open: switching channel is a read, not a reload.
     store: Option<matterless_store::Store>,
     sidebar: Sidebar,
@@ -276,11 +280,13 @@ impl App {
             size: (1000, 760),
             fonts: Fonts::new(),
             painter: Painter::new(),
-            rows,
-            laid: Vec::new(),
-            theme: Theme::default(),
+            stream: {
+                let mut stream = Stream::new("stream");
+                stream.rows = rows;
+                stream
+            },
+            thread: None,
             palette: Palette::default(),
-            scroll: 0.0,
             store,
             sidebar,
             input: Input::default(),
@@ -295,14 +301,14 @@ impl App {
         app
     }
 
-    /// The window as boxes: a fixed sidebar, and beside it a column holding the
-    /// header over the stream.
+    /// The window as boxes: a fixed sidebar, the channel column, and the thread
+    /// pane beside it when one is open.
     fn shell(&self) -> Vec<Placed> {
-        let tree = Boxed::new("shell", Size::Grow(1.0))
+        let mut row = Boxed::new("shell", Size::Grow(1.0))
             .axis(Axis::Row)
             .with(Boxed::new("sidebar-panel", Size::Fixed(SIDEBAR)))
             .with(
-                Boxed::new("column", Size::Grow(1.0))
+                Boxed::new("channel", Size::Grow(1.0))
                     .axis(Axis::Column)
                     .with(Boxed::new("header", Size::Fixed(header::HEIGHT)))
                     .with(Boxed::new("stream", Size::Grow(1.0)))
@@ -311,8 +317,16 @@ impl App {
                         Size::Fixed(self.composer.height()),
                     )),
             );
+        if self.thread.is_some() {
+            row = row.with(
+                Boxed::new("thread-panel", Size::Fixed(THREAD))
+                    .axis(Axis::Column)
+                    .with(Boxed::new("thread-header", Size::Fixed(header::HEIGHT)))
+                    .with(Boxed::new("thread", Size::Grow(1.0))),
+            );
+        }
         matterless_ui::solve::solve(
-            &tree,
+            &row,
             Rect::new(0.0, 0.0, self.size.0 as f32, self.size.1 as f32),
         )
     }
@@ -321,7 +335,7 @@ impl App {
         Rect::new(0.0, 0.0, SIDEBAR, self.size.1 as f32)
     }
 
-    /// Everything right of the sidebar: the header and the stream together.
+    /// Everything right of the sidebar, thread pane included.
     fn column_rect(&self) -> Rect {
         Rect::new(
             SIDEBAR,
@@ -331,14 +345,39 @@ impl App {
         )
     }
 
-    /// The stream, between the header above it and the composer below.
-    fn stream_rect(&self) -> Rect {
-        self.composer.above(header::below(self.column_rect()))
+    /// The thread pane's own column, when a thread is open.
+    fn thread_rect(&self) -> Option<Rect> {
+        let column = self.column_rect();
+        self.thread.as_ref()?;
+        // Never more than half: on a narrow window a fixed pane would leave the
+        // conversation it belongs to too thin to read.
+        let width = THREAD.min(column.width * 0.5);
+        Some(Rect::new(
+            column.right() - width,
+            column.y,
+            width,
+            column.height,
+        ))
     }
 
-    /// The strip the composer sits in, at the foot of the column.
+    /// The channel's column: everything right of the sidebar that the thread
+    /// pane has not taken.
+    fn channel_rect(&self) -> Rect {
+        let column = self.column_rect();
+        match self.thread_rect() {
+            Some(thread) => Rect::new(column.x, column.y, thread.x - column.x, column.height),
+            None => column,
+        }
+    }
+
+    /// The stream, between the header above it and the composer below.
+    fn stream_rect(&self) -> Rect {
+        self.composer.above(header::below(self.channel_rect()))
+    }
+
+    /// The strip the composer sits in, at the foot of the channel's column.
     fn composer_rect(&self) -> Rect {
-        self.composer.strip(header::below(self.column_rect()))
+        self.composer.strip(header::below(self.channel_rect()))
     }
 
     /// The open channel's name, which is what the header says.
@@ -372,7 +411,74 @@ impl App {
     fn targets(&self) -> Vec<Placed> {
         let mut boxes = self.shell();
         boxes.extend(self.sidebar.boxes(self.sidebar_rect()));
+        boxes.extend(self.stream.boxes(self.stream_rect()));
+        if let (Some(thread), Some(rect)) = (&self.thread, self.thread_rect()) {
+            boxes.extend(thread.boxes(header::below(rect)));
+        }
         boxes
+    }
+
+    /// Opens a thread beside the channel, or closes the one that is open.
+    ///
+    /// Read straight from the store like everything else here: the root, its
+    /// replies, and the same planner the channel uses, so the thread's rows are
+    /// the rows the app would draw rather than an approximation of them.
+    fn open_thread(&mut self, root_id: &str) {
+        let Some(store) = self.store.as_ref() else {
+            return;
+        };
+        // Clicking the open thread again closes it, which is what the twisty
+        // in every other client does.
+        if self
+            .thread
+            .as_ref()
+            .is_some_and(|open| open.name == thread_name(root_id))
+        {
+            self.close_thread();
+            return;
+        }
+        let Ok(Some(root)) = store.post(root_id) else {
+            eprintln!("thread {root_id}: no root in the local store");
+            return;
+        };
+        let replies = store.thread_replies(root_id).unwrap_or_default();
+        let mut people: Vec<String> = std::iter::once(root.user_id.clone())
+            .chain(replies.iter().map(|reply| reply.user_id.clone()))
+            .collect();
+        people.sort();
+        people.dedup();
+        let known = store.users_by_ids(&people).unwrap_or_default();
+
+        let mut options =
+            matterless_render::PlanOptions::new(matterless_core::model::ThreadMode::Flat, "");
+        options.author_names = known
+            .iter()
+            .map(|(id, user)| (id.clone(), user.username.clone()))
+            .collect();
+        options.author_avatars = known
+            .iter()
+            .map(|(id, user)| (id.clone(), user.last_picture_update))
+            .collect();
+
+        let mut stream = Stream::new(thread_name(root_id));
+        stream.rows = matterless_render::plan_thread(&root, &replies, &options);
+        println!("thread {root_id}: {} rows", stream.rows.len());
+        self.thread = Some(stream);
+        // The pane takes width from the channel, so both have to be laid out
+        // again before anything is drawn against the old one.
+        self.relayout();
+        if let Some(rect) = self.thread_rect() {
+            let within = header::below(rect);
+            if let Some(thread) = self.thread.as_mut() {
+                thread.to_bottom(within);
+            }
+        }
+    }
+
+    fn close_thread(&mut self) {
+        if self.thread.take().is_some() {
+            self.relayout();
+        }
     }
 
     /// Hands the frame's input to the widgets that want it.
@@ -403,10 +509,13 @@ impl App {
         };
         match matterless_view::feed::rows_of(store, channel, "") {
             Ok(rows) => {
-                self.rows = rows;
+                self.stream.rows = rows;
+                // A thread from the channel just left has nothing to do with
+                // the one just opened.
+                self.thread = None;
                 self.relayout();
-                let total: f32 = self.laid.iter().map(|row| row.height).sum();
-                self.scroll = (total - self.stream_rect().height).max(0.0);
+                let within = self.stream_rect();
+                self.stream.to_bottom(within);
             }
             Err(why) => eprintln!("{channel}: {why}"),
         }
@@ -443,18 +552,37 @@ impl App {
         header.draw(&mut canvas, strip);
 
         scene.clip_to(stream.x, stream.y, stream.width, stream.height);
-        let mut top = stream.y - self.scroll;
-        for row in &self.laid {
-            let bottom = top + row.height;
-            if bottom >= stream.y && top <= stream.bottom() {
-                let pieces =
-                    self.painter
-                        .pieces_of(&mut self.fonts, row, top, &self.theme, &self.palette);
-                // Shifted into the stream's column: the row plan is laid out
-                // from zero and knows nothing of the panel it lands in.
-                scene.extend(pieces.into_iter().map(|piece| shift(piece, stream.x)));
-            }
-            top = bottom;
+        let mut canvas = Canvas {
+            scene: &mut scene,
+            painter: &mut self.painter,
+            fonts: &mut self.fonts,
+            palette: &self.palette,
+        };
+        self.stream.draw(&mut canvas, stream, &self.input);
+
+        // The thread pane: its own header and its own clip, so a reply cannot
+        // spill into the conversation it came from.
+        if let (Some(thread), Some(pane)) = (&self.thread, self.thread_rect()) {
+            let strip = header::strip(pane);
+            let rows = header::below(pane);
+            let title = Header::new(format!("Thread -- {} replies", thread.rows.len()));
+            scene.clip_to(strip.x, strip.y, strip.width, strip.height);
+            let mut canvas = Canvas {
+                scene: &mut scene,
+                painter: &mut self.painter,
+                fonts: &mut self.fonts,
+                palette: &self.palette,
+            };
+            title.draw(&mut canvas, strip);
+
+            scene.clip_to(rows.x, rows.y, rows.width, rows.height);
+            let mut canvas = Canvas {
+                scene: &mut scene,
+                painter: &mut self.painter,
+                fonts: &mut self.fonts,
+                palette: &self.palette,
+            };
+            thread.draw(&mut canvas, rows, &self.input);
         }
 
         // Its own layer last, so the caret and the box sit over the stream
@@ -462,7 +590,7 @@ impl App {
         let composer = self.composer_rect();
         scene.clip_to(composer.x, composer.y, composer.width, composer.height);
         let focused = self.input.focus() == Some(composer::NAME);
-        let within = header::below(self.column_rect());
+        let within = header::below(self.channel_rect());
         let mut canvas = Canvas {
             scene: &mut scene,
             painter: &mut self.painter,
@@ -481,20 +609,20 @@ impl App {
         // The composer is shaped first: it decides its own height, and the
         // stream gets what is left, so its width has to be settled before the
         // rows are laid out against it.
-        let width = self.column_rect().width;
+        let width = self.channel_rect().width;
         self.composer.lay_out(&mut self.fonts, width);
-        self.theme = Theme {
-            width: self.stream_rect().width,
-            ..Theme::default()
-        };
-        self.laid = self
-            .rows
-            .iter()
-            .map(|row| lay_out(&mut self.fonts, row, &self.theme))
-            .collect();
-        let total: f32 = self.laid.iter().map(|row| row.height).sum();
-        let reach = (total - self.stream_rect().height).max(0.0);
-        self.scroll = self.scroll.clamp(0.0, reach);
+
+        let stream = self.stream_rect();
+        self.stream.lay_out(&mut self.fonts, stream.width);
+        self.stream.clamp(stream);
+
+        if let Some(pane) = self.thread_rect() {
+            let within = header::below(pane);
+            if let Some(thread) = self.thread.as_mut() {
+                thread.lay_out(&mut self.fonts, within.width);
+                thread.clamp(within);
+            }
+        }
     }
 }
 
@@ -642,6 +770,11 @@ impl ApplicationHandler for App {
                     self.input.apply(UiEvent::Typed(text.to_string()), &[]);
                 }
                 if down {
+                    // Escape closes the thread when the composer has nothing
+                    // to clear, which is the only key the shell claims.
+                    if self.input.struck(Key::Escape) && self.thread.is_some() {
+                        self.close_thread();
+                    }
                     self.react();
                     self.redraw();
                 }
@@ -661,35 +794,37 @@ impl ApplicationHandler for App {
                 if let Some(channel) = self.sidebar.react(&self.input, &boxes, within) {
                     self.open_channel(&channel);
                 }
+                // A message opens its thread. Taken before the composer reacts,
+                // because opening one narrows the column the composer sits in.
+                let stream = self.stream_rect();
+                if let Some(root) = self.stream.react(&self.input, &boxes, stream) {
+                    self.open_thread(&root);
+                }
                 self.react();
                 self.redraw();
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 let by = match delta {
-                    MouseScrollDelta::LineDelta(_, lines) => lines * self.theme.line_height * 3.0,
+                    MouseScrollDelta::LineDelta(_, lines) => {
+                        lines * self.stream.theme.line_height * 3.0
+                    }
                     MouseScrollDelta::PixelDelta(position) => position.y as f32,
                 };
                 let boxes = self.targets();
                 self.input.apply(UiEvent::Wheel { x: 0.0, y: by }, &boxes);
-                let within = self.sidebar_rect();
-                // One wheel, four panels, and the pointer decides which of them
-                // it belongs to -- which is what `wheel_over` is for. The header
-                // and the composer take it and do nothing, so turning the wheel
-                // over a fixed strip does not move the messages behind it.
-                if self
-                    .input
-                    .wheel_over(&boxes, |name| name == "sidebar")
-                    .is_some()
-                {
-                    self.sidebar.react(&self.input, &boxes, within);
-                } else if self
-                    .input
-                    .wheel_over(&boxes, |name| name == "header" || name == composer::NAME)
-                    .is_none()
-                {
-                    let total: f32 = self.laid.iter().map(|row| row.height).sum();
-                    let reach = (total - self.stream_rect().height).max(0.0);
-                    self.scroll = (self.scroll - by).clamp(0.0, reach);
+                // One wheel, five panels, and the pointer decides which of them
+                // it belongs to -- which is what `wheel_over` is for. Each panel
+                // asks about itself, so a fixed strip simply takes the turn and
+                // does nothing with it.
+                let sidebar = self.sidebar_rect();
+                self.sidebar.react(&self.input, &boxes, sidebar);
+                let stream = self.stream_rect();
+                self.stream.react(&self.input, &boxes, stream);
+                if let Some(pane) = self.thread_rect() {
+                    let within = header::below(pane);
+                    if let Some(thread) = self.thread.as_mut() {
+                        thread.react(&self.input, &boxes, within);
+                    }
                 }
                 self.redraw();
             }
@@ -772,37 +907,6 @@ fn snapshot(path: &std::path::Path, width: u32) -> Result<(), String> {
     Ok(())
 }
 
-/// Moves a piece sideways into its panel.
-fn shift(piece: matterless_paint::Piece, by: f32) -> matterless_paint::Piece {
-    use matterless_paint::Piece;
-    match piece {
-        Piece::Fill {
-            x,
-            y,
-            width,
-            height,
-            colour,
-        } => Piece::Fill {
-            x: x + by,
-            y,
-            width,
-            height,
-            colour,
-        },
-        Piece::Text { glyphs, ink, faint } => Piece::Text {
-            glyphs: glyphs
-                .into_iter()
-                .map(|glyph| matterless_paint::PlacedGlyph {
-                    x: glyph.x + by as i32,
-                    ..glyph
-                })
-                .collect(),
-            ink,
-            faint,
-        },
-    }
-}
-
 fn main() {
     // `--snapshot <file>` instead of a window, for a headless check.
     let args: Vec<String> = std::env::args().collect();
@@ -848,4 +952,10 @@ fn named(key: &winit::keyboard::Key) -> Option<Key> {
         Pressed::Character(text) => Key::Char(text.chars().next()?.to_ascii_lowercase()),
         _ => return None,
     })
+}
+
+/// What a thread panel answers to. Keyed by root so reopening the same thread
+/// can be told from opening a different one.
+fn thread_name(root_id: &str) -> String {
+    format!("thread/{root_id}")
 }
