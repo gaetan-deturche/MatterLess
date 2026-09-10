@@ -185,6 +185,9 @@ struct App {
     switcher: matterless_view::switcher::Switcher,
     /// Finding a message already said, answered from the local store.
     search: matterless_view::search::Search,
+    /// Picking a reaction, and the row it is anchored to.
+    picker: matterless_view::picker::Picker,
+    picked_near: matterless_ui::Rect,
     /// How far back the open channel is read. Grows as older pages arrive.
     depth: u32,
     /// True while a page of history is in flight, so the same page is not asked
@@ -297,6 +300,8 @@ impl App {
             clicked: None,
             switcher: matterless_view::switcher::Switcher::default(),
             search: matterless_view::search::Search::default(),
+            picker: matterless_view::picker::Picker::default(),
+            picked_near: matterless_ui::Rect::new(0.0, 0.0, 0.0, 0.0),
             depth: matterless_view::feed::PAGE,
             loading_older: false,
             more_history: true,
@@ -727,6 +732,9 @@ impl App {
         if let (Some(thread), Some(within)) = (&self.thread, self.thread_stream_rect()) {
             wanted.extend(thread.faces(within));
         }
+        // The picker's grid is mostly custom emoji, which are pictures like any
+        // other and go through the same asked set.
+        wanted.extend(self.picker.wants());
         for (key, width, height) in wanted {
             if self.asked.insert(key.clone()) {
                 link.send(matterless_view::live::Ask::Fetch { key, width, height });
@@ -824,6 +832,16 @@ impl App {
     fn act(&mut self, action: matterless_view::actions::Action, post_id: String, on: bool) {
         use matterless_view::actions::Action;
         match action {
+            Action::React => {
+                // Anchored under the message, so the grid says which one it
+                // would react to without needing a title that says so.
+                let stream = self.stream_rect();
+                let row = self.stream.row_rect(&post_id, stream);
+                self.picked_near = row
+                    .map(|row| matterless_ui::Rect::new(row.x + 60.0, row.bottom(), 0.0, 0.0))
+                    .unwrap_or(stream);
+                self.picker.show(&post_id, &mut self.fonts, &mut self.input);
+            }
             Action::Thread => {
                 let root = self
                     .stream
@@ -935,6 +953,7 @@ impl App {
         if let (Some(thread), Some(rect)) = (&self.thread, self.thread_stream_rect()) {
             boxes.extend(thread.boxes(rect, thread.hovered(&self.input)));
         }
+        boxes.extend(self.picker.boxes(self.picked_near, self.stream_rect()));
         boxes
     }
 
@@ -1009,6 +1028,46 @@ impl App {
 
     /// Hands the frame's input to the widgets that want it.
     fn react(&mut self) {
+        // The picker first: it is the smallest of the panels and the only one
+        // opened from a message, so while it is up the keys belong to it.
+        if self.picker.open() {
+            let mut input = std::mem::take(&mut self.input);
+            if input.struck(Key::Escape) {
+                self.picker.hide(&mut input);
+                self.input = input;
+                return;
+            }
+            let within = self.stream_rect();
+            let store = self.store.clone();
+            let chosen = self.picker.react(
+                &mut self.fonts,
+                &input,
+                self.picked_near,
+                within,
+                &mut self.clipboard,
+                store.as_deref(),
+            );
+            self.want_faces();
+            if let Some(emoji) = chosen {
+                let post_id = self.picker.for_post.clone().unwrap_or_default();
+                self.picker.hide(&mut input);
+                self.input = input;
+                if let Some(link) = self.link.as_ref() {
+                    link.send(matterless_view::live::Ask::React {
+                        post_id,
+                        emoji,
+                        // Always adding: the picker is how a reaction that is
+                        // not on the message yet gets there. Taking one off is
+                        // what the pill underneath is for.
+                        on: true,
+                    });
+                }
+                return;
+            }
+            self.input = input;
+            return;
+        }
+
         // Search first and alone while it is open, for the same reason the
         // switcher is: it is a thing the reader is doing instead of reading.
         if self.search.open {
@@ -1291,6 +1350,21 @@ impl App {
             };
             self.search.draw(&mut canvas, stream);
             self.search.query.draw(&mut canvas, field, true);
+        }
+        // Over everything, including the toolbar it was opened from: it is a
+        // small panel and whatever it covers is not what the reader is doing.
+        if self.picker.open() {
+            let near = self.picked_near;
+            let field = self.picker.field(near, stream);
+            scene.clip_to(0.0, 0.0, self.size.0 as f32, self.size.1 as f32);
+            let mut canvas = Canvas {
+                scene: &mut scene,
+                painter: &mut self.painter,
+                fonts: &mut self.fonts,
+                palette: &self.palette,
+            };
+            self.picker.draw(&mut canvas, near, stream);
+            self.picker.query.draw(&mut canvas, field, true);
         }
         scene
     }

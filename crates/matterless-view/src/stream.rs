@@ -185,6 +185,26 @@ impl Stream {
         placed
     }
 
+    /// Where one message sits on screen, for a panel that has to point at it.
+    ///
+    /// `None` when it is scrolled out of view, which is the honest answer: a
+    /// panel anchored to a row nobody can see would float over nothing.
+    pub fn row_rect(&self, post_id: &str, within: Rect) -> Option<Rect> {
+        let mut top = within.y - self.scroll;
+        for (index, laid) in self.laid.iter().enumerate() {
+            let bottom = top + laid.height;
+            let matches = matches!(
+                self.rows.get(index),
+                Some(Row::Post { post } | Row::Continuation { post }) if post.post_id == post_id
+            );
+            if matches && bottom >= within.y && top <= within.bottom() {
+                return Some(Rect::new(within.x, top, within.width, laid.height));
+            }
+            top = bottom;
+        }
+        None
+    }
+
     /// Applies a frame's input. Answers what the click asked for.
     pub fn react(&mut self, input: &Input, placed: &[Placed], within: Rect) -> Option<Chose> {
         if let Some((_, y)) = input.wheel_over(placed, |name| name == self.name) {

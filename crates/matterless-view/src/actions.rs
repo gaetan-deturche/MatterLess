@@ -17,6 +17,8 @@ use matterless_ui::Rect;
 /// button that does nothing is worse than a button that is not there.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
+    /// Open the picker, to add a reaction that is not already on the message.
+    React,
     /// Open this message's thread.
     Thread,
     /// Keep it, or stop keeping it.
@@ -33,6 +35,7 @@ impl Action {
     /// The short name it answers to, which is also what a hit test carries.
     pub fn slug(self) -> &'static str {
         match self {
+            Action::React => "react",
             Action::Thread => "thread",
             Action::Save => "save",
             Action::Pin => "pin",
@@ -43,6 +46,7 @@ impl Action {
 
     pub fn from_slug(slug: &str) -> Option<Self> {
         Some(match slug {
+            "react" => Action::React,
             "thread" => Action::Thread,
             "save" => Action::Save,
             "pin" => Action::Pin,
@@ -57,6 +61,7 @@ impl Action {
     /// in the room a message leaves at its top right.
     pub fn label(self, on: bool) -> &'static str {
         match (self, on) {
+            (Action::React, _) => "react",
             (Action::Thread, _) => "reply",
             (Action::Save, false) => "save",
             (Action::Save, true) => "saved",
@@ -79,7 +84,13 @@ const PADDING: f32 = 8.0;
 /// else's, and offering something that will be refused is a worse answer than
 /// not offering it.
 pub fn offered(mine: bool) -> Vec<Action> {
-    let mut offered = vec![Action::Thread, Action::Save, Action::Pin, Action::Link];
+    let mut offered = vec![
+        Action::React,
+        Action::Thread,
+        Action::Save,
+        Action::Pin,
+        Action::Link,
+    ];
     if mine {
         offered.push(Action::Delete);
     }
@@ -135,8 +146,8 @@ mod tests {
     fn the_buttons_sit_in_order_inside_the_row() {
         let row = Rect::new(100.0, 50.0, 600.0, 40.0);
         let placed = place(row, &offered(true), |_| 40.0);
-        assert_eq!(placed.len(), 5);
-        assert_eq!(placed[0].0, Action::Thread);
+        assert_eq!(placed.len(), 6);
+        assert_eq!(placed[0].0, Action::React);
         for pair in placed.windows(2) {
             assert!(
                 pair[0].1.right() <= pair[1].1.x,
