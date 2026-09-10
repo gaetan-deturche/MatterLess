@@ -25,6 +25,14 @@ pub enum Chose {
     Thread(String),
     /// Try this message again, by the pending id it still carries.
     Retry(String),
+    /// Add or remove this reaction.
+    React {
+        post_id: String,
+        emoji: String,
+        /// What it becomes, decided here rather than waited for: a pill has to
+        /// change the instant it is pressed.
+        on: bool,
+    },
 }
 
 /// One conversation: its rows, their heights, and where the reader is in it.
@@ -35,6 +43,9 @@ pub struct Stream {
     pub laid: Vec<RowLayout>,
     pub theme: Theme,
     pub scroll: f32,
+    /// Custom emoji this conversation uses, by name to the id whose image the
+    /// server holds. A standard emoji is a character and needs nothing here.
+    pub custom: std::collections::HashMap<String, String>,
 }
 
 impl Stream {
@@ -45,6 +56,7 @@ impl Stream {
             laid: Vec::new(),
             theme: Theme::default(),
             scroll: 0.0,
+            custom: std::collections::HashMap::new(),
         }
     }
 
@@ -132,6 +144,21 @@ impl Stream {
                     ),
                     depth: 2,
                 });
+                // The first thing inside a message a pointer can land on.
+                // Deeper than the row, so a click on a pill is a click on the
+                // pill rather than on the message behind it.
+                for (ordinal, (block, _)) in self.pills(index).into_iter().enumerate() {
+                    placed.push(Placed {
+                        name: format!("{}/row/{index}/reaction/{ordinal}", self.name),
+                        rect: Rect::new(
+                            within.x + self.theme.gutter + block.x,
+                            top + block.y,
+                            block.wrap,
+                            block.height,
+                        ),
+                        depth: 3,
+                    });
+                }
             }
             top = bottom;
         }
@@ -144,6 +171,19 @@ impl Stream {
             self.scroll = (self.scroll - y).clamp(0.0, self.reach(within));
         }
         let clicked = input.clicked()?;
+        // A pill first, because it sits inside a row and its name says so.
+        if let Some((index, ordinal)) = self.reaction_at(clicked)
+            && let Some(Row::Post { post } | Row::Continuation { post }) = self.rows.get(index)
+            && let Some(reaction) = post.reactions.get(ordinal)
+        {
+            return Some(Chose::React {
+                post_id: post.post_id.clone(),
+                emoji: reaction.emoji.clone(),
+                // What it will become, decided here rather than by the server:
+                // the pill has to change the instant it is pressed.
+                on: !reaction.mine,
+            });
+        }
         let index = self.index_of(clicked)?;
         // A message that never reached the server has no thread to open -- its
         // id is the window's own pending one, which the store has never heard
@@ -163,6 +203,13 @@ impl Stream {
             .ok()
     }
 
+    /// The row and reaction a pill name refers to, if it is one of this panel's.
+    fn reaction_at(&self, name: &str) -> Option<(usize, usize)> {
+        let rest = name.strip_prefix(&format!("{}/row/", self.name))?;
+        let (index, ordinal) = rest.split_once("/reaction/")?;
+        Some((index.parse().ok()?, ordinal.parse().ok()?))
+    }
+
     /// The row under the pointer, for drawing it hovered.
     fn hovered(&self, input: &Input) -> Option<usize> {
         self.index_of(input.hovered()?)
@@ -178,6 +225,16 @@ impl Stream {
         for (index, laid) in self.laid.iter().enumerate() {
             let bottom = top + laid.height;
             if bottom >= within.y && top <= within.bottom() {
+                // A custom emoji has no character, so its picture is the only
+                // way it is ever drawn.
+                for (_, reaction) in self.pills(index) {
+                    if reaction.unicode.is_none()
+                        && let Some(id) = self.custom.get(&reaction.emoji)
+                    {
+                        let side = self.theme.emoji_size as u32;
+                        wanted.push((emoji_key(id), side, side));
+                    }
+                }
                 if let Some(Row::Post { post }) = self.rows.get(index) {
                     wanted.push((
                         avatar_key(&post.author_id, post.avatar_at),
@@ -234,6 +291,86 @@ impl Stream {
                 key: picture_key(file),
             })
             .collect()
+    }
+
+    /// A row's reaction blocks, paired with the reactions they were built from.
+    ///
+    /// Paired by order, as the attachments are: the layout emits one block per
+    /// reaction in the post's own order.
+    fn pills(
+        &self,
+        index: usize,
+    ) -> Vec<(
+        &matterless_layout::row::Block,
+        &matterless_render::ReactionSummary,
+    )> {
+        let Some(Row::Post { post } | Row::Continuation { post }) = self.rows.get(index) else {
+            return Vec::new();
+        };
+        let Some(laid) = self.laid.get(index) else {
+            return Vec::new();
+        };
+        laid.blocks
+            .iter()
+            .filter(|block| block.kind == matterless_layout::row::Kind::Reactions)
+            .zip(post.reactions.iter())
+            .collect()
+    }
+
+    /// Draws the panel behind each reaction, before the text goes on top.
+    ///
+    /// One the reader is part of is drawn louder, which is the only thing the
+    /// pill has to say beyond its count: whether you are in it.
+    fn reactions(&self, into: &mut Canvas<'_>, index: usize, top: f32, left: f32) {
+        let Canvas {
+            scene,
+            painter,
+            fonts,
+            palette,
+        } = into;
+        for (block, reaction) in self.pills(index) {
+            let x = left + self.theme.gutter + block.x;
+            let y = top + block.y;
+            scene.fill(
+                x,
+                y,
+                block.wrap,
+                block.height - 3.0,
+                if reaction.mine {
+                    [palette.ink[0], palette.ink[1], palette.ink[2], 40]
+                } else {
+                    palette.surface
+                },
+            );
+            let mut text_at = x + self.theme.pill_padding;
+            // A custom emoji has no character to shape, so the square the
+            // layout reserved gets the picture instead. Without this the pill
+            // printed the name and read ":bongo: 1".
+            if reaction.unicode.is_none() {
+                if let Some(id) = self.custom.get(&reaction.emoji) {
+                    scene.extend([matterless_paint::Piece::Image {
+                        x: text_at,
+                        y: y + 3.0,
+                        width: self.theme.emoji_size,
+                        height: self.theme.emoji_size,
+                        key: emoji_key(id),
+                    }]);
+                }
+                text_at += self.theme.emoji_size + 4.0;
+            }
+            let label = painter.run(
+                fonts,
+                &block
+                    .spans
+                    .iter()
+                    .map(|span| span.text.as_str())
+                    .collect::<String>(),
+                text_at,
+                y + 3.0,
+                Run::label(f32::MAX),
+            );
+            scene.glyphs(label, palette.ink, palette.faint);
+        }
     }
 
     /// Draws the file cards: an attachment that is not a picture.
@@ -305,6 +442,16 @@ impl Stream {
             if bottom >= within.y && top <= within.bottom() {
                 if hovered == Some(index) {
                     scene.fill(within.x, top, within.width, row.height, palette.surface);
+                }
+                {
+                    let mut canvas = Canvas {
+                        scene,
+                        painter,
+                        fonts,
+                        palette,
+                    };
+                    // Before the text, or a pill would cover the count on it.
+                    self.reactions(&mut canvas, index, top, within.x);
                 }
                 let pieces = painter.pieces_of(fonts, row, top, &self.theme, palette);
                 // Shifted into this panel's column: a row plan is laid out from
@@ -417,6 +564,11 @@ fn size_of(bytes: i64) -> String {
         }
     }
     format!("{bytes} bytes")
+}
+
+/// What a custom emoji's picture is called.
+pub fn emoji_key(emoji_id: &str) -> String {
+    format!("emoji/{emoji_id}")
 }
 
 #[cfg(test)]

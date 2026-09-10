@@ -37,6 +37,11 @@ pub struct Theme {
     /// A file card: an attachment that is not a picture, drawn as a fixed row
     /// with its name and size on it.
     pub card_height: f32,
+    /// Inside a reaction pill, and between two of them.
+    pub pill_padding: f32,
+    pub pill_gap: f32,
+    /// The square a custom emoji is drawn in, which has no character to shape.
+    pub emoji_size: f32,
     pub reaction_height: f32,
     pub separator_height: f32,
     pub footer_height: f32,
@@ -62,6 +67,9 @@ impl Default for Theme {
             code_line_height: 18.0,
             code_padding: 16.0,
             card_height: 56.0,
+            pill_padding: 7.0,
+            pill_gap: 4.0,
+            emoji_size: 16.0,
             reaction_height: 25.0,
             separator_height: 34.0,
             footer_height: 26.0,
@@ -388,7 +396,7 @@ pub fn lay_out(fonts: &mut Fonts, row: &Row, theme: &Theme) -> RowLayout {
         Row::Post { post } => (post.nodes.as_slice(), Some(post), true),
         Row::Continuation { post } => (post.nodes.as_slice(), Some(post), false),
     };
-    let reactions = post.map(|post| post.reactions.len()).unwrap_or(0);
+
     let attachments = post.map(|post| post.files.len()).unwrap_or(0);
 
     y += theme.row_padding;
@@ -535,36 +543,57 @@ pub fn lay_out(fonts: &mut Fonts, row: &Row, theme: &Theme) -> RowLayout {
         }
     }
 
-    if reactions > 0 {
-        // One line of "emoji count" pairs. The pill behind each is the
-        // renderer's business; the layout only says what the line says.
-        let mut spans = Vec::new();
-        if let Some(post) = post {
-            for reaction in &post.reactions {
-                let face = reaction
-                    .unicode
-                    .clone()
-                    .unwrap_or_else(|| format!(":{}:", reaction.emoji));
-                spans.push(plain(format!("{face} ")));
-                spans.push(TextSpan {
-                    text: format!("{}   ", reaction.count),
+    // One block per reaction rather than one line of them all, because each is
+    // a thing to click: a pill nobody can press is a picture of a feature. The
+    // blocks come out in the post's own reaction order, so the caller pairs the
+    // nth with the nth reaction exactly as it does for attachments.
+    if let Some(post) = post.filter(|post| !post.reactions.is_empty()) {
+        let mut x = 0.0;
+        for reaction in &post.reactions {
+            // A standard emoji is a character and shapes like any other. A
+            // custom one is an image behind the session token: it has no
+            // character at all, so the pill reserves a square for it and the
+            // renderer puts the picture there. Printing the name instead is
+            // what made a reaction read ":bongo: 1".
+            let custom = reaction.unicode.is_none();
+            let label = match &reaction.unicode {
+                Some(face) => format!("{face} {}", reaction.count),
+                None => reaction.count.to_string(),
+            };
+            let width = crate::extent_of(
+                fonts,
+                &label,
+                f32::MAX,
+                crate::Style {
+                    size: theme.body_size,
+                    line_height: theme.reaction_height,
                     bold: false,
                     italic: false,
                     mono: false,
-                    faint: true,
-                });
+                },
+            )
+            .width
+                + theme.pill_padding * 2.0
+                + if custom { theme.emoji_size + 4.0 } else { 0.0 };
+            // Wrapped by hand: a row of pills is a row of boxes, not a run of
+            // text, so nothing else is going to wrap it.
+            if x > 0.0 && x + width > theme.text_width() {
+                x = 0.0;
+                y += theme.reaction_height;
             }
+            blocks.push(Block {
+                y,
+                x,
+                height: theme.reaction_height,
+                lines: 1,
+                kind: Kind::Reactions,
+                spans: vec![plain(label)],
+                size: theme.body_size,
+                // The pill's own width, which is what it is drawn and hit as.
+                wrap: width,
+            });
+            x += width + theme.pill_gap;
         }
-        blocks.push(Block {
-            y,
-            x: 0.0,
-            height: theme.reaction_height,
-            lines: 1,
-            kind: Kind::Reactions,
-            spans,
-            size: theme.body_size,
-            wrap: theme.text_width(),
-        });
         y += theme.reaction_height;
     }
 

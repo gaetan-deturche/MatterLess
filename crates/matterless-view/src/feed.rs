@@ -139,3 +139,57 @@ pub fn rows_from(
     let rows = plan_channel(&posts, &HashMap::new(), &options);
     Ok((channel_id, rows))
 }
+
+/// The custom emoji a page of rows uses, by name to the id behind their image.
+///
+/// A standard emoji is a character the parser already resolved. A custom one is
+/// an image behind the session token and has no character at all, so without
+/// this a reaction reads ":bongo:" and a message body says the name out loud.
+pub fn custom_emoji(store: &Store, rows: &[Row]) -> HashMap<String, String> {
+    let mut wanted: Vec<String> = Vec::new();
+    for row in rows {
+        let (Row::Post { post } | Row::Continuation { post }) = row else {
+            continue;
+        };
+        for reaction in &post.reactions {
+            if reaction.unicode.is_none() {
+                wanted.push(reaction.emoji.clone());
+            }
+        }
+        wanted.extend(named_in(&post.nodes));
+    }
+    wanted.sort();
+    wanted.dedup();
+    store
+        .known_emoji(&wanted)
+        .unwrap_or_default()
+        .into_iter()
+        // An empty id means the store looked and it is a standard one, which is
+        // a real answer and not a miss.
+        .filter(|(_, id)| !id.is_empty())
+        .collect()
+}
+
+/// Every `:name:` in a parsed body that had no character of its own.
+fn named_in(nodes: &[matterless_render::markdown::Node]) -> Vec<String> {
+    use matterless_render::markdown::Node;
+    let mut found = Vec::new();
+    for node in nodes {
+        match node {
+            Node::Emoji { name, unicode } if unicode.is_none() => found.push(name.clone()),
+            Node::Paragraph { children }
+            | Node::Heading { children, .. }
+            | Node::Blockquote { children }
+            | Node::Strong { children }
+            | Node::Emphasis { children }
+            | Node::Strike { children } => found.extend(named_in(children)),
+            Node::List { items, .. } => {
+                for item in items {
+                    found.extend(named_in(item));
+                }
+            }
+            _ => {}
+        }
+    }
+    found
+}
