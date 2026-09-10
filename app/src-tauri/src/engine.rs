@@ -9,9 +9,9 @@
 //! channel that changed. The frontend then asks for that channel's row plan, so
 //! there is exactly one way a row reaches the screen.
 
-use crate::pending::PendingPosts;
 use matterless_core::ws::{Signal, WsSession};
 use matterless_core::{AuthToken, Event, RestClient, User};
+use matterless_render::pending::PendingPosts;
 use matterless_sync::{Arrival, Delta, SyncContext, SyncEngine};
 use serde::Serialize;
 use std::sync::Arc;
