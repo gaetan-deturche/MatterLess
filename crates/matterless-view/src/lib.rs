@@ -17,6 +17,9 @@ pub mod feed;
 pub mod header;
 pub mod sidebar;
 pub mod sidebar_feed;
+pub mod stream;
+#[cfg(test)]
+mod stream_tests;
 
 use atlas::{Atlas, SIDE};
 use cosmic_text::SwashCache;
