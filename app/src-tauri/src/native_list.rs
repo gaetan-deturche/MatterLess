@@ -303,9 +303,14 @@ impl NativeList {
         for row in &self.laid {
             let bottom = top + row.height;
             if bottom >= 0.0 && top <= self.bounds.height as f32 {
-                let pieces =
-                    self.painter
-                        .pieces_of(&mut self.fonts, row, top, &self.theme, &self.palette);
+                let pieces = self.painter.pieces_of(
+                    &mut self.fonts,
+                    row,
+                    top,
+                    &self.theme,
+                    &self.palette,
+                    &std::collections::HashMap::new(),
+                );
                 scene.extend(pieces);
             }
             top = bottom;
