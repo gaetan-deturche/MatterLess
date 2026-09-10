@@ -150,6 +150,11 @@ pub struct TextSpan {
     pub bold: bool,
     pub italic: bool,
     pub mono: bool,
+    /// Where this text points, when it is part of a link. Carried out of the
+    /// layout for the same reason the styling is: only the shaping knows where
+    /// the words landed, and re-deriving them from the markdown is how a hit
+    /// box and the text under it come to disagree.
+    pub link: Option<String>,
     /// Drawn in the quieter ink: a timestamp, a reaction's count, anything the
     /// eye should pass over on its way to the message.
     pub faint: bool,
@@ -187,7 +192,7 @@ fn lines_of(nodes: &[Node], indent: f32, into: &mut Vec<Line>, code: &mut Vec<St
         match node {
             Node::Paragraph { children } => {
                 let mut spans = Vec::new();
-                inline(children, false, false, false, &mut spans);
+                inline(children, false, false, false, None, &mut spans);
                 into.push(Line {
                     spans,
                     indent,
@@ -196,7 +201,7 @@ fn lines_of(nodes: &[Node], indent: f32, into: &mut Vec<Line>, code: &mut Vec<St
             }
             Node::Heading { children, .. } => {
                 let mut spans = Vec::new();
-                inline(children, true, false, false, &mut spans);
+                inline(children, true, false, false, None, &mut spans);
                 into.push(Line {
                     spans,
                     indent,
@@ -230,7 +235,14 @@ fn lines_of(nodes: &[Node], indent: f32, into: &mut Vec<Line>, code: &mut Vec<St
             // Anything inline at the top level is a paragraph of its own.
             other => {
                 let mut spans = Vec::new();
-                inline(std::slice::from_ref(other), false, false, false, &mut spans);
+                inline(
+                    std::slice::from_ref(other),
+                    false,
+                    false,
+                    false,
+                    None,
+                    &mut spans,
+                );
                 if !spans.is_empty() {
                     into.push(Line {
                         spans,
@@ -243,8 +255,30 @@ fn lines_of(nodes: &[Node], indent: f32, into: &mut Vec<Line>, code: &mut Vec<St
     }
 }
 
+/// The href, if it is one this window would follow.
+///
+/// A message is text somebody else wrote, and a markdown link can name any
+/// scheme: `file:` reaching into the reader's disk, or anything the shell has
+/// been taught to run. Only the two the web uses are carried; everything else
+/// draws as words and does nothing when pressed.
+fn openable(href: &str) -> Option<&str> {
+    let scheme = href.split_once("://")?.0;
+    matches!(scheme.to_ascii_lowercase().as_str(), "http" | "https").then_some(href)
+}
+
 /// Collects inline content into styled spans.
-fn inline(nodes: &[Node], bold: bool, italic: bool, mono: bool, into: &mut Vec<TextSpan>) {
+///
+/// `link` is the href the words are inside, threaded down like the styling is:
+/// a link's text can be emphasised, code, or an emoji, and every piece of it
+/// points at the same place.
+fn inline(
+    nodes: &[Node],
+    bold: bool,
+    italic: bool,
+    mono: bool,
+    link: Option<&str>,
+    into: &mut Vec<TextSpan>,
+) {
     for node in nodes {
         match node {
             Node::Text { value } => into.push(TextSpan {
@@ -252,19 +286,26 @@ fn inline(nodes: &[Node], bold: bool, italic: bool, mono: bool, into: &mut Vec<T
                 bold,
                 italic,
                 mono,
+                link: link.map(str::to_string),
                 faint: false,
                 emoji: None,
             }),
-            Node::Strong { children } => inline(children, true, italic, mono, into),
+            Node::Strong { children } => inline(children, true, italic, mono, link, into),
             Node::Emphasis { children } | Node::Strike { children } => {
-                inline(children, bold, true, mono, into)
+                inline(children, bold, true, mono, link, into)
             }
-            Node::Link { children, .. } => inline(children, bold, italic, mono, into),
+            // Only what is worth opening. A message is untrusted text and a
+            // href in it can name any scheme at all; anything but the web is
+            // drawn as words and does nothing when pressed.
+            Node::Link { children, href } => {
+                inline(children, bold, italic, mono, openable(href), into)
+            }
             Node::InlineCode { value } | Node::InlineMath { value } => into.push(TextSpan {
                 text: value.clone(),
                 bold,
                 italic,
                 mono: true,
+                link: link.map(str::to_string),
                 faint: false,
                 emoji: None,
             }),
@@ -273,6 +314,7 @@ fn inline(nodes: &[Node], bold: bool, italic: bool, mono: bool, into: &mut Vec<T
                 bold,
                 italic,
                 mono,
+                link: link.map(str::to_string),
                 faint: false,
                 emoji: None,
             }),
@@ -281,6 +323,7 @@ fn inline(nodes: &[Node], bold: bool, italic: bool, mono: bool, into: &mut Vec<T
                 bold,
                 italic,
                 mono,
+                link: link.map(str::to_string),
                 faint: false,
                 emoji: None,
             }),
@@ -295,6 +338,7 @@ fn inline(nodes: &[Node], bold: bool, italic: bool, mono: bool, into: &mut Vec<T
                     bold,
                     italic,
                     mono,
+                    link: link.map(str::to_string),
                     faint: false,
                     emoji: None,
                 },
@@ -303,6 +347,7 @@ fn inline(nodes: &[Node], bold: bool, italic: bool, mono: bool, into: &mut Vec<T
                     bold,
                     italic,
                     mono,
+                    link: link.map(str::to_string),
                     faint: false,
                     emoji: Some(name.clone()),
                 },
@@ -312,6 +357,7 @@ fn inline(nodes: &[Node], bold: bool, italic: bool, mono: bool, into: &mut Vec<T
                 bold,
                 italic,
                 mono,
+                link: link.map(str::to_string),
                 faint: false,
                 emoji: None,
             }),
@@ -320,6 +366,7 @@ fn inline(nodes: &[Node], bold: bool, italic: bool, mono: bool, into: &mut Vec<T
                 bold,
                 italic,
                 mono,
+                link: link.map(str::to_string),
                 faint: false,
                 emoji: None,
             }),
@@ -394,6 +441,7 @@ pub fn lay_out(fonts: &mut Fonts, row: &Row, theme: &Theme) -> RowLayout {
             bold: false,
             italic: false,
             mono: false,
+            link: None,
             faint: false,
             emoji: None,
         }
@@ -462,6 +510,7 @@ pub fn lay_out(fonts: &mut Fonts, row: &Row, theme: &Theme) -> RowLayout {
                 bold: true,
                 italic: false,
                 mono: false,
+                link: None,
                 faint: false,
                 emoji: None,
             });
@@ -471,6 +520,7 @@ pub fn lay_out(fonts: &mut Fonts, row: &Row, theme: &Theme) -> RowLayout {
                 bold: false,
                 italic: false,
                 mono: false,
+                link: None,
                 faint: true,
                 emoji: None,
             });
@@ -480,6 +530,7 @@ pub fn lay_out(fonts: &mut Fonts, row: &Row, theme: &Theme) -> RowLayout {
                     bold: false,
                     italic: false,
                     mono: false,
+                    link: None,
                     faint: true,
                     emoji: None,
                 });
@@ -561,6 +612,7 @@ pub fn lay_out(fonts: &mut Fonts, row: &Row, theme: &Theme) -> RowLayout {
                 bold: false,
                 italic: false,
                 mono: true,
+                link: None,
                 faint: false,
                 emoji: None,
             }],
@@ -633,6 +685,7 @@ pub fn lay_out(fonts: &mut Fonts, row: &Row, theme: &Theme) -> RowLayout {
                     italic: false,
                     mono: false,
                     faint,
+                    link: None,
                     emoji: None,
                 }],
                 size: theme.body_size,
@@ -757,6 +810,7 @@ pub fn lay_out(fonts: &mut Fonts, row: &Row, theme: &Theme) -> RowLayout {
                 bold: false,
                 italic: false,
                 mono: false,
+                link: None,
                 faint: true,
                 emoji: None,
             }],

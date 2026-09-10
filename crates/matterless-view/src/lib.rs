@@ -20,6 +20,7 @@ pub mod feed;
 pub mod header;
 pub mod listing;
 pub mod live;
+pub mod open;
 pub mod picker;
 pub mod search;
 pub mod sidebar;
@@ -119,6 +120,9 @@ pub fn vertices_of(
     let solid_uv = [0.5 / side, 0.5 / side];
     for piece in pieces {
         match piece {
+            // Nothing to draw: a link box is where a pointer may land, and its
+            // words are already in the text piece beside it.
+            Piece::Link { .. } => {}
             Piece::Fill {
                 x,
                 y,
