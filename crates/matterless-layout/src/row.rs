@@ -34,6 +34,9 @@ pub struct Theme {
     pub code_line_height: f32,
     /// Padding a code block draws around its lines.
     pub code_padding: f32,
+    /// A file card: an attachment that is not a picture, drawn as a fixed row
+    /// with its name and size on it.
+    pub card_height: f32,
     pub reaction_height: f32,
     pub separator_height: f32,
     pub footer_height: f32,
@@ -58,6 +61,7 @@ impl Default for Theme {
             code_size: 12.5,
             code_line_height: 18.0,
             code_padding: 16.0,
+            card_height: 56.0,
             reaction_height: 25.0,
             separator_height: 34.0,
             footer_height: 26.0,
@@ -504,19 +508,31 @@ pub fn lay_out(fonts: &mut Fonts, row: &Row, theme: &Theme) -> RowLayout {
 
     if attachments > 0 {
         // The server gives every attachment its drawn size, so this is the one
-        // height that was never in doubt.
-        let height = 0.0;
-        blocks.push(Block {
-            y,
-            x: 0.0,
-            height,
-            lines: 0,
-            kind: Kind::Attachment,
-            spans: Vec::new(),
-            size: theme.body_size,
-            wrap: theme.text_width(),
-        });
-        y += height;
+        // height that was never in doubt: `box_width` and `box_height` are what
+        // the planner already worked out, and reserving exactly them means a
+        // picture arriving moves nothing.
+        //
+        // One block per file, stacked. Laying them side by side is a gallery,
+        // which is a later decision about arrangement rather than about height.
+        for file in post.map(|post| post.files.as_slice()).unwrap_or(&[]) {
+            let height = if file.image || file.video {
+                file.box_height.max(0) as f32
+            } else {
+                // A file card: a fixed row with a name and a size on it.
+                theme.card_height
+            };
+            blocks.push(Block {
+                y,
+                x: 0.0,
+                height,
+                lines: 0,
+                kind: Kind::Attachment,
+                spans: Vec::new(),
+                size: theme.body_size,
+                wrap: (file.box_width.max(0) as f32).min(theme.text_width()),
+            });
+            y += height + theme.block_gap;
+        }
     }
 
     if reactions > 0 {
@@ -769,5 +785,101 @@ mod tests {
         let laid = lay_out(&mut fonts, &Row::DateSeparator { epoch_day: 20137 }, &theme);
         assert_eq!(laid.height, theme.separator_height);
         assert_eq!(laid.blocks.len(), 1);
+    }
+
+    fn picture(id: &str, width: i32, height: i32) -> matterless_render::FileRef {
+        matterless_render::FileRef {
+            id: id.into(),
+            name: "shot.png".into(),
+            extension: "png".into(),
+            size: 1024,
+            mime_type: "image/png".into(),
+            width,
+            height,
+            image: true,
+            video: false,
+            variant: matterless_render::ImageVariant::Preview,
+            mini_preview: None,
+            box_width: width,
+            box_height: height,
+            archived: false,
+        }
+    }
+
+    /// The height the server already told us, reserved before the bytes
+    /// arrive. Without this an image appearing would push the conversation
+    /// down under it -- the one thing this whole layout exists to prevent.
+    #[test]
+    fn an_attachment_reserves_the_box_the_server_gave_it() {
+        let mut fonts = Fonts::new();
+        let theme = Theme::default();
+        let mut with = post(vec![]);
+        with.files = vec![picture("f1", 300, 200)];
+        let laid = lay_out(&mut fonts, &Row::Post { post: with }, &theme);
+        let block = laid
+            .blocks
+            .iter()
+            .find(|block| block.kind == Kind::Attachment)
+            .expect("an attachment block");
+        assert_eq!(block.height, 200.0);
+        assert_eq!(block.wrap, 300.0);
+        assert!(laid.height >= block.y + block.height);
+    }
+
+    /// Two pictures are two blocks, stacked, and the row is tall enough for
+    /// both.
+    #[test]
+    fn every_attachment_gets_its_own_room() {
+        let mut fonts = Fonts::new();
+        let theme = Theme::default();
+        let mut with = post(vec![]);
+        with.files = vec![picture("f1", 300, 200), picture("f2", 120, 90)];
+        let laid = lay_out(&mut fonts, &Row::Post { post: with }, &theme);
+        let blocks: Vec<&Block> = laid
+            .blocks
+            .iter()
+            .filter(|block| block.kind == Kind::Attachment)
+            .collect();
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0].height, 200.0);
+        assert_eq!(blocks[1].height, 90.0);
+        assert!(blocks[1].y >= blocks[0].y + blocks[0].height);
+        assert!(laid.height >= blocks[1].y + blocks[1].height);
+    }
+
+    /// A picture wider than the column is drawn no wider than the column.
+    #[test]
+    fn an_attachment_never_runs_past_the_column() {
+        let mut fonts = Fonts::new();
+        let theme = Theme::default();
+        let mut with = post(vec![]);
+        with.files = vec![picture("f1", 4000, 100)];
+        let laid = lay_out(&mut fonts, &Row::Post { post: with }, &theme);
+        let block = laid
+            .blocks
+            .iter()
+            .find(|block| block.kind == Kind::Attachment)
+            .expect("an attachment block");
+        assert_eq!(block.wrap, theme.text_width());
+    }
+
+    /// Something that is not a picture is a card, and a card has a fixed row of
+    /// its own rather than a zero-height nothing.
+    #[test]
+    fn a_file_that_is_not_a_picture_gets_a_card() {
+        let mut fonts = Fonts::new();
+        let theme = Theme::default();
+        let mut with = post(vec![]);
+        let mut document = picture("f1", 0, 0);
+        document.image = false;
+        document.name = "notes.pdf".into();
+        with.files = vec![document];
+        let laid = lay_out(&mut fonts, &Row::Post { post: with }, &theme);
+        let block = laid
+            .blocks
+            .iter()
+            .find(|block| block.kind == Kind::Attachment)
+            .expect("an attachment block");
+        assert_eq!(block.height, theme.card_height);
     }
 }
