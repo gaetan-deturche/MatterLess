@@ -1638,7 +1638,9 @@ impl App {
 
         // The thread pane: its own header and its own clip, so a reply cannot
         // spill into the conversation it came from.
-        if let (Some(thread), Some(pane)) = (&self.thread, self.thread_rect()) {
+        // Mutable because a stream records where it drew each link, which is
+        // what the next frame hit-tests against.
+        if let (Some(pane), Some(thread)) = (self.thread_rect(), self.thread.as_mut()) {
             let strip = header::strip(pane);
             // Above the reply box, not the whole pane: replies drawn behind it
             // would show through the box's own margin.
@@ -2122,6 +2124,9 @@ impl ApplicationHandler<Update> for App {
                         post_id,
                         on,
                     }) => self.act(action, post_id, on),
+                    Some(matterless_view::stream::Chose::Open(href)) => {
+                        matterless_view::open::link(&href);
+                    }
                     Some(matterless_view::stream::Chose::React { post_id, emoji, on }) => {
                         if let Some(link) = self.link.as_ref() {
                             link.send(matterless_view::live::Ask::React { post_id, emoji, on });

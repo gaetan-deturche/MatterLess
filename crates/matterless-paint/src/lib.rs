@@ -171,6 +171,20 @@ pub enum Piece {
         height: f32,
         key: String,
     },
+    /// Where a link's words ended up. Nothing is drawn for it.
+    ///
+    /// A piece all the same, because only the shaping knows where the words
+    /// landed and it already runs once per block: asking a second time would
+    /// be a second shaping pass, and a hit box derived any other way drifts
+    /// from the text under it. One per line a link spans, so a link that wraps
+    /// is pressable on both halves.
+    Link {
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        href: String,
+    },
 }
 
 /// A frame's worth of drawing, built up piece by piece.
@@ -359,12 +373,19 @@ impl Painter {
                     });
                 }
                 Kind::Text => {
-                    let (glyphs, rooms) = self.glyphs_of(fonts, block, x, y, theme);
+                    let (glyphs, rooms, links) = self.glyphs_of(fonts, block, x, y, theme);
                     pieces.push(Piece::Text {
                         glyphs,
                         ink: palette.ink,
                         faint: palette.faint,
                     });
+                    pieces.extend(links.into_iter().map(|link| Piece::Link {
+                        x: link.x,
+                        y: link.y,
+                        width: link.width,
+                        height: link.height,
+                        href: link.href,
+                    }));
                     // A custom emoji's placeholder, turned into the picture it
                     // was standing in for. Drawn to the room the spaces
                     // actually measured, so the line and the image agree
@@ -390,7 +411,7 @@ impl Painter {
                 // owns the row, because it spans the whole run of them and a
                 // single line does not know it is the first or the last.
                 Kind::Preview => {
-                    let (glyphs, _) = self.glyphs_of(fonts, block, x, y, theme);
+                    let (glyphs, _, _) = self.glyphs_of(fonts, block, x, y, theme);
                     pieces.push(Piece::Text {
                         glyphs,
                         ink: palette.ink,
@@ -444,6 +465,9 @@ impl Painter {
                     height,
                     colour,
                 } => canvas.fill(*x as i32, *y as i32, *width as i32, *height as i32, *colour),
+                // Nothing is drawn for a link: it is a box a pointer can land
+                // on, and the words inside it are already drawn as text.
+                Piece::Link { .. } => {}
                 // The snapshot path has no network, so a picture is drawn as
                 // the space it occupies. That is the honest answer: this path
                 // exists to check heights and glyph positions, and a filled box
@@ -541,9 +565,9 @@ impl Painter {
         x: f32,
         y: f32,
         theme: &Theme,
-    ) -> (Vec<PlacedGlyph>, Rooms) {
+    ) -> (Vec<PlacedGlyph>, Rooms, Links) {
         if block.spans.is_empty() {
-            return (Vec::new(), HashMap::new());
+            return (Vec::new(), HashMap::new(), Vec::new());
         }
         let line_height = if block.kind == Kind::Code {
             theme.code_line_height
@@ -567,15 +591,38 @@ impl Painter {
         // are walked: its glyphs are spaces and drawing them would draw
         // nothing, so the span they belong to is turned into a picture instead.
         let mut rooms: Rooms = HashMap::new();
+        // Where each link's words ended up, per line, widened glyph by glyph
+        // the same way an emoji's room is.
+        let mut links: Links = Vec::new();
         // Never more lines than the layout reserved. The buffer wraps to the
         // width it was given and will happily produce a fourth line for a
         // three-line block -- which draws over the message underneath. The
         // layout decides how tall a block is; this draws that and no more.
         for run in shaped.layout_runs().take(block.lines.max(1)) {
             for glyph in run.glyphs {
-                if let Some(at) = emoji_span(glyph.metadata)
-                    && block.spans.get(at).is_some_and(|span| span.emoji.is_some())
+                let at = span_of(glyph.metadata);
+                if marks(glyph.metadata, LINK)
+                    && let Some(href) = block.spans.get(at).and_then(|span| span.link.as_ref())
                 {
+                    // One box per line the link spans, widened glyph by glyph:
+                    // a link that wraps is pressable on both halves rather
+                    // than on one box straddling the gap between them.
+                    match links.last_mut() {
+                        Some(last)
+                            if last.href == *href && (last.y - (y + run.line_top)).abs() < 0.5 =>
+                        {
+                            last.width = (glyph.x + x + glyph.w - last.x).max(last.width);
+                        }
+                        _ => links.push(LinkBox {
+                            x: glyph.x + x,
+                            y: y + run.line_top,
+                            width: glyph.w,
+                            height: line_height,
+                            href: href.clone(),
+                        }),
+                    }
+                }
+                if marks(glyph.metadata, EMOJI) {
                     // Widened to cover every space of the placeholder, so the
                     // picture fills exactly the room the line reserved for it
                     // however the font measured them.
@@ -590,11 +637,11 @@ impl Painter {
                     key: physical.cache_key,
                     x: physical.x,
                     y: physical.y,
-                    faint: glyph.metadata == FAINT,
+                    faint: marks(glyph.metadata, FAINT),
                 });
             }
         }
-        (placed, rooms)
+        (placed, rooms, links)
     }
 }
 
@@ -606,28 +653,60 @@ type Room = (f32, f32, f32);
 type Rooms = HashMap<usize, Room>;
 
 /// Marks a faint span so its glyphs can be told apart after shaping.
+/// Where a link's words ended up on one line.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LinkBox {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+    pub href: String,
+}
+
+/// The link boxes one block produced, in the order they were shaped.
+type Links = Vec<LinkBox>;
+
+/// What a glyph remembers about the span it came from.
+///
+/// Metadata rides through shaping onto every glyph a span produces, and it is
+/// the only channel back from the shaper. It carries the span's index *and*
+/// what is special about it, because a line holds several spans and a glyph
+/// has to say which one it belongs to -- a link that wraps, an emoji
+/// placeholder, and a faint timestamp are all "which span was that".
 const FAINT: usize = 1;
+const EMOJI: usize = 2;
+const LINK: usize = 4;
+/// How many flags share the low bits. The span index rides above them.
+const FLAGS: usize = 8;
 
-/// Marks a span as a custom emoji's placeholder, with the span index added on
-/// so a line holding several can tell them apart.
-const EMOJI: usize = 16;
+fn marked(span: &TextSpan, at: usize) -> usize {
+    let mut flags = 0;
+    if span.faint {
+        flags |= FAINT;
+    }
+    if span.emoji.is_some() {
+        flags |= EMOJI;
+    }
+    if span.link.is_some() {
+        flags |= LINK;
+    }
+    at * FLAGS + flags
+}
 
-fn emoji_span(metadata: usize) -> Option<usize> {
-    metadata.checked_sub(EMOJI)
+fn span_of(metadata: usize) -> usize {
+    metadata / FLAGS
+}
+
+fn marks(metadata: usize, flag: usize) -> bool {
+    (metadata % FLAGS) & flag != 0
 }
 
 fn attrs_of(span: &TextSpan, at: usize) -> Attrs<'static> {
     let mut attrs = Attrs::new();
-    // A custom emoji marks its span so the placeholder can be found again once
-    // the glyphs come back, which is the only way to know where the picture
-    // goes. Its index rides along, because a line may hold several.
-    if span.emoji.is_some() {
-        attrs = attrs.metadata(EMOJI + at);
-    } else if span.faint {
-        // Metadata rides through shaping onto every glyph the span produces,
-        // which is how one run can be drawn in two colours.
-        attrs = attrs.metadata(FAINT);
-    }
+    // The span marks itself so its glyphs can be found again once they come
+    // back: it is the only way to know where a picture goes, where a link is,
+    // or which half of a run is quiet.
+    attrs = attrs.metadata(marked(span, at));
     if span.mono {
         attrs = attrs.family(Family::Monospace);
     }
