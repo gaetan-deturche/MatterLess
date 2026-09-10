@@ -49,4 +49,9 @@ required-features = ["window"]
 tauri-winrt-notification = "0.7"
 # The reader's own clock. The app gets its offset from the webview; a native
 # window has to ask the system, and std cannot.
-windows = { version = "0.61.3", features = ["Win32_System_Time"] }
+windows = { version = "0.61.3", features = [
+    "Win32_System_Time",
+    # Opening the window without raising it over the reader's work.
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+] }

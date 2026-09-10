@@ -1570,6 +1570,46 @@ impl App {
     }
 }
 
+/// Puts a just-created window at the bottom of the stack, without focus.
+///
+/// `with_active(false)` asks not to be *activated*, which is not the same as
+/// asking not to be *raised*: the window still arrives in front of whatever
+/// the reader is looking at. This is what the app does in `reveal_quietly`,
+/// and for the same reason.
+#[cfg(windows)]
+fn behind(window: &winit::window::Window) {
+    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    let Ok(handle) = window.window_handle() else {
+        return;
+    };
+    let RawWindowHandle::Win32(win32) = handle.as_raw() else {
+        return;
+    };
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        HWND_BOTTOM, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SetWindowPos,
+    };
+    let hwnd = HWND(win32.hwnd.get() as *mut std::ffi::c_void);
+    let placed = unsafe {
+        SetWindowPos(
+            hwnd,
+            Some(HWND_BOTTOM),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW,
+        )
+    };
+    match placed {
+        Ok(()) => println!("opened behind everything else (MATTERLESS_QUIET)"),
+        Err(error) => eprintln!("could not open quietly: {error}"),
+    }
+}
+
+#[cfg(not(windows))]
+fn behind(_window: &winit::window::Window) {}
+
 impl ApplicationHandler<Update> for App {
     fn resumed(&mut self, events: &ActiveEventLoop) {
         // Opened without taking focus when asked, which is what makes it
@@ -1591,7 +1631,7 @@ impl ApplicationHandler<Update> for App {
                 .expect("a window"),
         );
         if quiet {
-            println!("opened without taking focus (MATTERLESS_QUIET)");
+            behind(&window);
         }
 
         // Vulkan by name rather than whatever the platform prefers, which on
