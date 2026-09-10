@@ -14,9 +14,18 @@ use cosmic_text::{CacheKey, SwashCache, SwashContent};
 use matterless_layout::Fonts;
 use std::collections::HashMap;
 
-/// The side of the atlas texture. 1024 holds several thousand glyphs at chat
-/// sizes, which is every glyph the window will ever ask for.
-pub const SIDE: u32 = 1024;
+/// The side of the atlas texture. 2048 is 16 MB of RGBA, which is nothing on
+/// any card that runs Vulkan and is room for both halves below.
+pub const SIDE: u32 = 2048;
+
+/// Where the glyphs stop and the pictures start.
+///
+/// The two are fenced apart rather than sharing one allocator, because they
+/// exhaust at wildly different rates: a channel full of screenshots would take
+/// the whole atlas and then letters would stop rasterising, which is a baffling
+/// failure to be handed. Glyphs are tiny, so the smaller half is theirs and it
+/// still holds several thousand of them.
+const SPLIT: u32 = 768;
 
 /// Where one glyph sits in the atlas, and how far it is drawn from the pen.
 #[derive(Debug, Clone, Copy)]
@@ -48,6 +57,11 @@ pub struct Atlas {
     shelf_y: u32,
     shelf_height: u32,
     full: bool,
+    /// The picture half, allocated the same way below `SPLIT`.
+    picture_x: u32,
+    picture_y: u32,
+    picture_shelf: u32,
+    pictures_full: bool,
 }
 
 impl Atlas {
@@ -79,6 +93,10 @@ impl Atlas {
             view,
             slots: HashMap::new(),
             images: HashMap::new(),
+            picture_x: 1,
+            picture_y: SPLIT,
+            picture_shelf: 0,
+            pictures_full: false,
             pen_x: 1,
             shelf_y: 1,
             shelf_height: 0,
@@ -140,7 +158,7 @@ impl Atlas {
             self.images.insert(key.to_string(), None);
             return None;
         }
-        let Some(slot) = self.reserve(width, height) else {
+        let Some(slot) = self.reserve_picture(width, height) else {
             // Out of room. Remembered as absent rather than retried every frame,
             // which would be a stutter hiding its own cause.
             self.images.insert(key.to_string(), None);
@@ -214,6 +232,37 @@ impl Atlas {
         Some(slot)
     }
 
+    /// The same shelf allocator, in the half of the texture below `SPLIT`.
+    ///
+    /// Separate state rather than a shared pen, so a channel full of pictures
+    /// cannot take the room letters need.
+    fn reserve_picture(&mut self, width: u32, height: u32) -> Option<Slot> {
+        if self.pictures_full || width > SIDE {
+            return None;
+        }
+        if self.picture_x + width > SIDE {
+            self.picture_y += self.picture_shelf + 1;
+            self.picture_x = 1;
+            self.picture_shelf = 0;
+        }
+        if self.picture_y + height >= SIDE {
+            self.pictures_full = true;
+            return None;
+        }
+        let slot = Slot {
+            x: self.picture_x,
+            y: self.picture_y,
+            width,
+            height,
+            left: 0,
+            top: 0,
+            colour: false,
+        };
+        self.picture_x += width + 1;
+        self.picture_shelf = self.picture_shelf.max(height);
+        Some(slot)
+    }
+
     /// Finds room on the current shelf, or opens the next one.
     fn reserve(&mut self, width: u32, height: u32) -> Option<Slot> {
         if self.full || width > SIDE {
@@ -224,7 +273,7 @@ impl Atlas {
             self.pen_x = 1;
             self.shelf_height = 0;
         }
-        if self.shelf_y + height >= SIDE {
+        if self.shelf_y + height >= SPLIT {
             self.full = true;
             return None;
         }

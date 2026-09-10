@@ -636,9 +636,9 @@ impl App {
         if let (Some(thread), Some(within)) = (&self.thread, self.thread_stream_rect()) {
             wanted.extend(thread.faces(within));
         }
-        for key in wanted {
+        for (key, width, height) in wanted {
             if self.asked.insert(key.clone()) {
-                link.send(matterless_view::live::Ask::Fetch { key });
+                link.send(matterless_view::live::Ask::Fetch { key, width, height });
             }
         }
     }

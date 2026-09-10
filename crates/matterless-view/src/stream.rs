@@ -154,22 +154,68 @@ impl Stream {
     ///
     /// Only a `Post` has one: a continuation is the same person still talking,
     /// which is exactly what leaving the gutter empty says.
-    pub fn faces(&self, within: Rect) -> Vec<String> {
+    pub fn faces(&self, within: Rect) -> Vec<(String, u32, u32)> {
         let mut wanted = Vec::new();
         let mut top = within.y - self.scroll;
         for (index, laid) in self.laid.iter().enumerate() {
             let bottom = top + laid.height;
-            if bottom >= within.y
-                && top <= within.bottom()
-                && let Some(Row::Post { post }) = self.rows.get(index)
-            {
-                wanted.push(avatar_key(&post.author_id, post.avatar_at));
+            if bottom >= within.y && top <= within.bottom() {
+                if let Some(Row::Post { post }) = self.rows.get(index) {
+                    wanted.push((
+                        avatar_key(&post.author_id, post.avatar_at),
+                        AVATAR as u32,
+                        AVATAR as u32,
+                    ));
+                }
+                // Attachments hang off a continuation as readily as off a post.
+                if let Some(Row::Post { post } | Row::Continuation { post }) = self.rows.get(index)
+                {
+                    for file in &post.files {
+                        if file.image || file.video {
+                            // The box the layout reserved, so the picture is
+                            // scaled once on the way in rather than every frame
+                            // on the way out.
+                            wanted.push((
+                                picture_key(file),
+                                (file.box_width.max(1) as f32).min(self.theme.text_width()) as u32,
+                                file.box_height.max(1) as u32,
+                            ));
+                        }
+                    }
+                }
             }
             top = bottom;
         }
         wanted.sort();
         wanted.dedup();
         wanted
+    }
+
+    /// Where each of a row's pictures is drawn, from the blocks the layout
+    /// already reserved for them.
+    ///
+    /// Paired by order: the nth attachment block belongs to the nth file, which
+    /// is how the layout built them.
+    fn pictures(&self, index: usize, top: f32, left: f32) -> Vec<matterless_paint::Piece> {
+        let Some(Row::Post { post } | Row::Continuation { post }) = self.rows.get(index) else {
+            return Vec::new();
+        };
+        let Some(laid) = self.laid.get(index) else {
+            return Vec::new();
+        };
+        laid.blocks
+            .iter()
+            .filter(|block| block.kind == matterless_layout::row::Kind::Attachment)
+            .zip(post.files.iter())
+            .filter(|(_, file)| file.image || file.video)
+            .map(|(block, file)| matterless_paint::Piece::Image {
+                x: left + self.theme.gutter,
+                y: top + block.y,
+                width: block.wrap,
+                height: block.height,
+                key: picture_key(file),
+            })
+            .collect()
     }
 
     pub fn draw(&self, into: &mut Canvas<'_>, within: Rect, input: &Input) {
@@ -202,6 +248,7 @@ impl Stream {
                         key: avatar_key(&post.author_id, post.avatar_at),
                     }]);
                 }
+                scene.extend(self.pictures(index, top, within.x));
             }
             top = bottom;
         }
@@ -218,6 +265,22 @@ pub const AVATAR: f32 = 28.0;
 /// hand when somebody changes their photograph.
 pub fn avatar_key(user_id: &str, version: i64) -> String {
     format!("avatar/{user_id}?v={version}")
+}
+
+/// What an attachment's picture is called.
+///
+/// Which rendition, not just which file: the planner already chose one and
+/// sized the box against its pixels, so fetching a different one would draw a
+/// 120-pixel thumbnail stretched across a box measured for a 1920-pixel
+/// preview.
+pub fn picture_key(file: &matterless_render::FileRef) -> String {
+    match file.variant {
+        matterless_render::ImageVariant::Thumb => format!("thumb/{}", file.id),
+        matterless_render::ImageVariant::Preview => format!("preview/{}", file.id),
+        // An animation or a vector, whose preview would be a still frame or
+        // nothing at all.
+        matterless_render::ImageVariant::Original => format!("file/{}", file.id),
+    }
 }
 
 /// Moves a piece sideways into its panel.

@@ -64,9 +64,17 @@ pub enum Ask {
         root_id: String,
         message: String,
     },
-    /// Fetch a picture. The key is the window's own name for it, and the route
-    /// is derived from it here so the window never builds a server path.
-    Fetch { key: String },
+    /// Fetch a picture, decoded to fit the box the layout reserved for it.
+    ///
+    /// The size is asked for rather than settled later because a picture scaled
+    /// on the way in is scaled once, by a proper filter, into exactly the space
+    /// it will occupy -- where scaling it on the way out means the atlas holds
+    /// pixels nothing will ever show.
+    Fetch {
+        key: String,
+        width: u32,
+        height: u32,
+    },
 }
 
 /// The window's end of the socket thread. Dropping it closes the connection.
@@ -248,12 +256,12 @@ async fn run(
                             failed,
                         });
                     }
-                    Ask::Fetch { key } => {
+                    Ask::Fetch { key, width, height } => {
                         let Some(route) = route_for(&key) else {
                             continue;
                         };
                         match rest.fetch_bytes(&route).await {
-                            Ok(Some((bytes, _))) => match decode(&bytes) {
+                            Ok(Some((bytes, _))) => match decode(&bytes, width, height) {
                                 Some((width, height, rgba)) => wake.wake(Update::Picture {
                                     key,
                                     width,
@@ -309,6 +317,7 @@ pub fn route_for(key: &str) -> Option<String> {
         // The thumbnail is what a message list wants: measured at 20 KB against
         // a 474 KB original on this server.
         "thumb" => Some(format!("/files/{id}/thumbnail")),
+        "preview" => Some(format!("/files/{id}/preview")),
         "file" => Some(format!("/files/{id}")),
         _ => None,
     }
@@ -415,22 +424,30 @@ mod tests {
 /// Scaled down to what the atlas can hold rather than refused: an avatar comes
 /// back at whatever size the server keeps, and a face that would not fit is
 /// better small than missing.
-fn decode(bytes: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
+fn decode(bytes: &[u8], width: u32, height: u32) -> Option<(u32, u32, Vec<u8>)> {
     let decoded = image::load_from_memory(bytes).ok()?;
     let mut rgba = decoded.to_rgba8();
-    if rgba.width() > MAX_SIDE || rgba.height() > MAX_SIDE {
-        rgba = image::imageops::thumbnail(
-            &rgba,
-            rgba.width().min(MAX_SIDE),
-            rgba.height().min(MAX_SIDE),
-        );
+    // Never enlarged: a picture smaller than its box stays its own size and the
+    // sampler stretches it, which costs nothing and keeps the atlas small.
+    let wanted = (
+        width.clamp(1, MAX_SIDE).min(rgba.width()),
+        height.clamp(1, MAX_SIDE).min(rgba.height()),
+    );
+    if (rgba.width(), rgba.height()) != wanted {
+        // A box filter on the way in, which is a better downscale than the
+        // bilinear one the sampler would do on the way out -- and it is done
+        // once rather than every frame.
+        rgba = image::imageops::thumbnail(&rgba, wanted.0, wanted.1);
     }
     Some((rgba.width(), rgba.height(), rgba.into_raw()))
 }
 
-/// The largest picture worth putting in a shared atlas. A face is drawn at 28
-/// pixels, so anything past this is detail nothing will ever see.
-const MAX_SIDE: u32 = 128;
+/// The largest picture worth putting in a shared atlas.
+///
+/// The server's thumbnails come back around this size and a message list never
+/// draws one larger, so this is a guard against a surprise rather than a
+/// resize anything normally hits.
+const MAX_SIDE: u32 = 640;
 
 #[cfg(test)]
 mod routes {
