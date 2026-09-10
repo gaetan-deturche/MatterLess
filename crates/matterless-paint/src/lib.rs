@@ -78,6 +78,17 @@ pub struct Palette {
     pub surface: [u8; 4],
 }
 
+impl Palette {
+    /// The quieter ink as something to fill with.
+    ///
+    /// A bar beside a quote is the same colour as the text it belongs to, and
+    /// `ink`/`faint` are three channels because they colour glyphs while a
+    /// fill takes four.
+    pub fn faint_fill(&self) -> [u8; 4] {
+        [self.faint[0], self.faint[1], self.faint[2], 255]
+    }
+}
+
 impl Default for Palette {
     /// The app's dark theme.
     fn default() -> Self {
@@ -375,6 +386,17 @@ impl Painter {
                         });
                     }
                 }
+                // One line of a card: the bar beside it is drawn by whoever
+                // owns the row, because it spans the whole run of them and a
+                // single line does not know it is the first or the last.
+                Kind::Preview => {
+                    let (glyphs, _) = self.glyphs_of(fonts, block, x, y, theme);
+                    pieces.push(Piece::Text {
+                        glyphs,
+                        ink: palette.ink,
+                        faint: palette.faint,
+                    });
+                }
                 // Drawn by whoever owns the row rather than here: a pill is a
                 // box with a picture and a count in it, not a run of text, and
                 // only the caller knows which emoji is which.
@@ -545,7 +567,11 @@ impl Painter {
         // are walked: its glyphs are spaces and drawing them would draw
         // nothing, so the span they belong to is turned into a picture instead.
         let mut rooms: Rooms = HashMap::new();
-        for run in shaped.layout_runs() {
+        // Never more lines than the layout reserved. The buffer wraps to the
+        // width it was given and will happily produce a fourth line for a
+        // three-line block -- which draws over the message underneath. The
+        // layout decides how tall a block is; this draws that and no more.
+        for run in shaped.layout_runs().take(block.lines.max(1)) {
             for glyph in run.glyphs {
                 if let Some(at) = emoji_span(glyph.metadata)
                     && block.spans.get(at).is_some_and(|span| span.emoji.is_some())
@@ -612,4 +638,86 @@ fn attrs_of(span: &TextSpan, at: usize) -> Attrs<'static> {
         attrs = attrs.style(cosmic_text::Style::Italic);
     }
     attrs
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use matterless_layout::row::{Theme, lay_out};
+    use matterless_render::{PostRow, Preview, Row};
+    use std::sync::Arc;
+
+    fn post(previews: Vec<Preview>) -> PostRow {
+        PostRow {
+            post_id: "p1".into(),
+            root_id: String::new(),
+            author_id: "u1".into(),
+            author_name: "ada".into(),
+            create_at: 0,
+            update_at: 0,
+            edited: false,
+            nodes: Arc::new(vec![matterless_render::markdown::Node::Paragraph {
+                children: vec![matterless_render::markdown::Node::Text {
+                    value: "look".into(),
+                }],
+            }]),
+            reactions: Vec::new(),
+            files: Vec::new(),
+            attachments: Vec::new(),
+            avatar_at: 0,
+            bot: false,
+            body_is_attachment_only: false,
+            pending: false,
+            failed: false,
+            pinned: false,
+            saved: false,
+            following: false,
+            previews,
+        }
+    }
+
+    /// Nothing is drawn below the height the layout reserved.
+    ///
+    /// The buffer wraps to the width it is given and will produce a fourth
+    /// line for a three-line block, which draws over the message underneath.
+    /// A capped description is the case that made this reachable, and every
+    /// block has the same contract: the layout decides the height.
+    #[test]
+    fn no_glyph_is_drawn_below_the_row_it_belongs_to() {
+        let mut fonts = Fonts::new();
+        let mut painter = Painter::new();
+        let theme = Theme::default();
+        let row = Row::Post {
+            post: post(vec![Preview::Page {
+                url: "https://example.invalid/thing".into(),
+                title: "A title".into(),
+                // Far more than any cap, which is the whole point.
+                description: "word ".repeat(800),
+                site_name: "example.invalid".into(),
+                image: None,
+            }]),
+        };
+        let laid = lay_out(&mut fonts, &row, &theme);
+        let pieces = painter.pieces_of(
+            &mut fonts,
+            &laid,
+            0.0,
+            &theme,
+            &Palette::default(),
+            &HashMap::new(),
+        );
+        let lowest = pieces
+            .iter()
+            .filter_map(|piece| match piece {
+                Piece::Text { glyphs, .. } => glyphs.iter().map(|glyph| glyph.y).max(),
+                _ => None,
+            })
+            .max()
+            .expect("some text");
+        assert!(
+            (lowest as f32) <= laid.height,
+            "drew down to {lowest} in a row {} tall",
+            laid.height
+        );
+    }
 }
