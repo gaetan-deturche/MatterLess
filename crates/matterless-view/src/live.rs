@@ -33,6 +33,38 @@ pub enum Update {
     /// tell which half of a direct message is the reader, and asking the server
     /// is the only way to know it without being told.
     SignedIn { id: String, username: String },
+    /// A send came back. `failed` keeps the row on screen, marked, rather than
+    /// losing what was written.
+    SendSettled {
+        pending_post_id: String,
+        channel_id: String,
+        failed: bool,
+    },
+}
+
+/// What the window asks the socket thread to do.
+#[derive(Debug)]
+pub enum Ask {
+    /// Post a message. The pending id is the window's own, so the row it
+    /// already drew and the answer that comes back name the same thing.
+    Send {
+        pending_post_id: String,
+        channel_id: String,
+        root_id: String,
+        message: String,
+    },
+}
+
+/// The window's end of the socket thread. Dropping it closes the connection.
+pub struct Link {
+    asks: tokio::sync::mpsc::UnboundedSender<Ask>,
+}
+
+impl Link {
+    /// Queues a message to send. Fails only once the socket thread has gone.
+    pub fn send(&self, ask: Ask) -> bool {
+        self.asks.send(ask).is_ok()
+    }
 }
 
 /// Anything that can be woken from the socket thread.
@@ -93,7 +125,8 @@ pub fn stored_server(database: &std::path::Path) -> Option<String> {
 /// Returns immediately. The window keeps drawing from the store while this
 /// connects, which is the point: a cold start paints from SQLite and the socket
 /// catches it up, rather than the reader waiting on a network round trip.
-pub fn start(store: Arc<Store>, server: String, token: String, wake: impl Wake) {
+pub fn start(store: Arc<Store>, server: String, token: String, wake: impl Wake) -> Link {
+    let (asks, inbox) = tokio::sync::mpsc::unbounded_channel();
     std::thread::spawn(move || {
         let runtime = match tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -105,11 +138,18 @@ pub fn start(store: Arc<Store>, server: String, token: String, wake: impl Wake) 
                 return;
             }
         };
-        runtime.block_on(run(store, server, token, wake));
+        runtime.block_on(run(store, server, token, wake, inbox));
     });
+    Link { asks }
 }
 
-async fn run(store: Arc<Store>, server: String, token: String, wake: impl Wake) {
+async fn run(
+    store: Arc<Store>,
+    server: String,
+    token: String,
+    wake: impl Wake,
+    mut inbox: tokio::sync::mpsc::UnboundedReceiver<Ask>,
+) {
     let rest = match RestClient::new(&server) {
         Ok(rest) => rest,
         Err(error) => {
@@ -153,19 +193,67 @@ async fn run(store: Arc<Store>, server: String, token: String, wake: impl Wake) 
     let (signals_tx, mut signals) = tokio::sync::mpsc::channel(1024);
     let _handle = session.spawn(signals_tx);
 
-    while let Some(signal) = signals.recv().await {
-        match signal {
-            Signal::Connected { .. } => wake.wake(Update::Connected(true)),
-            Signal::Disconnected { .. } => wake.wake(Update::Connected(false)),
-            // The socket came back without resuming, so history has a hole. The
-            // window redraws from the store, which is the honest answer until
-            // it can refetch the gap itself.
-            Signal::ResyncRequired => wake.wake(Update::Changed(vec![Delta::ResyncRequired])),
-            Signal::Event { event, .. } => match engine.apply_event(&event, &context) {
-                Ok(deltas) if !deltas.is_empty() => wake.wake(Update::Changed(deltas)),
-                Ok(_) => {}
-                Err(error) => eprintln!("applying {}: {error}", event.name()),
-            },
+    loop {
+        tokio::select! {
+            // Sends and socket traffic on one thread: a send has to be able to
+            // go out while the socket is quiet, and its echo has to be able to
+            // arrive while a send is in flight.
+            ask = inbox.recv() => {
+                let Some(ask) = ask else { break };
+                match ask {
+                    Ask::Send { pending_post_id, channel_id, root_id, message } => {
+                        let request = matterless_core::model::NewPost {
+                            channel_id: &channel_id,
+                            message: &message,
+                            root_id: &root_id,
+                            pending_post_id: &pending_post_id,
+                            file_ids: &[],
+                        };
+                        let failed = match rest.create_post(&request).await {
+                            Ok(post) => {
+                                // Stored here rather than waited for: the echo
+                                // usually beats this reply, and whichever wins
+                                // the other one is a no-op.
+                                let event = matterless_core::Event::Posted {
+                                    channel_id: post.channel_id.clone(),
+                                    post: Box::new(post),
+                                };
+                                if let Err(error) = engine.apply_event(&event, &context) {
+                                    eprintln!("storing a confirmed send: {error}");
+                                }
+                                false
+                            }
+                            Err(error) => {
+                                eprintln!("send failed: {error}");
+                                true
+                            }
+                        };
+                        wake.wake(Update::SendSettled {
+                            pending_post_id,
+                            channel_id,
+                            failed,
+                        });
+                    }
+                }
+            }
+            signal = signals.recv() => {
+                let Some(signal) = signal else { break };
+                match signal {
+                    Signal::Connected { .. } => wake.wake(Update::Connected(true)),
+                    Signal::Disconnected { .. } => wake.wake(Update::Connected(false)),
+                    // The socket came back without resuming, so history has a
+                    // hole. The window redraws from the store, which is the
+                    // honest answer until it can refetch the gap itself.
+                    Signal::ResyncRequired => {
+                        wake.wake(Update::Changed(vec![Delta::ResyncRequired]))
+                    }
+                    Signal::Event { event, .. } => match engine.apply_event(&event, &context) {
+                        Ok(deltas) if !deltas.is_empty() => wake.wake(Update::Changed(deltas)),
+                        Ok(_) => {}
+                        Err(error) => eprintln!("applying {}: {error}", event.name()),
+                    },
+                }
+            }
         }
     }
 }

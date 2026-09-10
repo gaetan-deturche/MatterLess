@@ -9,6 +9,7 @@
 //! are the rows the app would draw rather than an approximation of them.
 
 use matterless_core::model::ThreadMode;
+use matterless_render::pending::PendingPost;
 use matterless_render::{PlanOptions, Row, plan_channel};
 use matterless_store::Store;
 use std::collections::HashMap;
@@ -53,8 +54,13 @@ fn busiest(store: &Store) -> Option<String> {
 /// mentions are theirs; an empty one draws every message as somebody else's,
 /// which is wrong in styling but not in height.
 /// Reads a channel from an already-open store and plans it.
-pub fn rows_of(store: &Store, channel_id: &str, me_id: &str) -> Result<Vec<Row>, String> {
-    let posts = store
+pub fn rows_of(
+    store: &Store,
+    channel_id: &str,
+    me_id: &str,
+    outstanding: &[PendingPost],
+) -> Result<Vec<Row>, String> {
+    let mut posts = store
         .channel_page(channel_id, None, PAGE)
         .map_err(|error| format!("read {channel_id}: {error}"))?;
     let mut authors: Vec<String> = posts.iter().map(|post| post.user_id.clone()).collect();
@@ -70,6 +76,18 @@ pub fn rows_of(store: &Store, channel_id: &str, me_id: &str) -> Result<Vec<Row>,
         .iter()
         .map(|(id, user)| (id.clone(), user.last_picture_update))
         .collect();
+
+    // Optimistic sends are merged here so they reach the screen through the
+    // same plan as everything else. A guess is never written to SQLite: if the
+    // send fails, or the window dies mid-flight, the database looks exactly as
+    // it did before.
+    for held in outstanding {
+        options.pending.insert(held.pending_post_id.clone());
+        if held.failed {
+            options.failed.insert(held.pending_post_id.clone());
+        }
+        posts.push(held.as_post(me_id));
+    }
     Ok(plan_channel(&posts, &HashMap::new(), &options))
 }
 

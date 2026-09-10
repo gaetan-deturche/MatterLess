@@ -166,6 +166,11 @@ struct App {
     /// Copy and paste within this window. Crossing to another process needs a
     /// platform clipboard, which is a dependency this window does not have yet.
     clipboard: String,
+    /// The socket thread, once it is up. Sends go through it.
+    link: Option<matterless_view::live::Link>,
+    /// Messages written but not yet confirmed, held in memory and nowhere else:
+    /// a guess must never reach SQLite.
+    outstanding: Arc<matterless_render::pending::PendingPosts>,
 }
 
 impl App {
@@ -264,6 +269,8 @@ impl App {
                 reply
             },
             clipboard: String::new(),
+            link: None,
+            outstanding: Arc::new(matterless_render::pending::PendingPosts::default()),
         };
         app.sidebar.selected = Some(channel);
         // Focused before anything is clicked: a chat window that needs a click
@@ -490,7 +497,12 @@ impl App {
             return;
         };
         println!("connecting to {server}");
-        matterless_view::live::start(store, server, token, Proxy(proxy));
+        self.link = Some(matterless_view::live::start(
+            store,
+            server,
+            token,
+            Proxy(proxy),
+        ));
     }
 
     /// Applies what the socket reported.
@@ -503,6 +515,29 @@ impl App {
             Update::SignedIn { id, username } => {
                 println!("reader is {username}");
                 self.signed_in(&id);
+            }
+            Update::SendSettled {
+                pending_post_id,
+                channel_id,
+                failed,
+            } => {
+                if failed {
+                    // Kept on screen, marked, rather than losing what was
+                    // written: the reader can see it did not go.
+                    self.outstanding.mark_failed(&pending_post_id);
+                    eprintln!("a message did not send");
+                } else {
+                    // The socket echo has usually already stored the real post
+                    // and this is the second of two answers; dropping the guess
+                    // twice is harmless.
+                    self.outstanding.resolve(&pending_post_id);
+                }
+                if self.sidebar.selected.as_deref() == Some(channel_id.as_str()) {
+                    self.reread_channel(&channel_id);
+                }
+                if let Some(root) = self.open_root() {
+                    self.reread_thread(&root);
+                }
             }
             Update::Failed(why) => {
                 self.connected = false;
@@ -526,6 +561,54 @@ impl App {
         self.redraw();
     }
 
+    /// Sends a message, showing it before the server has agreed to it.
+    ///
+    /// The guess goes on screen first and the request second: a chat client
+    /// that waits for a round trip before showing what you typed feels broken
+    /// on any connection worse than a good one.
+    fn post_message(&mut self, channel_id: &str, root_id: &str, message: String) {
+        let Some(link) = self.link.as_ref() else {
+            eprintln!("offline, so nothing was sent");
+            return;
+        };
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|since| since.as_millis() as i64)
+            .unwrap_or_default();
+        let pending_post_id = matterless_render::pending::PendingPosts::new_id(&self.me, now);
+        // The length, never the text.
+        println!(
+            "sending {} characters to {channel_id} (threaded: {})",
+            message.chars().count(),
+            !root_id.is_empty()
+        );
+        self.outstanding
+            .insert(matterless_render::pending::PendingPost {
+                pending_post_id: pending_post_id.clone(),
+                channel_id: channel_id.to_string(),
+                root_id: root_id.to_string(),
+                message: message.clone(),
+                create_at: now,
+                failed: false,
+                files: Vec::new(),
+            });
+        link.send(matterless_view::live::Ask::Send {
+            pending_post_id,
+            channel_id: channel_id.to_string(),
+            root_id: root_id.to_string(),
+            message,
+        });
+        // Painted immediately, and pinned to the bottom: sending is the one
+        // case where the reader definitely wants to be looking at the newest
+        // message, because they just wrote it.
+        self.reread_channel(channel_id);
+        let within = self.stream_rect();
+        self.stream.to_bottom(within);
+        if let Some(root) = self.open_root() {
+            self.reread_thread(&root);
+        }
+    }
+
     /// The root of the open thread, if one is open.
     fn open_root(&self) -> Option<String> {
         let name = &self.thread.as_ref()?.name;
@@ -542,7 +625,12 @@ impl App {
         };
         let within = self.stream_rect();
         let was_at_end = self.stream.scroll >= self.stream.reach(within) - 1.0;
-        match matterless_view::feed::rows_of(&store, channel, &self.me) {
+        match matterless_view::feed::rows_of(
+            &store,
+            channel,
+            &self.me,
+            &self.outstanding.for_channel(channel),
+        ) {
             Ok(rows) => {
                 self.stream.rows = rows;
                 self.relayout();
@@ -666,28 +754,40 @@ impl App {
         let sent = self
             .composer
             .react(&mut self.fonts, &self.input, within, &mut self.clipboard);
-        if let Some(text) = sent {
-            // The count, never the message: the log holds structure and sizes,
-            // not what anybody said.
-            println!("composer: sent {} characters", text.chars().count());
-        }
         let width = self.channel_rect().width;
         self.composer.lay_out(&mut self.fonts, width);
 
-        if let Some(body) = self.thread_body() {
+        let replied = if let Some(body) = self.thread_body() {
             let replied =
                 self.thread_composer
                     .react(&mut self.fonts, &self.input, body, &mut self.clipboard);
-            if let Some(text) = replied {
-                println!("thread: replied {} characters", text.chars().count());
-            }
             self.thread_composer.lay_out(&mut self.fonts, body.width);
-        }
+            replied
+        } else {
+            None
+        };
 
         // Only when a box actually grew or shrank. Every keystroke would
         // otherwise re-lay-out four hundred messages to learn nothing moved.
         if (self.composer.height(), self.thread_composer.height()) != was {
             self.relayout();
+        }
+
+        // Sent after the boxes are settled: posting re-reads the channel, and
+        // doing that with a composer mid-resize would lay the stream out
+        // against a height that is about to change.
+        if let Some(text) = sent
+            && let Some(channel) = self.sidebar.selected.clone()
+        {
+            self.post_message(&channel, "", text);
+        }
+        if let Some(text) = replied
+            && let Some(root) = self.open_root()
+        {
+            // A reply goes to the channel the thread is in, which is the one
+            // being looked at.
+            let channel = self.sidebar.selected.clone().unwrap_or_default();
+            self.post_message(&channel, &root, text);
         }
     }
 
@@ -696,7 +796,12 @@ impl App {
         let Some(store) = self.store.clone() else {
             return;
         };
-        match matterless_view::feed::rows_of(&store, channel, &self.me) {
+        match matterless_view::feed::rows_of(
+            &store,
+            channel,
+            &self.me,
+            &self.outstanding.for_channel(channel),
+        ) {
             Ok(rows) => {
                 self.stream.rows = rows;
                 // A thread from the channel just left has nothing to do with
