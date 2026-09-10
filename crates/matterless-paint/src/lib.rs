@@ -347,11 +347,10 @@ impl Painter {
                     ink: palette.ink,
                     faint: palette.faint,
                 }),
-                Kind::Reactions => pieces.push(Piece::Text {
-                    glyphs: self.glyphs_of(fonts, block, x, y, theme),
-                    ink: palette.ink,
-                    faint: palette.faint,
-                }),
+                // Drawn by whoever owns the row rather than here: a pill is a
+                // box with a picture and a count in it, not a run of text, and
+                // only the caller knows which emoji is which.
+                Kind::Reactions => {}
                 Kind::Attachment | Kind::Footer => {
                     if block.height >= 1.0 {
                         pieces.push(Piece::Fill {

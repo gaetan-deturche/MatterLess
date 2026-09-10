@@ -71,6 +71,12 @@ pub enum Ask {
         root_id: String,
         message: String,
     },
+    /// Add or remove a reaction.
+    React {
+        post_id: String,
+        emoji: String,
+        on: bool,
+    },
     /// Tell the server this channel has been seen, and record the watermark.
     ///
     /// Without it a channel stays unread however long it is looked at, and the
@@ -270,6 +276,20 @@ async fn run(
                             channel_id,
                             failed,
                         });
+                    }
+                    Ask::React { post_id, emoji, on } => {
+                        let done = if on {
+                            rest.add_reaction(&me_id, &post_id, &emoji).await.map(|_| ())
+                        } else {
+                            rest.remove_reaction(&me_id, &post_id, &emoji).await
+                        };
+                        match done {
+                            // The server echoes the change on the socket, which
+                            // is what actually redraws the pill. Nothing to do
+                            // here but say it went.
+                            Ok(()) => println!("reacted to {post_id}"),
+                            Err(error) => eprintln!("reacting to {post_id}: {error}"),
+                        }
                     }
                     Ask::MarkRead { channel_id } => {
                         if let Err(error) = rest.view_channel(&me_id, &channel_id).await {

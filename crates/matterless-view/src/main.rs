@@ -772,6 +772,7 @@ impl App {
         let outstanding = self.outstanding.for_channel(&channel);
         match matterless_view::feed::rows_of(&store, &channel, &self.me, &outstanding, self.depth) {
             Ok(rows) => {
+                self.stream.custom = matterless_view::feed::custom_emoji(&store, &rows);
                 self.stream.rows = rows;
                 self.relayout();
                 let grew = self.stream.total() - before;
@@ -832,6 +833,7 @@ impl App {
             self.depth,
         ) {
             Ok(rows) => {
+                self.stream.custom = matterless_view::feed::custom_emoji(&store, &rows);
                 self.stream.rows = rows;
                 self.relayout();
                 if was_at_end {
@@ -920,6 +922,7 @@ impl App {
 
         let mut stream = Stream::new(thread_name(root_id));
         stream.rows = matterless_render::plan_thread(&root, &replies, &options);
+        stream.custom = matterless_view::feed::custom_emoji(store, &stream.rows);
         println!("thread {root_id}: {} rows", stream.rows.len());
         // A reply half-written to one thread does not belong in another. It
         // survives closing and reopening the same one, which is the case worth
@@ -1004,6 +1007,7 @@ impl App {
             self.depth,
         ) {
             Ok(rows) => {
+                self.stream.custom = matterless_view::feed::custom_emoji(&store, &rows);
                 self.stream.rows = rows;
                 // A thread from the channel just left has nothing to do with
                 // the one just opened.
@@ -1336,6 +1340,11 @@ impl ApplicationHandler<Update> for App {
                 match self.stream.react(&self.input, &boxes, stream) {
                     Some(matterless_view::stream::Chose::Thread(root)) => self.open_thread(&root),
                     Some(matterless_view::stream::Chose::Retry(pending)) => self.retry(&pending),
+                    Some(matterless_view::stream::Chose::React { post_id, emoji, on }) => {
+                        if let Some(link) = self.link.as_ref() {
+                            link.send(matterless_view::live::Ask::React { post_id, emoji, on });
+                        }
+                    }
                     None => {}
                 }
                 self.react();
