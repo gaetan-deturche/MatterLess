@@ -1965,6 +1965,22 @@ impl Store {
         Ok(changed > 0)
     }
 
+    /// Undoes a local tombstone, for a message the server still has.
+    ///
+    /// The counterpart to `tombstone_post`. A delete learned from the server or
+    /// watched happening is a fact; one *inferred* from a message's absence
+    /// from a page is not, and an inference that cannot be withdrawn is a bug
+    /// waiting to hide somebody's messages for good. Only ever called with a
+    /// post the server has just handed back alive.
+    pub fn restore_post(&self, post_id: &str) -> Result<bool> {
+        let connection = self.lock();
+        let changed = connection.execute(
+            "UPDATE posts SET delete_at = 0 WHERE id = ?1 AND delete_at != 0",
+            params![post_id],
+        )?;
+        Ok(changed > 0)
+    }
+
     /// Records a pin locally after the server has accepted it.
     ///
     /// Deliberately leaves `update_at` alone, for the same reason patching
