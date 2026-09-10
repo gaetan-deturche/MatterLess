@@ -17,6 +17,7 @@ mod composer_tests;
 pub mod feed;
 pub mod header;
 pub mod live;
+pub mod search;
 pub mod sidebar;
 pub mod sidebar_feed;
 pub mod stream;
