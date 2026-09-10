@@ -1572,11 +1572,17 @@ impl App {
 
 impl ApplicationHandler<Update> for App {
     fn resumed(&mut self, events: &ActiveEventLoop) {
+        // Opened without taking focus when asked, which is what makes it
+        // usable next to the work it is being compared against: a window that
+        // seizes the keyboard every time it starts interrupts whoever is
+        // watching it.
+        let quiet = std::env::var_os("MATTERLESS_QUIET").is_some();
         let window = Arc::new(
             events
                 .create_window(
                     Window::default_attributes()
                         .with_title("MatterLess -- list on Vulkan")
+                        .with_active(!quiet)
                         .with_inner_size(winit::dpi::LogicalSize::new(
                             self.size.0 as f64,
                             self.size.1 as f64,
@@ -1584,6 +1590,9 @@ impl ApplicationHandler<Update> for App {
                 )
                 .expect("a window"),
         );
+        if quiet {
+            println!("opened without taking focus (MATTERLESS_QUIET)");
+        }
 
         // Vulkan by name rather than whatever the platform prefers, which on
         // Windows would be DX12.
