@@ -15,17 +15,22 @@ struct Viewport {
 @group(0) @binding(0) var<uniform> viewport: Viewport;
 @group(0) @binding(1) var atlas: texture_2d<f32>;
 @group(0) @binding(2) var atlas_sampler: sampler;
+// Linear, for a picture scaled to whatever box the layout reserved. A glyph is
+// rasterised at the size it is drawn and wants the point sampler above.
+@group(0) @binding(3) var smooth_sampler: sampler;
 
 struct In {
     @location(0) position: vec2<f32>,
     @location(1) uv: vec2<f32>,
     @location(2) colour: vec4<f32>,
+    @location(3) filtered: f32,
 };
 
 struct Out {
     @builtin(position) clip: vec4<f32>,
     @location(0) uv: vec2<f32>,
     @location(1) colour: vec4<f32>,
+    @location(2) filtered: f32,
 };
 
 @vertex
@@ -42,6 +47,7 @@ fn vertex(in: In) -> Out {
     out.clip = vec4<f32>(ndc, 0.0, 1.0);
     out.uv = in.uv;
     out.colour = in.colour;
+    out.filtered = in.filtered;
     return out;
 }
 
@@ -50,6 +56,11 @@ fn fragment(in: Out) -> @location(0) vec4<f32> {
     // A letter is white in the atlas with its coverage in the alpha, so this
     // multiply tints it. An emoji carries its own colour and arrives with a
     // white vertex, so the same multiply leaves it alone.
-    let texel = textureSample(atlas, atlas_sampler, in.uv);
+    // Both are sampled and one is chosen, rather than branching: a texture
+    // sample inside non-uniform control flow is undefined, and a select is
+    // free next to the fetches it picks between.
+    let sharp = textureSample(atlas, atlas_sampler, in.uv);
+    let soft = textureSample(atlas, smooth_sampler, in.uv);
+    let texel = select(sharp, soft, in.filtered > 0.5);
     return vec4<f32>(texel.rgb * in.colour.rgb, texel.a * in.colour.a);
 }

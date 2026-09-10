@@ -46,13 +46,17 @@ pub struct Vertex {
     pub position: [f32; 2],
     pub uv: [f32; 2],
     pub colour: [f32; 4],
+    /// Which sampler this quad wants: 0 for a glyph, 1 for a picture. Carried
+    /// per vertex because both kinds are in one draw call, and splitting the
+    /// call by sampler would cost more state changes than a float does.
+    pub filtered: f32,
 }
 
 impl Vertex {
     const LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
         array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
         step_mode: wgpu::VertexStepMode::Vertex,
-        attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2, 2 => Float32x4],
+        attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2, 2 => Float32x4, 3 => Float32],
     };
 }
 
@@ -139,17 +143,21 @@ pub fn vertices_of(
                 let Some(slot) = atlas.image(key) else {
                     continue;
                 };
-                push_quad(
+                // Half a texel in on every side. Filtering at the exact edge of
+                // a slot pulls in the gap between slots, which is transparent,
+                // so every picture would be drawn with a faded border.
+                quad(
                     into,
                     [*x, *y, *x + *width, *y + *height],
                     [
-                        slot.x as f32 / side,
-                        slot.y as f32 / side,
-                        (slot.x + slot.width) as f32 / side,
-                        (slot.y + slot.height) as f32 / side,
+                        (slot.x as f32 + 0.5) / side,
+                        (slot.y as f32 + 0.5) / side,
+                        ((slot.x + slot.width) as f32 - 0.5) / side,
+                        ((slot.y + slot.height) as f32 - 0.5) / side,
                     ],
                     // White, so the picture keeps its own colours.
                     [1.0, 1.0, 1.0, 1.0],
+                    1.0,
                 );
             }
             Piece::Text { glyphs, ink, faint } => {
@@ -196,7 +204,12 @@ pub fn vertices_of(
     }
 }
 
+/// A quad sampled point-for-point, which is what a glyph and a fill want.
 fn push_quad(into: &mut Vec<Vertex>, rect: [f32; 4], uv: [f32; 4], colour: [f32; 4]) {
+    quad(into, rect, uv, colour, 0.0);
+}
+
+fn quad(into: &mut Vec<Vertex>, rect: [f32; 4], uv: [f32; 4], colour: [f32; 4], filtered: f32) {
     let [x0, y0, x1, y1] = rect;
     let [u0, v0, u1, v1] = uv;
     let corners = [
@@ -204,31 +217,37 @@ fn push_quad(into: &mut Vec<Vertex>, rect: [f32; 4], uv: [f32; 4], colour: [f32;
             position: [x0, y0],
             uv: [u0, v0],
             colour,
+            filtered,
         },
         Vertex {
             position: [x1, y0],
             uv: [u1, v0],
             colour,
+            filtered,
         },
         Vertex {
             position: [x1, y1],
             uv: [u1, v1],
             colour,
+            filtered,
         },
         Vertex {
             position: [x0, y0],
             uv: [u0, v0],
             colour,
+            filtered,
         },
         Vertex {
             position: [x1, y1],
             uv: [u1, v1],
             colour,
+            filtered,
         },
         Vertex {
             position: [x0, y1],
             uv: [u0, v1],
             colour,
+            filtered,
         },
     ];
     into.extend_from_slice(&corners);
@@ -264,12 +283,25 @@ impl View {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        // Nearest, not linear: a glyph rasterised at the size it is drawn does
-        // not want filtering, which only blurs it.
+        // Two samplers, because the atlas holds two kinds of thing. A glyph is
+        // rasterised at the size it is drawn, so filtering it only blurs it. A
+        // picture is scaled to whatever box the layout reserved, and point
+        // sampling that drops whole rows of pixels -- which is what makes a
+        // downscaled screenshot look shattered.
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("atlas"),
             mag_filter: wgpu::FilterMode::Nearest,
             min_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
+        let smooth = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("pictures"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            // Clamped, so sampling the edge of a slot cannot wrap round to the
+            // other side of the atlas.
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
             ..Default::default()
         });
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -289,7 +321,7 @@ impl View {
                     binding: 1,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
                         view_dimension: wgpu::TextureViewDimension::D2,
                         multisampled: false,
                     },
@@ -298,7 +330,13 @@ impl View {
                 wgpu::BindGroupLayoutEntry {
                     binding: 2,
                     visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
             ],
@@ -318,6 +356,10 @@ impl View {
                 wgpu::BindGroupEntry {
                     binding: 2,
                     resource: wgpu::BindingResource::Sampler(&sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::Sampler(&smooth),
                 },
             ],
         });
