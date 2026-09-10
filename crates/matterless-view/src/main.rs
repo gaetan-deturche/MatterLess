@@ -637,6 +637,24 @@ impl App {
                 {
                     self.reread_thread(&root);
                 }
+                // A reaction names its post and no channel, so whether it
+                // matters is a question only the window can answer. Without
+                // this a pill the reader just added stayed invisible until
+                // they left the channel and came back.
+                let reacted = matterless_view::live::reacted(&deltas);
+                if !reacted.is_empty() {
+                    if self.stream.holds_any(&reacted) {
+                        self.reread_channel(&open);
+                    }
+                    if let Some(root) = self.open_root()
+                        && self
+                            .thread
+                            .as_ref()
+                            .is_some_and(|thread| thread.holds_any(&reacted))
+                    {
+                        self.reread_thread(&root);
+                    }
+                }
                 // The emoji table arriving is not a reason to replan four
                 // hundred messages, so `touched` names no channel for it. It
                 // is a reason to look up the names again: a pill drawn before

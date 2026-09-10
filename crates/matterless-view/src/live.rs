@@ -554,6 +554,24 @@ pub fn touches_thread(deltas: &[Delta], root_id: &str) -> bool {
     })
 }
 
+/// The messages whose reactions changed.
+///
+/// Separate from `touched` because the delta carries no channel: only the
+/// window knows whether one of these is on screen, and without asking it a
+/// reaction stayed invisible until the reader left the channel and came back.
+pub fn reacted(deltas: &[Delta]) -> Vec<String> {
+    let mut posts: Vec<String> = deltas
+        .iter()
+        .filter_map(|delta| match delta {
+            Delta::ReactionsChanged { post_id } => Some(post_id.clone()),
+            _ => None,
+        })
+        .collect();
+    posts.sort();
+    posts.dedup();
+    posts
+}
+
 /// Whether the custom emoji table changed under what is on screen.
 ///
 /// Separate from `touched`, which deliberately names no channel for this: the
@@ -651,6 +669,23 @@ mod tests {
         assert_eq!(context.thread_mode, ThreadMode::Collapsed);
         assert!(context.followed_threads.contains("root"));
         assert!(!context.followed_threads.contains("some-other-root"));
+    }
+
+    /// A reaction names its post and nothing else -- no channel, which is why
+    /// the window has to decide whether it matters.
+    #[test]
+    fn a_reaction_names_the_message_it_is_on() {
+        let deltas = vec![
+            Delta::ReactionsChanged {
+                post_id: "p1".into(),
+            },
+            Delta::ReactionsChanged {
+                post_id: "p1".into(),
+            },
+            posted("c", "", "p2"),
+        ];
+        assert_eq!(reacted(&deltas), vec!["p1".to_string()]);
+        assert!(touched(&deltas).iter().all(|channel| channel != "p1"));
     }
 
     /// A reply belongs to its thread, and so does the root itself.
