@@ -35,6 +35,10 @@ pub enum Entry {
         /// A direct or group message, which is sigilled by a person rather than
         /// by a hash.
         direct: bool,
+        /// The other person, for a one-to-one conversation. `None` for a
+        /// channel and for a group, which has no single other person to be
+        /// around or not.
+        counterpart: Option<String>,
     },
 }
 
@@ -141,7 +145,14 @@ impl Sidebar {
     /// Together rather than as six arguments: a scene to draw into, the tools
     /// to shape text with, and the colours. Every widget will want the same
     /// four, which is what makes them one thing.
-    pub fn draw(&self, into: &mut Canvas<'_>, placed: &[Placed], within: Rect, input: &Input) {
+    pub fn draw(
+        &self,
+        into: &mut Canvas<'_>,
+        placed: &[Placed],
+        within: Rect,
+        input: &Input,
+        presence: &std::collections::HashMap<String, String>,
+    ) {
         let Canvas {
             scene,
             painter,
@@ -183,6 +194,7 @@ impl Sidebar {
                     mentions,
                     muted,
                     direct,
+                    counterpart,
                 } => {
                     let chosen = self.selected.as_deref() == Some(id.as_str());
                     if chosen || input.hovered() == Some(name.as_str()) {
@@ -208,11 +220,28 @@ impl Sidebar {
                     // enough to wrap would run into the row beneath it. The
                     // panel's own clip cuts it off instead, which is what
                     // `overflow: hidden` did for the same rows in HTML.
+                    // Whether somebody is around, which is the one thing that
+                    // decides whether you write to them now. Only here: a dot
+                    // on every message row would say nothing about the
+                    // conversation and turn the margin into a light display.
+                    if let Some(lit) = counterpart
+                        .as_deref()
+                        .and_then(|who| presence.get(who))
+                        .and_then(|status| dot(status, palette))
+                    {
+                        scene.fill(
+                            row.rect.x + 2.0,
+                            row.rect.y + row.rect.height / 2.0 - DOT / 2.0,
+                            DOT,
+                            DOT,
+                            lit,
+                        );
+                    }
                     let sigil = if *direct { "@" } else { "#" };
                     let glyphs = painter.run(
                         fonts,
                         &format!("{sigil} {label}"),
-                        row.rect.x + 6.0,
+                        row.rect.x + GUTTER,
                         row.rect.y + 4.0,
                         Run::label(f32::MAX),
                     );
@@ -247,6 +276,33 @@ impl Sidebar {
     }
 }
 
+/// The presence dot, and the room kept for it at the start of every row.
+///
+/// Kept on channel rows too, which never have one: a sidebar whose names do
+/// not line up reads as broken, and the alternative is indenting only the
+/// conversations that happen to have a dot right now.
+const DOT: f32 = 6.0;
+const GUTTER: f32 = 12.0;
+
+/// What colour says about somebody, or nothing at all.
+///
+/// Offline draws no dot rather than a grey one. Absence is the common case,
+/// and a sidebar of grey dots is a sidebar of noise -- the question the dot
+/// answers is "are they there", and the answer is the dot's presence.
+fn dot(status: &str, palette: &matterless_paint::Palette) -> Option<[u8; 4]> {
+    match status {
+        "online" => Some([61, 184, 111, 255]),
+        "away" => Some([240, 178, 62, 255]),
+        "dnd" | "ooo" => Some([214, 77, 77, 255]),
+        // Includes "offline" and anything a newer server invents: a status
+        // this build does not know is not one it should guess a colour for.
+        _ => {
+            let _ = palette;
+            None
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -264,6 +320,7 @@ mod tests {
                 mentions: 0,
                 muted: false,
                 direct: false,
+                counterpart: None,
             },
             Entry::Channel {
                 id: "two".into(),
@@ -272,6 +329,7 @@ mod tests {
                 mentions: 1,
                 muted: false,
                 direct: false,
+                counterpart: None,
             },
         ])
     }
@@ -331,6 +389,30 @@ mod tests {
         assert_eq!(sidebar.reach(within), 0.0);
     }
 
+    /// Offline draws nothing, and so does a status this build has never heard
+    /// of: a colour guessed for an unknown word says something untrue.
+    #[test]
+    fn only_a_status_worth_showing_gets_a_dot() {
+        let palette = matterless_paint::Palette::default();
+        assert!(dot("online", &palette).is_some());
+        assert!(dot("away", &palette).is_some());
+        assert!(dot("dnd", &palette).is_some());
+        assert!(dot("offline", &palette).is_none());
+        assert!(dot("", &palette).is_none());
+        assert!(dot("whatever-comes-next", &palette).is_none());
+    }
+
+    /// Every one of them reads differently, or the dot says only "somebody has
+    /// a status" -- which nobody needed to know.
+    #[test]
+    fn the_states_do_not_look_alike() {
+        let palette = matterless_paint::Palette::default();
+        let shown = ["online", "away", "dnd"].map(|status| dot(status, &palette));
+        assert_ne!(shown[0], shown[1]);
+        assert_ne!(shown[1], shown[2]);
+        assert_ne!(shown[0], shown[2]);
+    }
+
     #[test]
     fn a_long_list_scrolls_and_stops_at_its_end() {
         let mut sidebar = Sidebar::new(
@@ -342,6 +424,7 @@ mod tests {
                     mentions: 0,
                     muted: false,
                     direct: false,
+                    counterpart: None,
                 })
                 .collect(),
         );

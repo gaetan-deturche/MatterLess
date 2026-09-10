@@ -193,6 +193,9 @@ struct App {
     /// Who is typing, and when this window last said that it was.
     typing: matterless_view::typing::Typing,
     said_typing: Option<std::time::Instant>,
+    /// Who is around, and the set last asked about.
+    presence: std::collections::HashMap<String, String>,
+    asked_about: Vec<String>,
     /// How far back the open channel is read. Grows as older pages arrive.
     depth: u32,
     /// True while a page of history is in flight, so the same page is not asked
@@ -324,6 +327,8 @@ impl App {
             edit: matterless_view::edit::Edit::default(),
             typing: matterless_view::typing::Typing::default(),
             said_typing: None,
+            presence: std::collections::HashMap::new(),
+            asked_about: Vec::new(),
             depth: matterless_view::feed::PAGE,
             loading_older: false,
             more_history: true,
@@ -514,6 +519,13 @@ impl App {
             for channel in group.channels {
                 entries.push(Entry::Channel {
                     direct: channel.channel_type == "D" || channel.channel_type == "G",
+                    // Only a one-to-one has a single other person; a group has
+                    // several and no dot could stand for all of them.
+                    counterpart: if channel.channel_type == "D" {
+                        channel.counterpart_id.clone()
+                    } else {
+                        None
+                    },
                     id: channel.id,
                     label: channel.display_name,
                     unread: if counted { channel.unread } else { 0 },
@@ -617,6 +629,11 @@ impl App {
                 println!("reader is {username}");
                 self.signed_in(&id);
             }
+            Update::Statuses(found) => {
+                for (user_id, status) in found {
+                    self.presence.insert(user_id, status);
+                }
+            }
             Update::Older { channel_id, more } => {
                 self.more_history = more;
                 self.loading_older = false;
@@ -688,6 +705,9 @@ impl App {
                 // this a pill the reader just added stayed invisible until
                 // they left the channel and came back.
                 for delta in &deltas {
+                    if let matterless_sync::Delta::StatusChanged { user_id, status } = delta {
+                        self.presence.insert(user_id.clone(), status.clone());
+                    }
                     if let matterless_sync::Delta::Typing {
                         channel_id,
                         user_id,
@@ -735,6 +755,37 @@ impl App {
             }
         }
         self.redraw();
+    }
+
+    /// Asks who is around, when the set of people worth asking about changes.
+    ///
+    /// Derived from the sidebar rather than from the messages on screen: the
+    /// sidebar is where presence is actually read, because whether somebody is
+    /// around decides whether you write to them now. The rows in a channel
+    /// change constantly while the people in them almost never do, so asking
+    /// from there would be a request per arriving message.
+    fn ask_who_is_around(&mut self) {
+        let Some(link) = self.link.as_ref() else {
+            return;
+        };
+        let mut wanted: Vec<String> = self
+            .sidebar
+            .entries
+            .iter()
+            .filter_map(|entry| match entry {
+                matterless_view::sidebar::Entry::Channel { counterpart, .. } => counterpart.clone(),
+                _ => None,
+            })
+            .collect();
+        wanted.sort();
+        wanted.dedup();
+        // An unchanged set costs no request, which is the whole point: this is
+        // called from the frame loop.
+        if wanted.is_empty() || wanted == self.asked_about {
+            return;
+        }
+        self.asked_about = wanted.clone();
+        link.send(matterless_view::live::Ask::Statuses { user_ids: wanted });
     }
 
     /// Tells the server this reader is typing, no more than now and then.
@@ -1504,7 +1555,8 @@ impl App {
             fonts: &mut self.fonts,
             palette: &self.palette,
         };
-        self.sidebar.draw(&mut canvas, &boxes, sidebar, &self.input);
+        self.sidebar
+            .draw(&mut canvas, &boxes, sidebar, &self.input, &self.presence);
 
         // Read before the painter is borrowed, and given its own layer after: a
         // name too long for the strip is cut by the clip rather than running
@@ -2044,6 +2096,7 @@ impl ApplicationHandler<Update> for App {
                 // What is on screen may have changed since the last frame.
                 self.want_faces();
                 self.name_emoji();
+                self.ask_who_is_around();
                 let scene = self.scene();
                 let size = self.size;
                 let ground = self.palette.ground;
