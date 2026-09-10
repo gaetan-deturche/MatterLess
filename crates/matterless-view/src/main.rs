@@ -196,6 +196,8 @@ struct App {
     /// Who is around, and the set last asked about.
     presence: std::collections::HashMap<String, String>,
     asked_about: Vec<String>,
+    /// Saved or pinned messages, whichever was last asked for.
+    listing: matterless_view::listing::Listing,
     /// How far back the open channel is read. Grows as older pages arrive.
     depth: u32,
     /// True while a page of history is in flight, so the same page is not asked
@@ -329,6 +331,7 @@ impl App {
             said_typing: None,
             presence: std::collections::HashMap::new(),
             asked_about: Vec::new(),
+            listing: matterless_view::listing::Listing::default(),
             depth: matterless_view::feed::PAGE,
             loading_older: false,
             more_history: true,
@@ -628,6 +631,14 @@ impl App {
             Update::SignedIn { id, username } => {
                 println!("reader is {username}");
                 self.signed_in(&id);
+            }
+            Update::Listed { title, found } => {
+                // Only if it is still the list being looked at: a slow answer
+                // must not reopen a panel the reader has already shut, or
+                // refill one they have since asked something else of.
+                if self.listing.title == title {
+                    self.listing.fill(found);
+                }
             }
             Update::Statuses(found) => {
                 for (user_id, status) in found {
@@ -1213,6 +1224,7 @@ impl App {
             boxes.extend(thread.boxes(rect, thread.hovered(&self.input)));
         }
         boxes.extend(self.picker.boxes(self.picked_near, self.stream_rect()));
+        boxes.extend(self.listing.boxes(self.stream_rect()));
         if let Some(row) = self.edited_row() {
             boxes.extend(self.edit.boxes(row, self.stream_rect()));
         }
@@ -1321,6 +1333,33 @@ impl App {
                 if let Some(link) = self.link.as_ref() {
                     link.send(matterless_view::live::Ask::Edit { post_id, message });
                 }
+                return;
+            }
+            self.input = input;
+            return;
+        }
+
+        // A list of messages stands in front of the conversation, like the
+        // switcher and search do, so while it is up the keys belong to it.
+        if self.listing.open() {
+            let mut input = std::mem::take(&mut self.input);
+            if input.struck(Key::Escape) {
+                self.listing.hide();
+                input.focus_on(composer::NAME);
+                self.input = input;
+                return;
+            }
+            let chosen = self.listing.react(&input);
+            if let Some(found) = chosen {
+                self.listing.hide();
+                input.focus_on(composer::NAME);
+                self.input = input;
+                // Opened at the conversation it was said in. Landing on the
+                // message itself needs an anchor the window cannot ask for
+                // yet, so it opens where the reader can find it rather than
+                // pretending.
+                self.sidebar.selected = Some(found.channel_id.clone());
+                self.open_channel(&found.channel_id);
                 return;
             }
             self.input = input;
@@ -1698,6 +1737,17 @@ impl App {
             self.switcher.draw(&mut canvas, stream);
             self.switcher.query.draw(&mut canvas, field, true);
         }
+        if self.listing.open() {
+            let stream = self.stream_rect();
+            scene.clip_to(0.0, 0.0, self.size.0 as f32, self.size.1 as f32);
+            let mut canvas = Canvas {
+                scene: &mut scene,
+                painter: &mut self.painter,
+                fonts: &mut self.fonts,
+                palette: &self.palette,
+            };
+            self.listing.draw(&mut canvas, stream);
+        }
         if self.search.open {
             let stream = self.stream_rect();
             let field = self.search.field(stream);
@@ -1990,6 +2040,26 @@ impl ApplicationHandler<Update> for App {
                     let mut input = std::mem::take(&mut self.input);
                     self.switcher.show(&mut self.fonts, &mut input);
                     self.input = input;
+                }
+                // Saved is reader-wide; pinned belongs to the channel in
+                // front of them, which is why one takes a channel and the
+                // other does not.
+                if down && self.input.chord(Key::Char('s')) {
+                    self.listing.expect("Saved");
+                    if let Some(link) = self.link.as_ref() {
+                        link.send(matterless_view::live::Ask::Saved);
+                    }
+                }
+                if down
+                    && self.input.chord(Key::Char('p'))
+                    && let Some(channel) = self.sidebar.selected.clone()
+                {
+                    self.listing.expect("Pinned");
+                    if let Some(link) = self.link.as_ref() {
+                        link.send(matterless_view::live::Ask::Pinned {
+                            channel_id: channel,
+                        });
+                    }
                 }
                 if down && self.input.chord(Key::Char('f')) {
                     let mut input = std::mem::take(&mut self.input);
