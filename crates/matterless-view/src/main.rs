@@ -171,6 +171,12 @@ struct App {
     /// Messages written but not yet confirmed, held in memory and nowhere else:
     /// a guess must never reach SQLite.
     outstanding: Arc<matterless_render::pending::PendingPosts>,
+    /// Pictures already asked for, so a face on screen is fetched once rather
+    /// than on every frame it is visible.
+    asked: std::collections::HashSet<String>,
+    /// Decoded pictures waiting to go into the atlas, which only the thread
+    /// that owns the GPU may touch.
+    arrived: Vec<(String, u32, u32, Vec<u8>)>,
 }
 
 impl App {
@@ -271,6 +277,8 @@ impl App {
             clipboard: String::new(),
             link: None,
             outstanding: Arc::new(matterless_render::pending::PendingPosts::default()),
+            asked: std::collections::HashSet::new(),
+            arrived: Vec::new(),
         };
         app.sidebar.selected = Some(channel);
         // Focused before anything is clicked: a chat window that needs a click
@@ -516,6 +524,12 @@ impl App {
                 println!("reader is {username}");
                 self.signed_in(&id);
             }
+            Update::Picture {
+                key,
+                width,
+                height,
+                rgba,
+            } => self.arrived.push((key, width, height, rgba)),
             Update::SendSettled {
                 pending_post_id,
                 channel_id,
@@ -606,6 +620,26 @@ impl App {
         self.stream.to_bottom(within);
         if let Some(root) = self.open_root() {
             self.reread_thread(&root);
+        }
+    }
+
+    /// Asks for the faces on screen that have not been asked for yet.
+    ///
+    /// Called after anything that changes what is visible -- a scroll, a new
+    /// message, a channel switch. The asked set is what keeps that from being a
+    /// request per frame.
+    fn want_faces(&mut self) {
+        let Some(link) = self.link.as_ref() else {
+            return;
+        };
+        let mut wanted = self.stream.faces(self.stream_rect());
+        if let (Some(thread), Some(within)) = (&self.thread, self.thread_stream_rect()) {
+            wanted.extend(thread.faces(within));
+        }
+        for key in wanted {
+            if self.asked.insert(key.clone()) {
+                link.send(matterless_view::live::Ask::Fetch { key });
+            }
         }
     }
 
@@ -1154,6 +1188,30 @@ impl ApplicationHandler<Update> for App {
                 if self.surface.is_none() || self.view.is_none() {
                     return;
                 }
+                // Pictures go into the atlas here, on the thread that owns the
+                // GPU and before the scene names them: uploading after the
+                // draw list is built would show a face one frame late.
+                if !self.arrived.is_empty()
+                    && let Some(view) = self.view.as_mut()
+                {
+                    let mut placed = 0;
+                    let mut refused = 0;
+                    for (key, width, height, rgba) in self.arrived.drain(..) {
+                        match view
+                            .atlas
+                            .put_image(&view.queue, &key, &rgba, width, height)
+                        {
+                            Some(_) => placed += 1,
+                            // The atlas is full. Worth saying, because the
+                            // symptom is faces that stop appearing partway
+                            // through a long scroll and nothing else.
+                            None => refused += 1,
+                        }
+                    }
+                    println!("atlas: {placed} pictures in, {refused} refused");
+                }
+                // What is on screen may have changed since the last frame.
+                self.want_faces();
                 let scene = self.scene();
                 let size = self.size;
                 let ground = self.palette.ground;

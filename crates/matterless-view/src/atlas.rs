@@ -38,6 +38,11 @@ pub struct Atlas {
     texture: wgpu::Texture,
     pub view: wgpu::TextureView,
     slots: HashMap<CacheKey, Option<Slot>>,
+    /// Pictures -- avatars today, attachments next -- keyed by the route they
+    /// came from. They share the glyph texture because a picture is exactly what
+    /// a colour emoji already is: RGBA sampled with a white vertex, through the
+    /// same pipeline and in the same draw call.
+    images: HashMap<String, Option<Slot>>,
     /// The shelf being filled, and where in it.
     pen_x: u32,
     shelf_y: u32,
@@ -73,6 +78,7 @@ impl Atlas {
             texture,
             view,
             slots: HashMap::new(),
+            images: HashMap::new(),
             pen_x: 1,
             shelf_y: 1,
             shelf_height: 0,
@@ -108,6 +114,46 @@ impl Atlas {
                 depth_or_array_layers: 1,
             },
         );
+    }
+
+    /// The slot a picture was written to, if it has been.
+    pub fn image(&self, key: &str) -> Option<Slot> {
+        self.images.get(key).copied().flatten()
+    }
+
+    /// Writes a decoded picture into the atlas.
+    ///
+    /// `rgba` is straight, not premultiplied, which is what the blend expects
+    /// and what every decoder here produces.
+    pub fn put_image(
+        &mut self,
+        queue: &wgpu::Queue,
+        key: &str,
+        rgba: &[u8],
+        width: u32,
+        height: u32,
+    ) -> Option<Slot> {
+        if let Some(held) = self.images.get(key) {
+            return *held;
+        }
+        if width == 0 || height == 0 || rgba.len() < (width * height * 4) as usize {
+            self.images.insert(key.to_string(), None);
+            return None;
+        }
+        let Some(slot) = self.reserve(width, height) else {
+            // Out of room. Remembered as absent rather than retried every frame,
+            // which would be a stutter hiding its own cause.
+            self.images.insert(key.to_string(), None);
+            return None;
+        };
+        self.write(queue, slot.x, slot.y, width, height, rgba);
+        // Its own colours, so the vertex must not tint it.
+        let slot = Slot {
+            colour: true,
+            ..slot
+        };
+        self.images.insert(key.to_string(), Some(slot));
+        Some(slot)
     }
 
     /// The slot for a glyph, rasterising it the first time it is asked for.

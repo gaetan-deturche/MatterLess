@@ -126,6 +126,32 @@ pub fn vertices_of(
                     rgba,
                 );
             }
+            Piece::Image {
+                x,
+                y,
+                width,
+                height,
+                key,
+            } => {
+                // Nothing until the bytes have arrived. The layout already
+                // reserved the room, so an absent picture leaves a gap rather
+                // than a conversation that shifts when it lands.
+                let Some(slot) = atlas.image(key) else {
+                    continue;
+                };
+                push_quad(
+                    into,
+                    [*x, *y, *x + *width, *y + *height],
+                    [
+                        slot.x as f32 / side,
+                        slot.y as f32 / side,
+                        (slot.x + slot.width) as f32 / side,
+                        (slot.y + slot.height) as f32 / side,
+                    ],
+                    // White, so the picture keeps its own colours.
+                    [1.0, 1.0, 1.0, 1.0],
+                );
+            }
             Piece::Text { glyphs, ink, faint } => {
                 let shade = |colour: &[u8; 3]| {
                     [

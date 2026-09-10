@@ -150,6 +150,28 @@ impl Stream {
         self.index_of(input.hovered()?)
     }
 
+    /// The faces the rows on screen need, so the caller can fetch the missing.
+    ///
+    /// Only a `Post` has one: a continuation is the same person still talking,
+    /// which is exactly what leaving the gutter empty says.
+    pub fn faces(&self, within: Rect) -> Vec<String> {
+        let mut wanted = Vec::new();
+        let mut top = within.y - self.scroll;
+        for (index, laid) in self.laid.iter().enumerate() {
+            let bottom = top + laid.height;
+            if bottom >= within.y
+                && top <= within.bottom()
+                && let Some(Row::Post { post }) = self.rows.get(index)
+            {
+                wanted.push(avatar_key(&post.author_id, post.avatar_at));
+            }
+            top = bottom;
+        }
+        wanted.sort();
+        wanted.dedup();
+        wanted
+    }
+
     pub fn draw(&self, into: &mut Canvas<'_>, within: Rect, input: &Input) {
         let Canvas {
             scene,
@@ -169,10 +191,33 @@ impl Stream {
                 // Shifted into this panel's column: a row plan is laid out from
                 // zero and knows nothing of where it lands.
                 scene.extend(pieces.into_iter().map(|piece| shift(piece, within.x)));
+                // The face goes in the gutter the layout already leaves empty,
+                // so it costs no height and a continuation simply has none.
+                if let Some(Row::Post { post }) = self.rows.get(index) {
+                    scene.extend([matterless_paint::Piece::Image {
+                        x: within.x + 2.0,
+                        y: top + 4.0,
+                        width: AVATAR,
+                        height: AVATAR,
+                        key: avatar_key(&post.author_id, post.avatar_at),
+                    }]);
+                }
             }
             top = bottom;
         }
     }
+}
+
+/// The size a face is drawn at, and the room the gutter already leaves for it.
+pub const AVATAR: f32 = 28.0;
+
+/// What a user's picture is called, versioned so a new picture is a new name.
+///
+/// `last_picture_update` is the only thing that says the bytes changed under an
+/// unchanged id, so it belongs in the key -- nothing then has to be evicted by
+/// hand when somebody changes their photograph.
+pub fn avatar_key(user_id: &str, version: i64) -> String {
+    format!("avatar/{user_id}?v={version}")
 }
 
 /// Moves a piece sideways into its panel.
@@ -202,6 +247,19 @@ fn shift(piece: matterless_paint::Piece, by: f32) -> matterless_paint::Piece {
                 .collect(),
             ink,
             faint,
+        },
+        Piece::Image {
+            x,
+            y,
+            width,
+            height,
+            key,
+        } => Piece::Image {
+            x: x + by,
+            y,
+            width,
+            height,
+            key,
         },
     }
 }
