@@ -16,10 +16,10 @@
 
 use crate::AppState;
 use crate::engine::{EngineMsg, UiDelta};
-use crate::pending::{PendingPost, PendingPosts};
 use crate::uploads;
 use matterless_core::model::ThreadMode;
 use matterless_render::markdown::Node;
+use matterless_render::pending::{PendingPost, PendingPosts};
 use matterless_render::{PlanOptions, Row, ThreadSummary, plan_channel};
 use matterless_sync::{Arrival, SyncContext};
 use serde::{Deserialize, Serialize};

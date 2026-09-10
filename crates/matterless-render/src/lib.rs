@@ -25,6 +25,7 @@ pub mod emoji;
 mod emoji_categories;
 mod emoji_table;
 pub mod markdown;
+pub mod pending;
 
 use markdown::Node;
 use matterless_core::model::{Post, ThreadMode, Timestamp};

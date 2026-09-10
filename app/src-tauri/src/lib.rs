@@ -22,7 +22,7 @@ mod filecache;
 mod media;
 #[cfg(windows)]
 mod native_list;
-mod pending;
+
 mod render_cache;
 mod taskbar;
 #[cfg(windows)]
@@ -84,7 +84,7 @@ pub struct AppState {
     pub rest: Arc<RestClient>,
     /// Optimistic sends, in memory only. Shared with the engine task, which
     /// clears an entry when the server echoes it back.
-    pub pending: Arc<pending::PendingPosts>,
+    pub pending: Arc<matterless_render::pending::PendingPosts>,
     /// The native message list, once the page has asked for it.
     ///
     /// Behind a lock and an `Option`: it owns a window and a GPU device, so it
@@ -673,7 +673,7 @@ pub fn run() {
             // Attachments live beside the database rather than in it: SQLite is
             // the wrong shape for a 150 MB blob, and the cache is disposable.
             let files = Arc::new(filecache::FileCache::open(directory.join("files")));
-            let pending = Arc::new(pending::PendingPosts::default());
+            let pending = Arc::new(matterless_render::pending::PendingPosts::default());
             let uploads = Arc::new(uploads::Uploads::default());
             let connected = Arc::new(std::sync::atomic::AtomicBool::new(false));
             let allow_svg = Arc::new(std::sync::atomic::AtomicBool::new(false));
