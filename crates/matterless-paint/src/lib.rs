@@ -15,6 +15,7 @@
 use cosmic_text::{Attrs, Buffer, Color, Family, Metrics, Shaping, SwashCache, Weight};
 use matterless_layout::Fonts;
 use matterless_layout::row::{Block, Kind, RowLayout, TextSpan, Theme};
+use std::collections::HashMap;
 
 /// A surface to draw on, in straight RGBA8.
 pub struct Canvas {
@@ -296,6 +297,10 @@ impl Painter {
         top: f32,
         theme: &Theme,
         palette: &Palette,
+        // Custom emoji by name to the id their picture is behind. Passed in
+        // because only the caller has read the store: the layout knows the name
+        // and nothing more.
+        custom: &HashMap<String, String>,
     ) -> Vec<Piece> {
         let mut pieces = Vec::new();
         for block in &row.blocks {
@@ -319,7 +324,7 @@ impl Painter {
                         colour: palette.surface,
                     });
                     pieces.push(Piece::Text {
-                        glyphs: self.glyphs_of(fonts, block, x, y, theme),
+                        glyphs: self.glyphs_of(fonts, block, x, y, theme).0,
                         ink: palette.ink,
                         faint: palette.faint,
                     });
@@ -337,16 +342,39 @@ impl Painter {
                         colour: palette.surface,
                     });
                     pieces.push(Piece::Text {
-                        glyphs: self.glyphs_of(fonts, block, x + 8.0, y + 8.0, theme),
+                        glyphs: self.glyphs_of(fonts, block, x + 8.0, y + 8.0, theme).0,
                         ink: palette.ink,
                         faint: palette.faint,
                     });
                 }
-                Kind::Text => pieces.push(Piece::Text {
-                    glyphs: self.glyphs_of(fonts, block, x, y, theme),
-                    ink: palette.ink,
-                    faint: palette.faint,
-                }),
+                Kind::Text => {
+                    let (glyphs, rooms) = self.glyphs_of(fonts, block, x, y, theme);
+                    pieces.push(Piece::Text {
+                        glyphs,
+                        ink: palette.ink,
+                        faint: palette.faint,
+                    });
+                    // A custom emoji's placeholder, turned into the picture it
+                    // was standing in for. Drawn to the room the spaces
+                    // actually measured, so the line and the image agree
+                    // however the font shaped them.
+                    for (at, (left, top, width)) in rooms {
+                        let Some(name) = block.spans.get(at).and_then(|span| span.emoji.as_ref())
+                        else {
+                            continue;
+                        };
+                        let Some(id) = custom.get(name) else {
+                            continue;
+                        };
+                        pieces.push(Piece::Image {
+                            x: left,
+                            y: top,
+                            width,
+                            height: width,
+                            key: format!("emoji/{id}"),
+                        });
+                    }
+                }
                 // Drawn by whoever owns the row rather than here: a pill is a
                 // box with a picture and a count in it, not a run of text, and
                 // only the caller knows which emoji is which.
@@ -377,7 +405,9 @@ impl Painter {
         theme: &Theme,
         palette: &Palette,
     ) {
-        let pieces = self.pieces_of(fonts, row, top, theme, palette);
+        // The snapshot path draws a picture as the space it occupies, so it
+        // has no emoji to resolve and hands over an empty map.
+        let pieces = self.pieces_of(fonts, row, top, theme, palette, &HashMap::new());
         self.paint_pieces(canvas, fonts, &pieces);
     }
 
@@ -489,9 +519,9 @@ impl Painter {
         x: f32,
         y: f32,
         theme: &Theme,
-    ) -> Vec<PlacedGlyph> {
+    ) -> (Vec<PlacedGlyph>, Rooms) {
         if block.spans.is_empty() {
-            return Vec::new();
+            return (Vec::new(), HashMap::new());
         }
         let line_height = if block.kind == Kind::Code {
             theme.code_line_height
@@ -504,14 +534,31 @@ impl Painter {
         let spans: Vec<(&str, Attrs<'static>)> = block
             .spans
             .iter()
-            .map(|span| (span.text.as_str(), attrs_of(span)))
+            .enumerate()
+            .map(|(at, span)| (span.text.as_str(), attrs_of(span, at)))
             .collect();
         shaped.set_rich_text(spans, &Attrs::new(), Shaping::Advanced, None);
         shaped.shape_until_scroll(false);
 
         let mut placed = Vec::new();
+        // Where each custom emoji's placeholder ended up, gathered as the runs
+        // are walked: its glyphs are spaces and drawing them would draw
+        // nothing, so the span they belong to is turned into a picture instead.
+        let mut rooms: Rooms = HashMap::new();
         for run in shaped.layout_runs() {
             for glyph in run.glyphs {
+                if let Some(at) = emoji_span(glyph.metadata)
+                    && block.spans.get(at).is_some_and(|span| span.emoji.is_some())
+                {
+                    // Widened to cover every space of the placeholder, so the
+                    // picture fills exactly the room the line reserved for it
+                    // however the font measured them.
+                    let room = rooms
+                        .entry(at)
+                        .or_insert((glyph.x + x, y + run.line_top, 0.0));
+                    room.2 = (glyph.x + x + glyph.w - room.0).max(room.2);
+                    continue;
+                }
                 let physical = glyph.physical((x, y + run.line_y), 1.0);
                 placed.push(PlacedGlyph {
                     key: physical.cache_key,
@@ -521,16 +568,36 @@ impl Painter {
                 });
             }
         }
-        placed
+        (placed, rooms)
     }
 }
+
+/// Where a custom emoji's placeholder ended up: its left edge, its top, and
+/// how wide the spaces standing in for it actually measured.
+type Room = (f32, f32, f32);
+
+/// The placeholders in one block, by the span each belongs to.
+type Rooms = HashMap<usize, Room>;
 
 /// Marks a faint span so its glyphs can be told apart after shaping.
 const FAINT: usize = 1;
 
-fn attrs_of(span: &TextSpan) -> Attrs<'static> {
+/// Marks a span as a custom emoji's placeholder, with the span index added on
+/// so a line holding several can tell them apart.
+const EMOJI: usize = 16;
+
+fn emoji_span(metadata: usize) -> Option<usize> {
+    metadata.checked_sub(EMOJI)
+}
+
+fn attrs_of(span: &TextSpan, at: usize) -> Attrs<'static> {
     let mut attrs = Attrs::new();
-    if span.faint {
+    // A custom emoji marks its span so the placeholder can be found again once
+    // the glyphs come back, which is the only way to know where the picture
+    // goes. Its index rides along, because a line may hold several.
+    if span.emoji.is_some() {
+        attrs = attrs.metadata(EMOJI + at);
+    } else if span.faint {
         // Metadata rides through shaping onto every glyph the span produces,
         // which is how one run can be drawn in two colours.
         attrs = attrs.metadata(FAINT);

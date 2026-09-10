@@ -143,7 +143,26 @@ pub struct TextSpan {
     /// Drawn in the quieter ink: a timestamp, a reaction's count, anything the
     /// eye should pass over on its way to the message.
     pub faint: bool,
+    /// A custom emoji standing in this span, by name.
+    ///
+    /// It has no character to shape, so the span holds non-breaking spaces and
+    /// the renderer draws the picture over exactly the room they took.
+    /// Reserving it in the text is what keeps the line count right, which is
+    /// what keeps the row height right.
+    pub emoji: Option<String>,
 }
+
+/// How many spaces a custom emoji reserves in a line.
+///
+/// Four measure close to the sixteen pixels the picture is drawn at, at the
+/// sizes this app uses. Close rather than exact on purpose: the picture is
+/// drawn to whatever they actually measured, so the reserved space and the
+/// image agree however the font shapes them.
+const EMOJI_ROOM: usize = 4;
+
+/// One of them. Non-breaking, or a wrap could split the placeholder in half and
+/// leave the picture straddling two lines.
+const NBSP: &str = "\u{00A0}";
 
 /// One paragraph-like run of inline content, and how far it is pushed in.
 struct Line {
@@ -224,6 +243,7 @@ fn inline(nodes: &[Node], bold: bool, italic: bool, mono: bool, into: &mut Vec<T
                 italic,
                 mono,
                 faint: false,
+                emoji: None,
             }),
             Node::Strong { children } => inline(children, true, italic, mono, into),
             Node::Emphasis { children } | Node::Strike { children } => {
@@ -236,6 +256,7 @@ fn inline(nodes: &[Node], bold: bool, italic: bool, mono: bool, into: &mut Vec<T
                 italic,
                 mono: true,
                 faint: false,
+                emoji: None,
             }),
             Node::UserMention { username, .. } => into.push(TextSpan {
                 text: format!("@{username}"),
@@ -243,6 +264,7 @@ fn inline(nodes: &[Node], bold: bool, italic: bool, mono: bool, into: &mut Vec<T
                 italic,
                 mono,
                 faint: false,
+                emoji: None,
             }),
             Node::ChannelLink { name } => into.push(TextSpan {
                 text: format!("~{name}"),
@@ -250,13 +272,30 @@ fn inline(nodes: &[Node], bold: bool, italic: bool, mono: bool, into: &mut Vec<T
                 italic,
                 mono,
                 faint: false,
+                emoji: None,
             }),
-            Node::Emoji { name, unicode } => into.push(TextSpan {
-                text: unicode.clone().unwrap_or_else(|| format!(":{name}:")),
-                bold,
-                italic,
-                mono,
-                faint: false,
+            // A standard emoji is a character and shapes like any other letter.
+            // A custom one has no character at all, so the span holds spaces
+            // wide enough for the picture and carries the name for whoever
+            // draws it. Non-breaking, or a wrap could split the placeholder in
+            // half and the picture would land across two lines.
+            Node::Emoji { name, unicode } => into.push(match unicode {
+                Some(character) => TextSpan {
+                    text: character.clone(),
+                    bold,
+                    italic,
+                    mono,
+                    faint: false,
+                    emoji: None,
+                },
+                None => TextSpan {
+                    text: NBSP.repeat(EMOJI_ROOM),
+                    bold,
+                    italic,
+                    mono,
+                    faint: false,
+                    emoji: Some(name.clone()),
+                },
             }),
             Node::SoftBreak | Node::HardBreak => into.push(TextSpan {
                 text: "\n".to_string(),
@@ -264,6 +303,7 @@ fn inline(nodes: &[Node], bold: bool, italic: bool, mono: bool, into: &mut Vec<T
                 italic,
                 mono,
                 faint: false,
+                emoji: None,
             }),
             Node::Image { alt, .. } => into.push(TextSpan {
                 text: alt.clone(),
@@ -271,6 +311,7 @@ fn inline(nodes: &[Node], bold: bool, italic: bool, mono: bool, into: &mut Vec<T
                 italic,
                 mono,
                 faint: false,
+                emoji: None,
             }),
             _ => {}
         }
@@ -344,6 +385,7 @@ pub fn lay_out(fonts: &mut Fonts, row: &Row, theme: &Theme) -> RowLayout {
             italic: false,
             mono: false,
             faint: false,
+            emoji: None,
         }
     }
 
@@ -411,6 +453,7 @@ pub fn lay_out(fonts: &mut Fonts, row: &Row, theme: &Theme) -> RowLayout {
                 italic: false,
                 mono: false,
                 faint: false,
+                emoji: None,
             });
             spans.push(plain("   ".to_string()));
             spans.push(TextSpan {
@@ -419,6 +462,7 @@ pub fn lay_out(fonts: &mut Fonts, row: &Row, theme: &Theme) -> RowLayout {
                 italic: false,
                 mono: false,
                 faint: true,
+                emoji: None,
             });
             if post.edited {
                 spans.push(TextSpan {
@@ -427,6 +471,7 @@ pub fn lay_out(fonts: &mut Fonts, row: &Row, theme: &Theme) -> RowLayout {
                     italic: false,
                     mono: false,
                     faint: true,
+                    emoji: None,
                 });
             }
         }
@@ -507,6 +552,7 @@ pub fn lay_out(fonts: &mut Fonts, row: &Row, theme: &Theme) -> RowLayout {
                 italic: false,
                 mono: true,
                 faint: false,
+                emoji: None,
             }],
             size: theme.code_size,
             wrap,
@@ -627,6 +673,7 @@ pub fn lay_out(fonts: &mut Fonts, row: &Row, theme: &Theme) -> RowLayout {
                 italic: false,
                 mono: false,
                 faint: true,
+                emoji: None,
             }],
             size: theme.body_size,
             wrap: theme.text_width(),

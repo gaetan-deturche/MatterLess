@@ -226,13 +226,25 @@ impl Stream {
             let bottom = top + laid.height;
             if bottom >= within.y && top <= within.bottom() {
                 // A custom emoji has no character, so its picture is the only
-                // way it is ever drawn.
+                // way it is ever drawn -- in a pill, and inline in a message.
+                let side = self.theme.emoji_size as u32;
                 for (_, reaction) in self.pills(index) {
                     if reaction.unicode.is_none()
                         && let Some(id) = self.custom.get(&reaction.emoji)
                     {
-                        let side = self.theme.emoji_size as u32;
                         wanted.push((emoji_key(id), side, side));
+                    }
+                }
+                if let Some(laid) = self.laid.get(index) {
+                    for name in laid
+                        .blocks
+                        .iter()
+                        .flat_map(|block| &block.spans)
+                        .filter_map(|span| span.emoji.as_ref())
+                    {
+                        if let Some(id) = self.custom.get(name) {
+                            wanted.push((emoji_key(id), side, side));
+                        }
                     }
                 }
                 if let Some(Row::Post { post }) = self.rows.get(index) {
@@ -453,7 +465,7 @@ impl Stream {
                     // Before the text, or a pill would cover the count on it.
                     self.reactions(&mut canvas, index, top, within.x);
                 }
-                let pieces = painter.pieces_of(fonts, row, top, &self.theme, palette);
+                let pieces = painter.pieces_of(fonts, row, top, &self.theme, palette, &self.custom);
                 // Shifted into this panel's column: a row plan is laid out from
                 // zero and knows nothing of where it lands.
                 scene.extend(pieces.into_iter().map(|piece| shift(piece, within.x)));
