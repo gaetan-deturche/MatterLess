@@ -27,6 +27,8 @@ pub enum Action {
     Pin,
     /// Copy a permalink.
     Link,
+    /// Change what it says. Only ever offered on the reader's own.
+    Edit,
     /// Delete it. Only ever offered on the reader's own.
     Delete,
 }
@@ -40,6 +42,7 @@ impl Action {
             Action::Save => "save",
             Action::Pin => "pin",
             Action::Link => "link",
+            Action::Edit => "edit",
             Action::Delete => "delete",
         }
     }
@@ -51,6 +54,7 @@ impl Action {
             "save" => Action::Save,
             "pin" => Action::Pin,
             "link" => Action::Link,
+            "edit" => Action::Edit,
             "delete" => Action::Delete,
             _ => return None,
         })
@@ -68,6 +72,7 @@ impl Action {
             (Action::Pin, false) => "pin",
             (Action::Pin, true) => "pinned",
             (Action::Link, _) => "link",
+            (Action::Edit, _) => "edit",
             (Action::Delete, _) => "delete",
         }
     }
@@ -92,6 +97,7 @@ pub fn offered(mine: bool) -> Vec<Action> {
         Action::Link,
     ];
     if mine {
+        offered.push(Action::Edit);
         offered.push(Action::Delete);
     }
     offered
@@ -132,6 +138,14 @@ mod tests {
         assert!(offered(true).contains(&Action::Delete));
     }
 
+    /// Same for editing: the server refuses somebody else's message, and a
+    /// button that will be refused is worse than one that is not there.
+    #[test]
+    fn edit_is_only_offered_on_your_own() {
+        assert!(!offered(false).contains(&Action::Edit));
+        assert!(offered(true).contains(&Action::Edit));
+    }
+
     /// Every slug survives the round trip, or a click would land on nothing.
     #[test]
     fn a_slug_names_exactly_one_action() {
@@ -146,7 +160,7 @@ mod tests {
     fn the_buttons_sit_in_order_inside_the_row() {
         let row = Rect::new(100.0, 50.0, 600.0, 40.0);
         let placed = place(row, &offered(true), |_| 40.0);
-        assert_eq!(placed.len(), 6);
+        assert_eq!(placed.len(), 7);
         assert_eq!(placed[0].0, Action::React);
         for pair in placed.windows(2) {
             assert!(

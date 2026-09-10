@@ -83,6 +83,11 @@ pub enum Ask {
         emoji: String,
         on: bool,
     },
+    /// Change what a message says.
+    ///
+    /// The socket echoes the edit back, which is what redraws the row, so
+    /// nothing is written here beyond what the server agreed to.
+    Edit { post_id: String, message: String },
     /// Resolve these emoji names against the server, once each.
     ///
     /// The answer is remembered either way: a name the server does not know as
@@ -320,9 +325,10 @@ async fn run(
                             Action::Pin => rest.set_post_pinned(&post_id, on).await,
                             Action::Delete => rest.delete_post(&post_id).await,
                             // Answered in the window: none of these needs the
-                            // server. React opens a picker, and the emoji it
-                            // chooses arrives later as its own ask.
-                            Action::React | Action::Thread | Action::Link => Ok(()),
+                            // server. React opens a picker and Edit opens a
+                            // box, and what either produces arrives later as
+                            // its own ask.
+                            Action::React | Action::Edit | Action::Thread | Action::Link => Ok(()),
                         };
                         match done {
                             // The socket echoes the change, which is what
@@ -330,6 +336,16 @@ async fn run(
                             // went.
                             Ok(()) => println!("{} on {post_id}", action.slug()),
                             Err(error) => eprintln!("{} on {post_id}: {error}", action.slug()),
+                        }
+                    }
+                    Ask::Edit { post_id, message } => {
+                        // The length, never the text.
+                        match rest.patch_post(&post_id, &message).await {
+                            Ok(_) => println!(
+                                "edited {post_id} to {} characters",
+                                message.chars().count()
+                            ),
+                            Err(error) => eprintln!("editing {post_id}: {error}"),
                         }
                     }
                     Ask::NameEmoji { names } => {
