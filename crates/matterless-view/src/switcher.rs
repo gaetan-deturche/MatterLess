@@ -220,6 +220,7 @@ mod tests {
                 mentions: 0,
                 muted: false,
                 direct: false,
+                counterpart: None,
             })
             .collect()
     }

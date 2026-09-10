@@ -48,6 +48,8 @@ pub enum Update {
     /// Older history arrived and is in the store. `more` is false once the
     /// beginning of the channel has been reached, so the window stops asking.
     Older { channel_id: String, more: bool },
+    /// Who is around, by user id.
+    Statuses(Vec<(String, String)>),
     /// A picture arrived, decoded to straight RGBA and ready for the atlas.
     ///
     /// Decoded on the socket thread rather than the drawing one: a JPEG is
@@ -84,6 +86,11 @@ pub enum Ask {
         emoji: String,
         on: bool,
     },
+    /// Who is around, for the conversations on screen.
+    ///
+    /// Batched rather than one call per person: the sidebar asks about every
+    /// direct conversation at once, and that is one request rather than forty.
+    Statuses { user_ids: Vec<String> },
     /// Say that this reader is typing, so the other clients can show it.
     ///
     /// Fire and forget: nothing depends on it arriving, and a typing signal
@@ -352,6 +359,18 @@ async fn run(
                             Err(error) => eprintln!("{} on {post_id}: {error}", action.slug()),
                         }
                     }
+                    Ask::Statuses { user_ids } => match rest.statuses_by_ids(&user_ids).await {
+                        Ok(found) => {
+                            println!("asked about {} people, {} answered", user_ids.len(), found.len());
+                            wake.wake(Update::Statuses(
+                                found
+                                    .into_iter()
+                                    .map(|status| (status.user_id, status.status))
+                                    .collect(),
+                            ));
+                        }
+                        Err(error) => eprintln!("asking who is around: {error}"),
+                    },
                     Ask::Typing {
                         channel_id,
                         root_id,
