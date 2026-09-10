@@ -50,6 +50,13 @@ fn main() {
             Ok(list) => show("Pinned", &store, list, &me.id),
             Err(error) => eprintln!("pinned: {error}"),
         }
+        // Threads come from the store rather than the server, so this is the
+        // whole of that path rather than a stand-in for it.
+        let threads = matterless_view::listing::followed(&store, &me.id, 200);
+        println!("Threads: {} followed", threads.len());
+        for one in threads.iter().take(5) {
+            println!("  {} in {} -- {}", one.author, one.channel, one.note);
+        }
     });
 }
 

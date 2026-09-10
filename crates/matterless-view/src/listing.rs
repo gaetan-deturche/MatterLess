@@ -29,6 +29,12 @@ pub struct Found {
     pub author: String,
     /// One line of it, which is all a row has room for.
     pub preview: String,
+    /// The thread this belongs to, so choosing it can open the conversation
+    /// *and* the thread. Empty when the message is not in one.
+    pub root_id: String,
+    /// A short trailing fact -- "4 replies". Empty when there is none, rather
+    /// than a placeholder nobody reads.
+    pub note: String,
 }
 
 /// Resolves posts into rows, naming their authors and conversations.
@@ -69,10 +75,75 @@ pub fn found_for(store: &Store, posts: Vec<matterless_core::Post>, me: &str) -> 
             },
             author: names.get(&post.user_id).cloned().unwrap_or(post.user_id),
             preview: matterless_sync::notify::preview_of(&post.message),
+            root_id: post.root_id,
+            note: String::new(),
             post_id: post.id,
             channel_id: post.channel_id,
         })
         .collect()
+}
+
+/// The threads this reader follows, newest reply first.
+///
+/// From the local store rather than the server: the sync engine already keeps
+/// this table current, and a list of conversations you are in should open
+/// instantly rather than after a round trip.
+pub fn followed(store: &Store, me: &str, limit: u32) -> Vec<Found> {
+    let threads = store.followed_threads(limit).unwrap_or_default();
+    let mut people: Vec<String> = threads
+        .iter()
+        .map(|thread| thread.author_id.clone())
+        .collect();
+    let mut channels: std::collections::HashMap<String, matterless_core::model::Channel> =
+        std::collections::HashMap::new();
+    for thread in &threads {
+        if let Ok(Some(channel)) = store.channel(&thread.channel_id) {
+            if channel.channel_type == "D"
+                && let Some(other) = matterless_sidebar::counterpart(&channel.name, me)
+            {
+                people.push(other);
+            }
+            channels.insert(thread.channel_id.clone(), channel);
+        }
+    }
+    people.sort();
+    people.dedup();
+    let known = store.users_by_ids(&people).unwrap_or_default();
+    let names: std::collections::HashMap<String, String> = known
+        .iter()
+        .map(|(id, user)| (id.clone(), user.username.clone()))
+        .collect();
+
+    threads
+        .into_iter()
+        .map(|thread| Found {
+            channel: match channels.get(&thread.channel_id) {
+                Some(channel) => matterless_sidebar::label(channel, me, &names),
+                None => thread.channel_id.clone(),
+            },
+            author: names
+                .get(&thread.author_id)
+                .cloned()
+                .unwrap_or(thread.author_id),
+            preview: matterless_sync::notify::preview_of(&thread.message),
+            note: note_for(thread.reply_count, thread.unread_replies),
+            // The root is the thread, so choosing the row opens it.
+            root_id: thread.root_id.clone(),
+            post_id: thread.root_id,
+            channel_id: thread.channel_id,
+        })
+        .collect()
+}
+
+/// What a thread row says about itself, in as few words as it can.
+fn note_for(replies: i64, unread: i64) -> String {
+    let plural = |count: i64| if count == 1 { "reply" } else { "replies" };
+    if unread > 0 {
+        // The unread count first: it is the reason to open this one rather
+        // than the one under it.
+        return format!("{unread} new of {replies} {}", plural(replies));
+    }
+    format!("{replies} {}", plural(replies))
 }
 
 /// A titled list, open or shut.
@@ -196,8 +267,10 @@ impl Listing {
         // An empty list has to say which kind of empty it is, or a slow request
         // and a genuinely empty list look identical.
         if self.found.is_empty() {
+            // Not "asking the server": threads are answered from the store,
+            // and a line that names the wrong source is worse than a vague one.
             let said = if self.waiting {
-                "asking the server"
+                "still looking"
             } else {
                 "nothing here yet"
             };
@@ -222,9 +295,13 @@ impl Listing {
             if at == self.chosen {
                 scene.fill(panel.x, y, panel.width, ROW, palette.ground);
             }
+            let said = match found.note.as_str() {
+                "" => format!("{} in {}", found.author, found.channel),
+                note => format!("{} in {} -- {note}", found.author, found.channel),
+            };
             let who = painter.run(
                 fonts,
-                &format!("{} in {}", found.author, found.channel),
+                &said,
                 panel.x + PADDING + 4.0,
                 y + 4.0,
                 Run::label(f32::MAX).bold(),
@@ -256,8 +333,20 @@ mod tests {
                 channel: "Dev".into(),
                 author: "ada".into(),
                 preview: "something".into(),
+                root_id: String::new(),
+                note: String::new(),
             })
             .collect()
+    }
+
+    /// The unread count leads, because it is the reason to open one thread
+    /// rather than the one beneath it. And one reply is not "1 replies".
+    #[test]
+    fn a_thread_says_what_is_waiting_in_it() {
+        assert_eq!(note_for(4, 2), "2 new of 4 replies");
+        assert_eq!(note_for(4, 0), "4 replies");
+        assert_eq!(note_for(1, 0), "1 reply");
+        assert_eq!(note_for(1, 1), "1 new of 1 reply");
     }
 
     /// The panel never grows past the window, however long the list.
