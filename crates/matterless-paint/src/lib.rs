@@ -104,6 +104,29 @@ pub struct PlacedGlyph {
     pub faint: bool,
 }
 
+/// Where the glyphs of an already-shaped buffer land.
+///
+/// `Painter::run` shapes its own text and is the right thing for a label. This
+/// is for a buffer somebody else owns and keeps between frames -- the composer's
+/// editor, which holds the text being typed and must not be reshaped from a
+/// string every frame, because the caret and the selection are positions inside
+/// the shaping and would be lost with it.
+pub fn placed_glyphs(buffer: &Buffer, x: f32, y: f32) -> Vec<PlacedGlyph> {
+    let mut placed = Vec::new();
+    for line in buffer.layout_runs() {
+        for glyph in line.glyphs {
+            let physical = glyph.physical((x, y + line.line_y), 1.0);
+            placed.push(PlacedGlyph {
+                key: physical.cache_key,
+                x: physical.x,
+                y: physical.y,
+                faint: false,
+            });
+        }
+    }
+    placed
+}
+
 /// A row reduced to what a renderer has to put on screen.
 ///
 /// Kept as a list rather than drawn directly so the snapshot and the window

@@ -10,11 +10,12 @@
 use matterless_layout::Fonts;
 use matterless_layout::row::{RowLayout, Theme, lay_out};
 use matterless_paint::{Painter, Palette, Scene};
-use matterless_ui::input::{Event as UiEvent, Input};
+use matterless_ui::input::{Event as UiEvent, Input, Key, Mods};
 // Aliased: `Node` is a markdown node in this file already, and a box here.
 use matterless_render::markdown::Node;
 use matterless_render::{PostRow, Row};
 use matterless_ui::{Axis, Node as Boxed, Placed, Rect, Size};
+use matterless_view::composer::{self, Composer};
 use matterless_view::header::{self, Header};
 use matterless_view::sidebar::{Canvas, Entry, Sidebar};
 use std::sync::Arc;
@@ -144,6 +145,10 @@ struct App {
     sidebar: Sidebar,
     input: Input,
     placed: Vec<Placed>,
+    composer: Composer,
+    /// Copy and paste within this window. Crossing to another process needs a
+    /// platform clipboard, which is a dependency this window does not have yet.
+    clipboard: String,
 }
 
 impl App {
@@ -280,8 +285,13 @@ impl App {
             sidebar,
             input: Input::default(),
             placed: Vec::new(),
+            composer: Composer::new(),
+            clipboard: String::new(),
         };
         app.sidebar.selected = Some(channel);
+        // Focused before anything is clicked: a chat window that needs a click
+        // before it will accept typing is a chat window that feels broken.
+        app.input.focus_on(composer::NAME);
         app
     }
 
@@ -295,7 +305,11 @@ impl App {
                 Boxed::new("column", Size::Grow(1.0))
                     .axis(Axis::Column)
                     .with(Boxed::new("header", Size::Fixed(header::HEIGHT)))
-                    .with(Boxed::new("stream", Size::Grow(1.0))),
+                    .with(Boxed::new("stream", Size::Grow(1.0)))
+                    .with(Boxed::new(
+                        composer::NAME,
+                        Size::Fixed(self.composer.height()),
+                    )),
             );
         matterless_ui::solve::solve(
             &tree,
@@ -317,8 +331,14 @@ impl App {
         )
     }
 
+    /// The stream, between the header above it and the composer below.
     fn stream_rect(&self) -> Rect {
-        header::below(self.column_rect())
+        self.composer.above(header::below(self.column_rect()))
+    }
+
+    /// The strip the composer sits in, at the foot of the column.
+    fn composer_rect(&self) -> Rect {
+        self.composer.strip(header::below(self.column_rect()))
     }
 
     /// The open channel's name, which is what the header says.
@@ -341,6 +361,38 @@ impl App {
     fn redraw(&self) {
         if let Some(window) = &self.window {
             window.request_redraw();
+        }
+    }
+
+    /// Every box a pointer can land on.
+    ///
+    /// One list rather than one per handler: a click and a wheel turn have to
+    /// be tested against the same boxes, and building them separately is how
+    /// the two come to disagree about what is under the pointer.
+    fn targets(&self) -> Vec<Placed> {
+        let mut boxes = self.shell();
+        boxes.extend(self.sidebar.boxes(self.sidebar_rect()));
+        boxes
+    }
+
+    /// Hands the frame's input to the widgets that want it.
+    fn react(&mut self) {
+        let within = header::below(self.column_rect());
+        let was = self.composer.height();
+        let sent = self
+            .composer
+            .react(&mut self.fonts, &self.input, within, &mut self.clipboard);
+        if let Some(text) = sent {
+            // The count, never the message: the log holds structure and sizes,
+            // not what anybody said.
+            println!("composer: sent {} characters", text.chars().count());
+        }
+        let width = self.column_rect().width;
+        self.composer.lay_out(&mut self.fonts, width);
+        // Only when the box actually grew or shrank. Every keystroke would
+        // otherwise re-lay-out four hundred messages to learn nothing moved.
+        if self.composer.height() != was {
+            self.relayout();
         }
     }
 
@@ -404,6 +456,20 @@ impl App {
             }
             top = bottom;
         }
+
+        // Its own layer last, so the caret and the box sit over the stream
+        // rather than under a message that scrolled into the strip.
+        let composer = self.composer_rect();
+        scene.clip_to(composer.x, composer.y, composer.width, composer.height);
+        let focused = self.input.focus() == Some(composer::NAME);
+        let within = header::below(self.column_rect());
+        let mut canvas = Canvas {
+            scene: &mut scene,
+            painter: &mut self.painter,
+            fonts: &mut self.fonts,
+            palette: &self.palette,
+        };
+        self.composer.draw(&mut canvas, within, focused);
         scene
     }
 
@@ -412,6 +478,11 @@ impl App {
     /// Once per width change, never per frame: the heights do not depend on the
     /// scroll position, which is the property that makes this list honest.
     fn relayout(&mut self) {
+        // The composer is shaped first: it decides its own height, and the
+        // stream gets what is left, so its width has to be settled before the
+        // rows are laid out against it.
+        let width = self.column_rect().width;
+        self.composer.lay_out(&mut self.fonts, width);
         self.theme = Theme {
             width: self.stream_rect().width,
             ..Theme::default()
@@ -522,9 +593,8 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
-                self.placed = self.shell();
-                let mut boxes = self.placed.clone();
-                boxes.extend(self.sidebar.boxes(self.sidebar_rect()));
+                self.placed = self.targets();
+                let boxes = self.placed.clone();
                 self.input.apply(
                     UiEvent::PointerMoved {
                         x: position.x as f32,
@@ -532,17 +602,55 @@ impl ApplicationHandler for App {
                     },
                     &boxes,
                 );
+                // A held press is a drag, which selects text in the composer.
+                if self.input.pressed().is_some() {
+                    self.react();
+                }
                 self.redraw();
             }
             WindowEvent::CursorLeft { .. } => {
                 self.input.apply(UiEvent::PointerLeft, &[]);
                 self.redraw();
             }
+            WindowEvent::ModifiersChanged(changed) => {
+                let held = changed.state();
+                self.input.apply(
+                    UiEvent::Modifiers(Mods {
+                        shift: held.shift_key(),
+                        // Resolved here so no widget has to ask what platform
+                        // it is on: Command is the chord key on macOS, Ctrl
+                        // everywhere else.
+                        command: if cfg!(target_os = "macos") {
+                            held.super_key()
+                        } else {
+                            held.control_key()
+                        },
+                        alt: held.alt_key(),
+                    }),
+                    &[],
+                );
+            }
+            WindowEvent::KeyboardInput { event, .. } => {
+                let down = event.state == winit::event::ElementState::Pressed;
+                if let Some(key) = named(&event.logical_key) {
+                    self.input.apply(UiEvent::Key { key, down }, &[]);
+                }
+                // What the platform composed, which is not the keys struck: an
+                // accented letter is two keys and one insertion, and a chord
+                // produces a key and no text at all.
+                if down && let Some(text) = &event.text {
+                    self.input.apply(UiEvent::Typed(text.to_string()), &[]);
+                }
+                if down {
+                    self.react();
+                    self.redraw();
+                }
+            }
             WindowEvent::MouseInput { state, button, .. } => {
                 if button != winit::event::MouseButton::Left {
                     return;
                 }
-                let boxes = self.sidebar.boxes(self.sidebar_rect());
+                let boxes = self.targets();
                 let event = if state == winit::event::ElementState::Pressed {
                     UiEvent::PointerPressed
                 } else {
@@ -553,6 +661,7 @@ impl ApplicationHandler for App {
                 if let Some(channel) = self.sidebar.react(&self.input, &boxes, within) {
                     self.open_channel(&channel);
                 }
+                self.react();
                 self.redraw();
             }
             WindowEvent::MouseWheel { delta, .. } => {
@@ -560,14 +669,13 @@ impl ApplicationHandler for App {
                     MouseScrollDelta::LineDelta(_, lines) => lines * self.theme.line_height * 3.0,
                     MouseScrollDelta::PixelDelta(position) => position.y as f32,
                 };
-                let mut boxes = self.sidebar.boxes(self.sidebar_rect());
-                boxes.extend(header::boxes(self.column_rect()));
+                let boxes = self.targets();
                 self.input.apply(UiEvent::Wheel { x: 0.0, y: by }, &boxes);
                 let within = self.sidebar_rect();
-                // One wheel, three panels, and the pointer decides which of them
+                // One wheel, four panels, and the pointer decides which of them
                 // it belongs to -- which is what `wheel_over` is for. The header
-                // takes it and does nothing, so turning the wheel over a fixed
-                // strip does not move the messages under it.
+                // and the composer take it and do nothing, so turning the wheel
+                // over a fixed strip does not move the messages behind it.
                 if self
                     .input
                     .wheel_over(&boxes, |name| name == "sidebar")
@@ -576,7 +684,7 @@ impl ApplicationHandler for App {
                     self.sidebar.react(&self.input, &boxes, within);
                 } else if self
                     .input
-                    .wheel_over(&boxes, |name| name == "header")
+                    .wheel_over(&boxes, |name| name == "header" || name == composer::NAME)
                     .is_none()
                 {
                     let total: f32 = self.laid.iter().map(|row| row.height).sum();
@@ -713,4 +821,31 @@ fn main() {
     let events = EventLoop::new().expect("an event loop");
     events.set_control_flow(ControlFlow::Wait);
     events.run_app(&mut App::new()).expect("the event loop");
+}
+
+/// The keys this app acts on, from what the platform reported.
+///
+/// Deliberately partial: everything else is text, and text arrives already
+/// composed. A letter is mapped too, but only so a chord like Ctrl+C can be
+/// recognised -- it is never how typing gets in.
+fn named(key: &winit::keyboard::Key) -> Option<Key> {
+    use winit::keyboard::{Key as Pressed, NamedKey};
+    Some(match key {
+        Pressed::Named(NamedKey::Enter) => Key::Enter,
+        Pressed::Named(NamedKey::Escape) => Key::Escape,
+        Pressed::Named(NamedKey::Tab) => Key::Tab,
+        Pressed::Named(NamedKey::Backspace) => Key::Backspace,
+        Pressed::Named(NamedKey::Delete) => Key::Delete,
+        Pressed::Named(NamedKey::ArrowLeft) => Key::Left,
+        Pressed::Named(NamedKey::ArrowRight) => Key::Right,
+        Pressed::Named(NamedKey::ArrowUp) => Key::Up,
+        Pressed::Named(NamedKey::ArrowDown) => Key::Down,
+        Pressed::Named(NamedKey::Home) => Key::Home,
+        Pressed::Named(NamedKey::End) => Key::End,
+        Pressed::Named(NamedKey::PageUp) => Key::PageUp,
+        Pressed::Named(NamedKey::PageDown) => Key::PageDown,
+        // Lowercased so a chord is the same key with or without shift.
+        Pressed::Character(text) => Key::Char(text.chars().next()?.to_ascii_lowercase()),
+        _ => return None,
+    })
 }
