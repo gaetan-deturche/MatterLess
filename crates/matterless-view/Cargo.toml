@@ -41,3 +41,9 @@ window = ["winit", "pollster", "png"]
 [[bin]]
 name = "matterless-view"
 required-features = ["window"]
+
+[target.'cfg(windows)'.dependencies]
+# Raised here rather than through a plugin, so a click reaches this window:
+# `on_activated` is an in-process event, which is the case that matters when the
+# window is already running.
+tauri-winrt-notification = "0.7"

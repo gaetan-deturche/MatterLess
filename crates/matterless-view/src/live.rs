@@ -40,6 +40,10 @@ pub enum Update {
         channel_id: String,
         failed: bool,
     },
+    /// A notification was clicked, naming the conversation to open. Raised
+    /// from whatever thread the platform fires its callback on, and delivered
+    /// like everything else on the one that owns the window.
+    Activated(String),
     /// A picture arrived, decoded to straight RGBA and ready for the atlas.
     ///
     /// Decoded on the socket thread rather than the drawing one: a JPEG is
