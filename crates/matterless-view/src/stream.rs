@@ -25,6 +25,13 @@ pub enum Chose {
     Thread(String),
     /// Try this message again, by the pending id it still carries.
     Retry(String),
+    /// Do something to one message.
+    Act {
+        action: crate::actions::Action,
+        post_id: String,
+        /// What the toggle becomes, for the actions that are one.
+        on: bool,
+    },
     /// Add or remove this reaction.
     React {
         post_id: String,
@@ -46,6 +53,8 @@ pub struct Stream {
     /// Custom emoji this conversation uses, by name to the id whose image the
     /// server holds. A standard emoji is a character and needs nothing here.
     pub custom: std::collections::HashMap<String, String>,
+    /// Who the reader is, so their own messages offer what only they may do.
+    pub me: String,
 }
 
 impl Stream {
@@ -57,6 +66,7 @@ impl Stream {
             theme: Theme::default(),
             scroll: 0.0,
             custom: std::collections::HashMap::new(),
+            me: String::new(),
         }
     }
 
@@ -122,7 +132,7 @@ impl Stream {
     /// Only the visible ones, unlike the sidebar: a channel is hundreds of
     /// thousands of rows where a sidebar is hundreds, and placing them all
     /// would cost more than the drawing does.
-    pub fn boxes(&self, within: Rect) -> Vec<Placed> {
+    pub fn boxes(&self, within: Rect, hovered: Option<usize>) -> Vec<Placed> {
         let mut placed = vec![Placed {
             name: self.name.clone(),
             rect: within,
@@ -147,6 +157,16 @@ impl Stream {
                 // The first thing inside a message a pointer can land on.
                 // Deeper than the row, so a click on a pill is a click on the
                 // pill rather than on the message behind it.
+                // Only the hovered row has a toolbar, so only it has buttons.
+                if hovered == Some(index) {
+                    for (action, rect) in self.toolbar(index, top, within) {
+                        placed.push(Placed {
+                            name: self.action_name(index, action),
+                            rect,
+                            depth: 3,
+                        });
+                    }
+                }
                 for (ordinal, (block, _)) in self.pills(index).into_iter().enumerate() {
                     placed.push(Placed {
                         name: format!("{}/row/{index}/reaction/{ordinal}", self.name),
@@ -184,6 +204,20 @@ impl Stream {
                 on: !reaction.mine,
             });
         }
+        // Then a toolbar button, which also sits inside a row.
+        if let Some((index, action)) = self.action_at(clicked)
+            && let Some(Row::Post { post } | Row::Continuation { post }) = self.rows.get(index)
+        {
+            return Some(Chose::Act {
+                action,
+                post_id: post.post_id.clone(),
+                on: match action {
+                    crate::actions::Action::Save => !post.saved,
+                    crate::actions::Action::Pin => !post.pinned,
+                    _ => true,
+                },
+            });
+        }
         let index = self.index_of(clicked)?;
         // A message that never reached the server has no thread to open -- its
         // id is the window's own pending one, which the store has never heard
@@ -194,6 +228,43 @@ impl Stream {
             return Some(Chose::Retry(post.post_id.clone()));
         }
         self.root_of(index).map(Chose::Thread)
+    }
+
+    /// The actions offered on a row, and where each button sits.
+    ///
+    /// Only on the row under the pointer: a toolbar on every message at once
+    /// would be a wall of buttons over a conversation.
+    fn toolbar(&self, index: usize, top: f32, within: Rect) -> Vec<(crate::actions::Action, Rect)> {
+        let Some(Row::Post { post } | Row::Continuation { post }) = self.rows.get(index) else {
+            return Vec::new();
+        };
+        // Nothing to act on until the server has agreed it exists.
+        if post.pending || post.failed {
+            return Vec::new();
+        }
+        let strip = Rect::new(within.x, top + 2.0, within.width, crate::actions::HEIGHT);
+        crate::actions::place(
+            strip,
+            &crate::actions::offered(post.author_id == self.me),
+            // Measured against the same label that is drawn, so a button is
+            // never narrower than the word inside it.
+            |action| action.label(false).chars().count() as f32 * 7.0,
+        )
+    }
+
+    /// What the toolbar of a row is called, per button.
+    fn action_name(&self, index: usize, action: crate::actions::Action) -> String {
+        format!("{}/row/{index}/action/{}", self.name, action.slug())
+    }
+
+    /// The row and action a button name refers to.
+    fn action_at(&self, name: &str) -> Option<(usize, crate::actions::Action)> {
+        let rest = name.strip_prefix(&format!("{}/row/", self.name))?;
+        let (index, slug) = rest.split_once("/action/")?;
+        Some((
+            index.parse().ok()?,
+            crate::actions::Action::from_slug(slug)?,
+        ))
     }
 
     /// The row a name refers to, if it is one of this panel's.
@@ -211,8 +282,14 @@ impl Stream {
     }
 
     /// The row under the pointer, for drawing it hovered.
-    fn hovered(&self, input: &Input) -> Option<usize> {
-        self.index_of(input.hovered()?)
+    ///
+    /// A button inside a row counts as that row, or the toolbar would vanish
+    /// the moment the pointer reached it.
+    pub fn hovered(&self, input: &Input) -> Option<usize> {
+        let name = input.hovered()?;
+        self.index_of(name)
+            .or_else(|| self.action_at(name).map(|(index, _)| index))
+            .or_else(|| self.reaction_at(name).map(|(index, _)| index))
     }
 
     /// The faces the rows on screen need, so the caller can fetch the missing.
@@ -385,6 +462,52 @@ impl Stream {
         }
     }
 
+    /// Draws the row's toolbar, one button at a time.
+    fn buttons(&self, into: &mut Canvas<'_>, index: usize, top: f32, within: Rect, input: &Input) {
+        let Some(Row::Post { post } | Row::Continuation { post }) = self.rows.get(index) else {
+            return;
+        };
+        let Canvas {
+            scene,
+            painter,
+            fonts,
+            palette,
+        } = into;
+        for (action, rect) in self.toolbar(index, top, within) {
+            let on = match action {
+                crate::actions::Action::Save => post.saved,
+                crate::actions::Action::Pin => post.pinned,
+                _ => false,
+            };
+            let under = input.hovered() == Some(self.action_name(index, action).as_str());
+            scene.fill(
+                rect.x,
+                rect.y,
+                rect.width,
+                rect.height,
+                if under {
+                    [palette.ink[0], palette.ink[1], palette.ink[2], 45]
+                } else {
+                    palette.surface
+                },
+            );
+            let glyphs = painter.run(
+                fonts,
+                action.label(on),
+                rect.x + 8.0,
+                rect.y + 3.0,
+                Run::label(f32::MAX),
+            );
+            // A button already done reads loud, so pressing it twice is
+            // visibly two different things.
+            scene.glyphs(
+                glyphs,
+                if on { palette.ink } else { palette.faint },
+                palette.faint,
+            );
+        }
+    }
+
     /// Draws the file cards: an attachment that is not a picture.
     ///
     /// A name and a size on a panel, which is all a message list can honestly
@@ -481,6 +604,17 @@ impl Stream {
                     }]);
                 }
                 scene.extend(self.pictures(index, top, within.x));
+                // The toolbar last of the row's own drawing, so it sits over
+                // the message rather than under the first word of it.
+                if hovered == Some(index) {
+                    let mut canvas = Canvas {
+                        scene,
+                        painter,
+                        fonts,
+                        palette,
+                    };
+                    self.buttons(&mut canvas, index, top, within, input);
+                }
                 let mut canvas = Canvas {
                     scene,
                     painter,

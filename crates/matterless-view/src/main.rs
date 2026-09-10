@@ -776,6 +776,7 @@ impl App {
         let outstanding = self.outstanding.for_channel(&channel);
         match matterless_view::feed::rows_of(&store, &channel, &self.me, &outstanding, self.depth) {
             Ok(rows) => {
+                self.stream.me = self.me.clone();
                 self.stream.custom = matterless_view::feed::custom_emoji(&store, &rows);
                 self.stream.rows = rows;
                 self.relayout();
@@ -813,6 +814,51 @@ impl App {
         });
     }
 
+    /// Does what a toolbar button asked for.
+    ///
+    /// Two of them never reach the server: opening a thread is this window's
+    /// own business, and a permalink is a string.
+    fn act(&mut self, action: matterless_view::actions::Action, post_id: String, on: bool) {
+        use matterless_view::actions::Action;
+        match action {
+            Action::Thread => {
+                let root = self
+                    .stream
+                    .rows
+                    .iter()
+                    .find_map(|row| match row {
+                        Row::Post { post } | Row::Continuation { post }
+                            if post.post_id == post_id =>
+                        {
+                            Some(if post.root_id.is_empty() {
+                                post.post_id.clone()
+                            } else {
+                                post.root_id.clone()
+                            })
+                        }
+                        _ => None,
+                    })
+                    .unwrap_or(post_id);
+                self.open_thread(&root);
+            }
+            Action::Link => {
+                // Into this window's own clipboard, which is where everything
+                // else it copies goes until there is a platform one.
+                self.clipboard = format!("/pl/{post_id}");
+                println!("copied a permalink");
+            }
+            other => {
+                if let Some(link) = self.link.as_ref() {
+                    link.send(matterless_view::live::Ask::Act {
+                        action: other,
+                        post_id,
+                        on,
+                    });
+                }
+            }
+        }
+    }
+
     /// The root of the open thread, if one is open.
     fn open_root(&self) -> Option<String> {
         let name = &self.thread.as_ref()?.name;
@@ -837,6 +883,7 @@ impl App {
             self.depth,
         ) {
             Ok(rows) => {
+                self.stream.me = self.me.clone();
                 self.stream.custom = matterless_view::feed::custom_emoji(&store, &rows);
                 self.stream.rows = rows;
                 self.relayout();
@@ -875,9 +922,15 @@ impl App {
     fn targets(&self) -> Vec<Placed> {
         let mut boxes = self.shell();
         boxes.extend(self.sidebar.boxes(self.sidebar_rect()));
-        boxes.extend(self.stream.boxes(self.stream_rect()));
+        // The hovered row is what decides whether a toolbar exists, and it is
+        // read from the frame just gone: a toolbar the pointer is already on
+        // must stay under it.
+        boxes.extend(
+            self.stream
+                .boxes(self.stream_rect(), self.stream.hovered(&self.input)),
+        );
         if let (Some(thread), Some(rect)) = (&self.thread, self.thread_stream_rect()) {
-            boxes.extend(thread.boxes(rect));
+            boxes.extend(thread.boxes(rect, thread.hovered(&self.input)));
         }
         boxes
     }
@@ -1041,6 +1094,7 @@ impl App {
             self.depth,
         ) {
             Ok(rows) => {
+                self.stream.me = self.me.clone();
                 self.stream.custom = matterless_view::feed::custom_emoji(&store, &rows);
                 self.stream.rows = rows;
                 // A thread from the channel just left has nothing to do with
@@ -1395,6 +1449,11 @@ impl ApplicationHandler<Update> for App {
                 match self.stream.react(&self.input, &boxes, stream) {
                     Some(matterless_view::stream::Chose::Thread(root)) => self.open_thread(&root),
                     Some(matterless_view::stream::Chose::Retry(pending)) => self.retry(&pending),
+                    Some(matterless_view::stream::Chose::Act {
+                        action,
+                        post_id,
+                        on,
+                    }) => self.act(action, post_id, on),
                     Some(matterless_view::stream::Chose::React { post_id, emoji, on }) => {
                         if let Some(link) = self.link.as_ref() {
                             link.send(matterless_view::live::Ask::React { post_id, emoji, on });

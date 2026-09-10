@@ -9,6 +9,7 @@
 //! -- which is what a browser cannot offer and what every scroll artefact in the
 //! DOM list came from.
 
+pub mod actions;
 pub mod atlas;
 pub mod composer;
 #[cfg(test)]
