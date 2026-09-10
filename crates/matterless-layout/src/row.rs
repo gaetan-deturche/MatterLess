@@ -459,9 +459,29 @@ pub fn lay_out(fonts: &mut Fonts, row: &Row, theme: &Theme) -> RowLayout {
     }
 
     for block in &code {
-        // A code block does not wrap -- it scrolls -- so its lines are the ones
-        // written, however long they are.
-        let count = block.lines().count().max(1);
+        // Measured at the width it will actually be shaped at, rather than
+        // counting the lines as typed. Those two disagreed: the painter wrapped
+        // at the column while this counted newlines, so one long log line
+        // reserved a single line's height and drew over the message below it.
+        //
+        // The app scrolls a code block sideways rather than wrapping it, and
+        // this will too once the renderer can scroll sideways. That is a change
+        // to `wrap` alone -- the count stays right, because it asks what will be
+        // drawn rather than what was written.
+        let wrap = (theme.text_width() - theme.code_padding).max(40.0);
+        let count = crate::extent_of(
+            fonts,
+            block,
+            wrap,
+            crate::Style {
+                size: theme.code_size,
+                line_height: theme.code_line_height,
+                bold: false,
+                italic: false,
+                mono: true,
+            },
+        )
+        .lines;
         let height = count as f32 * theme.code_line_height + theme.code_padding;
         blocks.push(Block {
             y,
@@ -477,7 +497,7 @@ pub fn lay_out(fonts: &mut Fonts, row: &Row, theme: &Theme) -> RowLayout {
                 faint: false,
             }],
             size: theme.code_size,
-            wrap: theme.text_width(),
+            wrap,
         });
         y += height + theme.block_gap;
     }
@@ -622,8 +642,7 @@ mod tests {
         assert_eq!(first.height - next.height, theme.header_height);
     }
 
-    /// A code block's height is the lines it was written with, because it
-    /// scrolls sideways rather than wrapping.
+    /// Short lines do not wrap, so the count is the lines as written.
     #[test]
     fn a_code_block_counts_its_own_lines() {
         let mut fonts = Fonts::new();
@@ -645,6 +664,65 @@ mod tests {
             code.height,
             3.0 * theme.code_line_height + theme.code_padding
         );
+    }
+
+    /// A pasted build error is one line as typed and several as drawn. Counting
+    /// what was written reserved a single line, and the message below it was
+    /// drawn over the top.
+    #[test]
+    fn a_long_code_line_reserves_the_height_it_will_be_drawn_at() {
+        let mut fonts = Fonts::new();
+        let theme = Theme::default();
+        let long = "UATHelper: Packaging (Windows): Module.Curiosity.27.cpp.obj : error \
+                    LNK2019: unresolved external symbol \"protected: void __cdecl \
+                    U3DFlowManager::ProcessPendingSpawningRequest(class FSCBudgetedWork &)\" \
+                    referenced in function \"public: void __cdecl U3DFlowManager::Initialize\"";
+        let row = Row::Post {
+            post: post(vec![Node::CodeBlock {
+                language: None,
+                value: long.into(),
+            }]),
+        };
+        let laid = lay_out(&mut fonts, &row, &theme);
+        let code = laid
+            .blocks
+            .iter()
+            .find(|block| block.kind == Kind::Code)
+            .expect("a code block");
+
+        assert_eq!(long.lines().count(), 1, "one line as typed");
+        assert!(
+            code.lines > 1,
+            "a line far wider than the column has to wrap"
+        );
+        assert_eq!(
+            code.height,
+            code.lines as f32 * theme.code_line_height + theme.code_padding
+        );
+        // The block has to fit inside the row it is part of, or it draws over
+        // whatever comes next.
+        assert!(laid.height >= code.y + code.height);
+    }
+
+    /// The layout and the painter have to shape at the same width, or the count
+    /// is right about a wrap that never happens.
+    #[test]
+    fn a_code_block_is_shaped_inside_its_own_padding() {
+        let mut fonts = Fonts::new();
+        let theme = Theme::default();
+        let row = Row::Post {
+            post: post(vec![Node::CodeBlock {
+                language: None,
+                value: "one".into(),
+            }]),
+        };
+        let laid = lay_out(&mut fonts, &row, &theme);
+        let code = laid
+            .blocks
+            .iter()
+            .find(|block| block.kind == Kind::Code)
+            .expect("a code block");
+        assert_eq!(code.wrap, theme.text_width() - theme.code_padding);
     }
 
     /// Bold is wider, so the same words can need another line -- which a

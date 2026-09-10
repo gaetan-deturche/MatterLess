@@ -312,10 +312,14 @@ impl Painter {
                     });
                 }
                 Kind::Code => {
+                    // The full column, not the wrap: `wrap` is the width the
+                    // text is shaped at, which is inside the padding the text
+                    // is drawn at. Filling to it would leave the last letter of
+                    // a full line sitting outside its own background.
                     pieces.push(Piece::Fill {
                         x,
                         y,
-                        width: block.wrap,
+                        width: theme.text_width(),
                         height: block.height,
                         colour: palette.surface,
                     });
