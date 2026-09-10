@@ -20,7 +20,7 @@ fn panel() -> Rect {
 
 /// Focused and laid out, as the shell leaves it before a frame.
 fn ready(fonts: &mut Fonts) -> (Composer, Input) {
-    let mut composer = Composer::new();
+    let mut composer = Composer::new(NAME);
     composer.lay_out(fonts, panel().width);
     let mut input = Input::default();
     input.focus_on(NAME);
@@ -170,7 +170,7 @@ fn a_chord_does_not_also_type_its_letter() {
 #[test]
 fn an_unfocused_composer_ignores_the_keyboard() {
     let mut fonts = Fonts::new();
-    let mut composer = Composer::new();
+    let mut composer = Composer::new(NAME);
     composer.lay_out(&mut fonts, panel().width);
     let mut input = Input::default();
     input.focus_on("stream");
@@ -223,8 +223,57 @@ fn it_stops_growing_at_the_cap() {
 #[test]
 fn the_composer_and_the_stream_tile_the_panel() {
     let mut fonts = Fonts::new();
-    let mut composer = Composer::new();
+    let mut composer = Composer::new(NAME);
     composer.lay_out(&mut fonts, panel().width);
     assert_eq!(composer.above(panel()).bottom(), composer.strip(panel()).y);
     assert_eq!(composer.strip(panel()).bottom(), panel().bottom());
+}
+
+/// Two boxes on screen at once, so a keystroke has to reach exactly one. The
+/// channel's composer and the thread's are the same widget under two names,
+/// and without the name they would both take every key.
+#[test]
+fn only_the_focused_box_of_two_takes_the_keystrokes() {
+    let mut fonts = Fonts::new();
+    let mut channel = Composer::new(NAME);
+    let mut thread = Composer::new("thread-composer");
+    channel.lay_out(&mut fonts, panel().width);
+    thread.lay_out(&mut fonts, panel().width);
+
+    let mut input = Input::default();
+    input.focus_on("thread-composer");
+    input.apply(Event::Typed("a reply".to_string()), &[]);
+    channel.react(&mut fonts, &input, panel(), &mut String::new());
+    thread.react(&mut fonts, &input, panel(), &mut String::new());
+
+    assert_eq!(thread.text(), "a reply");
+    assert_eq!(channel.text(), "", "the channel's box is not focused");
+}
+
+/// Sending from one box must not empty the other: a draft in the channel has
+/// to survive replying in a thread.
+#[test]
+fn sending_a_reply_leaves_the_channel_draft_alone() {
+    let mut fonts = Fonts::new();
+    let mut channel = Composer::new(NAME);
+    let mut thread = Composer::new("thread-composer");
+    channel.lay_out(&mut fonts, panel().width);
+    thread.lay_out(&mut fonts, panel().width);
+
+    let mut input = Input::default();
+    input.focus_on(NAME);
+    input.apply(Event::Typed("half a thought".to_string()), &[]);
+    channel.react(&mut fonts, &input, panel(), &mut String::new());
+    input.settle();
+
+    input.focus_on("thread-composer");
+    input.apply(Event::Typed("done".to_string()), &[]);
+    thread.react(&mut fonts, &input, panel(), &mut String::new());
+    input.settle();
+    press(&mut input, Key::Enter);
+    let sent = thread.react(&mut fonts, &input, panel(), &mut String::new());
+
+    assert_eq!(sent, Some("done".to_string()));
+    assert_eq!(thread.text(), "");
+    assert_eq!(channel.text(), "half a thought");
 }
