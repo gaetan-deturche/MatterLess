@@ -21,6 +21,7 @@ pub mod sidebar_feed;
 pub mod stream;
 #[cfg(test)]
 mod stream_tests;
+pub mod switcher;
 pub mod toast;
 
 use atlas::{Atlas, SIDE};

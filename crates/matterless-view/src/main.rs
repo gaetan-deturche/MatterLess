@@ -180,6 +180,9 @@ struct App {
     /// What a clicked notification does. Held once and shared with every toast,
     /// because each one outlives the call that raised it.
     clicked: Option<Arc<matterless_view::toast::Clicked>>,
+    /// Jumping to a conversation by name, which is how a reader gets around a
+    /// hundred and fourteen channels without hunting the sidebar.
+    switcher: matterless_view::switcher::Switcher,
     /// How far back the open channel is read. Grows as older pages arrive.
     depth: u32,
     /// True while a page of history is in flight, so the same page is not asked
@@ -290,6 +293,7 @@ impl App {
             asked: std::collections::HashSet::new(),
             arrived: Vec::new(),
             clicked: None,
+            switcher: matterless_view::switcher::Switcher::default(),
             depth: matterless_view::feed::PAGE,
             loading_older: false,
             more_history: true,
@@ -949,6 +953,36 @@ impl App {
 
     /// Hands the frame's input to the widgets that want it.
     fn react(&mut self) {
+        // The switcher first and alone while it is open: it is a thing the
+        // reader is doing instead of reading, so the boxes behind it must not
+        // take the same keys.
+        if self.switcher.open {
+            let mut input = std::mem::take(&mut self.input);
+            if input.struck(Key::Escape) {
+                self.switcher.hide(&mut input);
+                self.input = input;
+                return;
+            }
+            let within = self.stream_rect();
+            let entries = self.sidebar.entries.clone();
+            let chosen = self.switcher.react(
+                &mut self.fonts,
+                &input,
+                within,
+                &mut self.clipboard,
+                &entries,
+            );
+            if let Some(channel) = chosen {
+                self.switcher.hide(&mut input);
+                self.input = input;
+                self.sidebar.selected = Some(channel.clone());
+                self.open_channel(&channel);
+                return;
+            }
+            self.input = input;
+            return;
+        }
+
         let was = (self.composer.height(), self.thread_composer.height());
 
         // Both boxes are offered the frame. Each one checks whether it holds
@@ -1131,6 +1165,22 @@ impl App {
             palette: &self.palette,
         };
         self.composer.draw(&mut canvas, within, focused);
+
+        // Last, and over the whole window: the switcher covers what it stands
+        // in front of rather than sitting beside it.
+        if self.switcher.open {
+            let stream = self.stream_rect();
+            let field = self.switcher.field(stream);
+            scene.clip_to(0.0, 0.0, self.size.0 as f32, self.size.1 as f32);
+            let mut canvas = Canvas {
+                scene: &mut scene,
+                painter: &mut self.painter,
+                fonts: &mut self.fonts,
+                palette: &self.palette,
+            };
+            self.switcher.draw(&mut canvas, stream);
+            self.switcher.query.draw(&mut canvas, field, true);
+        }
         scene
     }
 
@@ -1308,6 +1358,11 @@ impl ApplicationHandler<Update> for App {
                 // produces a key and no text at all.
                 if down && let Some(text) = &event.text {
                     self.input.apply(UiEvent::Typed(text.to_string()), &[]);
+                }
+                if down && self.input.chord(Key::Char('k')) {
+                    let mut input = std::mem::take(&mut self.input);
+                    self.switcher.show(&mut self.fonts, &mut input);
+                    self.input = input;
                 }
                 if down {
                     // Escape closes the thread when the composer has nothing
