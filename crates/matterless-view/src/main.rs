@@ -17,6 +17,7 @@ use matterless_render::{PostRow, Row};
 use matterless_ui::{Axis, Node as Boxed, Placed, Rect, Size};
 use matterless_view::composer::{self, Composer};
 use matterless_view::header::{self, Header};
+use matterless_view::live::Update;
 use matterless_view::sidebar::{Canvas, Entry, Sidebar};
 use matterless_view::stream::Stream;
 use std::sync::Arc;
@@ -147,7 +148,13 @@ struct App {
     thread: Option<Stream>,
     palette: Palette,
     /// The store, kept open: switching channel is a read, not a reload.
-    store: Option<matterless_store::Store>,
+    store: Option<Arc<matterless_store::Store>>,
+    /// True while the socket is up. Drawn in the header, because a client that
+    /// has quietly stopped receiving looks exactly like a quiet channel.
+    connected: bool,
+    /// Who the reader is, empty until the server says. Decides unread counts
+    /// and which half of a direct message names it.
+    me: String,
     sidebar: Sidebar,
     input: Input,
     placed: Vec<Placed>,
@@ -209,72 +216,23 @@ impl App {
     fn new() -> Self {
         // The store is opened once and kept: switching channel is a read.
         let store = matterless_view::feed::default_store()
-            .and_then(|path| matterless_view::feed::open(&path).ok());
+            .and_then(|path| matterless_view::feed::open(&path).ok())
+            .map(Arc::new);
         // Without a reader there is no membership row, and the store answers
         // with each channel's *total* message count -- which looks like an
         // unread badge of four thousand. No reader, no counts.
         let me = std::env::var("MATTERLESS_ME").unwrap_or_default();
         if me.is_empty() {
-            // Worth saying rather than leaving to be noticed: with no reader,
-            // neither half of a `<id>__<id>` slug can be ruled out, so a direct
-            // message may be named after the wrong person.
+            // Only until the socket signs in, which answers the same question
+            // properly. Worth saying because the first paint happens before
+            // that: with no reader, neither half of a `<id>__<id>` slug can be
+            // ruled out, so a direct message may be named after the wrong one.
             println!(
-                "MATTERLESS_ME is unset: counts are suppressed and a direct \
-                 message may be named after the wrong half of its pair"
+                "no reader yet: counts stay blank and a direct message may be \
+                 named after the wrong half of its pair until the socket signs in"
             );
         }
-        let groups = store
-            .as_ref()
-            .map(|store| matterless_view::sidebar_feed::groups(store, &me))
-            .unwrap_or_default();
-        let counted = !me.is_empty();
-        // Flattened into one list of rows: the categories become headings, and
-        // a group with nothing in it is not worth a heading of its own.
-        let mut entries: Vec<Entry> = Vec::new();
-        for group in groups {
-            if group.channels.is_empty() {
-                continue;
-            }
-            // Named by its team when one contributes: two teams each bring a
-            // "Favorites" and a "Channels", and unqualified they read as
-            // duplicates of each other.
-            entries.push(Entry::Heading {
-                label: if group.team_name.is_empty() {
-                    group.display_name
-                } else {
-                    format!("{} -- {}", group.display_name, group.team_name)
-                },
-            });
-            for channel in group.channels {
-                entries.push(Entry::Channel {
-                    direct: channel.channel_type == "D" || channel.channel_type == "G",
-                    id: channel.id,
-                    label: channel.display_name,
-                    unread: if counted { channel.unread } else { 0 },
-                    mentions: if counted { channel.mentions } else { 0 },
-                    muted: channel.muted,
-                });
-            }
-        }
-        println!(
-            "sidebar: {} groups, {} channels -- {}",
-            entries
-                .iter()
-                .filter(|entry| matches!(entry, Entry::Heading { .. }))
-                .count(),
-            entries
-                .iter()
-                .filter(|entry| matches!(entry, Entry::Channel { .. }))
-                .count(),
-            entries
-                .iter()
-                .filter_map(|entry| match entry {
-                    Entry::Heading { label } => Some(label.as_str()),
-                    Entry::Channel { .. } => None,
-                })
-                .collect::<Vec<&str>>()
-                .join(" > ")
-        );
+        let entries = Self::entries(store.as_deref(), &me);
         let sidebar = Sidebar::new(entries);
         let (channel, rows) = Self::feed();
         let mut app = Self {
@@ -297,6 +255,8 @@ impl App {
             sidebar,
             input: Input::default(),
             placed: Vec::new(),
+            connected: false,
+            me: me.clone(),
             composer: Composer::new(composer::NAME),
             thread_composer: {
                 let mut reply = Composer::new(THREAD_COMPOSER);
@@ -433,6 +393,186 @@ impl App {
         }
     }
 
+    /// The sidebar's rows: the reader's own groups, flattened into one list.
+    ///
+    /// Built here rather than inline because it is built twice -- once from
+    /// whatever was known at startup, and again once the server has said who
+    /// the reader is, which is what makes the unread counts real.
+    fn entries(store: Option<&matterless_store::Store>, me: &str) -> Vec<Entry> {
+        let groups = store
+            .map(|store| matterless_view::sidebar_feed::groups(store, me))
+            .unwrap_or_default();
+        // Without a reader there is no membership row, and the store answers
+        // with each channel's *total* message count -- which looks like an
+        // unread badge of four thousand.
+        let counted = !me.is_empty();
+        let mut entries: Vec<Entry> = Vec::new();
+        for group in groups {
+            if group.channels.is_empty() {
+                continue;
+            }
+            // Named by its team when one contributes: two teams each bring a
+            // "Favorites" and a "Channels", and unqualified they read as
+            // duplicates of each other.
+            entries.push(Entry::Heading {
+                label: if group.team_name.is_empty() {
+                    group.display_name
+                } else {
+                    format!("{} -- {}", group.display_name, group.team_name)
+                },
+            });
+            for channel in group.channels {
+                entries.push(Entry::Channel {
+                    direct: channel.channel_type == "D" || channel.channel_type == "G",
+                    id: channel.id,
+                    label: channel.display_name,
+                    unread: if counted { channel.unread } else { 0 },
+                    mentions: if counted { channel.mentions } else { 0 },
+                    muted: channel.muted,
+                });
+            }
+        }
+        println!(
+            "sidebar: {} groups, {} channels -- {}",
+            entries
+                .iter()
+                .filter(|entry| matches!(entry, Entry::Heading { .. }))
+                .count(),
+            entries
+                .iter()
+                .filter(|entry| matches!(entry, Entry::Channel { .. }))
+                .count(),
+            entries
+                .iter()
+                .filter_map(|entry| match entry {
+                    Entry::Heading { label } => Some(label.as_str()),
+                    Entry::Channel { .. } => None,
+                })
+                .collect::<Vec<&str>>()
+                .join(" > ")
+        );
+        entries
+    }
+
+    /// Rebuilds the sidebar now that the reader is known.
+    ///
+    /// Names a direct message after the right half of its pair and gives every
+    /// row a real unread count -- neither of which was answerable before the
+    /// server said who the token belongs to.
+    fn signed_in(&mut self, id: &str) {
+        self.me = id.to_string();
+        let open = self.sidebar.selected.clone();
+        let scroll = self.sidebar.scroll;
+        self.sidebar = Sidebar::new(Self::entries(self.store.as_deref(), id));
+        self.sidebar.selected = open;
+        self.sidebar.scroll = scroll;
+    }
+
+    /// Opens the socket, if there is a store and a session to open it with.
+    ///
+    /// Refusing to start is not a failure worth stopping for: the window still
+    /// draws everything the database holds, which is what it did before there
+    /// was a socket at all.
+    fn connect(&mut self, proxy: winit::event_loop::EventLoopProxy<Update>) {
+        let Some(store) = self.store.clone() else {
+            println!("no database, so nothing to keep up to date");
+            return;
+        };
+        let Some(path) = matterless_view::feed::default_store() else {
+            return;
+        };
+        let Some(server) = matterless_view::live::stored_server(&path) else {
+            println!("no server.txt beside the database; staying offline");
+            return;
+        };
+        let Some(token) = matterless_view::live::stored_token() else {
+            println!("no session in the keychain; staying offline");
+            return;
+        };
+        println!("connecting to {server}");
+        matterless_view::live::start(store, server, token, Proxy(proxy));
+    }
+
+    /// Applies what the socket reported.
+    fn apply(&mut self, update: Update) {
+        match update {
+            Update::Connected(up) => {
+                self.connected = up;
+                println!("socket {}", if up { "connected" } else { "lost" });
+            }
+            Update::SignedIn { id, username } => {
+                println!("reader is {username}");
+                self.signed_in(&id);
+            }
+            Update::Failed(why) => {
+                self.connected = false;
+                eprintln!("staying offline: {why}");
+            }
+            Update::Changed(deltas) => {
+                // The engine has already written every one of these. The only
+                // question left is whether anything on screen is now stale.
+                let open = self.sidebar.selected.clone().unwrap_or_default();
+                let channels = matterless_view::live::touched(&deltas);
+                if channels.iter().any(|channel| channel == &open) {
+                    self.reread_channel(&open);
+                }
+                if let Some(root) = self.open_root()
+                    && matterless_view::live::touches_thread(&deltas, &root)
+                {
+                    self.reread_thread(&root);
+                }
+            }
+        }
+        self.redraw();
+    }
+
+    /// The root of the open thread, if one is open.
+    fn open_root(&self) -> Option<String> {
+        let name = &self.thread.as_ref()?.name;
+        name.strip_prefix("thread/").map(str::to_string)
+    }
+
+    /// Re-reads the open channel, keeping the reader where they were.
+    ///
+    /// Pinned to the bottom only when it was already there: a message arriving
+    /// while somebody is reading history must not drag them away from it.
+    fn reread_channel(&mut self, channel: &str) {
+        let Some(store) = self.store.clone() else {
+            return;
+        };
+        let within = self.stream_rect();
+        let was_at_end = self.stream.scroll >= self.stream.reach(within) - 1.0;
+        match matterless_view::feed::rows_of(&store, channel, &self.me) {
+            Ok(rows) => {
+                self.stream.rows = rows;
+                self.relayout();
+                if was_at_end {
+                    let within = self.stream_rect();
+                    self.stream.to_bottom(within);
+                }
+            }
+            Err(why) => eprintln!("{channel}: {why}"),
+        }
+    }
+
+    /// Re-reads the open thread the same way.
+    fn reread_thread(&mut self, root_id: &str) {
+        let Some(within) = self.thread_stream_rect() else {
+            return;
+        };
+        let was_at_end = self
+            .thread
+            .as_ref()
+            .is_some_and(|thread| thread.scroll >= thread.reach(within) - 1.0);
+        // Rebuilt through the same path the click takes, so a live reply and an
+        // opened thread are planned identically.
+        let open = self.thread.take();
+        self.open_thread(root_id);
+        if !was_at_end && let (Some(old), Some(new)) = (open, self.thread.as_mut()) {
+            new.scroll = old.scroll;
+        }
+    }
+
     /// Every box a pointer can land on.
     ///
     /// One list rather than one per handler: a click and a wheel turn have to
@@ -480,7 +620,7 @@ impl App {
         let known = store.users_by_ids(&people).unwrap_or_default();
 
         let mut options =
-            matterless_render::PlanOptions::new(matterless_core::model::ThreadMode::Flat, "");
+            matterless_render::PlanOptions::new(matterless_core::model::ThreadMode::Flat, &self.me);
         options.author_names = known
             .iter()
             .map(|(id, user)| (id.clone(), user.username.clone()))
@@ -553,10 +693,10 @@ impl App {
 
     /// Reads a channel and lays it out, then shows its newest message.
     fn open_channel(&mut self, channel: &str) {
-        let Some(store) = self.store.as_ref() else {
+        let Some(store) = self.store.clone() else {
             return;
         };
-        match matterless_view::feed::rows_of(store, channel, "") {
+        match matterless_view::feed::rows_of(&store, channel, &self.me) {
             Ok(rows) => {
                 self.stream.rows = rows;
                 // A thread from the channel just left has nothing to do with
@@ -590,7 +730,14 @@ impl App {
         // Read before the painter is borrowed, and given its own layer after: a
         // name too long for the strip is cut by the clip rather than running
         // along the top of the first message.
-        let header = Header::new(self.title());
+        // Said in the header while it is down, and silent while it is up: a
+        // client that has quietly stopped receiving is indistinguishable from a
+        // quiet channel, and that is the state worth naming.
+        let header = Header::new(if self.connected {
+            self.title()
+        } else {
+            format!("{} (offline)", self.title())
+        });
         scene.clip_to(strip.x, strip.y, strip.width, strip.height);
         let mut canvas = Canvas {
             scene: &mut scene,
@@ -692,7 +839,7 @@ impl App {
     }
 }
 
-impl ApplicationHandler for App {
+impl ApplicationHandler<Update> for App {
     fn resumed(&mut self, events: &ActiveEventLoop) {
         let window = Arc::new(
             events
@@ -756,6 +903,11 @@ impl ApplicationHandler for App {
         self.surface = Some(surface);
         self.window = Some(window);
         self.relayout();
+    }
+
+    /// What the socket reported, delivered on the thread that owns the window.
+    fn user_event(&mut self, _events: &ActiveEventLoop, update: Update) {
+        self.apply(update);
     }
 
     fn window_event(&mut self, events: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
@@ -987,9 +1139,29 @@ fn main() {
         return;
     }
 
-    let events = EventLoop::new().expect("an event loop");
+    // A loop that carries its own message type, so the socket thread can hand
+    // work to the thread that owns the window rather than touching it.
+    let events = EventLoop::<Update>::with_user_event()
+        .build()
+        .expect("an event loop");
     events.set_control_flow(ControlFlow::Wait);
-    events.run_app(&mut App::new()).expect("the event loop");
+    let mut app = App::new();
+    app.connect(events.create_proxy());
+    events.run_app(&mut app).expect("the event loop");
+}
+
+/// Wakes the window from the socket thread.
+///
+/// The proxy is the only thing the two threads share, and it carries an
+/// already-decided update rather than a lock on anything the window draws from.
+struct Proxy(winit::event_loop::EventLoopProxy<Update>);
+
+impl matterless_view::live::Wake for Proxy {
+    fn wake(&self, update: Update) {
+        // Fails only once the loop has exited, which is not worth reporting on
+        // the way out.
+        let _ = self.0.send_event(update);
+    }
 }
 
 /// The keys this app acts on, from what the platform reported.

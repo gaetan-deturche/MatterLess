@@ -12,6 +12,13 @@ matterless-render = { path = "../matterless-render" }
 matterless-sidebar = { path = "../matterless-sidebar" }
 matterless-ui = { path = "../matterless-ui" }
 matterless-store = { path = "../matterless-store" }
+matterless-sync = { path = "../matterless-sync" }
+# The socket runs on a thread of its own, so the window never blocks on it.
+tokio = { version = "1", features = ["rt", "macros", "sync", "time"] }
+serde_json = "1"
+# The session the app already established, read rather than collected: this
+# window has no business asking for a password to mint a second one.
+keyring = "3"
 # The Vulkan backend is selected explicitly at instance creation; wgpu is the
 # API on top of it rather than an abstraction over which one to use.
 wgpu = "26"

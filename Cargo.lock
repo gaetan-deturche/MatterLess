@@ -3044,15 +3044,19 @@ name = "matterless-view"
 version = "0.1.0"
 dependencies = [
  "cosmic-text",
+ "keyring",
  "matterless-core",
  "matterless-layout",
  "matterless-paint",
  "matterless-render",
  "matterless-sidebar",
  "matterless-store",
+ "matterless-sync",
  "matterless-ui",
  "png 0.18.1",
  "pollster",
+ "serde_json",
+ "tokio",
  "wgpu",
  "winit",
 ]

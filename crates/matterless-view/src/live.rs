@@ -1,0 +1,267 @@
+//! The window's connection to the server.
+//!
+//! Until now this window was a snapshot: it opened the database, drew what was
+//! in it, and never learned anything again. This is the half that makes it a
+//! chat client -- the socket, the sync engine, and a way to wake a winit event
+//! loop from the thread they run on.
+//!
+//! Nothing here decides what a change *means*. `matterless-sync` already does
+//! that, and it is the same engine the app runs, so a message arriving here and
+//! a message arriving there are the same message with the same unread count and
+//! the same notification verdict. This only carries the answer across a thread
+//! boundary.
+
+use matterless_core::RestClient;
+use matterless_core::auth::AuthToken;
+use matterless_core::ws::{Signal, WsSession};
+use matterless_core::{ThreadMode, User};
+use matterless_store::Store;
+use matterless_sync::{Delta, SyncContext, SyncEngine};
+use std::sync::Arc;
+
+/// What the socket thread tells the window.
+#[derive(Debug)]
+pub enum Update {
+    /// The socket came up or went down. A level, not an edge: a window that
+    /// starts after the socket is already up would otherwise never learn it.
+    Connected(bool),
+    /// What changed, already applied to the store.
+    Changed(Vec<Delta>),
+    /// The connection could not be made at all, with the reason.
+    Failed(String),
+    /// Who the token belongs to. The window needs this to count unreads and to
+    /// tell which half of a direct message is the reader, and asking the server
+    /// is the only way to know it without being told.
+    SignedIn { id: String, username: String },
+}
+
+/// Anything that can be woken from the socket thread.
+///
+/// A trait rather than winit's proxy directly, so the plumbing can be tested
+/// and so this crate does not need a window to compile.
+pub trait Wake: Send + 'static {
+    fn wake(&self, update: Update);
+}
+
+/// Where the session lives once the app has signed in.
+///
+/// Read rather than asked for: the token is a thirty-day bearer credential the
+/// app already holds, and this window has no business collecting a password to
+/// mint a second one.
+pub fn stored_token() -> Option<String> {
+    let entry = keyring::Entry::new("matterless", "session").ok()?;
+    match entry.get_password() {
+        Ok(token) if !token.is_empty() => Some(token),
+        // The same minted file the app imports from, for a machine that has
+        // never signed in through the app itself.
+        _ => minted_token(),
+    }
+}
+
+fn minted_token() -> Option<String> {
+    for candidate in [
+        "Claude/.mm_token.json",
+        "../../Claude/.mm_token.json",
+        "tools/.mm_token.json",
+        "../../tools/.mm_token.json",
+    ] {
+        let Ok(raw) = std::fs::read_to_string(candidate) else {
+            continue;
+        };
+        let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&raw) else {
+            continue;
+        };
+        if let Some(token) = parsed.get("token").and_then(|value| value.as_str())
+            && !token.is_empty()
+        {
+            return Some(token.to_string());
+        }
+    }
+    None
+}
+
+/// The server this install is pointed at, from the file beside the database.
+pub fn stored_server(database: &std::path::Path) -> Option<String> {
+    let directory = database.parent()?;
+    let held = std::fs::read_to_string(directory.join("server.txt")).ok()?;
+    let trimmed = held.trim().to_string();
+    (!trimmed.is_empty()).then_some(trimmed)
+}
+
+/// Opens the socket on a thread of its own and reports what arrives.
+///
+/// Returns immediately. The window keeps drawing from the store while this
+/// connects, which is the point: a cold start paints from SQLite and the socket
+/// catches it up, rather than the reader waiting on a network round trip.
+pub fn start(store: Arc<Store>, server: String, token: String, wake: impl Wake) {
+    std::thread::spawn(move || {
+        let runtime = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(runtime) => runtime,
+            Err(error) => {
+                wake.wake(Update::Failed(format!("no runtime: {error}")));
+                return;
+            }
+        };
+        runtime.block_on(run(store, server, token, wake));
+    });
+}
+
+async fn run(store: Arc<Store>, server: String, token: String, wake: impl Wake) {
+    let rest = match RestClient::new(&server) {
+        Ok(rest) => rest,
+        Err(error) => {
+            wake.wake(Update::Failed(format!("{server}: {error}")));
+            return;
+        }
+    };
+    rest.set_token(AuthToken::Session(token.clone()));
+
+    // Who the reader is, which the notification and unread decisions need and
+    // which also proves the token is still good before a socket is opened.
+    let me: User = match rest.me().await {
+        Ok(me) => me,
+        Err(error) => {
+            wake.wake(Update::Failed(format!(
+                "the session is not usable: {error}"
+            )));
+            return;
+        }
+    };
+    println!("signed in as {}", me.username);
+    wake.wake(Update::SignedIn {
+        id: me.id.clone(),
+        username: me.username.clone(),
+    });
+
+    let session = match WsSession::new(&rest.base_url(), AuthToken::Session(token)) {
+        Ok(session) => session,
+        Err(error) => {
+            wake.wake(Update::Failed(format!("websocket url: {error}")));
+            return;
+        }
+    };
+
+    let engine = SyncEngine::new(store);
+    // Flat rather than the reader's own preference: this window draws a channel
+    // flat, and a context that disagreed with the drawing would count unreads
+    // against rows that are not there.
+    let context = SyncContext::new(me, ThreadMode::Flat);
+
+    let (signals_tx, mut signals) = tokio::sync::mpsc::channel(1024);
+    let _handle = session.spawn(signals_tx);
+
+    while let Some(signal) = signals.recv().await {
+        match signal {
+            Signal::Connected { .. } => wake.wake(Update::Connected(true)),
+            Signal::Disconnected { .. } => wake.wake(Update::Connected(false)),
+            // The socket came back without resuming, so history has a hole. The
+            // window redraws from the store, which is the honest answer until
+            // it can refetch the gap itself.
+            Signal::ResyncRequired => wake.wake(Update::Changed(vec![Delta::ResyncRequired])),
+            Signal::Event { event, .. } => match engine.apply_event(&event, &context) {
+                Ok(deltas) if !deltas.is_empty() => wake.wake(Update::Changed(deltas)),
+                Ok(_) => {}
+                Err(error) => eprintln!("applying {}: {error}", event.name()),
+            },
+        }
+    }
+}
+
+/// Which channels a batch of changes touched, so only an open one is re-read.
+///
+/// A channel nobody is looking at still had its post stored -- that is the
+/// engine's job and it has already happened. This only answers what has to be
+/// drawn again.
+pub fn touched(deltas: &[Delta]) -> Vec<String> {
+    let mut channels: Vec<String> = deltas
+        .iter()
+        .filter_map(|delta| match delta {
+            Delta::PostUpserted { channel_id, .. }
+            | Delta::PostTombstoned { channel_id, .. }
+            | Delta::UnreadChanged { channel_id, .. }
+            | Delta::ThreadChanged { channel_id, .. } => Some(channel_id.clone()),
+            _ => None,
+        })
+        .collect();
+    channels.sort();
+    channels.dedup();
+    channels
+}
+
+/// Whether a batch changed anything a *thread* pane is showing.
+pub fn touches_thread(deltas: &[Delta], root_id: &str) -> bool {
+    deltas.iter().any(|delta| match delta {
+        Delta::PostUpserted {
+            root_id: root,
+            post_id,
+            ..
+        } => root == root_id || post_id == root_id,
+        Delta::ThreadChanged { root_id: root, .. } => root == root_id,
+        Delta::ReactionsChanged { post_id } => post_id == root_id,
+        _ => false,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use matterless_store::{PostChange, Unread};
+    use matterless_sync::Arrival;
+    use matterless_sync::notify::MentionVerdict;
+
+    fn posted(channel: &str, root: &str, post: &str) -> Delta {
+        Delta::PostUpserted {
+            post_id: post.into(),
+            channel_id: channel.into(),
+            root_id: root.into(),
+            arrival: Arrival::Live,
+            change: PostChange::Inserted,
+            in_stream: true,
+            mention: MentionVerdict::None,
+            notify: false,
+        }
+    }
+
+    #[test]
+    fn only_the_channels_that_changed_are_named() {
+        let deltas = vec![
+            posted("one", "", "p1"),
+            posted("one", "", "p2"),
+            Delta::UnreadChanged {
+                channel_id: "two".into(),
+                unread: Unread::default(),
+            },
+            Delta::StatusChanged {
+                user_id: "u1".into(),
+                status: "online".into(),
+            },
+        ];
+        assert_eq!(touched(&deltas), vec!["one".to_string(), "two".to_string()]);
+    }
+
+    /// Ephemeral changes redraw nothing: a status or a typing indicator is not
+    /// a reason to re-read four hundred messages.
+    #[test]
+    fn ephemeral_changes_name_no_channel() {
+        let deltas = vec![
+            Delta::Typing {
+                channel_id: "one".into(),
+                user_id: "u1".into(),
+                root_id: String::new(),
+            },
+            Delta::CustomEmojiChanged,
+        ];
+        assert!(touched(&deltas).is_empty());
+    }
+
+    /// A reply belongs to its thread, and so does the root itself.
+    #[test]
+    fn a_thread_notices_its_own_replies() {
+        assert!(touches_thread(&[posted("c", "root", "reply")], "root"));
+        assert!(touches_thread(&[posted("c", "", "root")], "root"));
+        assert!(!touches_thread(&[posted("c", "other", "reply")], "root"));
+    }
+}
