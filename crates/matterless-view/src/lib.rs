@@ -28,6 +28,7 @@ pub mod stream;
 mod stream_tests;
 pub mod switcher;
 pub mod toast;
+pub mod typing;
 
 use atlas::{Atlas, SIDE};
 use cosmic_text::SwashCache;

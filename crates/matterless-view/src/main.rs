@@ -190,6 +190,9 @@ struct App {
     picked_near: matterless_ui::Rect,
     /// Changing a message, in the row it sits in.
     edit: matterless_view::edit::Edit,
+    /// Who is typing, and when this window last said that it was.
+    typing: matterless_view::typing::Typing,
+    said_typing: Option<std::time::Instant>,
     /// How far back the open channel is read. Grows as older pages arrive.
     depth: u32,
     /// True while a page of history is in flight, so the same page is not asked
@@ -198,6 +201,9 @@ struct App {
     /// False once the beginning of the channel has been reached.
     more_history: bool,
 }
+
+/// The height kept for the "somebody is typing" line, above each composer.
+const TYPING: f32 = 16.0;
 
 /// How many emoji names are asked about in one frame. A channel full of them
 /// must not turn one frame into fifty requests.
@@ -316,6 +322,8 @@ impl App {
             picker: matterless_view::picker::Picker::default(),
             picked_near: matterless_ui::Rect::new(0.0, 0.0, 0.0, 0.0),
             edit: matterless_view::edit::Edit::default(),
+            typing: matterless_view::typing::Typing::default(),
+            said_typing: None,
             depth: matterless_view::feed::PAGE,
             loading_older: false,
             more_history: true,
@@ -402,7 +410,17 @@ impl App {
 
     /// The stream, between the header above it and the composer below.
     fn stream_rect(&self) -> Rect {
-        self.composer.above(header::below(self.channel_rect()))
+        let above = self.composer.above(header::below(self.channel_rect()));
+        Rect::new(above.x, above.y, above.width, above.height - TYPING)
+    }
+
+    /// The line above the composer saying somebody is writing.
+    ///
+    /// Reserved whether or not anybody is, so the conversation does not jump a
+    /// line every time somebody starts and stops.
+    fn typing_rect(&self) -> Rect {
+        let above = self.composer.above(header::below(self.channel_rect()));
+        Rect::new(above.x, above.bottom() - TYPING, above.width, TYPING)
     }
 
     /// The strip the composer sits in, at the foot of the channel's column.
@@ -418,7 +436,24 @@ impl App {
 
     /// The thread's replies, above its reply box.
     fn thread_stream_rect(&self) -> Option<Rect> {
-        Some(self.thread_composer.above(self.thread_body()?))
+        let above = self.thread_composer.above(self.thread_body()?);
+        Some(Rect::new(
+            above.x,
+            above.y,
+            above.width,
+            above.height - TYPING,
+        ))
+    }
+
+    /// The same line, for the thread pane.
+    fn thread_typing_rect(&self) -> Option<Rect> {
+        let above = self.thread_composer.above(self.thread_body()?);
+        Some(Rect::new(
+            above.x,
+            above.bottom() - TYPING,
+            above.width,
+            TYPING,
+        ))
     }
 
     fn thread_composer_rect(&self) -> Option<Rect> {
@@ -652,6 +687,29 @@ impl App {
                 // matters is a question only the window can answer. Without
                 // this a pill the reader just added stayed invisible until
                 // they left the channel and came back.
+                for delta in &deltas {
+                    if let matterless_sync::Delta::Typing {
+                        channel_id,
+                        user_id,
+                        root_id,
+                    } = delta
+                    {
+                        // Never this reader: the server echoes their own
+                        // signal back, and "someone is typing" about yourself
+                        // is nonsense.
+                        if user_id != &self.me {
+                            // Counts, never who: this is the loudest signal on
+                            // the socket and the log is not a record of who
+                            // talks to whom.
+                            let before = self.typing.count(channel_id, root_id);
+                            self.typing.note(channel_id, root_id, user_id);
+                            let now = self.typing.count(channel_id, root_id);
+                            if now != before {
+                                println!("{now} typing in {channel_id}");
+                            }
+                        }
+                    }
+                }
                 let reacted = matterless_view::live::reacted(&deltas);
                 if !reacted.is_empty() {
                     if self.stream.holds_any(&reacted) {
@@ -677,6 +735,27 @@ impl App {
             }
         }
         self.redraw();
+    }
+
+    /// Tells the server this reader is typing, no more than now and then.
+    ///
+    /// Every keystroke would be a message per character on the busiest signal
+    /// there is, and the other clients hold what they hear for six seconds --
+    /// so once every three says the same thing for a fraction of the traffic.
+    fn say_typing(&mut self, root_id: &str) {
+        const EVERY: std::time::Duration = std::time::Duration::from_secs(3);
+        if self.said_typing.is_some_and(|last| last.elapsed() < EVERY) {
+            return;
+        }
+        let (Some(channel), Some(link)) = (self.sidebar.selected.clone(), self.link.as_ref())
+        else {
+            return;
+        };
+        self.said_typing = Some(std::time::Instant::now());
+        link.send(matterless_view::live::Ask::Typing {
+            channel_id: channel,
+            root_id: root_id.to_string(),
+        });
     }
 
     /// Names any reaction that can be neither drawn nor fetched.
@@ -1323,6 +1402,17 @@ impl App {
             None
         };
 
+        // A keystroke in either box is this reader typing, which the other
+        // clients want to know. Which box says whether it is the channel or
+        // the thread, because that is what the signal carries.
+        if !self.input.typed().is_empty() {
+            let root = match self.input.focus() {
+                Some(THREAD_COMPOSER) => self.open_root().unwrap_or_default(),
+                _ => String::new(),
+            };
+            self.say_typing(&root);
+        }
+
         // Only when a box actually grew or shrank. Every keystroke would
         // otherwise re-lay-out four hundred messages to learn nothing moved.
         if (self.composer.height(), self.thread_composer.height()) != was {
@@ -1485,6 +1575,48 @@ impl App {
             }
         }
 
+        // The line above each composer. Drawn before the composers so it is
+        // under them, which is where a reserved strip belongs.
+        let open = self.sidebar.selected.clone().unwrap_or_default();
+        let root = self.open_root().unwrap_or_default();
+        let lines = [
+            (self.typing_rect(), self.typing.line(&open, "")),
+            (
+                self.thread_typing_rect()
+                    .unwrap_or(Rect::new(0.0, 0.0, 0.0, 0.0)),
+                self.open_root()
+                    .and_then(|root| self.typing.line(&open, &root)),
+            ),
+        ];
+        let _ = root;
+        for (rect, said) in lines {
+            let Some(said) = said else { continue };
+            if rect.width <= 0.0 {
+                continue;
+            }
+            scene.clip_to(rect.x, rect.y, rect.width, rect.height);
+            let mut canvas = Canvas {
+                scene: &mut scene,
+                painter: &mut self.painter,
+                fonts: &mut self.fonts,
+                palette: &self.palette,
+            };
+            let Canvas {
+                scene,
+                painter,
+                fonts,
+                palette,
+            } = &mut canvas;
+            let glyphs = painter.run(
+                fonts,
+                &said,
+                rect.x + 24.0,
+                rect.y,
+                matterless_paint::Run::label(f32::MAX),
+            );
+            scene.glyphs(glyphs, palette.faint, palette.faint);
+        }
+
         // Its own layer last, so the caret and the box sit over the stream
         // rather than under a message that scrolled into the strip.
         let composer = self.composer_rect();
@@ -1628,6 +1760,24 @@ fn behind(window: &winit::window::Window) {
 fn behind(_window: &winit::window::Window) {}
 
 impl ApplicationHandler<Update> for App {
+    /// Waits for the next thing to happen, or for a typing line to go stale.
+    ///
+    /// `Wait` alone would leave "someone is typing" on screen until something
+    /// else woke the window, which on a quiet channel is the person who
+    /// stopped typing sending their message -- or never.
+    fn about_to_wait(&mut self, events: &ActiveEventLoop) {
+        let (expired, next) = self.typing.forget_stale();
+        // Only when a line actually went: asking for a frame whenever one is
+        // merely live would redraw every frame for as long as anybody types.
+        if expired {
+            self.redraw();
+        }
+        events.set_control_flow(match next {
+            Some(expires) => ControlFlow::WaitUntil(expires),
+            None => ControlFlow::Wait,
+        });
+    }
+
     fn resumed(&mut self, events: &ActiveEventLoop) {
         // Opened without taking focus when asked, which is what makes it
         // usable next to the work it is being compared against: a window that

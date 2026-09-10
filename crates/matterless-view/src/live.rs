@@ -84,6 +84,11 @@ pub enum Ask {
         emoji: String,
         on: bool,
     },
+    /// Say that this reader is typing, so the other clients can show it.
+    ///
+    /// Fire and forget: nothing depends on it arriving, and a typing signal
+    /// that misses is worth strictly less than the round trip to confirm it.
+    Typing { channel_id: String, root_id: String },
     /// Bring a channel's recent history back in line with the server.
     ///
     /// The window reads a local store, so anything that happened while it was
@@ -266,7 +271,7 @@ async fn run(
     );
 
     let (signals_tx, mut signals) = tokio::sync::mpsc::channel(1024);
-    let _handle = session.spawn(signals_tx);
+    let handle = session.spawn(signals_tx);
 
     loop {
         tokio::select! {
@@ -347,6 +352,10 @@ async fn run(
                             Err(error) => eprintln!("{} on {post_id}: {error}", action.slug()),
                         }
                     }
+                    Ask::Typing {
+                        channel_id,
+                        root_id,
+                    } => handle.typing(&channel_id, &root_id),
                     Ask::Refresh { channel_id } => {
                         match rest.posts(&channel_id, RECENT).await {
                             Ok(list) => {
