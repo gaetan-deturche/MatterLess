@@ -521,6 +521,17 @@ impl App {
         self.sidebar = Sidebar::new(Self::entries(self.store.as_deref(), id));
         self.sidebar.selected = open;
         self.sidebar.scroll = scroll;
+        // The channel already on screen never went through `open_channel`, so
+        // this is its one chance to be reconciled: it was drawn from the store
+        // before there was a connection to check it against.
+        if let (Some(channel), Some(link)) = (&self.sidebar.selected, self.link.as_ref()) {
+            link.send(matterless_view::live::Ask::Looking {
+                channel_id: channel.clone(),
+            });
+            link.send(matterless_view::live::Ask::Refresh {
+                channel_id: channel.clone(),
+            });
+        }
     }
 
     /// Opens the socket, if there is a store and a session to open it with.
@@ -1374,6 +1385,12 @@ impl App {
                     // message the reader is watching arrive from interrupting
                     // them about itself.
                     link.send(matterless_view::live::Ask::Looking {
+                        channel_id: channel.to_string(),
+                    });
+                    // Opening it is also the moment to find out what happened
+                    // to it while nobody was connected. The rows already on
+                    // screen are the local copy; this is what corrects them.
+                    link.send(matterless_view::live::Ask::Refresh {
                         channel_id: channel.to_string(),
                     });
                 }

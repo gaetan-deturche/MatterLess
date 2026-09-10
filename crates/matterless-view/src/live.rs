@@ -13,10 +13,11 @@
 
 use matterless_core::RestClient;
 use matterless_core::auth::AuthToken;
+use matterless_core::model::PostList;
 use matterless_core::ws::{Signal, WsSession};
 use matterless_core::{ThreadMode, User};
 use matterless_store::Store;
-use matterless_sync::{Delta, SyncContext, SyncEngine};
+use matterless_sync::{Arrival, Delta, SyncContext, SyncEngine};
 use std::sync::Arc;
 
 /// What the socket thread tells the window.
@@ -83,6 +84,14 @@ pub enum Ask {
         emoji: String,
         on: bool,
     },
+    /// Bring a channel's recent history back in line with the server.
+    ///
+    /// The window reads a local store, so anything that happened while it was
+    /// not connected -- a message deleted, a message edited -- it never hears
+    /// about: the server simply stops mentioning a deleted post, and a stale
+    /// local copy stays on screen forever. This is the visit that heals that,
+    /// and it is what the app does on every channel open.
+    Refresh { channel_id: String },
     /// Change what a message says.
     ///
     /// The socket echoes the edit back, which is what redraws the row, so
@@ -336,6 +345,40 @@ async fn run(
                             // went.
                             Ok(()) => println!("{} on {post_id}", action.slug()),
                             Err(error) => eprintln!("{} on {post_id}: {error}", action.slug()),
+                        }
+                    }
+                    Ask::Refresh { channel_id } => {
+                        match rest.posts(&channel_id, RECENT).await {
+                            Ok(list) => {
+                                // A backfill, so nothing in it can notify:
+                                // these are messages the reader has had for a
+                                // while, not messages arriving.
+                                let quiet =
+                                    SyncContext::new(context.me.clone(), ThreadMode::Collapsed);
+                                let mut deltas = match engine.apply_post_list(
+                                    &channel_id,
+                                    &list,
+                                    Arrival::Backfill,
+                                    &quiet,
+                                    0,
+                                ) {
+                                    Ok(deltas) => deltas,
+                                    Err(error) => {
+                                        eprintln!("refreshing {channel_id}: {error}");
+                                        continue;
+                                    }
+                                };
+                                deltas.extend(returned(engine.store(), &list));
+                                deltas.extend(vanished(engine.store(), &channel_id, &list));
+                                if !deltas.is_empty() {
+                                    println!(
+                                        "{channel_id}: {} changes from the server",
+                                        deltas.len()
+                                    );
+                                    wake.wake(Update::Changed(deltas));
+                                }
+                            }
+                            Err(error) => eprintln!("refreshing {channel_id}: {error}"),
                         }
                     }
                     Ask::Edit { post_id, message } => {
@@ -688,6 +731,102 @@ mod tests {
         assert!(touched(&deltas).iter().all(|channel| channel != "p1"));
     }
 
+    fn said(id: &str, at: i64) -> matterless_core::Post {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "channel_id": "c1", "user_id": "u1",
+            "create_at": at, "update_at": at, "message": id,
+        }))
+        .expect("a post")
+    }
+
+    /// What the server answers with, built the way it arrives: a map plus the
+    /// order, newest first, which is the shape the endpoint actually returns.
+    fn page(posts: &[matterless_core::Post]) -> PostList {
+        serde_json::from_value(serde_json::json!({
+            "order": posts.iter().map(|post| post.id.clone()).collect::<Vec<_>>(),
+            "posts": posts
+                .iter()
+                .map(|post| (post.id.clone(), serde_json::to_value(post).expect("json")))
+                .collect::<serde_json::Map<_, _>>(),
+        }))
+        .expect("a page")
+    }
+
+    /// A page from the server proves a message is gone only for the span it
+    /// actually covers. Anything older than the page is simply not in it, and
+    /// tombstoning on that would erase history the reader still has.
+    #[test]
+    fn only_messages_the_page_covers_can_be_called_gone() {
+        let store = Store::open_in_memory().expect("a store");
+        let held = [
+            said("p0", 50),
+            said("p1", 100),
+            said("p2", 200),
+            said("p3", 300),
+        ];
+        store.upsert_posts(&held).expect("stored");
+
+        // The server still has p1 and p3. p2 fell inside the page and is not
+        // in it; p0 is older than the page began.
+        let list = page(&[said("p3", 300), said("p1", 100)]);
+
+        let gone = vanished(&store, "c1", &list);
+        assert_eq!(gone.len(), 1);
+        assert!(matches!(
+            &gone[0],
+            Delta::PostTombstoned { post_id, .. } if post_id == "p2"
+        ));
+        assert_ne!(store.post("p2").unwrap().unwrap().delete_at, 0);
+        assert_eq!(store.post("p0").unwrap().unwrap().delete_at, 0);
+        assert_eq!(store.post("p1").unwrap().unwrap().delete_at, 0);
+    }
+
+    /// The page's own window is `order`. A thread root dragged in by a recent
+    /// reply can be months older, and taking the range from it would make 200
+    /// messages evidence about a month of history -- tombstoning everything in
+    /// between that this page had no room for.
+    #[test]
+    fn an_old_root_pulled_in_by_a_reply_does_not_widen_the_window() {
+        let store = Store::open_in_memory().expect("a store");
+        store
+            .upsert_posts(&[said("ancient", 10), said("between", 50), said("p1", 100)])
+            .expect("stored");
+
+        // The server answered with today's page, plus the old root a reply in
+        // it belongs to -- which is in `posts` but not in `order`.
+        let mut list = page(&[said("p1", 100)]);
+        list.posts.insert("ancient".into(), said("ancient", 10));
+
+        assert!(vanished(&store, "c1", &list).is_empty());
+        assert_eq!(store.post("between").unwrap().unwrap().delete_at, 0);
+    }
+
+    /// The inference has to be reversible, or one wrong bound hides somebody's
+    /// messages for good. A page listing a post alive puts it back.
+    #[test]
+    fn a_message_the_server_still_has_comes_back() {
+        let store = Store::open_in_memory().expect("a store");
+        store.upsert_posts(&[said("p1", 100)]).expect("stored");
+        store.tombstone_post("p1", 101).expect("tombstoned");
+        assert_ne!(store.post("p1").unwrap().unwrap().delete_at, 0);
+
+        let put_back = returned(&store, &page(&[said("p1", 100)]));
+        assert_eq!(put_back.len(), 1);
+        assert_eq!(store.post("p1").unwrap().unwrap().delete_at, 0);
+        // And only once: a second visit has nothing left to correct.
+        assert!(returned(&store, &page(&[said("p1", 100)])).is_empty());
+    }
+
+    /// An empty page is not evidence that a channel is empty: a request that
+    /// came back with nothing must not erase what is already held.
+    #[test]
+    fn an_empty_page_calls_nothing_gone() {
+        let store = Store::open_in_memory().expect("a store");
+        store.upsert_posts(&[said("p1", 100)]).expect("stored");
+        assert!(vanished(&store, "c1", &page(&[])).is_empty());
+        assert_eq!(store.post("p1").unwrap().unwrap().delete_at, 0);
+    }
+
     /// A reply belongs to its thread, and so does the root itself.
     #[test]
     fn a_thread_notices_its_own_replies() {
@@ -815,3 +954,96 @@ fn followed(store: &Store) -> std::collections::HashSet<String> {
 
 /// How many followed threads are held. Well past what anybody follows at once.
 const FOLLOWED: u32 = 500;
+
+/// How much recent history one visit reconciles. What the official client asks
+/// for on a channel switch, and one request rather than a paged walk.
+const RECENT: u32 = 200;
+
+/// Tombstones the messages the server no longer has.
+///
+/// A deleted post is not reported as deleted -- the server simply stops
+/// listing it -- so the only way to learn of one missed while disconnected is
+/// that it is absent from a page that covers its time. Bounded to the range
+/// the page actually spans, and to roots, which is what the stream draws:
+/// outside that range absence proves nothing, and a reply can be absent from a
+/// channel page while still existing under an older root.
+///
+/// Tombstoned rather than deleted. It is an inference, and a row that can be
+/// corrected by the next thing the server says is a safer answer than one that
+/// is gone.
+fn vanished(store: &Store, channel_id: &str, list: &PostList) -> Vec<Delta> {
+    // Bounded by `order`, not by `posts`. The map carries thread roots dragged
+    // in by a recent reply, which can be months older than the page itself --
+    // taking the range from them would claim a page of 200 messages was
+    // evidence about a month of history, and tombstone everything between.
+    // `order` is the contiguous window, and only over that does absence mean
+    // anything.
+    let (Some(newest), Some(oldest)) = (
+        list.order.first().and_then(|id| list.posts.get(id)),
+        list.oldest_in_order(),
+    ) else {
+        return Vec::new();
+    };
+    let (newest, oldest) = (newest.create_at, oldest.create_at);
+    // A page that did not reach back far enough proves nothing about anything
+    // older than it, and `has_next` says the server had more to give.
+    let held = store
+        .channel_page_filtered(channel_id, Some(newest + 1), Some(oldest), RECENT * 2, true)
+        .unwrap_or_default();
+    held.into_iter()
+        .filter(|post| post.delete_at == 0 && !list.posts.contains_key(&post.id))
+        .filter_map(|post| {
+            // The server's own clock is not available here, and the value is
+            // only ever compared against zero.
+            match store.tombstone_post(&post.id, post.create_at + 1) {
+                Ok(true) => {
+                    println!("{} is gone from the server", post.id);
+                    Some(Delta::PostTombstoned {
+                        post_id: post.id,
+                        channel_id: post.channel_id,
+                    })
+                }
+                Ok(false) => None,
+                Err(error) => {
+                    eprintln!("tombstoning {}: {error}", post.id);
+                    None
+                }
+            }
+        })
+        .collect()
+}
+
+/// Undoes a tombstone the server disagrees with.
+///
+/// `vanished` infers a delete from absence, and an inference can be wrong: a
+/// page that did not reach as far back as it looked, or a bound taken from the
+/// wrong end of the list. This is what makes that recoverable -- a message the
+/// server hands back alive is put back, so a mistake lasts until the next
+/// visit rather than for good.
+fn returned(store: &Store, list: &PostList) -> Vec<Delta> {
+    list.posts
+        .values()
+        .filter(|post| post.delete_at == 0)
+        .filter_map(|post| match store.restore_post(&post.id) {
+            Ok(true) => {
+                println!("{} is still there after all", post.id);
+                Some(Delta::PostUpserted {
+                    post_id: post.id.clone(),
+                    channel_id: post.channel_id.clone(),
+                    root_id: post.root_id.clone(),
+                    arrival: Arrival::Backfill,
+                    change: matterless_store::PostChange::Updated,
+                    in_stream: !post.is_reply(),
+                    mention: matterless_sync::notify::MentionVerdict::None,
+                    // A message that was always there is not news.
+                    notify: false,
+                })
+            }
+            Ok(false) => None,
+            Err(error) => {
+                eprintln!("restoring {}: {error}", post.id);
+                None
+            }
+        })
+        .collect()
+}
