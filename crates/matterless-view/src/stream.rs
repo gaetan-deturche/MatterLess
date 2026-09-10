@@ -189,6 +189,20 @@ impl Stream {
         placed
     }
 
+    /// Whether any of these messages is in this stream.
+    ///
+    /// Every row, not only the visible ones: a reaction on a message just above
+    /// the fold still belongs on the page, and a reader who scrolls back to it
+    /// should not find a stale pill there.
+    pub fn holds_any(&self, post_ids: &[String]) -> bool {
+        self.rows.iter().any(|row| match row {
+            Row::Post { post } | Row::Continuation { post } => {
+                post_ids.iter().any(|wanted| wanted == &post.post_id)
+            }
+            _ => false,
+        })
+    }
+
     /// Where one message sits on screen, for a panel that has to point at it.
     ///
     /// `None` when it is scrolled out of view, which is the honest answer: a
