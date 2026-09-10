@@ -568,6 +568,43 @@ pub fn lay_out(fonts: &mut Fonts, row: &Row, theme: &Theme) -> RowLayout {
         y += theme.reaction_height;
     }
 
+    // A message that has not been confirmed reads quieter than one that has,
+    // which is the whole of what "pending" means to a reader: it is there, and
+    // it is not certain yet. Done by marking the spans rather than by a state
+    // the renderer would have to know about, so it draws through the same path
+    // every other quiet thing does.
+    if post.is_some_and(|post| post.pending) {
+        for block in &mut blocks {
+            for span in &mut block.spans {
+                span.faint = true;
+            }
+        }
+    }
+
+    // A send that failed says so, in a line of its own that takes real height.
+    // Leaving it to a colour would say nothing on a row already drawn faint,
+    // and a message that silently looks delivered when it is not is the worst
+    // of the available answers.
+    if post.is_some_and(|post| post.failed) {
+        blocks.push(Block {
+            y,
+            x: 0.0,
+            height: theme.line_height,
+            lines: 1,
+            kind: Kind::Text,
+            spans: vec![TextSpan {
+                text: "Not sent. Click to try again.".to_string(),
+                bold: false,
+                italic: false,
+                mono: false,
+                faint: true,
+            }],
+            size: theme.body_size,
+            wrap: theme.text_width(),
+        });
+        y += theme.line_height;
+    }
+
     RowLayout {
         height: y + theme.row_padding,
         blocks,
@@ -881,5 +918,66 @@ mod tests {
             .find(|block| block.kind == Kind::Attachment)
             .expect("an attachment block");
         assert_eq!(block.height, theme.card_height);
+    }
+
+    /// A message that has not been confirmed reads quieter than one that has.
+    /// Without this an optimistic send looks exactly like a delivered one, and
+    /// the reader has no way to tell a message that went from one that might
+    /// not have.
+    #[test]
+    fn a_pending_message_is_drawn_quietly() {
+        let mut fonts = Fonts::new();
+        let theme = Theme::default();
+        let mut guess = post(vec![Node::Paragraph {
+            children: vec![Node::Text {
+                value: "on its way".into(),
+            }],
+        }]);
+        guess.pending = true;
+        let laid = lay_out(&mut fonts, &Row::Post { post: guess }, &theme);
+        let spans: Vec<&TextSpan> = laid.blocks.iter().flat_map(|block| &block.spans).collect();
+        assert!(!spans.is_empty());
+        assert!(
+            spans.iter().all(|span| span.faint),
+            "every span of a pending message is quiet"
+        );
+    }
+
+    /// A send that failed says so in a line of its own, which takes real
+    /// height: a message that silently looks delivered when it is not is the
+    /// worst of the available answers.
+    #[test]
+    fn a_failed_message_says_so_and_takes_the_room_to() {
+        let mut fonts = Fonts::new();
+        let theme = Theme::default();
+        let body = vec![Node::Paragraph {
+            children: vec![Node::Text {
+                value: "did not go".into(),
+            }],
+        }];
+        let sent = lay_out(
+            &mut fonts,
+            &Row::Post {
+                post: post(body.clone()),
+            },
+            &theme,
+        );
+
+        let mut broken = post(body);
+        broken.failed = true;
+        let laid = lay_out(&mut fonts, &Row::Post { post: broken }, &theme);
+
+        assert!(
+            laid.blocks
+                .iter()
+                .flat_map(|block| &block.spans)
+                .any(|span| span.text.contains("Not sent")),
+            "a failed message says it did not go"
+        );
+        assert_eq!(
+            laid.height,
+            sent.height + theme.line_height,
+            "and the row is a line taller for saying it"
+        );
     }
 }

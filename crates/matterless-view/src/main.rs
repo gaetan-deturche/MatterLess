@@ -707,6 +707,33 @@ impl App {
         }
     }
 
+    /// Sends a failed message again, keeping its pending id.
+    ///
+    /// The same id, so the row does not jump: it is the one already on screen
+    /// being tried again, not a second attempt appearing beneath the first.
+    fn retry(&mut self, pending_post_id: &str) {
+        let (Some(link), Some(held)) = (self.link.as_ref(), self.outstanding.get(pending_post_id))
+        else {
+            return;
+        };
+        println!("retrying a message to {}", held.channel_id);
+        // Unmarked before it goes, so the row stops saying it failed while it
+        // is in flight.
+        self.outstanding
+            .insert(matterless_render::pending::PendingPost {
+                failed: false,
+                ..held.clone()
+            });
+        link.send(matterless_view::live::Ask::Send {
+            pending_post_id: held.pending_post_id.clone(),
+            channel_id: held.channel_id.clone(),
+            root_id: held.root_id.clone(),
+            message: held.message.clone(),
+        });
+        let channel = held.channel_id.clone();
+        self.reread_channel(&channel);
+    }
+
     /// The root of the open thread, if one is open.
     fn open_root(&self) -> Option<String> {
         let name = &self.thread.as_ref()?.name;
@@ -1218,8 +1245,10 @@ impl ApplicationHandler<Update> for App {
                 // A message opens its thread. Taken before the composer reacts,
                 // because opening one narrows the column the composer sits in.
                 let stream = self.stream_rect();
-                if let Some(root) = self.stream.react(&self.input, &boxes, stream) {
-                    self.open_thread(&root);
+                match self.stream.react(&self.input, &boxes, stream) {
+                    Some(matterless_view::stream::Chose::Thread(root)) => self.open_thread(&root),
+                    Some(matterless_view::stream::Chose::Retry(pending)) => self.retry(&pending),
+                    None => {}
                 }
                 self.react();
                 self.redraw();
