@@ -83,6 +83,11 @@ pub enum Ask {
         emoji: String,
         on: bool,
     },
+    /// Which conversation the reader is looking at.
+    ///
+    /// The notification rules ask: a message in the channel already on screen
+    /// does not interrupt somebody who can see it.
+    Looking { channel_id: String },
     /// Tell the server this channel has been seen, and record the watermark.
     ///
     /// Without it a channel stays unread however long it is looked at, and the
@@ -234,10 +239,11 @@ async fn run(
     };
 
     let engine = SyncEngine::new(store);
-    // Flat rather than the reader's own preference: this window draws a channel
-    // flat, and a context that disagreed with the drawing would count unreads
-    // against rows that are not there.
-    let context = SyncContext::new(me, ThreadMode::Flat);
+    let mut context = reader_context(me, engine.store());
+    println!(
+        "following {} threads, replies elsewhere stay quiet",
+        context.followed_threads.len()
+    );
 
     let (signals_tx, mut signals) = tokio::sync::mpsc::channel(1024);
     let _handle = session.spawn(signals_tx);
@@ -317,6 +323,13 @@ async fn run(
                             Ok(()) => println!("{} on {post_id}", action.slug()),
                             Err(error) => eprintln!("{} on {post_id}: {error}", action.slug()),
                         }
+                    }
+                    Ask::Looking { channel_id } => {
+                        context.active_channel = Some(channel_id);
+                        // A window with focus it cannot measure is better
+                        // assumed focused: the alternative is interrupting
+                        // somebody about the channel they are reading.
+                        context.window_focused = true;
                     }
                     Ask::MarkRead { channel_id } => {
                         if let Err(error) = rest.view_channel(&me_id, &channel_id).await {
@@ -405,7 +418,18 @@ async fn run(
                         wake.wake(Update::Changed(vec![Delta::ResyncRequired]))
                     }
                     Signal::Event { event, .. } => match engine.apply_event(&event, &context) {
-                        Ok(deltas) if !deltas.is_empty() => wake.wake(Update::Changed(deltas)),
+                        Ok(deltas) if !deltas.is_empty() => {
+                            // Following or unfollowing a thread changes which
+                            // replies may interrupt, so the set is re-read
+                            // rather than left as it was at startup.
+                            if deltas
+                                .iter()
+                                .any(|delta| matches!(delta, Delta::ThreadChanged { .. }))
+                            {
+                                context.followed_threads = followed(engine.store());
+                            }
+                            wake.wake(Update::Changed(deltas));
+                        }
                         Ok(_) => {}
                         Err(error) => eprintln!("applying {}: {error}", event.name()),
                     },
@@ -525,6 +549,31 @@ mod tests {
         assert!(touched(&deltas).is_empty());
     }
 
+    /// The two halves of what decides whether a reply interrupts somebody.
+    ///
+    /// Hardcoding `Flat` here once turned every reply in every thread into a
+    /// notification, because the rule that spares an unfollowed thread only
+    /// applies under collapsed ones. An empty followed set is the other half:
+    /// it would go quiet about the threads the reader is actually in.
+    #[test]
+    fn the_reader_reads_collapsed_and_knows_what_they_follow() {
+        let store = Store::open_in_memory().expect("a store");
+        // Through serde, because these are wire types with no other
+        // constructor and every field but the id has a default.
+        let thread: matterless_core::model::UserThread =
+            serde_json::from_value(serde_json::json!({ "id": "root", "last_reply_at": 20,
+                                "post": { "id": "root", "channel_id": "c1" } }))
+            .expect("a thread");
+        store.upsert_threads(&[thread]).expect("a followed thread");
+
+        let me: matterless_core::model::User =
+            serde_json::from_value(serde_json::json!({ "id": "u1" })).expect("a user");
+        let context = reader_context(me, &store);
+        assert_eq!(context.thread_mode, ThreadMode::Collapsed);
+        assert!(context.followed_threads.contains("root"));
+        assert!(!context.followed_threads.contains("some-other-root"));
+    }
+
     /// A reply belongs to its thread, and so does the root itself.
     #[test]
     fn a_thread_notices_its_own_replies() {
@@ -591,3 +640,35 @@ mod routes {
         assert_eq!(route_for("avatar/abc-123"), None);
     }
 }
+
+/// How this window reads, for the notification rules.
+///
+/// Collapsed, matching how the channel is actually planned and drawn. Flat was
+/// wrong twice over: it disagreed with the drawing, and it silently disabled
+/// the rule in `decide` that keeps a reply in a thread nobody follows from
+/// interrupting them -- that rule only applies under collapsed threads, so
+/// every reply in every thread was notifying.
+fn reader_context(me: matterless_core::User, store: &Store) -> SyncContext {
+    let mut context = SyncContext::new(me, ThreadMode::Collapsed);
+    context.followed_threads = followed(store);
+    context
+}
+
+/// The thread roots this reader follows.
+///
+/// Read from the store rather than left empty, which is what decides whether a
+/// reply interrupts somebody: under collapsed threads a reply notifies only if
+/// the thread is followed or it names them outright. An empty set is a safe
+/// answer -- nothing interrupts -- but a wrong one, because a thread the reader
+/// is actually in should.
+fn followed(store: &Store) -> std::collections::HashSet<String> {
+    store
+        .followed_threads(FOLLOWED)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|thread| thread.root_id)
+        .collect()
+}
+
+/// How many followed threads are held. Well past what anybody follows at once.
+const FOLLOWED: u32 = 500;

@@ -1152,6 +1152,12 @@ impl App {
                     link.send(matterless_view::live::Ask::MarkRead {
                         channel_id: channel.to_string(),
                     });
+                    // And it is the channel on screen, which is what keeps a
+                    // message the reader is watching arrive from interrupting
+                    // them about itself.
+                    link.send(matterless_view::live::Ask::Looking {
+                        channel_id: channel.to_string(),
+                    });
                 }
             }
             Err(why) => eprintln!("{channel}: {why}"),
