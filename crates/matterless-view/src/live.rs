@@ -50,6 +50,11 @@ pub enum Update {
     Older { channel_id: String, more: bool },
     /// Who is around, by user id.
     Statuses(Vec<(String, String)>),
+    /// A titled list of messages, for the panel that asked for it.
+    Listed {
+        title: String,
+        found: Vec<crate::listing::Found>,
+    },
     /// A picture arrived, decoded to straight RGBA and ready for the atlas.
     ///
     /// Decoded on the socket thread rather than the drawing one: a JPEG is
@@ -86,6 +91,10 @@ pub enum Ask {
         emoji: String,
         on: bool,
     },
+    /// The messages this reader has saved, across every conversation.
+    Saved,
+    /// The messages pinned in one channel, for everyone.
+    Pinned { channel_id: String },
     /// Who is around, for the conversations on screen.
     ///
     /// Batched rather than one call per person: the sidebar asks about every
@@ -359,6 +368,20 @@ async fn run(
                             Err(error) => eprintln!("{} on {post_id}: {error}", action.slug()),
                         }
                     }
+                    Ask::Saved => {
+                        // From the server rather than the store: a message
+                        // saved from another client was never seen here, and a
+                        // list that only knows about this window's own saves
+                        // would be quietly wrong.
+                        match rest.flagged_posts(&me_id, LISTED).await {
+                            Ok(list) => wake.wake(listed("Saved", engine.store(), list, &me_id)),
+                            Err(error) => eprintln!("listing saved messages: {error}"),
+                        }
+                    }
+                    Ask::Pinned { channel_id } => match rest.pinned_posts(&channel_id).await {
+                        Ok(list) => wake.wake(listed("Pinned", engine.store(), list, &me_id)),
+                        Err(error) => eprintln!("listing pinned messages: {error}"),
+                    },
                     Ask::Statuses { user_ids } => match rest.statuses_by_ids(&user_ids).await {
                         Ok(found) => {
                             println!("asked about {} people, {} answered", user_ids.len(), found.len());
@@ -1074,4 +1097,31 @@ fn returned(store: &Store, list: &PostList) -> Vec<Delta> {
             }
         })
         .collect()
+}
+
+/// How many messages one list holds. Long enough that scrolling it is the
+/// exception, short enough that the panel is not a second conversation.
+const LISTED: u32 = 60;
+
+/// Turns a server list into rows the panel can draw.
+///
+/// Newest first, which is the order both endpoints answer in and the order a
+/// list of things you saved is worth reading in.
+fn listed(title: &str, store: &Store, list: PostList, me_id: &str) -> Update {
+    let mut posts: Vec<matterless_core::Post> = list
+        .order
+        .iter()
+        .filter_map(|id| list.posts.get(id).cloned())
+        // A tombstone is not something to show in a list of saved messages:
+        // the message is gone, and the save outliving it says nothing.
+        .filter(|post| post.delete_at == 0)
+        .collect();
+    // `order` is the server's, but a pinned list arrives unordered often
+    // enough that sorting here is cheaper than trusting it.
+    posts.sort_by_key(|post| std::cmp::Reverse(post.create_at));
+    println!("{title}: {} messages", posts.len());
+    Update::Listed {
+        title: title.to_string(),
+        found: crate::listing::found_for(store, posts, me_id),
+    }
 }

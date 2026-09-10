@@ -18,6 +18,7 @@ mod composer_tests;
 pub mod edit;
 pub mod feed;
 pub mod header;
+pub mod listing;
 pub mod live;
 pub mod picker;
 pub mod search;
