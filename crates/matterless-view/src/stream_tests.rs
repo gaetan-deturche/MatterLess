@@ -1,6 +1,6 @@
 //! What the stream has to get right about rows and the pointer.
 
-use super::stream::Stream;
+use super::stream::{Chose, Stream};
 use matterless_layout::Fonts;
 use matterless_render::{PostRow, Row, markdown::Node};
 use matterless_ui::Rect;
@@ -92,7 +92,7 @@ fn clicking_a_message_opens_its_thread() {
     input.apply(Event::PointerReleased, &placed);
     assert_eq!(
         stream.react(&input, &placed, within),
-        Some("root".to_string())
+        Some(Chose::Thread("root".to_string()))
     );
 }
 

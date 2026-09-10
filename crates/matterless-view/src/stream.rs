@@ -18,6 +18,15 @@ use matterless_render::Row;
 use matterless_ui::input::Input;
 use matterless_ui::{Placed, Rect};
 
+/// What a click on a row asked for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Chose {
+    /// Open this thread.
+    Thread(String),
+    /// Try this message again, by the pending id it still carries.
+    Retry(String),
+}
+
 /// One conversation: its rows, their heights, and where the reader is in it.
 pub struct Stream {
     /// What this panel answers to, so a channel and a thread can coexist.
@@ -129,14 +138,22 @@ impl Stream {
         placed
     }
 
-    /// Applies a frame's input. Answers the thread the reader opened.
-    pub fn react(&mut self, input: &Input, placed: &[Placed], within: Rect) -> Option<String> {
+    /// Applies a frame's input. Answers what the click asked for.
+    pub fn react(&mut self, input: &Input, placed: &[Placed], within: Rect) -> Option<Chose> {
         if let Some((_, y)) = input.wheel_over(placed, |name| name == self.name) {
             self.scroll = (self.scroll - y).clamp(0.0, self.reach(within));
         }
         let clicked = input.clicked()?;
         let index = self.index_of(clicked)?;
-        self.root_of(index)
+        // A message that never reached the server has no thread to open -- its
+        // id is the window's own pending one, which the store has never heard
+        // of -- so a click on it means the only thing it can mean.
+        if let Some(Row::Post { post } | Row::Continuation { post }) = self.rows.get(index)
+            && post.failed
+        {
+            return Some(Chose::Retry(post.post_id.clone()));
+        }
+        self.root_of(index).map(Chose::Thread)
     }
 
     /// The row a name refers to, if it is one of this panel's.
