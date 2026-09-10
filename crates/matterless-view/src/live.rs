@@ -40,6 +40,17 @@ pub enum Update {
         channel_id: String,
         failed: bool,
     },
+    /// A picture arrived, decoded to straight RGBA and ready for the atlas.
+    ///
+    /// Decoded on the socket thread rather than the drawing one: a JPEG is
+    /// milliseconds of work, and doing it between frames is how a scroll
+    /// stutters when somebody with a photograph comes into view.
+    Picture {
+        key: String,
+        width: u32,
+        height: u32,
+        rgba: Vec<u8>,
+    },
 }
 
 /// What the window asks the socket thread to do.
@@ -53,6 +64,9 @@ pub enum Ask {
         root_id: String,
         message: String,
     },
+    /// Fetch a picture. The key is the window's own name for it, and the route
+    /// is derived from it here so the window never builds a server path.
+    Fetch { key: String },
 }
 
 /// The window's end of the socket thread. Dropping it closes the connection.
@@ -234,6 +248,26 @@ async fn run(
                             failed,
                         });
                     }
+                    Ask::Fetch { key } => {
+                        let Some(route) = route_for(&key) else {
+                            continue;
+                        };
+                        match rest.fetch_bytes(&route).await {
+                            Ok(Some((bytes, _))) => match decode(&bytes) {
+                                Some((width, height, rgba)) => wake.wake(Update::Picture {
+                                    key,
+                                    width,
+                                    height,
+                                    rgba,
+                                }),
+                                None => eprintln!("{key}: could not be decoded"),
+                            },
+                            // A person with no picture is not an error, and a
+                            // silent gap is the right drawing for one.
+                            Ok(None) => {}
+                            Err(error) => eprintln!("{key}: {error}"),
+                        }
+                    }
                 }
             }
             signal = signals.recv() => {
@@ -255,6 +289,28 @@ async fn run(
                 }
             }
         }
+    }
+}
+
+/// The server route a picture key names, or `None` if it names nothing.
+///
+/// A pure function, so the routing is testable without a network or a token,
+/// and so nothing a window asks for can leave the routes listed here. Ids are
+/// server-generated tokens; anything else is malformed and gets no request.
+pub fn route_for(key: &str) -> Option<String> {
+    let path = key.split('?').next()?;
+    let (kind, id) = path.trim_start_matches('/').split_once('/')?;
+    if id.is_empty() || !id.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return None;
+    }
+    match kind {
+        "avatar" => Some(format!("/users/{id}/image")),
+        "emoji" => Some(format!("/emoji/{id}/image")),
+        // The thumbnail is what a message list wants: measured at 20 KB against
+        // a 474 KB original on this server.
+        "thumb" => Some(format!("/files/{id}/thumbnail")),
+        "file" => Some(format!("/files/{id}")),
+        _ => None,
     }
 }
 
@@ -351,5 +407,55 @@ mod tests {
         assert!(touches_thread(&[posted("c", "root", "reply")], "root"));
         assert!(touches_thread(&[posted("c", "", "root")], "root"));
         assert!(!touches_thread(&[posted("c", "other", "reply")], "root"));
+    }
+}
+
+/// Decodes a picture to straight RGBA at its own size.
+///
+/// Scaled down to what the atlas can hold rather than refused: an avatar comes
+/// back at whatever size the server keeps, and a face that would not fit is
+/// better small than missing.
+fn decode(bytes: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
+    let decoded = image::load_from_memory(bytes).ok()?;
+    let mut rgba = decoded.to_rgba8();
+    if rgba.width() > MAX_SIDE || rgba.height() > MAX_SIDE {
+        rgba = image::imageops::thumbnail(
+            &rgba,
+            rgba.width().min(MAX_SIDE),
+            rgba.height().min(MAX_SIDE),
+        );
+    }
+    Some((rgba.width(), rgba.height(), rgba.into_raw()))
+}
+
+/// The largest picture worth putting in a shared atlas. A face is drawn at 28
+/// pixels, so anything past this is detail nothing will ever see.
+const MAX_SIDE: u32 = 128;
+
+#[cfg(test)]
+mod routes {
+    use super::route_for;
+
+    #[test]
+    fn a_key_names_the_route_it_came_from() {
+        assert_eq!(
+            route_for("avatar/abc123?v=17").as_deref(),
+            Some("/users/abc123/image")
+        );
+        assert_eq!(
+            route_for("thumb/file9").as_deref(),
+            Some("/files/file9/thumbnail")
+        );
+    }
+
+    /// Nothing a window asks for may leave the routes listed here: an id is a
+    /// server-generated token, and anything else gets no request made for it.
+    #[test]
+    fn a_malformed_key_asks_for_nothing() {
+        assert_eq!(route_for("avatar/../../etc/passwd"), None);
+        assert_eq!(route_for("avatar/"), None);
+        assert_eq!(route_for("avatar"), None);
+        assert_eq!(route_for("secrets/abc123"), None);
+        assert_eq!(route_for("avatar/abc-123"), None);
     }
 }

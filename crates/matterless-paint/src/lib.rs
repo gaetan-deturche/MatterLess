@@ -146,6 +146,19 @@ pub enum Piece {
         ink: [u8; 3],
         faint: [u8; 3],
     },
+    /// A picture, named by the route it came from.
+    ///
+    /// Nothing is drawn until the bytes have arrived, and the space it occupies
+    /// was reserved by the layout rather than by the image -- which is the same
+    /// rule every other row follows, and the reason a face appearing does not
+    /// move the conversation under it.
+    Image {
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        key: String,
+    },
 }
 
 /// A frame's worth of drawing, built up piece by piece.
@@ -380,6 +393,24 @@ impl Painter {
                     height,
                     colour,
                 } => canvas.fill(*x as i32, *y as i32, *width as i32, *height as i32, *colour),
+                // The snapshot path has no network, so a picture is drawn as
+                // the space it occupies. That is the honest answer: this path
+                // exists to check heights and glyph positions, and a filled box
+                // shows the room was reserved without pretending to bytes it
+                // never fetched.
+                Piece::Image {
+                    x,
+                    y,
+                    width,
+                    height,
+                    ..
+                } => canvas.fill(
+                    *x as i32,
+                    *y as i32,
+                    *width as i32,
+                    *height as i32,
+                    [40, 48, 58, 255],
+                ),
                 Piece::Text { glyphs, ink, faint } => {
                     for glyph in glyphs {
                         let shade = if glyph.faint { *faint } else { *ink };
