@@ -313,8 +313,10 @@ async fn run(
                             Action::Save => rest.set_post_saved(&me_id, &post_id, on).await,
                             Action::Pin => rest.set_post_pinned(&post_id, on).await,
                             Action::Delete => rest.delete_post(&post_id).await,
-                            // Answered in the window: neither needs the server.
-                            Action::Thread | Action::Link => Ok(()),
+                            // Answered in the window: none of these needs the
+                            // server. React opens a picker, and the emoji it
+                            // chooses arrives later as its own ask.
+                            Action::React | Action::Thread | Action::Link => Ok(()),
                         };
                         match done {
                             // The socket echoes the change, which is what
