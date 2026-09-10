@@ -71,6 +71,12 @@ pub enum Ask {
         root_id: String,
         message: String,
     },
+    /// Save, pin or delete one message.
+    Act {
+        action: crate::actions::Action,
+        post_id: String,
+        on: bool,
+    },
     /// Add or remove a reaction.
     React {
         post_id: String,
@@ -289,6 +295,27 @@ async fn run(
                             // here but say it went.
                             Ok(()) => println!("reacted to {post_id}"),
                             Err(error) => eprintln!("reacting to {post_id}: {error}"),
+                        }
+                    }
+                    Ask::Act {
+                        action,
+                        post_id,
+                        on,
+                    } => {
+                        use crate::actions::Action;
+                        let done = match action {
+                            Action::Save => rest.set_post_saved(&me_id, &post_id, on).await,
+                            Action::Pin => rest.set_post_pinned(&post_id, on).await,
+                            Action::Delete => rest.delete_post(&post_id).await,
+                            // Answered in the window: neither needs the server.
+                            Action::Thread | Action::Link => Ok(()),
+                        };
+                        match done {
+                            // The socket echoes the change, which is what
+                            // redraws the row. Nothing to do here but say it
+                            // went.
+                            Ok(()) => println!("{} on {post_id}", action.slug()),
+                            Err(error) => eprintln!("{} on {post_id}: {error}", action.slug()),
                         }
                     }
                     Ask::MarkRead { channel_id } => {
