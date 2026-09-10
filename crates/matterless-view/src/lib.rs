@@ -10,6 +10,9 @@
 //! DOM list came from.
 
 pub mod atlas;
+pub mod composer;
+#[cfg(test)]
+mod composer_tests;
 pub mod feed;
 pub mod header;
 pub mod sidebar;

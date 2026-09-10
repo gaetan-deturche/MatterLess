@@ -33,6 +33,10 @@ pub enum Event {
         key: Key,
         down: bool,
     },
+    /// The modifier keys changed. A level rather than an edge, because that is
+    /// what the platform reports and what a shift-drag has to ask about
+    /// halfway through.
+    Modifiers(Mods),
     /// Text the platform composed, which is not the same as the keys struck:
     /// an accented letter or a CJK character is several keys and one insertion.
     Typed(String),
@@ -57,6 +61,28 @@ pub enum Key {
     End,
     PageUp,
     PageDown,
+    /// A letter, for a chord. `Ctrl+C` is not text and never arrives as
+    /// `Typed`, so it has to be a key to be actionable at all.
+    Char(char),
+}
+
+/// Which modifiers are held.
+///
+/// `command` is the platform's own chord key -- Ctrl on Windows and Linux, the
+/// Command key on macOS -- resolved by the shell so no widget has to ask which
+/// platform it is running on.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Mods {
+    pub shift: bool,
+    pub command: bool,
+    pub alt: bool,
+}
+
+impl Mods {
+    /// Nothing held, which is what distinguishes typing from a chord.
+    pub fn bare(&self) -> bool {
+        !self.shift && !self.command && !self.alt
+    }
 }
 
 /// What the reader has done since the last frame, and what is still true.
@@ -66,12 +92,16 @@ pub struct Input {
     hovered: Option<String>,
     /// Where a press began, held until the button is released.
     pressed_on: Option<String>,
+    /// Set for the one frame the button went down on, which is what separates
+    /// the start of a drag from the middle of one.
+    pressed_now: Option<String>,
     /// Set for one frame when a press and its release agreed.
     clicked: Option<String>,
     wheel: (f32, f32),
     focus: Option<String>,
     typed: String,
     keys: Vec<Key>,
+    mods: Mods,
 }
 
 impl Input {
@@ -88,6 +118,7 @@ impl Input {
             }
             Event::PointerPressed => {
                 self.pressed_on = self.hovered.clone();
+                self.pressed_now = self.hovered.clone();
                 // Focus follows the press, not the release: a reader who holds
                 // the button down on a field expects it to be theirs already.
                 self.focus = self.hovered.clone();
@@ -111,6 +142,7 @@ impl Input {
                     self.keys.push(key);
                 }
             }
+            Event::Modifiers(mods) => self.mods = mods,
             Event::Typed(text) => self.typed.push_str(&text),
         }
     }
@@ -123,6 +155,17 @@ impl Input {
     /// The box a press is currently held on, for drawing it pressed.
     pub fn pressed(&self) -> Option<&str> {
         self.pressed_on.as_deref()
+    }
+
+    /// The box the button went down on this frame, and only this frame.
+    pub fn pressed_now(&self) -> Option<&str> {
+        self.pressed_now.as_deref()
+    }
+
+    /// Where the pointer is, for a widget that needs the position rather than
+    /// the box -- placing a caret in a line of text, say.
+    pub fn pointer_at(&self) -> Option<(f32, f32)> {
+        self.pointer
     }
 
     pub fn clicked(&self) -> Option<&str> {
@@ -168,6 +211,17 @@ impl Input {
         self.keys.contains(&key)
     }
 
+    /// Which modifiers are held right now.
+    pub fn mods(&self) -> Mods {
+        self.mods
+    }
+
+    /// The platform's chord key plus this one, and nothing else -- so `Ctrl+C`
+    /// does not also fire on `Ctrl+Shift+C`, which is a different command.
+    pub fn chord(&self, key: Key) -> bool {
+        self.mods.command && !self.mods.alt && !self.mods.shift && self.struck(key)
+    }
+
     /// Text composed since the last frame.
     pub fn typed(&self) -> &str {
         &self.typed
@@ -179,6 +233,7 @@ impl Input {
     /// typed text do not. Forgetting this is how one click becomes many.
     pub fn settle(&mut self) {
         self.clicked = None;
+        self.pressed_now = None;
         self.wheel = (0.0, 0.0);
         self.typed.clear();
         self.keys.clear();

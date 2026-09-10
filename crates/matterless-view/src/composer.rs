@@ -1,0 +1,361 @@
+//! Where a message is written.
+//!
+//! The first widget in this port that has to hold state between frames, and the
+//! reason the input model grew modifiers. A caret is not a character offset: it
+//! is a position inside a *shaped* run, which is what makes an accented letter
+//! one step rather than two and what puts the caret in the right place in a
+//! line that has been laid out with kerning.
+//!
+//! So the shaping is not redone from a string each frame -- `cosmic-text`'s own
+//! editor owns the buffer and the cursor together, and moves them together.
+//! Hand-rolling that would mean re-deriving grapheme clusters, word boundaries
+//! and bidirectional runs, all of which it already has right.
+
+use crate::sidebar::Canvas;
+use cosmic_text::{
+    Action, Attrs, Buffer, Cursor, Edit, Editor, Metrics, Motion, Selection, Shaping,
+};
+use matterless_layout::Fonts;
+use matterless_ui::input::{Input, Key};
+use matterless_ui::{Placed, Rect};
+
+/// The text being written, and where the caret is in it.
+pub struct Composer {
+    editor: Editor<'static>,
+    /// Drawn when there is nothing written, so the box says what it is for.
+    pub placeholder: String,
+    /// True once anything has been typed, so an empty buffer can be told from
+    /// one the reader has emptied on purpose.
+    pub touched: bool,
+}
+
+/// What the box is called when a pointer is tested against it.
+pub const NAME: &str = "composer";
+
+const SIZE: f32 = 14.0;
+const LINE: f32 = 20.0;
+const PADDING: f32 = 10.0;
+/// The margin outside the box, matching the stream's own gutter.
+const MARGIN: f32 = 12.0;
+/// How tall it is allowed to grow before the text scrolls inside it. Eight
+/// lines is a long message; past that the composer would be eating the
+/// conversation it is a reply to.
+const MAX_LINES: usize = 8;
+
+impl Default for Composer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Composer {
+    pub fn new() -> Self {
+        Self {
+            editor: Editor::new(Buffer::new_empty(Metrics::new(SIZE, LINE))),
+            placeholder: "Write a message".to_string(),
+            touched: false,
+        }
+    }
+
+    /// The text as it stands.
+    pub fn text(&self) -> String {
+        self.editor.with_buffer(|buffer| {
+            buffer
+                .lines
+                .iter()
+                .map(|line| line.text())
+                .collect::<Vec<&str>>()
+                .join("\n")
+        })
+    }
+
+    fn is_empty(&self) -> bool {
+        self.editor
+            .with_buffer(|buffer| buffer.lines.iter().all(|line| line.text().is_empty()))
+    }
+
+    /// Shapes the text for this width. Must run before the height is asked for
+    /// or the box is drawn, because both are answers about the shaping.
+    pub fn lay_out(&mut self, fonts: &mut Fonts, width: f32) {
+        let inner = (width - MARGIN * 2.0 - PADDING * 2.0).max(1.0);
+        self.editor.with_buffer_mut(|buffer| {
+            buffer.set_size(Some(inner), None);
+        });
+        self.editor.shape_as_needed(fonts.system_mut(), false);
+    }
+
+    /// How many lines the text occupies, capped at what the box will show.
+    fn lines(&self) -> usize {
+        self.editor
+            .with_buffer(|buffer| buffer.layout_runs().count())
+            .clamp(1, MAX_LINES)
+    }
+
+    /// The height the strip needs, which grows with the message.
+    pub fn height(&self) -> f32 {
+        self.lines() as f32 * LINE + PADDING * 2.0 + MARGIN * 2.0
+    }
+
+    /// The strip at the bottom of a panel, and what is left above it.
+    pub fn strip(&self, within: Rect) -> Rect {
+        let height = self.height().min(within.height);
+        Rect::new(within.x, within.bottom() - height, within.width, height)
+    }
+
+    pub fn above(&self, within: Rect) -> Rect {
+        let height = self.height().min(within.height);
+        Rect::new(
+            within.x,
+            within.y,
+            within.width,
+            (within.height - height).max(0.0),
+        )
+    }
+
+    /// The box itself, inside the strip's margin.
+    fn box_of(&self, within: Rect) -> Rect {
+        let strip = self.strip(within);
+        Rect::new(
+            strip.x + MARGIN,
+            strip.y + MARGIN,
+            (strip.width - MARGIN * 2.0).max(0.0),
+            (strip.height - MARGIN * 2.0).max(0.0),
+        )
+    }
+
+    /// The box as a hit target, so a click lands on it and the wheel over it
+    /// does not scroll the conversation behind.
+    pub fn boxes(&self, within: Rect) -> Vec<Placed> {
+        vec![Placed {
+            name: NAME.to_string(),
+            rect: self.strip(within),
+            depth: 1,
+        }]
+    }
+
+    /// Applies a frame's input. Answers the message when the reader sent one.
+    ///
+    /// Enter sends and Shift+Enter breaks the line, which is the convention
+    /// every chat client shares and the opposite of what a text area does by
+    /// default -- so it is decided here rather than left to the editor.
+    pub fn react(
+        &mut self,
+        fonts: &mut Fonts,
+        input: &Input,
+        within: Rect,
+        clipboard: &mut String,
+    ) -> Option<String> {
+        let inner = self.box_of(within).inset(PADDING);
+        let focused = input.focus() == Some(NAME);
+
+        // The pointer puts the caret where it was clicked, and dragging from
+        // there selects. Coordinates are the buffer's own, so the box's origin
+        // comes off first.
+        if let Some((x, y)) = input.pointer_at()
+            && input.pressed() == Some(NAME)
+        {
+            let at = ((x - inner.x) as i32, (y - inner.y) as i32);
+            // The frame the button went down places the caret; every frame
+            // after that drags a selection from it.
+            let action = if input.pressed_now() == Some(NAME) {
+                Action::Click { x: at.0, y: at.1 }
+            } else {
+                Action::Drag { x: at.0, y: at.1 }
+            };
+            let system = fonts.system_mut();
+            self.editor.action(system, action);
+        }
+
+        if !focused {
+            return None;
+        }
+
+        let mods = input.mods();
+        let mut sent = None;
+        for key in input.keys() {
+            match key {
+                Key::Enter if mods.shift => self.act(fonts, Action::Enter),
+                Key::Enter => {
+                    let text = self.text();
+                    if !text.trim().is_empty() {
+                        sent = Some(text);
+                    }
+                }
+                Key::Backspace => self.act(fonts, Action::Backspace),
+                Key::Delete => self.act(fonts, Action::Delete),
+                Key::Escape => self.editor.set_selection(Selection::None),
+                Key::Left if mods.command => self.motion(fonts, Motion::LeftWord, mods.shift),
+                Key::Right if mods.command => self.motion(fonts, Motion::RightWord, mods.shift),
+                Key::Left => self.motion(fonts, Motion::Left, mods.shift),
+                Key::Right => self.motion(fonts, Motion::Right, mods.shift),
+                Key::Up => self.motion(fonts, Motion::Up, mods.shift),
+                Key::Down => self.motion(fonts, Motion::Down, mods.shift),
+                Key::Home => self.motion(fonts, Motion::Home, mods.shift),
+                Key::End => self.motion(fonts, Motion::End, mods.shift),
+                _ => {}
+            }
+        }
+
+        if input.chord(Key::Char('a')) {
+            // Anchored at the start and moved to the end, which is what a
+            // selection *is* here: there is no "select everything" action.
+            self.editor.set_cursor(Cursor::new(0, 0));
+            self.editor
+                .set_selection(Selection::Normal(self.editor.cursor()));
+            self.motion(fonts, Motion::BufferEnd, true);
+        }
+        if input.chord(Key::Char('c'))
+            && let Some(text) = self.editor.copy_selection()
+        {
+            *clipboard = text;
+        }
+        if input.chord(Key::Char('x'))
+            && let Some(text) = self.editor.copy_selection()
+        {
+            *clipboard = text;
+            self.editor.delete_selection();
+            self.touched = true;
+        }
+        if input.chord(Key::Char('v')) && !clipboard.is_empty() {
+            let pasted = clipboard.clone();
+            self.editor.insert_string(&pasted, None);
+            self.touched = true;
+        }
+
+        // Typed text last, and only when no chord claimed the frame: a platform
+        // that reports `Ctrl+V` as both a chord and the letter "v" would
+        // otherwise paste and then type a v.
+        if !input.typed().is_empty() && !mods.command {
+            for character in input.typed().chars() {
+                // Control characters are not text. A newline arrives as Enter,
+                // which has already been decided above.
+                if !character.is_control() {
+                    self.act(fonts, Action::Insert(character));
+                    self.touched = true;
+                }
+            }
+        }
+
+        if sent.is_some() {
+            self.clear(fonts);
+        }
+        sent
+    }
+
+    fn act(&mut self, fonts: &mut Fonts, action: Action) {
+        let system = fonts.system_mut();
+        self.editor.action(system, action);
+    }
+
+    /// Moves the caret, extending the selection when shift is held.
+    ///
+    /// The anchor is the caller's to manage: the editor moves a cursor, and
+    /// whether that drags a selection behind it is a decision above it.
+    fn motion(&mut self, fonts: &mut Fonts, motion: Motion, extend: bool) {
+        if extend {
+            if self.editor.selection() == Selection::None {
+                self.editor
+                    .set_selection(Selection::Normal(self.editor.cursor()));
+            }
+        } else {
+            self.editor.set_selection(Selection::None);
+        }
+        self.act(fonts, Action::Motion(motion));
+    }
+
+    /// Empties it, as sending does.
+    pub fn clear(&mut self, fonts: &mut Fonts) {
+        self.editor.with_buffer_mut(|buffer| {
+            buffer.set_text("", &Attrs::new(), Shaping::Advanced, None);
+        });
+        self.editor.set_cursor(Cursor::new(0, 0));
+        self.editor.set_selection(Selection::None);
+        // Reshaped now, or the next height would still be the sent message's
+        // and the box would stay tall with nothing in it.
+        self.editor.shape_as_needed(fonts.system_mut(), false);
+        self.touched = false;
+    }
+
+    /// Draws the box, the text, the selection and the caret.
+    pub fn draw(&self, into: &mut Canvas<'_>, within: Rect, focused: bool) {
+        let Canvas {
+            scene,
+            painter,
+            fonts,
+            palette,
+        } = into;
+        let strip = self.strip(within);
+        let outer = self.box_of(within);
+        let inner = outer.inset(PADDING);
+
+        scene.fill(strip.x, strip.y, strip.width, strip.height, palette.ground);
+        scene.fill(outer.x, outer.y, outer.width, outer.height, palette.surface);
+        // A border rather than a shadow: one rectangle behind another is the
+        // only outline this renderer can draw, and a focused box has to be
+        // visibly different from an unfocused one.
+        let edge: [u8; 4] = if focused {
+            [palette.ink[0], palette.ink[1], palette.ink[2], 120]
+        } else {
+            [palette.faint[0], palette.faint[1], palette.faint[2], 60]
+        };
+        for (x, y, width, height) in [
+            (outer.x, outer.y, outer.width, 1.0),
+            (outer.x, outer.bottom() - 1.0, outer.width, 1.0),
+            (outer.x, outer.y, 1.0, outer.height),
+            (outer.right() - 1.0, outer.y, 1.0, outer.height),
+        ] {
+            scene.fill(x, y, width, height, edge);
+        }
+
+        if self.is_empty() {
+            let glyphs = painter.run(
+                fonts,
+                &self.placeholder,
+                inner.x,
+                inner.y,
+                matterless_paint::Run {
+                    size: SIZE,
+                    line_height: LINE,
+                    bold: false,
+                    wrap: f32::MAX,
+                },
+            );
+            scene.glyphs(glyphs, palette.faint, palette.faint);
+        }
+
+        // The selection goes down first, or it would cover the letters it is
+        // meant to be behind.
+        if let Some((start, end)) = self.editor.selection_bounds() {
+            self.editor.with_buffer(|buffer| {
+                for run in buffer.layout_runs() {
+                    for (x, width) in run.highlight(start, end) {
+                        scene.fill(
+                            inner.x + x,
+                            inner.y + run.line_top,
+                            width,
+                            LINE,
+                            [palette.ink[0], palette.ink[1], palette.ink[2], 60],
+                        );
+                    }
+                }
+            });
+        }
+
+        self.editor.with_buffer(|buffer| {
+            let glyphs = matterless_paint::placed_glyphs(buffer, inner.x, inner.y);
+            scene.glyphs(glyphs, palette.ink, palette.faint);
+        });
+
+        // Solid rather than blinking: a blink needs a clock and a redraw of its
+        // own, and this window only draws when something happens.
+        if focused && let Some((x, y)) = self.editor.cursor_position() {
+            scene.fill(
+                inner.x + x as f32,
+                inner.y + y as f32,
+                1.5,
+                LINE,
+                [palette.ink[0], palette.ink[1], palette.ink[2], 255],
+            );
+        }
+    }
+}
