@@ -13,6 +13,7 @@
 use crate::sidebar::Canvas;
 use matterless_layout::Fonts;
 use matterless_layout::row::{RowLayout, Theme, lay_out};
+use matterless_paint::Run;
 use matterless_render::Row;
 use matterless_ui::input::Input;
 use matterless_ui::{Placed, Rect};
@@ -218,6 +219,61 @@ impl Stream {
             .collect()
     }
 
+    /// Draws the file cards: an attachment that is not a picture.
+    ///
+    /// A name and a size on a panel, which is all a message list can honestly
+    /// say about a document -- and considerably more than the blank space the
+    /// reserved height would otherwise be.
+    fn cards(&self, into: &mut Canvas<'_>, index: usize, top: f32, left: f32) {
+        let Some(Row::Post { post } | Row::Continuation { post }) = self.rows.get(index) else {
+            return;
+        };
+        let Some(laid) = self.laid.get(index) else {
+            return;
+        };
+        let Canvas {
+            scene,
+            painter,
+            fonts,
+            palette,
+        } = into;
+        for (block, file) in laid
+            .blocks
+            .iter()
+            .filter(|block| block.kind == matterless_layout::row::Kind::Attachment)
+            .zip(post.files.iter())
+            .filter(|(_, file)| !file.image && !file.video)
+        {
+            let x = left + self.theme.gutter;
+            let y = top + block.y;
+            let width = (self.theme.text_width() * 0.6).min(320.0);
+            scene.fill(x, y, width, block.height, palette.surface);
+            let name = painter.run(
+                fonts,
+                &file.name,
+                x + 12.0,
+                y + 10.0,
+                Run {
+                    size: 13.5,
+                    line_height: 18.0,
+                    bold: true,
+                    // Cut by the panel's clip rather than wrapped: a card is a
+                    // fixed height and a wrapped name would run out of it.
+                    wrap: f32::MAX,
+                },
+            );
+            scene.glyphs(name, palette.ink, palette.faint);
+            let about = painter.run(
+                fonts,
+                &format!("{} · {}", file.extension.to_uppercase(), size_of(file.size)),
+                x + 12.0,
+                y + 30.0,
+                Run::label(f32::MAX),
+            );
+            scene.glyphs(about, palette.faint, palette.faint);
+        }
+    }
+
     pub fn draw(&self, into: &mut Canvas<'_>, within: Rect, input: &Input) {
         let Canvas {
             scene,
@@ -249,6 +305,13 @@ impl Stream {
                     }]);
                 }
                 scene.extend(self.pictures(index, top, within.x));
+                let mut canvas = Canvas {
+                    scene,
+                    painter,
+                    fonts,
+                    palette,
+                };
+                self.cards(&mut canvas, index, top, within.x);
             }
             top = bottom;
         }
@@ -324,5 +387,31 @@ fn shift(piece: matterless_paint::Piece, by: f32) -> matterless_paint::Piece {
             height,
             key,
         },
+    }
+}
+
+/// A file's size, in the unit a person would say it in.
+fn size_of(bytes: i64) -> String {
+    const UNITS: [(&str, f64); 3] = [("GB", 1e9), ("MB", 1e6), ("kB", 1e3)];
+    let size = bytes.max(0) as f64;
+    for (name, scale) in UNITS {
+        if size >= scale {
+            return format!("{:.1} {name}", size / scale);
+        }
+    }
+    format!("{bytes} bytes")
+}
+
+#[cfg(test)]
+mod sizes {
+    use super::size_of;
+
+    #[test]
+    fn a_size_is_said_in_the_unit_a_person_would_use() {
+        assert_eq!(size_of(512), "512 bytes");
+        assert_eq!(size_of(20_480), "20.5 kB");
+        assert_eq!(size_of(474_000_000), "474.0 MB");
+        // Never negative, whatever the server said.
+        assert_eq!(size_of(-1), "-1 bytes");
     }
 }
