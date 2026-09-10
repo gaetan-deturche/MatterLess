@@ -47,6 +47,11 @@ pub struct Theme {
     pub footer_height: f32,
     /// How far a list item or a quote is pushed in.
     pub indent: f32,
+    /// The bar beside a preview card, and the gap between it and the text.
+    pub quote_bar: f32,
+    /// How many lines of a description or a quoted message are kept. Past this
+    /// a card stops being a summary and starts being the page.
+    pub preview_lines: usize,
     /// The reader's own offset, so a timestamp says what their clock says.
     pub utc_offset_minutes: i32,
 }
@@ -74,6 +79,8 @@ impl Default for Theme {
             separator_height: 34.0,
             footer_height: 26.0,
             indent: 18.0,
+            quote_bar: 3.0,
+            preview_lines: 3,
             utc_offset_minutes: 0,
         }
     }
@@ -125,6 +132,9 @@ pub enum Kind {
     Reactions,
     /// An image or a file card, whose size the server told us.
     Attachment,
+    /// One line of a link or permalink card. A card is several of these
+    /// stacked with no gap, so the bar drawn beside them reads as one.
+    Preview,
     Footer,
     Separator,
 }
@@ -589,6 +599,81 @@ pub fn lay_out(fonts: &mut Fonts, row: &Row, theme: &Theme) -> RowLayout {
         }
     }
 
+    // A link or permalink card, as a stack of lines rather than one block: a
+    // card mixes sizes -- a small site name over a bold title over a quieter
+    // description -- and one block carries one size. Stacked with no gap
+    // between them, so the bar drawn beside the run reads as a single card.
+    for preview in post.map(|post| post.previews.as_slice()).unwrap_or(&[]) {
+        let x = theme.quote_bar + theme.indent / 2.0;
+        let wrap = (theme.text_width() - x).max(40.0);
+        let mut push = |text: &str, bold: bool, faint: bool, cap: usize, fonts: &mut Fonts| {
+            if text.is_empty() {
+                return;
+            }
+            let style = crate::Style {
+                size: theme.body_size,
+                line_height: theme.line_height,
+                bold,
+                italic: false,
+                mono: false,
+            };
+            let count = crate::extent_of(fonts, text, wrap, style)
+                .lines
+                .max(1)
+                .min(cap);
+            blocks.push(Block {
+                y,
+                x,
+                height: count as f32 * theme.line_height,
+                lines: count,
+                kind: Kind::Preview,
+                spans: vec![TextSpan {
+                    text: text.to_string(),
+                    bold,
+                    italic: false,
+                    mono: false,
+                    faint,
+                    emoji: None,
+                }],
+                size: theme.body_size,
+                wrap,
+            });
+            y += count as f32 * theme.line_height;
+        };
+        match preview {
+            matterless_render::Preview::Page {
+                title,
+                description,
+                site_name,
+                ..
+            } => {
+                push(site_name, false, true, 1, fonts);
+                push(title, true, false, 2, fonts);
+                push(description, false, true, theme.preview_lines, fonts);
+            }
+            matterless_render::Preview::Permalink {
+                channel_label,
+                author_name,
+                nodes,
+                ..
+            } => {
+                push(
+                    &format!("{author_name} in {channel_label}"),
+                    true,
+                    false,
+                    1,
+                    fonts,
+                );
+                // The quoted body as plain text: a card is a summary, and a
+                // quote that re-renders headings and lists inside a message is
+                // a second message.
+                let quoted = matterless_render::markdown::plain_text(nodes);
+                push(&quoted, false, true, theme.preview_lines, fonts);
+            }
+        }
+        y += theme.block_gap;
+    }
+
     // One block per reaction rather than one line of them all, because each is
     // a thing to click: a pill nobody can press is a picture of a feature. The
     // blocks come out in the post's own reaction order, so the caller pairs the
@@ -725,6 +810,83 @@ mod tests {
                 value: value.into(),
             }],
         }
+    }
+
+    /// A card takes room, or the message under it is drawn over.
+    ///
+    /// Reserved by the layout rather than discovered by the painter, which is
+    /// the contract every other block keeps: the renderer draws exactly what
+    /// was measured.
+    #[test]
+    fn a_link_card_reserves_the_room_it_draws_in() {
+        let mut fonts = Fonts::new();
+        let theme = Theme::default();
+        let bare = lay_out(
+            &mut fonts,
+            &Row::Post {
+                post: post(vec![text("look")]),
+            },
+            &theme,
+        );
+
+        let mut carded = post(vec![text("look")]);
+        carded.previews = vec![matterless_render::Preview::Page {
+            url: "https://example.invalid/thing".into(),
+            title: "A page with a title".into(),
+            description: "And a description long enough to say something about it.".into(),
+            site_name: "example.invalid".into(),
+            image: None,
+        }];
+        let with = lay_out(&mut fonts, &Row::Post { post: carded }, &theme);
+
+        assert!(
+            with.height > bare.height,
+            "a card added no height: {} vs {}",
+            with.height,
+            bare.height
+        );
+        let card: Vec<&Block> = with
+            .blocks
+            .iter()
+            .filter(|block| block.kind == Kind::Preview)
+            .collect();
+        // Site, title, description: three stacked lines, one card.
+        assert_eq!(card.len(), 3);
+        // Stacked with no gap, so the bar beside them reads as one.
+        for pair in card.windows(2) {
+            assert!(
+                (pair[1].y - (pair[0].y + pair[0].height)).abs() < 0.5,
+                "a gap opened between two lines of one card"
+            );
+        }
+    }
+
+    /// A description of a thousand words is not a summary. Past the cap the
+    /// card would be the page.
+    #[test]
+    fn a_long_description_is_cut_rather_than_drawn_whole() {
+        let mut fonts = Fonts::new();
+        let theme = Theme::default();
+        let mut carded = post(vec![text("look")]);
+        carded.previews = vec![matterless_render::Preview::Page {
+            url: "https://example.invalid/thing".into(),
+            title: "Title".into(),
+            description: "word ".repeat(500),
+            site_name: "example.invalid".into(),
+            image: None,
+        }];
+        let laid = lay_out(&mut fonts, &Row::Post { post: carded }, &theme);
+        let longest = laid
+            .blocks
+            .iter()
+            .filter(|block| block.kind == Kind::Preview)
+            .map(|block| block.lines)
+            .max()
+            .expect("a card");
+        assert!(
+            longest <= theme.preview_lines,
+            "{longest} lines is not a summary"
+        );
     }
 
     /// The whole point: a row's height is known, and it is different at two

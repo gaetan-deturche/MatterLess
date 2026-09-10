@@ -203,6 +203,45 @@ impl Stream {
         })
     }
 
+    /// The bar beside each preview card.
+    ///
+    /// Drawn over the run of consecutive `Preview` blocks rather than per
+    /// line, so a card of three lines has one bar down its side rather than
+    /// three stubs with gaps between them.
+    fn quote_bars(&self, into: &mut Canvas<'_>, index: usize, top: f32, left: f32) {
+        let Some(laid) = self.laid.get(index) else {
+            return;
+        };
+        let mut run: Option<(f32, f32)> = None;
+        for block in laid
+            .blocks
+            .iter()
+            .filter(|block| block.kind == matterless_layout::row::Kind::Preview)
+            .map(Some)
+            .chain(std::iter::once(None))
+        {
+            match (block, run) {
+                // A line that carries on where the last one stopped is the
+                // same card; anything else starts a new one.
+                (Some(block), Some((start, end))) if (block.y - end).abs() < 0.5 => {
+                    run = Some((start, block.y + block.height));
+                }
+                (block, finished) => {
+                    if let Some((start, end)) = finished {
+                        into.scene.fill(
+                            left + self.theme.gutter,
+                            top + start,
+                            self.theme.quote_bar,
+                            end - start,
+                            into.palette.faint_fill(),
+                        );
+                    }
+                    run = block.map(|block| (block.y, block.y + block.height));
+                }
+            }
+        }
+    }
+
     /// Where one message sits on screen, for a panel that has to point at it.
     ///
     /// `None` when it is scrolled out of view, which is the honest answer: a
@@ -660,6 +699,7 @@ impl Stream {
                     palette,
                 };
                 self.cards(&mut canvas, index, top, within.x);
+                self.quote_bars(&mut canvas, index, top, within.x);
             }
             top = bottom;
         }

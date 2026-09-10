@@ -360,7 +360,7 @@ fn flush_text(stack: &mut [Frame], pending: &mut String) {
 /// A label rather than a body: it becomes the `alt` attribute and the thing
 /// drawn when the image will not load, so nested emphasis and links have
 /// nothing to contribute but their words.
-fn plain_text(nodes: &[Node]) -> String {
+pub fn plain_text(nodes: &[Node]) -> String {
     let mut out = String::new();
     fn walk(nodes: &[Node], out: &mut String) {
         for node in nodes {
