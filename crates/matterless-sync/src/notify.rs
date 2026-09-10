@@ -526,3 +526,127 @@ mod tests {
         assert!(decide(&named, &ctx).notify);
     }
 }
+
+/// What a notification says, read from the store.
+///
+/// Beside `decide` because they are two halves of one thing: that answers
+/// whether to interrupt somebody, and this answers what to interrupt them with.
+/// Both shells need both, and a second copy of either would drift.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Announcement {
+    /// False when the author is still an id rather than a name, so a caller can
+    /// fetch the profile and say it properly a moment later.
+    pub resolved: bool,
+    pub author: String,
+    pub author_id: String,
+    /// The conversation it came from, for the title.
+    pub channel: String,
+    pub preview: String,
+    /// A direct or group message, which is named by its kind rather than by a
+    /// channel nobody would recognise.
+    pub direct: bool,
+}
+
+/// Reads what a notification for this post should say.
+///
+/// Falls back to ids rather than failing: a notification with an ugly name
+/// still tells you something happened, where no notification tells you nothing.
+pub fn announce(store: &matterless_store::Store, post_id: &str) -> Announcement {
+    let Ok(Some(post)) = store.post(post_id) else {
+        return Announcement::default();
+    };
+    let known = store
+        .users_by_ids(std::slice::from_ref(&post.user_id))
+        .ok()
+        .and_then(|found| found.get(&post.user_id).map(|user| user.username.clone()));
+    let (channel, direct) = conversation_label(store.channel(&post.channel_id).ok().flatten());
+    Announcement {
+        resolved: known.is_some(),
+        author: known.unwrap_or_else(|| post.user_id.clone()),
+        author_id: post.user_id,
+        channel,
+        preview: preview_of(&post.message),
+        direct,
+    }
+}
+
+/// What to call the conversation a notification came from.
+pub fn conversation_label(channel: Option<matterless_core::Channel>) -> (String, bool) {
+    match channel {
+        Some(channel) if channel.channel_type == "D" => ("Direct Message".to_string(), true),
+        Some(channel) if channel.channel_type == "G" => ("Group Message".to_string(), true),
+        Some(channel) if !channel.display_name.is_empty() => (channel.display_name, false),
+        // A channel with no display name at all: its name is at least readable.
+        Some(channel) => (channel.name, false),
+        // Not held locally yet. An empty title leaves the caller to fall back.
+        None => (String::new(), false),
+    }
+}
+
+/// One line of the message, short enough for a toast.
+pub fn preview_of(message: &str) -> String {
+    let single_line: String = message
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut short: String = single_line.chars().take(140).collect();
+    if single_line.chars().count() > 140 {
+        short.push('…');
+    }
+    short
+}
+
+#[cfg(test)]
+mod announcing {
+    use super::{conversation_label, preview_of};
+    use matterless_core::Channel;
+
+    fn channel(kind: &str, display: &str, name: &str) -> Channel {
+        Channel {
+            id: "c1".into(),
+            team_id: String::new(),
+            channel_type: kind.into(),
+            name: name.into(),
+            display_name: display.into(),
+            total_msg_count: 0,
+            total_msg_count_root: 0,
+            last_post_at: 0,
+            delete_at: 0,
+        }
+    }
+
+    /// A direct message is named by its kind: its channel name is an id pair
+    /// that would mean nothing on a toast.
+    #[test]
+    fn a_conversation_is_named_by_what_it_is() {
+        assert_eq!(
+            conversation_label(Some(channel("D", "", "a__b"))),
+            ("Direct Message".to_string(), true)
+        );
+        assert_eq!(
+            conversation_label(Some(channel("O", "Dev", "dev"))),
+            ("Dev".to_string(), false)
+        );
+        assert_eq!(
+            conversation_label(Some(channel("O", "", "dev"))),
+            ("dev".to_string(), false)
+        );
+        assert_eq!(conversation_label(None), (String::new(), false));
+    }
+
+    /// A toast is one line, so a message that is many becomes one.
+    #[test]
+    fn a_preview_is_a_single_line() {
+        assert_eq!(preview_of("one\n\n  two  \nthree"), "one two three");
+    }
+
+    #[test]
+    fn a_long_preview_is_cut_and_marked() {
+        let long = "x".repeat(200);
+        let preview = preview_of(&long);
+        assert_eq!(preview.chars().count(), 141);
+        assert!(preview.ends_with('…'));
+    }
+}

@@ -12,6 +12,7 @@
 use matterless_core::ws::{Signal, WsSession};
 use matterless_core::{AuthToken, Event, RestClient, User};
 use matterless_render::pending::PendingPosts;
+use matterless_sync::notify::{Announcement as ToastText, announce};
 use matterless_sync::{Arrival, Delta, SyncContext, SyncEngine};
 use serde::Serialize;
 use std::sync::Arc;
@@ -122,64 +123,12 @@ pub enum UiDelta {
     },
 }
 
-/// Trims a message to one short line for a toast. Newlines and long bodies
-/// both make Windows truncate unhelpfully, so it is done here where the whole
-/// text is available.
-/// What to call the conversation in a toast, and whether it is a direct one.
-///
-/// A DM has no display name of its own and its `name` is the pair of user ids,
-/// so falling back to the name put a wall of hex in the title. Naming the *kind*
-/// of conversation instead is what the official client does, and it avoids
-/// repeating the person, who is already in the body.
-fn conversation_label(channel: Option<matterless_core::Channel>) -> (String, bool) {
-    match channel {
-        Some(channel) if channel.channel_type == "D" => ("Direct Message".to_string(), true),
-        Some(channel) if channel.channel_type == "G" => ("Group Message".to_string(), true),
-        Some(channel) if !channel.display_name.is_empty() => (channel.display_name, false),
-        // A channel with no display name at all: its name is at least readable.
-        Some(channel) => (channel.name, false),
-        // Not held locally yet. An empty title leaves the shell to fall back.
-        None => (String::new(), false),
-    }
-}
-
-/// What a toast shows. Assembled in Rust because deciding it needs the store.
-#[derive(Debug, Default)]
-struct ToastText {
-    author: String,
-    /// Who wrote it, so an unresolved name can be fetched.
-    author_id: String,
-    /// False when `author` is standing in as a raw id because the local store
-    /// has never met this person -- which a fresh install has not, for almost
-    /// everybody.
-    resolved: bool,
-    /// The conversation's name, or what kind of conversation it is.
-    channel: String,
-    preview: String,
-    /// A direct or group message, where the person is the conversation.
-    direct: bool,
-}
-
 /// Milliseconds since the epoch, matching what `Date.now()` reads in the shell.
 fn wall_clock_ms() -> f64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|since| since.as_secs_f64() * 1000.0)
         .unwrap_or(0.0)
-}
-
-fn preview_of(message: &str) -> String {
-    let single_line: String = message
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .collect::<Vec<_>>()
-        .join(" ");
-    let mut short: String = single_line.chars().take(140).collect();
-    if single_line.chars().count() > 140 {
-        short.push('…');
-    }
-    short
 }
 
 struct Runner {
@@ -280,24 +229,7 @@ impl Runner {
     /// still tells you something happened, where no notification tells you
     /// nothing.
     fn notification_text(&self, post_id: &str) -> ToastText {
-        let store = self.engine.store();
-        let Ok(Some(post)) = store.post(post_id) else {
-            return ToastText::default();
-        };
-        let known = store
-            .users_by_ids(std::slice::from_ref(&post.user_id))
-            .ok()
-            .and_then(|found| found.get(&post.user_id).map(|user| user.username.clone()));
-
-        let (channel, direct) = conversation_label(store.channel(&post.channel_id).ok().flatten());
-        ToastText {
-            resolved: known.is_some(),
-            author: known.unwrap_or_else(|| post.user_id.clone()),
-            author_id: post.user_id.clone(),
-            channel,
-            preview: preview_of(&post.message),
-            direct,
-        }
+        announce(self.engine.store(), post_id)
     }
 
     /// Fetches a stranger's name, then sends the notification.
@@ -705,14 +637,15 @@ mod tests {
             "",
             "7gwdwjg1zjf7tb5xxdp6ieazgr__ufwu3fbgutnu5ep8odumg4tzzr",
         );
-        let (label, direct) = conversation_label(Some(dm));
+        let (label, direct) = matterless_sync::notify::conversation_label(Some(dm));
         assert_eq!(label, "Direct Message");
         assert!(direct, "the shell marks the author with @ for these");
     }
 
     #[test]
     fn a_group_message_says_so_too() {
-        let (label, direct) = conversation_label(Some(channel("G", "", "abc123def456")));
+        let (label, direct) =
+            matterless_sync::notify::conversation_label(Some(channel("G", "", "abc123def456")));
         assert_eq!(label, "Group Message");
         assert!(direct);
     }
@@ -721,15 +654,19 @@ mod tests {
     /// conversation, so nothing is marked.
     #[test]
     fn a_channel_is_named_by_its_display_name() {
-        let (label, direct) =
-            conversation_label(Some(channel("O", "Builds | Alerts", "builds--alerts")));
+        let (label, direct) = matterless_sync::notify::conversation_label(Some(channel(
+            "O",
+            "Builds | Alerts",
+            "builds--alerts",
+        )));
         assert_eq!(label, "Builds | Alerts");
         assert!(!direct);
     }
 
     #[test]
     fn a_channel_without_a_display_name_falls_back_to_its_slug() {
-        let (label, _) = conversation_label(Some(channel("P", "", "secret-project")));
+        let (label, _) =
+            matterless_sync::notify::conversation_label(Some(channel("P", "", "secret-project")));
         assert_eq!(label, "secret-project");
     }
 
@@ -737,7 +674,7 @@ mod tests {
     /// blank title still says something happened; failing would say nothing.
     #[test]
     fn an_unknown_channel_yields_an_empty_label_rather_than_failing() {
-        let (label, direct) = conversation_label(None);
+        let (label, direct) = matterless_sync::notify::conversation_label(None);
         assert!(label.is_empty());
         assert!(!direct);
     }
