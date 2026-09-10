@@ -183,6 +183,8 @@ struct App {
     /// Jumping to a conversation by name, which is how a reader gets around a
     /// hundred and fourteen channels without hunting the sidebar.
     switcher: matterless_view::switcher::Switcher,
+    /// Finding a message already said, answered from the local store.
+    search: matterless_view::search::Search,
     /// How far back the open channel is read. Grows as older pages arrive.
     depth: u32,
     /// True while a page of history is in flight, so the same page is not asked
@@ -294,6 +296,7 @@ impl App {
             arrived: Vec::new(),
             clicked: None,
             switcher: matterless_view::switcher::Switcher::default(),
+            search: matterless_view::search::Search::default(),
             depth: matterless_view::feed::PAGE,
             loading_older: false,
             more_history: true,
@@ -1006,6 +1009,41 @@ impl App {
 
     /// Hands the frame's input to the widgets that want it.
     fn react(&mut self) {
+        // Search first and alone while it is open, for the same reason the
+        // switcher is: it is a thing the reader is doing instead of reading.
+        if self.search.open {
+            let mut input = std::mem::take(&mut self.input);
+            if input.struck(Key::Escape) {
+                self.search.hide(&mut input);
+                self.input = input;
+                return;
+            }
+            let within = self.stream_rect();
+            let store = self.store.clone();
+            let hit = store.as_ref().and_then(|store| {
+                self.search.react(
+                    &mut self.fonts,
+                    &input,
+                    within,
+                    &mut self.clipboard,
+                    store,
+                    &self.me,
+                )
+            });
+            if let Some(hit) = hit {
+                self.search.hide(&mut input);
+                self.input = input;
+                // Opened at the channel it was said in. Landing on the message
+                // itself needs an anchor the window cannot ask for yet, so it
+                // opens where the reader can find it rather than pretending.
+                self.sidebar.selected = Some(hit.channel_id.clone());
+                self.open_channel(&hit.channel_id);
+                return;
+            }
+            self.input = input;
+            return;
+        }
+
         // The switcher first and alone while it is open: it is a thing the
         // reader is doing instead of reading, so the boxes behind it must not
         // take the same keys.
@@ -1235,6 +1273,19 @@ impl App {
             self.switcher.draw(&mut canvas, stream);
             self.switcher.query.draw(&mut canvas, field, true);
         }
+        if self.search.open {
+            let stream = self.stream_rect();
+            let field = self.search.field(stream);
+            scene.clip_to(0.0, 0.0, self.size.0 as f32, self.size.1 as f32);
+            let mut canvas = Canvas {
+                scene: &mut scene,
+                painter: &mut self.painter,
+                fonts: &mut self.fonts,
+                palette: &self.palette,
+            };
+            self.search.draw(&mut canvas, stream);
+            self.search.query.draw(&mut canvas, field, true);
+        }
         scene
     }
 
@@ -1416,6 +1467,11 @@ impl ApplicationHandler<Update> for App {
                 if down && self.input.chord(Key::Char('k')) {
                     let mut input = std::mem::take(&mut self.input);
                     self.switcher.show(&mut self.fonts, &mut input);
+                    self.input = input;
+                }
+                if down && self.input.chord(Key::Char('f')) {
+                    let mut input = std::mem::take(&mut self.input);
+                    self.search.show(&mut self.fonts, &mut input);
                     self.input = input;
                 }
                 if down {
