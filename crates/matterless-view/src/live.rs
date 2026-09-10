@@ -83,6 +83,12 @@ pub enum Ask {
         emoji: String,
         on: bool,
     },
+    /// Resolve these emoji names against the server, once each.
+    ///
+    /// The answer is remembered either way: a name the server does not know as
+    /// custom is a standard one too new for the generated table, or a scanner
+    /// artefact like the `53` in `12:53:`, and neither is worth asking twice.
+    NameEmoji { names: Vec<String> },
     /// Which conversation the reader is looking at.
     ///
     /// The notification rules ask: a message in the channel already on screen
@@ -326,6 +332,31 @@ async fn run(
                             Err(error) => eprintln!("{} on {post_id}: {error}", action.slug()),
                         }
                     }
+                    Ask::NameEmoji { names } => {
+                        let mut learned = 0usize;
+                        for name in &names {
+                            let id = rest
+                                .emoji_by_name(name)
+                                .await
+                                .ok()
+                                .flatten()
+                                .map(|emoji| emoji.id)
+                                .unwrap_or_default();
+                            if !id.is_empty() {
+                                learned += 1;
+                            }
+                            if let Err(error) = engine.store().remember_emoji(name, &id) {
+                                eprintln!("remembering :{name}: {error}");
+                            }
+                        }
+                        if learned > 0 {
+                            println!("{learned} of {} names are custom emoji", names.len());
+                            // The same delta the socket raises when somebody
+                            // adds one, so the window has one way to hear that
+                            // the table changed rather than two.
+                            wake.wake(Update::Changed(vec![Delta::CustomEmojiChanged]));
+                        }
+                    }
                     Ask::Looking { channel_id } => {
                         context.active_channel = Some(channel_id);
                         // A window with focus it cannot measure is better
@@ -507,6 +538,18 @@ pub fn touches_thread(deltas: &[Delta], root_id: &str) -> bool {
     })
 }
 
+/// Whether the custom emoji table changed under what is on screen.
+///
+/// Separate from `touched`, which deliberately names no channel for this: the
+/// table arriving is not a reason to replan four hundred messages, but it is a
+/// reason to look the names up again. A pill drawn before the table landed
+/// found nothing behind its name and stayed blank until the channel was left.
+pub fn renames_emoji(deltas: &[Delta]) -> bool {
+    deltas
+        .iter()
+        .any(|delta| matches!(delta, Delta::CustomEmojiChanged))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -557,6 +600,16 @@ mod tests {
             Delta::CustomEmojiChanged,
         ];
         assert!(touched(&deltas).is_empty());
+    }
+
+    /// Ephemeral for planning is not ephemeral for drawing: the emoji table is
+    /// the one delta that redraws nothing and still changes what is on screen.
+    #[test]
+    fn the_emoji_table_is_ephemeral_but_not_ignorable() {
+        let deltas = vec![Delta::CustomEmojiChanged];
+        assert!(touched(&deltas).is_empty());
+        assert!(renames_emoji(&deltas));
+        assert!(!renames_emoji(&[posted("one", "", "p1")]));
     }
 
     /// The two halves of what decides whether a reply interrupts somebody.

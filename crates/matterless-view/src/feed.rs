@@ -140,12 +140,8 @@ pub fn rows_from(
     Ok((channel_id, rows))
 }
 
-/// The custom emoji a page of rows uses, by name to the id behind their image.
-///
-/// A standard emoji is a character the parser already resolved. A custom one is
-/// an image behind the session token and has no character at all, so without
-/// this a reaction reads ":bongo:" and a message body says the name out loud.
-pub fn custom_emoji(store: &Store, rows: &[Row]) -> HashMap<String, String> {
+/// Every emoji name a page of rows mentions that has no character of its own.
+fn named_by(rows: &[Row]) -> Vec<String> {
     let mut wanted: Vec<String> = Vec::new();
     for row in rows {
         let (Row::Post { post } | Row::Continuation { post }) = row else {
@@ -160,13 +156,36 @@ pub fn custom_emoji(store: &Store, rows: &[Row]) -> HashMap<String, String> {
     }
     wanted.sort();
     wanted.dedup();
+    wanted
+}
+
+/// The custom emoji a page of rows uses, by name to the id behind their image.
+///
+/// A standard emoji is a character the parser already resolved. A custom one is
+/// an image behind the session token and has no character at all, so without
+/// this a reaction reads ":bongo:" and a message body says the name out loud.
+pub fn custom_emoji(store: &Store, rows: &[Row]) -> HashMap<String, String> {
     store
-        .known_emoji(&wanted)
+        .known_emoji(&named_by(rows))
         .unwrap_or_default()
         .into_iter()
         // An empty id means the store looked and it is a standard one, which is
         // a real answer and not a miss.
         .filter(|(_, id)| !id.is_empty())
+        .collect()
+}
+
+/// The names on this page nobody has asked the server about yet.
+///
+/// Absent from the table entirely, which is not the same as present with an
+/// empty id: that is the remembered answer "the server does not know this as
+/// custom", and asking again would be asking a question already answered.
+pub fn unknown_emoji(store: &Store, rows: &[Row]) -> Vec<String> {
+    let wanted = named_by(rows);
+    let known = store.known_emoji(&wanted).unwrap_or_default();
+    wanted
+        .into_iter()
+        .filter(|name| !known.contains_key(name))
         .collect()
 }
 
@@ -192,4 +211,66 @@ fn named_in(nodes: &[matterless_render::markdown::Node]) -> Vec<String> {
         }
     }
     found
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use matterless_render::{PostRow, ReactionSummary};
+    use std::sync::Arc;
+
+    fn reacted_with(names: &[&str]) -> Vec<Row> {
+        vec![Row::Post {
+            post: PostRow {
+                post_id: "p1".into(),
+                root_id: String::new(),
+                author_id: "u1".into(),
+                author_name: "ada".into(),
+                create_at: 1,
+                update_at: 1,
+                edited: false,
+                nodes: Arc::new(Vec::new()),
+                reactions: names
+                    .iter()
+                    .map(|name| ReactionSummary {
+                        emoji: (*name).to_string(),
+                        count: 1,
+                        mine: false,
+                        // No character, so it is either custom or a name the
+                        // table has never heard of -- the two this asks about.
+                        unicode: None,
+                        names: Vec::new(),
+                    })
+                    .collect(),
+                files: Vec::new(),
+                attachments: Vec::new(),
+                avatar_at: 0,
+                bot: false,
+                body_is_attachment_only: false,
+                pending: false,
+                failed: false,
+                pinned: false,
+                saved: false,
+                following: false,
+                previews: Vec::new(),
+            },
+        }]
+    }
+
+    /// A name nobody has asked about is asked about; one already answered is
+    /// not. Without the second half every frame would ask the server the same
+    /// question again, and the answer to "is `53` an emoji" does not change.
+    #[test]
+    fn only_names_nobody_has_asked_about_are_asked_about() {
+        let store = Store::open_in_memory().expect("a store");
+        store.remember_emoji("bongo", "abc123").expect("custom");
+        store.remember_emoji("53", "").expect("not custom");
+        let rows = reacted_with(&["bongo", "53", "shipit"]);
+
+        assert_eq!(unknown_emoji(&store, &rows), vec!["shipit".to_string()]);
+        // And the one with an id behind it is the one that can be drawn.
+        let known = custom_emoji(&store, &rows);
+        assert_eq!(known.get("bongo").map(String::as_str), Some("abc123"));
+        assert!(!known.contains_key("53"));
+    }
 }

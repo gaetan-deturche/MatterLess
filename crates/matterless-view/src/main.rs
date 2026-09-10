@@ -197,6 +197,10 @@ struct App {
     more_history: bool,
 }
 
+/// How many emoji names are asked about in one frame. A channel full of them
+/// must not turn one frame into fifty requests.
+const LOOKUPS: usize = 12;
+
 impl App {
     /// Real messages if the store can be read, and the sample if not.
     ///
@@ -275,6 +279,13 @@ impl App {
             painter: Painter::new(),
             stream: {
                 let mut stream = Stream::new("stream");
+                // Looked up here as well as in `open_channel`, because the
+                // first channel never goes through it: without this every
+                // custom emoji on the channel the app opens with drew as an
+                // empty box until the reader left it and came back.
+                if let Some(store) = store.as_deref() {
+                    stream.custom = matterless_view::feed::custom_emoji(store, &rows);
+                }
                 stream.rows = rows;
                 stream
             },
@@ -623,9 +634,79 @@ impl App {
                 {
                     self.reread_thread(&root);
                 }
+                // The emoji table arriving is not a reason to replan four
+                // hundred messages, so `touched` names no channel for it. It
+                // is a reason to look up the names again: a pill drawn before
+                // the table landed found nothing behind its name and stayed
+                // blank for as long as the channel was open.
+                if matterless_view::live::renames_emoji(&deltas) {
+                    self.rename_emoji();
+                }
             }
         }
         self.redraw();
+    }
+
+    /// Names any reaction that can be neither drawn nor fetched.
+    ///
+    /// Names only, never message text. A pill with no character and no picture
+    /// is an empty box, and the tally is what says whether that is a name
+    /// nobody has asked about or one the server answered "not custom" for.
+    fn report_blank_pills(&self) {
+        let blank: Vec<&str> = self
+            .stream
+            .rows
+            .iter()
+            .filter_map(|row| match row {
+                Row::Post { post } | Row::Continuation { post } => Some(post),
+                _ => None,
+            })
+            .flat_map(|post| &post.reactions)
+            .filter(|reaction| reaction.unicode.is_none())
+            .map(|reaction| reaction.emoji.as_str())
+            .filter(|name| !self.stream.custom.contains_key(*name))
+            .collect();
+        if !blank.is_empty() {
+            println!("no character and no picture for: {}", blank.join(", "));
+        }
+    }
+
+    /// Asks the server about emoji names nobody has asked about yet.
+    ///
+    /// A few at a time, and remembered either way, so a channel full of
+    /// unknown names is a handful of requests spread over a few frames rather
+    /// than fifty at once. Whatever is left over goes on the next frame.
+    fn name_emoji(&mut self) {
+        let (Some(store), Some(link)) = (self.store.clone(), self.link.as_ref()) else {
+            return;
+        };
+        let mut names = matterless_view::feed::unknown_emoji(&store, &self.stream.rows);
+        if let Some(thread) = self.thread.as_ref() {
+            names.extend(matterless_view::feed::unknown_emoji(&store, &thread.rows));
+        }
+        let asking: Vec<String> = names
+            .into_iter()
+            // The asked set is what stops the same name going out once a frame
+            // while the answer is still in flight.
+            .filter(|name| self.asked.insert(format!("emoji-name/{name}")))
+            .take(LOOKUPS)
+            .collect();
+        if !asking.is_empty() {
+            link.send(matterless_view::live::Ask::NameEmoji { names: asking });
+        }
+    }
+
+    /// Looks up the custom emoji on screen again, and asks for any new picture.
+    fn rename_emoji(&mut self) {
+        let Some(store) = self.store.clone() else {
+            return;
+        };
+        self.stream.custom = matterless_view::feed::custom_emoji(&store, &self.stream.rows);
+        if let Some(thread) = self.thread.as_mut() {
+            thread.custom = matterless_view::feed::custom_emoji(&store, &thread.rows);
+        }
+        self.report_blank_pills();
+        self.want_faces();
     }
 
     /// Sends a message, showing it before the server has agreed to it.
@@ -1194,6 +1275,7 @@ impl App {
                 self.stream.me = self.me.clone();
                 self.stream.custom = matterless_view::feed::custom_emoji(&store, &rows);
                 self.stream.rows = rows;
+                self.report_blank_pills();
                 // A thread from the channel just left has nothing to do with
                 // the one just opened.
                 self.thread = None;
@@ -1653,6 +1735,7 @@ impl ApplicationHandler<Update> for App {
                 }
                 // What is on screen may have changed since the last frame.
                 self.want_faces();
+                self.name_emoji();
                 let scene = self.scene();
                 let size = self.size;
                 let ground = self.palette.ground;
