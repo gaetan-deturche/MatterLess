@@ -398,7 +398,15 @@ async fn run(
                                     height,
                                     rgba,
                                 }),
-                                None => eprintln!("{key}: could not be decoded"),
+                                // Named by what actually came back: a picture
+                                // this build has no decoder for and a picture
+                                // that is really an error page fail the same
+                                // way, and "could not be decoded" said neither.
+                                None => eprintln!(
+                                    "{key}: could not be decoded, {} bytes of {}",
+                                    bytes.len(),
+                                    kind_of(&bytes)
+                                ),
                             },
                             // A person with no picture is not an error, and a
                             // silent gap is the right drawing for one.
@@ -606,6 +614,35 @@ fn decode(bytes: &[u8], width: u32, height: u32) -> Option<(u32, u32, Vec<u8>)> 
         rgba = image::imageops::thumbnail(&rgba, wanted.0, wanted.1);
     }
     Some((rgba.width(), rgba.height(), rgba.into_raw()))
+}
+
+/// What a downloaded picture actually is, by its first bytes.
+///
+/// Only for saying so in a message: the decoder sniffs for itself.
+fn kind_of(bytes: &[u8]) -> &'static str {
+    match bytes {
+        [0x89, b'P', b'N', b'G', ..] => "png",
+        [0xFF, 0xD8, ..] => "jpeg",
+        [b'G', b'I', b'F', ..] => "gif",
+        [
+            b'R',
+            b'I',
+            b'F',
+            b'F',
+            _,
+            _,
+            _,
+            _,
+            b'W',
+            b'E',
+            b'B',
+            b'P',
+            ..,
+        ] => "webp",
+        [b'<', ..] | [0xEF, 0xBB, 0xBF, b'<', ..] => "markup, not a picture",
+        [b'{', ..] => "json, not a picture",
+        _ => "something unrecognised",
+    }
 }
 
 /// The largest picture worth putting in a shared atlas.
