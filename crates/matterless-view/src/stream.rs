@@ -78,6 +78,10 @@ impl Stream {
     pub fn lay_out(&mut self, fonts: &mut Fonts, width: f32) {
         self.theme = Theme {
             width,
+            // The clock on every row, in the reader's own time rather than
+            // UTC. Read here rather than held, so a machine that crosses a
+            // daylight-saving boundary while running is right afterwards.
+            utc_offset_minutes: crate::clock::utc_offset_minutes(),
             ..Theme::default()
         };
         self.laid = self

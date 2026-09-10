@@ -11,6 +11,7 @@
 
 pub mod actions;
 pub mod atlas;
+pub mod clock;
 pub mod composer;
 #[cfg(test)]
 mod composer_tests;

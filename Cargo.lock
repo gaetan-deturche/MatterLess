@@ -3080,6 +3080,7 @@ dependencies = [
  "tauri-winrt-notification",
  "tokio",
  "wgpu",
+ "windows 0.61.3",
  "winit",
 ]
 

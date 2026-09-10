@@ -1099,6 +1099,7 @@ impl App {
 
         let mut options =
             matterless_render::PlanOptions::new(matterless_core::model::ThreadMode::Flat, &self.me);
+        options.utc_offset_minutes = matterless_view::clock::utc_offset_minutes();
         options.author_names = known
             .iter()
             .map(|(id, user)| (id.clone(), user.username.clone()))

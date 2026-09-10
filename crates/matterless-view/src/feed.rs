@@ -69,6 +69,10 @@ pub fn rows_of(
     authors.dedup();
     let people = store.users_by_ids(&authors).unwrap_or_default();
     let mut options = PlanOptions::new(ThreadMode::Collapsed, me_id);
+    // Every timestamp in the store is UTC. Without this the day a message
+    // belongs to is decided in UTC too, and a conversation that ran across
+    // midnight local time is separated in the wrong place.
+    options.utc_offset_minutes = crate::clock::utc_offset_minutes();
     options.author_names = people
         .iter()
         .map(|(id, user)| (id.clone(), user.username.clone()))
@@ -125,6 +129,10 @@ pub fn rows_from(
     let people = store.users_by_ids(&authors).unwrap_or_default();
 
     let mut options = PlanOptions::new(ThreadMode::Collapsed, me_id);
+    // Every timestamp in the store is UTC. Without this the day a message
+    // belongs to is decided in UTC too, and a conversation that ran across
+    // midnight local time is separated in the wrong place.
+    options.utc_offset_minutes = crate::clock::utc_offset_minutes();
     options.author_names = people
         .iter()
         .map(|(id, user)| (id.clone(), user.username.clone()))
