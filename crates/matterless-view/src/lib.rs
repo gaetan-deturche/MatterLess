@@ -14,6 +14,7 @@ pub mod atlas;
 pub mod composer;
 #[cfg(test)]
 mod composer_tests;
+pub mod edit;
 pub mod feed;
 pub mod header;
 pub mod live;

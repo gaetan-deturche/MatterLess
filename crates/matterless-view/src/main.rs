@@ -188,6 +188,8 @@ struct App {
     /// Picking a reaction, and the row it is anchored to.
     picker: matterless_view::picker::Picker,
     picked_near: matterless_ui::Rect,
+    /// Changing a message, in the row it sits in.
+    edit: matterless_view::edit::Edit,
     /// How far back the open channel is read. Grows as older pages arrive.
     depth: u32,
     /// True while a page of history is in flight, so the same page is not asked
@@ -313,6 +315,7 @@ impl App {
             search: matterless_view::search::Search::default(),
             picker: matterless_view::picker::Picker::default(),
             picked_near: matterless_ui::Rect::new(0.0, 0.0, 0.0, 0.0),
+            edit: matterless_view::edit::Edit::default(),
             depth: matterless_view::feed::PAGE,
             loading_older: false,
             more_history: true,
@@ -943,6 +946,22 @@ impl App {
                     .unwrap_or(post_id);
                 self.open_thread(&root);
             }
+            Action::Edit => {
+                // The raw markdown from the store, not the rendered body: what
+                // was typed is what should come back into the box.
+                let Some(said) = self
+                    .store
+                    .as_ref()
+                    .and_then(|store| store.post(&post_id).ok().flatten())
+                else {
+                    eprintln!("{post_id}: no copy to edit");
+                    return;
+                };
+                let mut input = std::mem::take(&mut self.input);
+                self.edit
+                    .show(&post_id, &said.message, &mut self.fonts, &mut input);
+                self.input = input;
+            }
             Action::Link => {
                 // Into this window's own clipboard, which is where everything
                 // else it copies goes until there is a platform one.
@@ -1035,7 +1054,16 @@ impl App {
             boxes.extend(thread.boxes(rect, thread.hovered(&self.input)));
         }
         boxes.extend(self.picker.boxes(self.picked_near, self.stream_rect()));
+        if let Some(row) = self.edited_row() {
+            boxes.extend(self.edit.boxes(row, self.stream_rect()));
+        }
         boxes
+    }
+
+    /// Where the message being edited sits, if it is still on screen.
+    fn edited_row(&self) -> Option<matterless_ui::Rect> {
+        let post_id = self.edit.for_post.as_ref()?;
+        self.stream.row_rect(post_id, self.stream_rect())
     }
 
     /// Opens a thread beside the channel, or closes the one that is open.
@@ -1109,6 +1137,36 @@ impl App {
 
     /// Hands the frame's input to the widgets that want it.
     fn react(&mut self) {
+        // The editor first of all: it is the only panel that is part of a
+        // message rather than in front of one, and while it is open the keys
+        // belong to it rather than to the composer at the bottom.
+        if self.edit.open() {
+            let mut input = std::mem::take(&mut self.input);
+            if input.struck(Key::Escape) {
+                self.edit.hide(&mut input);
+                self.input = input;
+                return;
+            }
+            let within = self.stream_rect();
+            let row = self
+                .edited_row()
+                .unwrap_or_else(|| matterless_ui::Rect::new(within.x, within.y, within.width, 0.0));
+            let saved = self
+                .edit
+                .react(&mut self.fonts, &input, row, within, &mut self.clipboard);
+            if let Some(message) = saved {
+                let post_id = self.edit.for_post.clone().unwrap_or_default();
+                self.edit.hide(&mut input);
+                self.input = input;
+                if let Some(link) = self.link.as_ref() {
+                    link.send(matterless_view::live::Ask::Edit { post_id, message });
+                }
+                return;
+            }
+            self.input = input;
+            return;
+        }
+
         // The picker first: it is the smallest of the panels and the only one
         // opened from a message, so while it is up the keys belong to it.
         if self.picker.open() {
@@ -1433,6 +1491,21 @@ impl App {
             self.search.draw(&mut canvas, stream);
             self.search.query.draw(&mut canvas, field, true);
         }
+        // In the row rather than over the window, so it is clipped to the
+        // stream like the message it stands in place of.
+        if self.edit.open()
+            && let Some(row) = self.edited_row()
+        {
+            scene.clip_to(stream.x, stream.y, stream.width, stream.height);
+            let mut canvas = Canvas {
+                scene: &mut scene,
+                painter: &mut self.painter,
+                fonts: &mut self.fonts,
+                palette: &self.palette,
+            };
+            self.edit.draw(&mut canvas, row, stream);
+        }
+
         // Over everything, including the toolbar it was opened from: it is a
         // small panel and whatever it covers is not what the reader is doing.
         if self.picker.open() {

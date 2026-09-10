@@ -281,6 +281,27 @@ impl Composer {
         self.touched = false;
     }
 
+    /// Puts text in it, with the caret at the end.
+    ///
+    /// At the end rather than the start, because the reason to open a box that
+    /// already has words in it is to change what they say, and the end is where
+    /// somebody rereading their own sentence stops.
+    pub fn fill(&mut self, text: &str, fonts: &mut Fonts) {
+        self.editor.with_buffer_mut(|buffer| {
+            buffer.set_text(text, &Attrs::new(), Shaping::Advanced, None);
+        });
+        self.editor.shape_as_needed(fonts.system_mut(), false);
+        let end = self.editor.with_buffer(|buffer| {
+            let line = buffer.lines.len().saturating_sub(1);
+            Cursor::new(line, buffer.lines[line].text().len())
+        });
+        self.editor.set_cursor(end);
+        self.editor.set_selection(Selection::None);
+        // Already said something, so an empty box reads as emptied on purpose
+        // rather than never filled.
+        self.touched = true;
+    }
+
     /// Draws the box, the text, the selection and the caret.
     pub fn draw(&self, into: &mut Canvas<'_>, within: Rect, focused: bool) {
         let Canvas {
