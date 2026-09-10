@@ -177,6 +177,9 @@ struct App {
     /// Decoded pictures waiting to go into the atlas, which only the thread
     /// that owns the GPU may touch.
     arrived: Vec<(String, u32, u32, Vec<u8>)>,
+    /// What a clicked notification does. Held once and shared with every toast,
+    /// because each one outlives the call that raised it.
+    clicked: Option<Arc<matterless_view::toast::Clicked>>,
 }
 
 impl App {
@@ -279,6 +282,7 @@ impl App {
             outstanding: Arc::new(matterless_render::pending::PendingPosts::default()),
             asked: std::collections::HashSet::new(),
             arrived: Vec::new(),
+            clicked: None,
         };
         app.sidebar.selected = Some(channel);
         // Focused before anything is clicked: a chat window that needs a click
@@ -504,6 +508,13 @@ impl App {
             println!("no session in the keychain; staying offline");
             return;
         };
+        // The click handler is built here because it needs the same proxy the
+        // socket thread wakes the window with: a toast fires its callback on a
+        // thread of its own, and this is how the answer gets home.
+        let waking = proxy.clone();
+        self.clicked = Some(Arc::new(Box::new(move |channel_id: String| {
+            let _ = waking.send_event(matterless_view::live::Update::Activated(channel_id));
+        })));
         println!("connecting to {server}");
         self.link = Some(matterless_view::live::start(
             store,
@@ -523,6 +534,15 @@ impl App {
             Update::SignedIn { id, username } => {
                 println!("reader is {username}");
                 self.signed_in(&id);
+            }
+            Update::Activated(channel_id) => {
+                // Clicking a notification is the reader saying they want to be
+                // looking at that conversation.
+                if let Some(window) = &self.window {
+                    window.focus_window();
+                }
+                self.sidebar.selected = Some(channel_id.clone());
+                self.open_channel(&channel_id);
             }
             Update::Picture {
                 key,
@@ -558,6 +578,7 @@ impl App {
                 eprintln!("staying offline: {why}");
             }
             Update::Changed(deltas) => {
+                self.announce(&deltas);
                 // The engine has already written every one of these. The only
                 // question left is whether anything on screen is now stale.
                 let open = self.sidebar.selected.clone().unwrap_or_default();
@@ -620,6 +641,49 @@ impl App {
         self.stream.to_bottom(within);
         if let Some(root) = self.open_root() {
             self.reread_thread(&root);
+        }
+    }
+
+    /// Raises a notification for anything that earned one.
+    ///
+    /// The decision was made in the sync engine, by the same `notify::decide`
+    /// the app runs -- muting, mentions, the reader's own messages and their
+    /// do-not-disturb are all already accounted for. Nothing is reconsidered
+    /// here; the flag on the delta is the answer.
+    fn announce(&mut self, deltas: &[matterless_sync::Delta]) {
+        let Some(store) = self.store.clone() else {
+            return;
+        };
+        // A message in the channel being looked at is one the reader can
+        // already see, so interrupting them about it is noise. The app leaves
+        // this to window focus, which this window cannot ask about yet.
+        let open = self.sidebar.selected.clone().unwrap_or_default();
+        for delta in deltas {
+            let matterless_sync::Delta::PostUpserted {
+                post_id,
+                channel_id,
+                notify: true,
+                ..
+            } = delta
+            else {
+                continue;
+            };
+            if channel_id == &open {
+                continue;
+            }
+            let said = matterless_sync::notify::announce(&store, post_id);
+            let (title, body) = matterless_view::toast::wording(&said);
+            // The count, never the words: a notification carries the message
+            // and the log must not.
+            println!(
+                "notifying about {channel_id} ({} characters, named: {})",
+                said.preview.chars().count(),
+                said.resolved
+            );
+            let Some(clicked) = self.clicked.clone() else {
+                continue;
+            };
+            matterless_view::toast::raise(channel_id, &title, &body, clicked);
         }
     }
 

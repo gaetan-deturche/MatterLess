@@ -3077,6 +3077,7 @@ dependencies = [
  "png 0.18.1",
  "pollster",
  "serde_json",
+ "tauri-winrt-notification",
  "tokio",
  "wgpu",
  "winit",
