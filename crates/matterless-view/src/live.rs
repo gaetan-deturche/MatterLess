@@ -45,6 +45,13 @@ pub enum Update {
     /// from whatever thread the platform fires its callback on, and delivered
     /// like everything else on the one that owns the window.
     Activated(String),
+    /// A newer build is there, and here is what it would take to install it.
+    ///
+    /// Offered, never taken: nothing has been fetched at this point beyond the
+    /// manifest saying it exists.
+    Updatable(crate::update::Offer),
+    /// Installing the build the reader accepted did not work.
+    UpdateFailed(String),
     /// The tray icon was used.
     ///
     /// It arrives the same way, even though the shell delivers it on this very
@@ -149,6 +156,15 @@ pub enum Ask {
     },
     /// Be told about one message again later.
     Remind { post_id: String, when: i64 },
+    /// Look for a newer build. Answered with nothing at all when there is
+    /// none, which is the common case and not worth a message.
+    LookForUpdate,
+    /// Fetch, check and run the installer the reader has just accepted.
+    ///
+    /// Does not come back: the installer replaces this executable, so the
+    /// process has to be gone before it can. Only a reader's press reaches
+    /// here -- nothing is downloaded by the looking.
+    InstallUpdate(crate::update::Offer),
     /// Join a public channel, then open it.
     Join { channel_id: String },
     /// Find or create the conversation with one person, then open it.
@@ -599,6 +615,34 @@ async fn run(
                         match rest.set_reminder(&me_id, &post_id, when).await {
                             Ok(()) => println!("reminder set on {post_id}"),
                             Err(error) => eprintln!("setting a reminder: {error}"),
+                        }
+                    }
+                    Ask::LookForUpdate => {
+                        match looked().await {
+                            Ok(Some(offer)) => {
+                                println!("{} is available", offer.version);
+                                wake.wake(Update::Updatable(offer));
+                            }
+                            Ok(None) => println!("already the newest build"),
+                            // A failed check is not a failed start: the client
+                            // runs perfectly well on the build it has.
+                            Err(error) => eprintln!("could not look for an update: {error}"),
+                        }
+                    }
+                    Ask::InstallUpdate(offer) => {
+                        match fetched(&offer).await {
+                            // `install` does not return when it works.
+                            Ok(bytes) => match crate::update::install(&bytes, &offer.version) {
+                                Ok(_) => unreachable!("the installer took over"),
+                                Err(error) => {
+                                    eprintln!("installing {}: {error}", offer.version);
+                                    wake.wake(Update::UpdateFailed(error));
+                                }
+                            },
+                            Err(error) => {
+                                eprintln!("fetching {}: {error}", offer.version);
+                                wake.wake(Update::UpdateFailed(error));
+                            }
                         }
                     }
                     Ask::Join { channel_id } => {
@@ -1483,6 +1527,63 @@ fn listed(title: &str, store: &Store, list: PostList, me_id: &str) -> Update {
 /// Teams first, because a channel is asked for per team and a direct message
 /// comes back under every one of them -- so they are deduplicated by id or the
 /// same conversation is stored several times over.
+/// Asks the release what the newest build is.
+///
+/// Its own client rather than the one the server session uses: this is a
+/// request to a release host, and it has no business carrying a Mattermost
+/// token.
+async fn looked() -> Result<Option<crate::update::Offer>, String> {
+    let Some(target) = crate::update::target() else {
+        return Err("no manifest key for this platform".to_string());
+    };
+    let client = reqwest::Client::builder()
+        .user_agent(concat!("MatterLess/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .map_err(|error| error.to_string())?;
+    let body = client
+        .get(crate::update::ENDPOINT)
+        .send()
+        .await
+        .map_err(|error| error.to_string())?
+        .error_for_status()
+        .map_err(|error| error.to_string())?
+        .text()
+        .await
+        .map_err(|error| error.to_string())?;
+    let manifest: crate::update::Manifest =
+        serde_json::from_str(&body).map_err(|error| format!("the manifest will not parse: {error}"))?;
+    Ok(crate::update::offered(
+        &manifest,
+        &target,
+        crate::update::running(),
+    ))
+}
+
+/// Fetches the installer and checks it against the key before handing it back.
+///
+/// The check is here rather than at the call site so there is no path that
+/// reaches the bytes without it: unverified bytes never leave this function.
+async fn fetched(offer: &crate::update::Offer) -> Result<Vec<u8>, String> {
+    let client = reqwest::Client::builder()
+        .user_agent(concat!("MatterLess/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .map_err(|error| error.to_string())?;
+    let bytes = client
+        .get(&offer.url)
+        .send()
+        .await
+        .map_err(|error| error.to_string())?
+        .error_for_status()
+        .map_err(|error| error.to_string())?
+        .bytes()
+        .await
+        .map_err(|error| error.to_string())?;
+    println!("fetched {} bytes for {}", bytes.len(), offer.version);
+    crate::update::verified(&bytes, &offer.signature, crate::update::PUBKEY)?;
+    println!("the download is signed by the key this build trusts");
+    Ok(bytes.to_vec())
+}
+
 /// Moves one channel into one of a team's sidebar categories.
 ///
 /// The server replaces a category wholesale, `channel_ids` and all, so moving
