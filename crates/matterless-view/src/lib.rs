@@ -34,6 +34,7 @@ pub mod stream;
 mod stream_tests;
 pub mod switcher;
 pub mod toast;
+pub mod tooltip;
 pub mod typing;
 
 use atlas::{Atlas, SIDE};

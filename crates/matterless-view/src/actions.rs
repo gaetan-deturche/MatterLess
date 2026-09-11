@@ -38,6 +38,18 @@ impl Tool {
         })
     }
 
+    /// What it is for, said after the pointer has rested on it.
+    ///
+    /// Three glyphs across the corner of a message say nothing on their own,
+    /// and the app carries exactly these three words on them.
+    pub fn explains(self) -> &'static str {
+        match self {
+            Tool::React => "Add a reaction",
+            Tool::Reply => "Reply in thread",
+            Tool::More => "More actions",
+        }
+    }
+
     /// What is drawn on it. One glyph each, the app's own.
     pub fn mark(self) -> &'static str {
         match self {

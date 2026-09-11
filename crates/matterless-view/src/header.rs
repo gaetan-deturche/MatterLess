@@ -87,6 +87,27 @@ impl Act {
         }
     }
 
+    /// What the mark means, for somebody who has stopped to ask.
+    ///
+    /// A pin, a bookmark, a bell and a door say nothing on their own. In the
+    /// app every one of these carries a `title` and the browser explains it
+    /// for nothing; a native window has to be told to. The words are the
+    /// app's own, so the two clients answer the same question the same way.
+    pub fn explains(self, on: bool) -> &'static str {
+        match (self, on) {
+            (Act::Pinned, _) => "Pinned messages",
+            (Act::Saved, _) => "Saved messages",
+            (Act::Threads, _) => "Threads",
+            (Act::Add, _) => "Add Members",
+            (Act::Mute, false) => "Mute Channel",
+            (Act::Mute, true) => "Unmute Channel",
+            (Act::Leave, _) => "Leave Channel",
+            (Act::Follow, false) => "Follow thread",
+            (Act::Follow, true) => "Unfollow thread",
+            (Act::Close, _) => "Close thread",
+        }
+    }
+
     /// What a hit test carries, which never changes with the state: a click on
     /// "unmute" has to land on the same button "mute" did.
     pub fn slug(self) -> &'static str {

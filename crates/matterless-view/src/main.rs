@@ -220,6 +220,8 @@ struct App {
     loading_older: bool,
     /// False once the beginning of the channel has been reached.
     more_history: bool,
+    /// What the button under the pointer is for, once it has been rested on.
+    tooltip: matterless_view::tooltip::Tooltip,
     /// The menu currently open, whichever of the two it is.
     ///
     /// One at a time and one field: a right-click on the sidebar while the
@@ -373,6 +375,7 @@ impl App {
             loading_older: false,
             more_history: true,
             menu: matterless_view::menu::Menu::default(),
+            tooltip: matterless_view::tooltip::Tooltip::default(),
         };
         app.sidebar.selected = Some(channel);
         // Focused before anything is clicked: a chat window that needs a click
@@ -1576,6 +1579,115 @@ impl App {
             Some(Chose::More { post_id, under }) => self.offer_message_menu(&post_id, under),
             None => {}
         }
+    }
+
+    /// What the box under the pointer is for.
+    ///
+    /// The port's answer to the `title` on nearly every control in the app.
+    /// Each panel knows its own marks, so the words come from the module that
+    /// draws them and this only says which panel a name belongs to.
+    ///
+    /// `None` for everything that explains itself. A tooltip over a sentence
+    /// somebody wrote is an interruption, not help.
+    fn explains(&self, name: &str) -> Option<String> {
+        // The strip, whose buttons are the ones with nothing but a mark on
+        // them: a pin, a bookmark, a bell and a door.
+        if let Some(slug) = name.strip_prefix("header/") {
+            if slug == "find" {
+                return None;
+            }
+            let act = header::Act::from_slug(slug)?;
+            let on = match act {
+                header::Act::Mute => self.muted(),
+                header::Act::Follow => self.following_open_thread(),
+                _ => false,
+            };
+            return Some(act.explains(on).to_string());
+        }
+        // A team is its name, and the envelope is what it stands for.
+        if let Some(id) = name.strip_prefix("rail/") {
+            if id == matterless_view::rail::DIRECTS {
+                return Some("Direct messages".to_string());
+            }
+            return self
+                .rail
+                .teams
+                .iter()
+                .find(|team| team.id == id)
+                .map(|team| team.name.clone());
+        }
+        if name == "sidebar/me" {
+            return Some("Your status".to_string());
+        }
+        self.explains_in(&self.stream, name)
+            .or_else(|| self.thread.as_ref().and_then(|thread| self.explains_in(thread, name)))
+    }
+
+    /// The same question for one conversation, since there can be two on
+    /// screen and both name their boxes after themselves.
+    fn explains_in(&self, stream: &Stream, name: &str) -> Option<String> {
+        let rest = name.strip_prefix(&format!("{}/", stream.name))?;
+        // A face on the quick row is the emoji it stands for, by name: a
+        // picture of a face does not say what reacting with it means.
+        if let Some(at) = rest.strip_prefix("faces/") {
+            let at = at.parse::<usize>().ok()?;
+            return Some(match matterless_view::actions::QUICK.get(at) {
+                Some((emoji, _)) => format!(":{emoji}:"),
+                None => "More reactions".to_string(),
+            });
+        }
+        // A pressable run of words. A mention and a channel say where they
+        // lead; a link says where it goes, which the app leaves to the
+        // browser's status bar and this window has nowhere else to put.
+        if let Some(at) = rest.strip_prefix("press/") {
+            let at = at.parse::<usize>().ok()?;
+            let (press, _) = stream.presses_seen().get(at)?;
+            return Some(match press {
+                matterless_layout::row::Press::Person(_) => "Show profile".to_string(),
+                matterless_layout::row::Press::Channel(_) => "Go to channel".to_string(),
+                matterless_layout::row::Press::Post { .. } => "Go to the message".to_string(),
+                matterless_layout::row::Press::Link(href) => href.clone(),
+            });
+        }
+        let (index, what) = rest.strip_prefix("row/")?.split_once('/')?;
+        let index = index.parse::<usize>().ok()?;
+        if let Some(slug) = what.strip_prefix("tool/") {
+            return Some(
+                matterless_view::actions::Tool::from_slug(slug)?
+                    .explains()
+                    .to_string(),
+            );
+        }
+        let (Row::Post { post } | Row::Continuation { post }) = stream.rows.get(index)? else {
+            return None;
+        };
+        // Who left a reaction, which is the whole reason a pill is worth
+        // hovering: the count says how many and nothing says who.
+        if let Some(ordinal) = what.strip_prefix("reaction/") {
+            let reaction = post.reactions.get(ordinal.parse::<usize>().ok()?)?;
+            return Some(matterless_view::tooltip::reacted_by(
+                &reaction.emoji,
+                reaction.count,
+                &reaction.names,
+            ));
+        }
+        // An attachment, by the name it was uploaded under: the card shows a
+        // truncated name and the reader cannot widen it.
+        if let Some(ordinal) = what.strip_prefix("save/") {
+            let file = post.files.get(ordinal.parse::<usize>().ok()?)?;
+            return Some(format!("Save {}", file.name));
+        }
+        // A quoted card leads somewhere inside the app, which is worth saying;
+        // a page card is its own link and says so in its title already.
+        if let Some(ordinal) = what.strip_prefix("preview/") {
+            return match post.previews.get(ordinal.parse::<usize>().ok()?)? {
+                matterless_render::Preview::Permalink { .. } => {
+                    Some("Go to the message".to_string())
+                }
+                matterless_render::Preview::Page { url, .. } => Some(url.clone()),
+            };
+        }
+        None
     }
 
     fn permalink(&self, post_id: &str) -> Option<String> {
@@ -2839,7 +2951,38 @@ impl App {
             };
             self.menu.draw(&mut canvas, window, &self.input);
         }
+        // Last of everything, because it explains whatever is on top: a label
+        // about a menu item drawn under the menu is a label about nothing.
+        if self.tooltip.shown().is_some() {
+            let window = self.window_rect();
+            scene.clip_to(0.0, 0.0, self.size.0 as f32, self.size.1 as f32);
+            let mut canvas = Canvas {
+                scene: &mut scene,
+                painter: &mut self.painter,
+                fonts: &mut self.fonts,
+                palette: &self.palette,
+            };
+            self.tooltip.draw(&mut canvas, window);
+        }
         scene
+    }
+
+    /// Points the tooltip at whatever the pointer is now on.
+    ///
+    /// Called wherever the hover can have changed rather than once a frame:
+    /// the box under the pointer is settled by `input`, and asking again while
+    /// nothing has moved would restart the wait on every redraw -- so a
+    /// tooltip would never appear at all.
+    fn watch_pointer(&mut self) {
+        let hovered = self.input.hovered().map(str::to_string);
+        let explained = hovered
+            .as_deref()
+            .and_then(|name| self.explains(name))
+            .unwrap_or_default();
+        let at = self.input.pointer_at();
+        self.tooltip.follows(hovered.as_deref(), at, |_| {
+            (!explained.is_empty()).then_some(explained)
+        });
     }
 
     /// Lays the whole conversation out for the current width.
@@ -2922,6 +3065,17 @@ impl ApplicationHandler<Update> for App {
         if expired {
             self.redraw();
         }
+        // A tooltip appears without anything happening -- the pointer stops,
+        // and half a second later there are words. Nothing else would wake the
+        // window for that, so the wait is cut short for it and the frame that
+        // draws it is asked for here.
+        if self.tooltip.ripened() {
+            self.redraw();
+        }
+        let next = match (next, self.tooltip.wakes()) {
+            (Some(typing), Some(tip)) => Some(typing.min(tip)),
+            (typing, tip) => typing.or(tip),
+        };
         events.set_control_flow(match next {
             Some(expires) => ControlFlow::WaitUntil(expires),
             None => ControlFlow::Wait,
@@ -3049,6 +3203,7 @@ impl ApplicationHandler<Update> for App {
                 if self.input.pressed().is_some() {
                     self.react();
                 }
+                self.watch_pointer();
                 self.redraw();
             }
             // A file dragged onto the window goes to the conversation under
@@ -3080,6 +3235,7 @@ impl ApplicationHandler<Update> for App {
             }
             WindowEvent::CursorLeft { .. } => {
                 self.input.apply(UiEvent::PointerLeft, &[]);
+                self.watch_pointer();
                 self.redraw();
             }
             WindowEvent::ModifiersChanged(changed) => {
