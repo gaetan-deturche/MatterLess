@@ -3229,13 +3229,24 @@ impl App {
 /// resized once by a proper filter into the size it will be shown at is the
 /// same argument the badge and the tray picture make.
 fn window_icon(side: u32) -> Option<winit::window::Icon> {
-    const ICON: &[u8] = include_bytes!("../resources/icons/icon.png");
-    let decoded = image::load_from_memory(ICON)
-        .inspect_err(|error| eprintln!("the window icon would not decode: {error}"))
-        .ok()?
-        .resize_exact(side, side, image::imageops::FilterType::Lanczos3)
-        .into_rgba8();
-    winit::window::Icon::from_rgba(decoded.into_raw(), side, side)
+    // Decoded once and kept. Two sizes are asked for, and decoding a 512px
+    // picture twice cost most of the time the window took to be created --
+    // measured at 187ms of 199ms, which is a fifth of a second of nothing on
+    // screen for a picture that has not changed.
+    static FULL: std::sync::OnceLock<Option<image::RgbaImage>> = std::sync::OnceLock::new();
+    let full = FULL
+        .get_or_init(|| {
+            const ICON: &[u8] = include_bytes!("../resources/icons/icon.png");
+            image::load_from_memory(ICON)
+                .inspect_err(|error| eprintln!("the window icon would not decode: {error}"))
+                .ok()
+                .map(|decoded| decoded.into_rgba8())
+        })
+        .as_ref()?;
+    // A box filter rather than Lanczos: this is a 16- or 32-fold reduction,
+    // where a windowed sinc costs a great deal and shows nothing for it.
+    let scaled = image::imageops::thumbnail(full, side, side);
+    winit::window::Icon::from_rgba(scaled.into_raw(), side, side)
         .inspect_err(|error| eprintln!("the window icon was refused: {error}"))
         .ok()
 }
@@ -3357,6 +3368,7 @@ impl ApplicationHandler<Update> for App {
     }
 
     fn resumed(&mut self, events: &ActiveEventLoop) {
+        let began = std::time::Instant::now();
         // Opened without taking focus when asked, which is what makes it
         // usable next to the work it is being compared against: a window that
         // seizes the keyboard every time it starts interrupts whoever is
@@ -3414,6 +3426,7 @@ impl ApplicationHandler<Update> for App {
             pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default()))
                 .expect("a device");
 
+        let ready = began.elapsed();
         let capabilities = surface.get_capabilities(&adapter);
         self.format = capabilities.formats[0];
         self.plain = matterless_view::plain(self.format);
@@ -3445,6 +3458,14 @@ impl ApplicationHandler<Update> for App {
         // Already held, from before the tray was told about it.
         debug_assert!(self.window.is_some());
         self.relayout();
+        // What the window waits on before it can be shown, since it now waits
+        // on all of it: a swapchain is most of it and belongs to the driver,
+        // and the rest is this program's to keep honest.
+        println!(
+            "ready in {}ms, of which {}ms was Vulkan up to the device",
+            began.elapsed().as_millis(),
+            ready.as_millis()
+        );
         // Everything is ready, so the window can be seen -- and the message
         // loop is about to start, so the shell's question about the icon will
         // be answered rather than timed out.
