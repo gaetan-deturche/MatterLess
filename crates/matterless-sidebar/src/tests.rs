@@ -70,6 +70,28 @@ fn a_note_to_self_is_called_you() {
 /// The failure the native window shows today: with nobody resolved, the label
 /// must at least be an id and never the raw `id__id` slug.
 #[test]
+fn the_reader_is_left_out_of_a_group_conversations_name() {
+    let mut group = channel("c1", "G", "gxyz", "ada, bob, me");
+    let mut names = HashMap::new();
+    names.insert("me_id".to_string(), "me".to_string());
+    assert_eq!(label(&group, "me_id", &names), "ada, bob");
+
+    // A name is matched whole: "ada" sits inside "adam.smith", and removing it
+    // there would leave "m.smith".
+    group.display_name = "adam.smith, ada".into();
+    let mut only_ada = HashMap::new();
+    only_ada.insert("me_id".to_string(), "ada".to_string());
+    assert_eq!(label(&group, "me_id", &only_ada), "adam.smith");
+
+    // Nobody resolved, so nothing is taken out rather than a guess made.
+    assert_eq!(label(&group, "me_id", &HashMap::new()), "adam.smith, ada");
+
+    // A channel keeps its name whoever the reader is.
+    let public = channel("c2", "O", "dev", "ada, bob, me");
+    assert_eq!(label(&public, "me_id", &names), "ada, bob, me");
+}
+
+#[test]
 fn an_unresolved_counterpart_falls_back_to_the_id_not_the_slug() {
     let dm = channel("c1", "D", "me__them", "");
     assert_eq!(label(&dm, "me", &HashMap::new()), "them");
