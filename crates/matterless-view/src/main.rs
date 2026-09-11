@@ -1063,6 +1063,21 @@ impl App {
             .unwrap_or_else(|| "signing in".to_string())
     }
 
+    /// Whether the reader follows the thread on screen.
+    ///
+    /// From the store rather than remembered here: following is changed from
+    /// this window and from every other client the reader has.
+    fn following_open_thread(&self) -> bool {
+        let (Some(root), Some(store)) = (self.open_root(), self.store.as_ref()) else {
+            return false;
+        };
+        store
+            .thread_states_for(std::slice::from_ref(&root))
+            .unwrap_or_default()
+            .get(&root)
+            .is_some_and(|state| state.following)
+    }
+
     /// Whether the conversation on screen is muted, as the sidebar has it.
     fn muted(&self) -> bool {
         let Some(open) = self.sidebar.selected.as_deref() else {
@@ -1108,6 +1123,19 @@ impl App {
                     self.listing.expect("Pinned");
                     link.send(matterless_view::live::Ask::Pinned {
                         channel_id: channel,
+                    });
+                }
+            }
+            header::Act::Close => self.close_thread(),
+            header::Act::Follow => {
+                let Some(root) = self.open_root() else {
+                    return;
+                };
+                let following = self.following_open_thread();
+                if let Some(link) = self.link.as_ref() {
+                    link.send(matterless_view::live::Ask::Follow {
+                        root_id: root,
+                        following: !following,
                     });
                 }
             }
@@ -1697,6 +1725,9 @@ impl App {
             boxes.extend(thread.boxes(rect, thread.hovered(&self.input)));
         }
         boxes.extend(header::boxes(self.column_rect(), &self.header_offers()));
+        if let Some(pane) = self.thread_rect() {
+            boxes.extend(header::boxes(pane, &header::for_thread()));
+        }
         boxes.extend(self.composer.boxes_in(header::below(self.channel_rect())));
         if let Some(body) = self.thread_body() {
             boxes.extend(self.thread_composer.boxes_in(body));
@@ -2202,15 +2233,23 @@ impl App {
         // spill into the conversation it came from.
         // Mutable because a stream records where it drew each link, which is
         // what the next frame hit-tests against.
+        let following = self.following_open_thread();
         if let (Some(pane), Some(thread)) = (self.thread_rect(), self.thread.as_mut()) {
+            // The pane's own frame: `.pane { border-left: 1px solid var(--rule);
+            // background: var(--ground) }`. Without the rule it ran into the
+            // conversation it came from with nothing between them.
+            scene.clip_to(pane.x, pane.y, pane.width, pane.height);
+            scene.fill(pane.x, pane.y, pane.width, pane.height, self.palette.ground);
+            scene.fill(pane.x, pane.y, 1.0, pane.height, self.palette.rule);
             let strip = header::strip(pane);
             // Above the reply box, not the whole pane: replies drawn behind it
             // would show through the box's own margin.
             let rows = self.thread_composer.above(header::below(pane));
             let mut title = Header::new(format!("Thread -- {} replies", thread.rows.len()));
-            // A thread is not somewhere to leave, and its lists are the same
-            // ones the channel's strip already offers.
-            title.offered.clear();
+            // Whether its replies keep interrupting the reader, and a way out.
+            // Nothing on the channel's strip applies to one thread.
+            title.offered = header::for_thread();
+            title.muted = following;
             scene.clip_to(strip.x, strip.y, strip.width, strip.height);
             let mut canvas = Canvas {
                 scene: &mut scene,
@@ -2218,7 +2257,7 @@ impl App {
                 fonts: &mut self.fonts,
                 palette: &self.palette,
             };
-            title.draw(&mut canvas, strip, None);
+            title.draw(&mut canvas, strip, on_strip);
 
             scene.clip_to(rows.x, rows.y, rows.width, rows.height);
             let mut canvas = Canvas {

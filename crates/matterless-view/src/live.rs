@@ -119,6 +119,8 @@ pub enum Ask {
     /// written to. Asked of the server because neither is in the local store
     /// by definition.
     Discover { query: String },
+    /// Keep hearing about a thread, or stop.
+    Follow { root_id: String, following: bool },
     /// Put somebody else in a channel.
     AddMember { channel_id: String, user_id: String },
     /// Stop a conversation counting unread, or start again.
@@ -439,6 +441,30 @@ async fn run(
                         let found = discover(&rest, engine.store(), &me_id, &query).await;
                         println!("{} other ways to read \"{query}\"", found.len());
                         wake.wake(Update::Discovered { query, found });
+                    }
+                    Ask::Follow { root_id, following } => {
+                        // The team comes from the thread's own channel: a
+                        // thread belongs to one, and the route is scoped by it.
+                        let team = engine
+                            .store()
+                            .post(&root_id)
+                            .ok()
+                            .flatten()
+                            .and_then(|post| engine.store().channel(&post.channel_id).ok().flatten())
+                            .map(|channel| channel.team_id)
+                            .unwrap_or_default();
+                        match rest.follow_thread(&me_id, &team, &root_id, following).await {
+                            Ok(()) => {
+                                println!(
+                                    "{} {root_id}",
+                                    if following { "following" } else { "unfollowed" }
+                                );
+                                // Which threads may interrupt has just changed,
+                                // and the rule reads a set held on this thread.
+                                context.followed_threads = followed(engine.store());
+                            }
+                            Err(error) => eprintln!("following {root_id}: {error}"),
+                        }
                     }
                     Ask::AddMember {
                         channel_id,

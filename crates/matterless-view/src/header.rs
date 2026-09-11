@@ -34,6 +34,8 @@ const GAP: f32 = 4.0;
 /// The search field in the middle of the strip, which is where the app puts
 /// it and where a reader raised on any chat client will look.
 const FIND: f32 = 240.0;
+/// The follow button, which is a word and not a mark.
+const FOLLOW: f32 = 72.0;
 
 /// What a button in the strip does.
 ///
@@ -53,6 +55,11 @@ pub enum Act {
     Mute,
     /// Stop being in this channel.
     Leave,
+    /// Start or stop following this thread, which is what decides whether its
+    /// replies interrupt the reader.
+    Follow,
+    /// Shut the thread pane.
+    Close,
 }
 
 impl Act {
@@ -74,6 +81,9 @@ impl Act {
             (Act::Mute, false) => "🔔",
             (Act::Mute, true) => "🔕",
             (Act::Leave, _) => "🚪",
+            (Act::Follow, false) => "follow",
+            (Act::Follow, true) => "following",
+            (Act::Close, _) => "×",
         }
     }
 
@@ -87,6 +97,8 @@ impl Act {
             Act::Add => "add",
             Act::Mute => "mute",
             Act::Leave => "leave",
+            Act::Follow => "follow",
+            Act::Close => "close",
         }
     }
 
@@ -98,9 +110,17 @@ impl Act {
             "add" => Act::Add,
             "mute" => Act::Mute,
             "leave" => Act::Leave,
+            "follow" => Act::Follow,
+            "close" => Act::Close,
             _ => return None,
         })
     }
+}
+
+/// What a thread pane's strip offers: whether to keep hearing about it, and a
+/// way out. Nothing on the channel's strip applies to one thread.
+pub fn for_thread() -> Vec<Act> {
+    vec![Act::Follow, Act::Close]
 }
 
 /// What the strip offers for this conversation.
@@ -151,10 +171,16 @@ pub fn place(within: Rect, offered: &[Act]) -> Vec<(Act, Rect)> {
     let mut placed = Vec::new();
     let mut right = strip.right() - GAP;
     for act in offered.iter().rev() {
-        right -= BUTTON;
+        // One of them is a word rather than a mark, because "following" is a
+        // state and a mark cannot hold one.
+        let width = match act {
+            Act::Follow => FOLLOW,
+            _ => BUTTON,
+        };
+        right -= width;
         placed.push((
             *act,
-            Rect::new(right, strip.y + 10.0, BUTTON, strip.height - 20.0),
+            Rect::new(right, strip.y + 10.0, width, strip.height - 20.0),
         ));
         right -= GAP;
     }
