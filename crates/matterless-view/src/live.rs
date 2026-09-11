@@ -117,6 +117,8 @@ pub enum Ask {
     /// written to. Asked of the server because neither is in the local store
     /// by definition.
     Discover { query: String },
+    /// Stop being in a channel.
+    Leave { channel_id: String },
     /// Join a public channel, then open it.
     Join { channel_id: String },
     /// Find or create the conversation with one person, then open it.
@@ -421,6 +423,21 @@ async fn run(
                         let found = discover(&rest, engine.store(), &me_id, &query).await;
                         println!("{} other ways to read \"{query}\"", found.len());
                         wake.wake(Update::Discovered { query, found });
+                    }
+                    Ask::Leave { channel_id } => {
+                        match rest.leave_channel(&channel_id, &me_id).await {
+                            Ok(()) => {
+                                println!("left {channel_id}");
+                                // The sidebar has a row fewer in it, and only
+                                // a fresh membership pull will show that.
+                                if let Ok((_, mode)) =
+                                    membership(&rest, engine.store(), &me_id).await
+                                {
+                                    wake.wake(Update::Membership(mode));
+                                }
+                            }
+                            Err(error) => eprintln!("leaving {channel_id}: {error}"),
+                        }
                     }
                     Ask::Join { channel_id } => {
                         match rest.join_channel(&channel_id, &me_id).await {
