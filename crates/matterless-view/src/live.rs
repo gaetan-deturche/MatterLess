@@ -45,6 +45,12 @@ pub enum Update {
     /// from whatever thread the platform fires its callback on, and delivered
     /// like everything else on the one that owns the window.
     Activated(String),
+    /// The tray icon was used.
+    ///
+    /// It arrives the same way, even though the shell delivers it on this very
+    /// thread: going through the proxy means the window is not being changed
+    /// from inside a window procedure, halfway through winit's own dispatch.
+    Tray(crate::tray::Act),
     /// Older history arrived and is in the store. `more` is false once the
     /// beginning of the channel has been reached, so the window stops asking.
     Older { channel_id: String, more: bool },

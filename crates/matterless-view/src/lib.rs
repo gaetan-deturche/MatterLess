@@ -37,6 +37,7 @@ pub mod switcher;
 pub mod taskbar;
 pub mod toast;
 pub mod tooltip;
+pub mod tray;
 pub mod typing;
 
 use atlas::{Atlas, SIDE};

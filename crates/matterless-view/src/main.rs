@@ -220,6 +220,10 @@ struct App {
     loading_older: bool,
     /// False once the beginning of the channel has been reached.
     more_history: bool,
+    /// The notification area, which is what lets the window be shut.
+    tray: matterless_view::tray::Tray,
+    /// A way to wake the window from the tray's own window procedure.
+    waker: Option<winit::event_loop::EventLoopProxy<Update>>,
     /// The taskbar button: its overlay badge, and its flashing.
     taskbar: matterless_view::taskbar::Taskbar,
     /// Whether this window has the keyboard, which decides both whether an
@@ -381,6 +385,8 @@ impl App {
             more_history: true,
             menu: matterless_view::menu::Menu::default(),
             tooltip: matterless_view::tooltip::Tooltip::default(),
+            tray: matterless_view::tray::Tray::default(),
+            waker: None,
             taskbar: matterless_view::taskbar::Taskbar::default(),
             // Assumed until the platform says otherwise, which it does on the
             // first focus event: a window that starts out believing it is
@@ -703,6 +709,9 @@ impl App {
     /// draws everything the database holds, which is what it did before there
     /// was a socket at all.
     fn connect(&mut self, proxy: winit::event_loop::EventLoopProxy<Update>) {
+        // Kept for the tray, which has to reach the window from a window
+        // procedure of its own.
+        self.waker = Some(proxy.clone());
         let Some(store) = self.store.clone() else {
             println!("no database, so nothing to keep up to date");
             return;
@@ -795,10 +804,10 @@ impl App {
             }
             Update::Activated(channel_id) => {
                 // Clicking a notification is the reader saying they want to be
-                // looking at that conversation.
-                if let Some(window) = &self.window {
-                    window.focus_window();
-                }
+                // looking at that conversation -- which means the window, and
+                // by now it may be hidden in the tray rather than merely
+                // behind something.
+                self.raise();
                 self.sidebar.selected = Some(channel_id.clone());
                 self.open_channel(&channel_id);
             }
@@ -913,6 +922,9 @@ impl App {
                     self.rename_emoji();
                 }
             }
+            // Answered before this, in `user_event`, because it is the one
+            // update that can end the loop and this has no way to say so.
+            Update::Tray(_) => {}
         }
         self.redraw();
     }
@@ -1735,6 +1747,58 @@ impl App {
             .show(raw_window(self.window.as_ref()), overlay, &told)
         {
             println!("badge: {attention} wanting an answer, unread {}", state.any_unread);
+        }
+    }
+
+    /// Puts the icon in the notification area, once.
+    ///
+    /// Answers whether it is there, which decides what the close button means:
+    /// on a machine with no notification area, hiding the window would leave
+    /// no way back to it and no way out.
+    fn tray_ready(&mut self) -> bool {
+        let Some(waker) = self.waker.clone() else {
+            return false;
+        };
+        self.tray.show(move |act| {
+            // Through the proxy rather than acting here: this is called from
+            // inside a window procedure, part-way through winit's own dispatch,
+            // and the window is not ours to change at that moment.
+            let _ = waker.send_event(Update::Tray(act));
+        })
+    }
+
+    /// Shows the window and puts it in front, from wherever it had got to.
+    ///
+    /// All three, because only all three work: it may be hidden, minimised, or
+    /// simply behind everything, and a tray icon that sometimes does nothing is
+    /// worse than one that is not there.
+    fn raise(&mut self) {
+        let Some(window) = self.window.as_ref() else {
+            return;
+        };
+        window.set_visible(true);
+        window.set_minimized(false);
+        window.focus_window();
+        self.taskbar.calm(raw_window(self.window.as_ref()));
+    }
+
+    /// Runs whatever the tray was asked for.
+    fn act_on_tray(&mut self, act: matterless_view::tray::Act, events: &ActiveEventLoop) {
+        use matterless_view::tray::{Act, startup};
+        match act {
+            Act::Open => self.raise(),
+            Act::Startup => {
+                let now = startup::set(!startup::enabled());
+                println!("start with windows: {now}");
+            }
+            Act::Quit => {
+                println!("quitting from the tray");
+                // Taken down by hand rather than left to `Drop`: the event loop
+                // does not unwind, so nothing else would remove the icon and
+                // the shell would leave a dead one behind.
+                self.tray.hide();
+                events.exit();
+            }
         }
     }
 
@@ -3219,6 +3283,13 @@ impl ApplicationHandler<Update> for App {
         if quiet {
             behind(&window);
         }
+        self.window = Some(Arc::clone(&window));
+        // Before anything else can want it: the close button means one thing
+        // with a tray and another without, and the answer must not depend on
+        // how far through starting up the reader got.
+        if !self.tray_ready() {
+            eprintln!("no notification area: closing the window will quit");
+        }
 
         // Vulkan by name rather than whatever the platform prefers, which on
         // Windows would be DX12.
@@ -3267,18 +3338,44 @@ impl ApplicationHandler<Update> for App {
         );
         self.view = Some(matterless_view::View::new(device, queue, self.plain));
         self.surface = Some(surface);
-        self.window = Some(window);
+        // Already held, from before the tray was told about it.
+        debug_assert!(self.window.is_some());
         self.relayout();
     }
 
     /// What the socket reported, delivered on the thread that owns the window.
-    fn user_event(&mut self, _events: &ActiveEventLoop, update: Update) {
+    fn user_event(&mut self, events: &ActiveEventLoop, update: Update) {
+        // The tray is the one update that can end the loop, so it is answered
+        // here rather than in `apply`, which has no way to say so.
+        if let Update::Tray(act) = update {
+            self.act_on_tray(act, events);
+            return;
+        }
         self.apply(update);
     }
 
     fn window_event(&mut self, events: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
-            WindowEvent::CloseRequested => events.exit(),
+            WindowEvent::CloseRequested => {
+                // Closing HIDES the window, and the tray is what says so.
+                //
+                // Notifications only exist while this process runs -- there is
+                // no push proxy for a desktop client -- so quitting on the
+                // close button would quietly turn them off, which is the one
+                // thing that lets somebody keep the webapp closed. Quitting is
+                // still one click away, in the tray menu.
+                //
+                // Unless there is no tray to be in, in which case the close
+                // button is the only way out and has to remain one.
+                if self.tray_ready() {
+                    if let Some(window) = self.window.as_ref() {
+                        window.set_visible(false);
+                    }
+                    println!("hidden to the tray");
+                } else {
+                    events.exit();
+                }
+            }
             WindowEvent::Resized(size) => {
                 self.size = (size.width.max(1), size.height.max(1));
                 if let (Some(surface), Some(view)) = (&self.surface, &self.view) {
