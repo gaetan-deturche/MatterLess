@@ -146,6 +146,14 @@ impl Profile {
             palette.surface,
             PANEL,
         );
+        scene.rounded(
+            panel.x + PADDING,
+            panel.y + PADDING,
+            FACE,
+            FACE,
+            palette.raised,
+            FACE / 2.0,
+        );
         scene.extend([matterless_paint::Piece::Image {
             x: panel.x + PADDING,
             y: panel.y + PADDING,

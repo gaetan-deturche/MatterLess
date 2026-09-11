@@ -29,7 +29,7 @@ pub const HEIGHT: f32 = 44.0;
 const LEFT: f32 = 14.0;
 const SIGIL: f32 = 14.0;
 /// A button in the strip, and the gap between two of them.
-const BUTTON: f32 = 62.0;
+const BUTTON: f32 = 30.0;
 const GAP: f32 = 4.0;
 /// The search field in the middle of the strip, which is where the app puts
 /// it and where a reader raised on any chat client will look.
@@ -56,18 +56,24 @@ pub enum Act {
 }
 
 impl Act {
-    /// What the button says. `on` only means anything to the one that is a
-    /// toggle: a state a button can be in has to read differently, or pressing
-    /// it twice looks like nothing happened.
+    /// What the button shows.
+    ///
+    /// A mark rather than a word, which is what the app has. Six words is a
+    /// sentence across the top of the strip, and it left no room for the
+    /// search field that belongs in the middle of it.
+    ///
+    /// `on` only means anything to the one that is a toggle: a state a button
+    /// can be in has to read differently, or pressing it twice looks like
+    /// nothing happened.
     pub fn label(self, on: bool) -> &'static str {
         match (self, on) {
-            (Act::Pinned, _) => "pinned",
-            (Act::Saved, _) => "saved",
-            (Act::Threads, _) => "threads",
-            (Act::Add, _) => "add",
-            (Act::Mute, false) => "mute",
-            (Act::Mute, true) => "unmute",
-            (Act::Leave, _) => "leave",
+            (Act::Pinned, _) => "📌",
+            (Act::Saved, _) => "🔖",
+            (Act::Threads, _) => "🧵",
+            (Act::Add, _) => "👤",
+            (Act::Mute, false) => "🔔",
+            (Act::Mute, true) => "🔕",
+            (Act::Leave, _) => "🚪",
         }
     }
 
@@ -127,7 +133,7 @@ pub fn find(within: Rect, offered: &[Act]) -> Option<Rect> {
         .first()
         .map(|(_, rect)| rect.x)
         .unwrap_or(strip.right());
-    let room = right - (strip.x + LEFT + SIGIL + 180.0);
+    let room = right - (strip.x + LEFT + SIGIL + 160.0);
     if room < FIND {
         return None;
     }
@@ -245,9 +251,14 @@ impl Header {
             let glyphs = painter.run(
                 fonts,
                 act.label(self.muted),
-                rect.x + 8.0,
-                rect.y + 2.0,
-                Run::label(f32::MAX),
+                rect.x + 7.0,
+                rect.y + 1.0,
+                Run {
+                    size: 15.0,
+                    line_height: 20.0,
+                    bold: false,
+                    wrap: f32::MAX,
+                },
             );
             scene.glyphs(
                 glyphs,

@@ -836,6 +836,7 @@ impl Stream {
         // The first three, which is what the app shows: past that the faces
         // stop identifying anybody and become a texture.
         for face in participants.iter().take(FACES) {
+            scene.rounded(x, y, FACE, FACE, palette.raised, FACE / 2.0);
             scene.extend([matterless_paint::Piece::Image {
                 x,
                 y,
@@ -1032,6 +1033,17 @@ impl Stream {
                 // The face goes in the gutter the layout already leaves empty,
                 // so it costs no height and a continuation simply has none.
                 if let Some(Row::Post { post }) = self.rows.get(index) {
+                    // `background: var(--surface-2)` on the face itself, which
+                    // is what a picture with transparency in it sits on and
+                    // what fills the circle before one has arrived at all.
+                    scene.rounded(
+                        inner.x + 2.0,
+                        top + 4.0,
+                        AVATAR,
+                        AVATAR,
+                        palette.raised,
+                        AVATAR / 2.0,
+                    );
                     scene.extend([matterless_paint::Piece::Image {
                         x: inner.x + 2.0,
                         y: top + 4.0,

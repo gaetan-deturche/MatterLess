@@ -591,6 +591,7 @@ impl App {
                 waiting.sort_by_key(|channel| std::cmp::Reverse(channel.last_post_at));
                 entries.push(Entry::Heading {
                     label: "Unreads".to_string(),
+                    directs: false,
                 });
                 entries.extend(waiting.into_iter().map(row));
             }
@@ -609,11 +610,13 @@ impl App {
                 team = group.team_name.clone();
                 if !team.is_empty() {
                     entries.push(Entry::Team {
+                        id: group.team_id.clone(),
                         label: team.clone(),
                     });
                 }
             }
             entries.push(Entry::Heading {
+                directs: group.category_type == "direct_messages",
                 label: group.display_name,
             });
             entries.extend(group.channels.into_iter().map(row));
@@ -631,7 +634,8 @@ impl App {
             entries
                 .iter()
                 .filter_map(|entry| match entry {
-                    Entry::Heading { label } | Entry::Team { label } => Some(label.as_str()),
+                    Entry::Heading { label, .. } | Entry::Team { label, .. } =>
+                        Some(label.as_str()),
                     _ => None,
                 })
                 .collect::<Vec<&str>>()
@@ -1050,20 +1054,6 @@ impl App {
         }
     }
 
-    /// The first conversation a team holds, in the order the sidebar lists it.
-    fn first_channel_in(&self, team_id: &str) -> Option<String> {
-        let store = self.store.as_ref()?;
-        self.sidebar.entries.iter().find_map(|entry| match entry {
-            matterless_view::sidebar::Entry::Channel { id, .. } => store
-                .channel(id)
-                .ok()
-                .flatten()
-                .filter(|channel| channel.team_id == team_id)
-                .map(|channel| channel.id),
-            _ => None,
-        })
-    }
-
     /// The reader's own name, as the store knows it.
     fn my_name(&self) -> String {
         self.store
@@ -1179,10 +1169,10 @@ impl App {
     /// scrolled: a list that jumps to the top every time a count changes is
     /// worse than one showing a stale number.
     fn rebuild_sidebar(&mut self) {
-        // The teams beside it, from the same store and at the same moment: a
-        // rail naming a team the sidebar no longer lists is worse than either
-        // being a little stale.
-        self.rail.teams = self
+        // The teams beside it, from the same entries the sidebar just got:
+        // a rail counting something the list does not show would be two
+        // answers to one question.
+        let mut teams: Vec<matterless_view::rail::Tile> = self
             .store
             .as_ref()
             .map(|store| {
@@ -1197,10 +1187,59 @@ impl App {
                         } else {
                             team.display_name
                         },
+                        unread: 0,
+                        mentions: 0,
+                        directs: false,
                     })
                     .collect()
             })
             .unwrap_or_default();
+        // What is waiting in each, summed from the rows themselves. A muted
+        // channel contributes nothing: muting says "do not interrupt me", and
+        // a dot on the team is an interruption at one remove.
+        let mut directs = matterless_view::rail::Tile {
+            id: matterless_view::rail::DIRECTS.to_string(),
+            name: matterless_view::rail::ENVELOPE.to_string(),
+            unread: 0,
+            mentions: 0,
+            directs: true,
+        };
+        if let Some(store) = self.store.as_ref() {
+            for entry in &self.sidebar.entries {
+                let matterless_view::sidebar::Entry::Channel {
+                    id,
+                    unread,
+                    mentions,
+                    muted,
+                    direct,
+                    ..
+                } = entry
+                else {
+                    continue;
+                };
+                if *muted {
+                    continue;
+                }
+                let into = if *direct {
+                    Some(&mut directs)
+                } else {
+                    store
+                        .channel(id)
+                        .ok()
+                        .flatten()
+                        .and_then(|channel| {
+                            teams.iter().position(|team| team.id == channel.team_id)
+                        })
+                        .map(|at| &mut teams[at])
+                };
+                if let Some(tile) = into {
+                    tile.unread += unread;
+                    tile.mentions += mentions;
+                }
+            }
+        }
+        teams.push(directs);
+        self.rail.teams = teams;
         self.rail.chosen = self
             .sidebar
             .selected
@@ -1411,6 +1450,7 @@ impl App {
         // other and go through the same asked set.
         wanted.extend(self.picker.wants());
         wanted.extend(self.profile.wants());
+        wanted.extend(self.rail.wants());
         for (key, width, height) in wanted {
             if self.asked.insert(key.clone()) {
                 link.send(matterless_view::live::Ask::Fetch { key, width, height });
@@ -2678,11 +2718,14 @@ impl ApplicationHandler<Update> for App {
                 // A team on the rail takes the reader to the first
                 // conversation it holds: a team is not itself somewhere to be,
                 // and landing on nothing would be a press that did nothing.
-                if let Some(team) = self.rail.react(&self.input)
-                    && let Some(first) = self.first_channel_in(&team)
-                {
-                    self.sidebar.selected = Some(first.clone());
-                    self.open_channel(&first);
+                // A team is somewhere in the list rather than somewhere to
+                // be, so the rail takes the reader there: it scrolls the
+                // sidebar to that team's heading and leaves the conversation
+                // they were reading open. Opening a channel they did not ask
+                // for would be answering a question they did not put.
+                if let Some(team) = self.rail.react(&self.input) {
+                    let within = self.sidebar_rect();
+                    self.sidebar.scroll_to(&team, within);
                 }
                 let within = self.sidebar_rect();
                 if let Some(channel) = self.sidebar.react(&self.input, &boxes, within) {
