@@ -32,8 +32,8 @@ pub enum Chose {
         /// What the toggle becomes, for the actions that are one.
         on: bool,
     },
-    /// Follow a link somebody wrote.
-    Open(String),
+    /// Follow something somebody wrote: a link, a person, a conversation.
+    Press(matterless_layout::row::Press),
     /// Add or remove this reaction.
     React {
         post_id: String,
@@ -57,8 +57,8 @@ pub struct Stream {
     pub custom: std::collections::HashMap<String, String>,
     /// Who the reader is, so their own messages offer what only they may do.
     pub me: String,
-    /// Where each link's words were drawn, from the frame just gone.
-    links: Vec<(String, Rect)>,
+    /// Where each pressable run of words was drawn, from the frame just gone.
+    presses: Vec<(matterless_layout::row::Press, Rect)>,
 }
 
 impl Stream {
@@ -71,7 +71,7 @@ impl Stream {
             scroll: 0.0,
             custom: std::collections::HashMap::new(),
             me: String::new(),
-            links: Vec::new(),
+            presses: Vec::new(),
         }
     }
 
@@ -191,15 +191,15 @@ impl Stream {
             }
             top = bottom;
         }
-        // The links from the frame just gone, deepest of all: a link inside a
-        // message sits under the pills and the toolbar, which are things in
-        // their own right rather than words in a sentence.
-        for (at, (_, rect)) in self.links.iter().enumerate() {
+        // The pressable words from the frame just gone: they sit under the
+        // pills and the toolbar, which are things in their own right rather
+        // than words in a sentence.
+        for (at, (_, rect)) in self.presses.iter().enumerate() {
             if rect.bottom() < within.y || rect.y > within.bottom() {
                 continue;
             }
             placed.push(Placed {
-                name: format!("{}/link/{at}", self.name),
+                name: format!("{}/press/{at}", self.name),
                 rect: *rect,
                 depth: 3,
             });
@@ -260,6 +260,18 @@ impl Stream {
         }
     }
 
+    /// Where a pressable run of words was last drawn.
+    ///
+    /// So a panel opened from one can point at it. Answers the first, which is
+    /// the one nearest the top: a name mentioned four times in a conversation
+    /// has four boxes and a card can only be beside one of them.
+    pub fn pressed_rect(&self, press: &matterless_layout::row::Press) -> Option<Rect> {
+        self.presses
+            .iter()
+            .find(|(one, _)| one == press)
+            .map(|(_, rect)| *rect)
+    }
+
     /// Where one message sits on screen, for a panel that has to point at it.
     ///
     /// `None` when it is scrolled out of view, which is the honest answer: a
@@ -286,14 +298,14 @@ impl Stream {
             self.scroll = (self.scroll - y).clamp(0.0, self.reach(within));
         }
         let clicked = input.clicked()?;
-        // A link first: it is the innermost thing in a row, and a click on one
-        // is a click on the words rather than on the message holding them.
+        // Words first: they are the innermost thing in a row, and a click on
+        // one is a click on them rather than on the message holding them.
         if let Some(at) = clicked
-            .strip_prefix(&format!("{}/link/", self.name))
+            .strip_prefix(&format!("{}/press/", self.name))
             .and_then(|at| at.parse::<usize>().ok())
-            && let Some((href, _)) = self.links.get(at)
+            && let Some((press, _)) = self.presses.get(at)
         {
-            return Some(Chose::Open(href.clone()));
+            return Some(Chose::Press(press.clone()));
         }
         // A pill next, because it sits inside a row and its name says so.
         if let Some((index, ordinal)) = self.reaction_at(clicked)
@@ -668,11 +680,11 @@ impl Stream {
     }
 
     pub fn draw(&mut self, into: &mut Canvas<'_>, within: Rect, input: &Input) {
-        // Gathered as the rows are drawn, because only the shaping knows where
-        // a link's words landed. Read by `boxes` on the next frame, which is
-        // the same one-frame-old answer the toolbar is hit with -- and a link
-        // does not move between two frames of a still list.
-        let mut links = Vec::new();
+        // Gathered as the rows are drawn, because only the shaping knows
+        // where the words landed. Read by `boxes` on the next frame, which is
+        // the same one-frame-old answer the toolbar is hit with -- and a
+        // message does not move between two frames of a still list.
+        let mut presses = Vec::new();
         // How many of them have been underlined already, so each row draws
         // only its own.
         let mut marked = 0usize;
@@ -708,15 +720,15 @@ impl Stream {
                     .map(|piece| shift(piece, within.x))
                     .collect();
                 for piece in &pieces {
-                    if let matterless_paint::Piece::Link {
+                    if let matterless_paint::Piece::Press {
                         x,
                         y,
                         width,
                         height,
-                        href,
+                        press,
                     } = piece
                     {
-                        links.push((href.clone(), Rect::new(*x, *y, *width, *height)));
+                        presses.push((press.clone(), Rect::new(*x, *y, *width, *height)));
                     }
                 }
                 scene.extend(pieces);
@@ -724,7 +736,7 @@ impl Stream {
                 // colour a link with and text that is pressable has to say so.
                 // Drawn from the boxes the shaping just reported, so it sits
                 // under exactly the words it belongs to.
-                for (_, rect) in links.iter().skip(marked) {
+                for (_, rect) in presses.iter().skip(marked) {
                     scene.fill(
                         rect.x,
                         rect.bottom() - 2.0,
@@ -733,7 +745,7 @@ impl Stream {
                         palette.faint_fill(),
                     );
                 }
-                marked = links.len();
+                marked = presses.len();
                 // The face goes in the gutter the layout already leaves empty,
                 // so it costs no height and a continuation simply has none.
                 if let Some(Row::Post { post }) = self.rows.get(index) {
@@ -768,7 +780,7 @@ impl Stream {
             }
             top = bottom;
         }
-        self.links = links;
+        self.presses = presses;
     }
 }
 
@@ -817,18 +829,18 @@ fn shift(piece: matterless_paint::Piece, by: f32) -> matterless_paint::Piece {
             height,
             colour,
         },
-        Piece::Link {
+        Piece::Press {
             x,
             y,
             width,
             height,
-            href,
-        } => Piece::Link {
+            press,
+        } => Piece::Press {
             x: x + by,
             y,
             width,
             height,
-            href,
+            press,
         },
         Piece::Text { glyphs, ink, faint } => Piece::Text {
             glyphs: glyphs
