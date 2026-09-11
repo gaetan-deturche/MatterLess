@@ -420,7 +420,7 @@ impl Painter {
                     // The words first, so their width decides where the two
                     // rules stop: a rule drawn under the label would strike
                     // through it.
-                    let (glyphs, _, _) = self.glyphs_of(fonts, block, 0.0, y, theme);
+                    let (glyphs, _, _, _) = self.glyphs_of(fonts, block, 0.0, y, theme);
                     let middle = y + block.height / 2.0;
                     let said = glyphs
                         .iter()
@@ -454,7 +454,7 @@ impl Painter {
                             colour: rule,
                             radius: 0.0,
                         });
-                        let (glyphs, _, _) = self.glyphs_of(
+                        let (glyphs, _, _, _) = self.glyphs_of(
                             fonts,
                             block,
                             left,
@@ -521,8 +521,36 @@ impl Painter {
                         signal: palette.signal,
                     });
                 }
+                // The same as text, a step quieter, with a bar down its left.
+                Kind::Quote => {
+                    let (glyphs, _, _, _) = self.glyphs_of(fonts, block, x, y, theme);
+                    pieces.push(Piece::Fill {
+                        x: x - theme.indent + theme.quote_bar,
+                        y,
+                        width: theme.quote_bar,
+                        height: block.height,
+                        colour: palette.rule,
+                        radius: 0.0,
+                    });
+                    pieces.push(Piece::Text {
+                        glyphs,
+                        ink: palette.soft,
+                        faint: palette.faint,
+                        signal: palette.signal,
+                    });
+                }
                 Kind::Text => {
-                    let (glyphs, rooms, presses) = self.glyphs_of(fonts, block, x, y, theme);
+                    let (glyphs, rooms, presses, code) = self.glyphs_of(fonts, block, x, y, theme);
+                    // The ground behind inline code, before the words: a
+                    // background pushed after them covers what it is for.
+                    pieces.extend(code.into_iter().map(|(cx, cy, width, height)| Piece::Fill {
+                        x: cx - 2.0,
+                        y: cy + 1.0,
+                        width: width + 4.0,
+                        height: height - 2.0,
+                        colour: palette.raised,
+                        radius: 3.0,
+                    }));
                     pieces.push(Piece::Text {
                         glyphs,
                         ink: palette.ink,
@@ -565,7 +593,7 @@ impl Painter {
                 // a border down the left, the panel behind it, and the corners
                 // cut on the right only -- which is what `0 4px 4px 0` says.
                 Kind::Attached => {
-                    let (glyphs, _, _) = self.glyphs_of(fonts, block, x, y, theme);
+                    let (glyphs, _, _, _) = self.glyphs_of(fonts, block, x, y, theme);
                     pieces.push(Piece::Text {
                         glyphs,
                         ink: palette.ink,
@@ -574,7 +602,7 @@ impl Painter {
                     });
                 }
                 Kind::Preview => {
-                    let (glyphs, _, _) = self.glyphs_of(fonts, block, x, y, theme);
+                    let (glyphs, _, _, _) = self.glyphs_of(fonts, block, x, y, theme);
                     pieces.push(Piece::Text {
                         glyphs,
                         ink: palette.ink,
@@ -744,9 +772,9 @@ impl Painter {
         x: f32,
         y: f32,
         theme: &Theme,
-    ) -> (Vec<PlacedGlyph>, Rooms, Presses) {
+    ) -> (Vec<PlacedGlyph>, Rooms, Presses, Vec<CodeBox>) {
         if block.spans.is_empty() {
-            return (Vec::new(), HashMap::new(), Vec::new());
+            return (Vec::new(), HashMap::new(), Vec::new(), Vec::new());
         }
         let line_height = if block.kind == Kind::Code {
             theme.code_line_height
@@ -773,6 +801,7 @@ impl Painter {
         // Where each pressable run ended up, per line, widened glyph by glyph
         // the same way an emoji's room is.
         let mut presses: Presses = Vec::new();
+        let mut code: Vec<CodeBox> = Vec::new();
         // Never more lines than the layout reserved. The buffer wraps to the
         // width it was given and will happily produce a fourth line for a
         // three-line block -- which draws over the message underneath. The
@@ -812,6 +841,18 @@ impl Painter {
                     room.2 = (glyph.x + x + glyph.w - room.0).max(room.2);
                     continue;
                 }
+                // Where a run of `code` landed, widened glyph by glyph the
+                // same way a link's box is: `code` carries a ground of its own
+                // and only the shaping knows how wide to make it.
+                if marks(glyph.metadata, MONO) && block.kind != Kind::Code {
+                    let top = y + run.line_top;
+                    match code.last_mut() {
+                        Some(last) if (last.1 - top).abs() < 0.5 => {
+                            last.2 = (glyph.x + x + glyph.w - last.0).max(last.2);
+                        }
+                        _ => code.push((glyph.x + x, top, glyph.w, line_height)),
+                    }
+                }
                 let physical = glyph.physical((x, y + run.line_y), 1.0);
                 placed.push(PlacedGlyph {
                     key: physical.cache_key,
@@ -829,7 +870,7 @@ impl Painter {
                 });
             }
         }
-        (placed, rooms, presses)
+        (placed, rooms, presses, code)
     }
 }
 
@@ -841,6 +882,11 @@ type Room = (f32, f32, f32);
 type Rooms = HashMap<usize, Room>;
 
 /// Marks a faint span so its glyphs can be told apart after shaping.
+/// Where a run of inline code ended up on one line, so a ground can be drawn
+/// behind it. The same trick the press boxes use, and for the same reason:
+/// only the shaping knows where the words landed.
+pub type CodeBox = (f32, f32, f32, f32);
+
 /// Where a pressable run of words ended up on one line.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PressBox {
@@ -867,8 +913,11 @@ const CODE: f32 = 6.0;
 const FAINT: usize = 1;
 const EMOJI: usize = 2;
 const PRESS: usize = 4;
+/// Set in a monospace face, which in a sentence means `code` -- and `code`
+/// has a ground of its own.
+const MONO: usize = 8;
 /// How many flags share the low bits. The span index rides above them.
-const FLAGS: usize = 8;
+const FLAGS: usize = 16;
 
 fn marked(span: &TextSpan, at: usize) -> usize {
     let mut flags = 0;
@@ -880,6 +929,9 @@ fn marked(span: &TextSpan, at: usize) -> usize {
     }
     if span.press.is_some() {
         flags |= PRESS;
+    }
+    if span.mono {
+        flags |= MONO;
     }
     at * FLAGS + flags
 }
