@@ -50,6 +50,19 @@ fn conversation(fonts: &mut Fonts) -> Stream {
         Row::Post {
             post: post("reply", "root"),
         },
+        Row::ThreadFooter {
+            root_id: "root".into(),
+            reply_count: 2,
+            last_reply_at: 0,
+            participants: vec![matterless_render::ThreadFace {
+                user_id: "u1".into(),
+                name: "someone".into(),
+                avatar_at: 0,
+            }],
+            unread_replies: 0,
+            unread_mentions: 0,
+            following: true,
+        },
     ];
     stream.lay_out(fonts, panel().width);
     stream
@@ -74,26 +87,42 @@ fn a_separator_opens_nothing() {
     assert_eq!(stream.root_of(99), None);
 }
 
-#[test]
-fn clicking_a_message_opens_its_thread() {
-    let mut fonts = Fonts::new();
-    let mut stream = conversation(&mut fonts);
+/// Clicks the middle of a placed row and answers what the stream made of it.
+fn click(stream: &mut Stream, name: &str) -> Option<Chose> {
     let within = panel();
     let placed = stream.boxes(within, None);
     let row = placed
         .iter()
-        .find(|item| item.name == "stream/row/1")
-        .expect("the first message is placed");
-
+        .find(|item| item.name == name)
+        .unwrap_or_else(|| panic!("{name} is placed"));
     let mut input = Input::default();
     let at = (row.rect.x + 10.0, row.rect.y + row.rect.height / 2.0);
     input.apply(Event::PointerMoved { x: at.0, y: at.1 }, &placed);
     input.apply(Event::PointerPressed, &placed);
     input.apply(Event::PointerReleased, &placed);
+    stream.react(&input, &placed, within)
+}
+
+/// The footer is the way in, and the only one.
+#[test]
+fn the_footer_opens_the_thread() {
+    let mut fonts = Fonts::new();
+    let mut stream = conversation(&mut fonts);
     assert_eq!(
-        stream.react(&input, &placed, within),
+        click(&mut stream, "stream/row/3"),
         Some(Chose::Thread("root".to_string()))
     );
+}
+
+/// A message is not a button. It was one, and that swallowed every click on a
+/// mention or a link inside it -- while giving no hint that pressing a
+/// sentence would do anything at all.
+#[test]
+fn clicking_a_message_does_nothing() {
+    let mut fonts = Fonts::new();
+    let mut stream = conversation(&mut fonts);
+    assert_eq!(click(&mut stream, "stream/row/1"), None);
+    assert_eq!(click(&mut stream, "stream/row/2"), None);
 }
 
 /// Rows off the bottom are not placed at all, so a click where one would have

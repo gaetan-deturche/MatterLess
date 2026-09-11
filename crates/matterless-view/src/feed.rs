@@ -93,7 +93,59 @@ pub fn rows_of(
         }
         posts.push(held.as_post(me_id));
     }
-    Ok(plan_channel(&posts, &HashMap::new(), &options))
+    Ok(plan_channel(
+        &posts,
+        &summaries(store, channel_id, &posts),
+        &options,
+    ))
+}
+
+/// What each root on this page has hanging off it.
+///
+/// Stubbed to an empty map for a long time, which is why the thread footer --
+/// built by the planner, measured by the layout -- had never once appeared:
+/// with no summary a root grows no footer, and the only way left to open a
+/// thread was to press the whole message.
+fn summaries(
+    store: &Store,
+    channel_id: &str,
+    posts: &[matterless_core::Post],
+) -> HashMap<String, matterless_render::ThreadSummary> {
+    let roots: Vec<String> = posts
+        .iter()
+        .filter(|post| post.root_id.is_empty())
+        .map(|post| post.id.clone())
+        .collect();
+    let mut summaries: HashMap<String, matterless_render::ThreadSummary> = store
+        .thread_summaries_for(channel_id, &roots)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(root_id, (reply_count, last_reply_at, participants))| {
+            (
+                root_id,
+                matterless_render::ThreadSummary {
+                    reply_count,
+                    last_reply_at,
+                    participants,
+                    ..Default::default()
+                },
+            )
+        })
+        .collect();
+
+    // Read state is the server's, and it can describe a thread whose replies
+    // are not held locally at all -- so a state without a local summary still
+    // earns an entry, or the footer that explains an unread badge would never
+    // be built.
+    for (root_id, state) in store.thread_states_for(&roots).unwrap_or_default() {
+        let summary = summaries.entry(root_id).or_default();
+        summary.reply_count = summary.reply_count.max(state.reply_count);
+        summary.last_reply_at = summary.last_reply_at.max(state.last_reply_at);
+        summary.unread_replies = state.unread_replies;
+        summary.unread_mentions = state.unread_mentions;
+        summary.following = state.following;
+    }
+    summaries
 }
 
 pub fn rows_from(
