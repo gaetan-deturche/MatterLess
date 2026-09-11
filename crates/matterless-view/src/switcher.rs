@@ -35,6 +35,12 @@ pub struct Match {
 
 /// The quick switcher, open or shut.
 pub struct Switcher {
+    /// The message being forwarded, when it was opened to pick a destination
+    /// rather than to go somewhere. `None` is the ordinary case.
+    ///
+    /// Set through `forward_instead`, which also changes what the box says: the
+    /// same list answering two questions has to say which one it is asking.
+    pub forwarding: Option<String>,
     pub open: bool,
     /// The query, in a real text field: it has a caret, a selection and
     /// clipboard, and writing a second lesser one would be a second thing to
@@ -57,6 +63,7 @@ impl Switcher {
         query.placeholder = "Jump to…".to_string();
         Self {
             open: false,
+            forwarding: None,
             query,
             found: Vec::new(),
             chosen: 0,
@@ -67,14 +74,25 @@ impl Switcher {
     /// as the first: the last search is not this one.
     pub fn show(&mut self, fonts: &mut Fonts, input: &mut Input) {
         self.open = true;
+        // Forgotten here rather than on close, so a switcher opened the
+        // ordinary way after a forward is the ordinary switcher again.
+        self.forwarding = None;
+        self.query.placeholder = "Jump to…".to_string();
         self.query.clear(fonts);
         self.chosen = 0;
         self.found.clear();
         input.focus_on(NAME);
     }
 
+    /// Turns an open switcher into "where should this go".
+    pub fn forward_instead(&mut self, post_id: &str) {
+        self.forwarding = Some(post_id.to_string());
+        self.query.placeholder = "Forward to…".to_string();
+    }
+
     pub fn hide(&mut self, input: &mut Input) {
         self.open = false;
+        self.forwarding = None;
         if input.focus() == Some(NAME) {
             input.focus_on(crate::composer::NAME);
         }
@@ -207,6 +225,31 @@ impl Switcher {
 
 #[cfg(test)]
 mod tests {
+    /// The same list answers two questions, and it has to say which one it is
+    /// asking -- otherwise a reader forwards a message believing they are
+    /// changing channel.
+    #[test]
+    fn it_says_which_question_it_is_asking() {
+        use super::*;
+        let mut fonts = Fonts::new();
+        let mut input = Input::default();
+        let mut switcher = Switcher::new();
+
+        switcher.show(&mut fonts, &mut input);
+        assert_eq!(switcher.forwarding, None);
+        let jumping = switcher.query.placeholder.clone();
+
+        switcher.forward_instead("p1");
+        assert_eq!(switcher.forwarding.as_deref(), Some("p1"));
+        assert_ne!(switcher.query.placeholder, jumping);
+
+        // Opened the ordinary way afterwards, it is the ordinary switcher
+        // again rather than one still pointed at a message.
+        switcher.show(&mut fonts, &mut input);
+        assert_eq!(switcher.forwarding, None);
+        assert_eq!(switcher.query.placeholder, jumping);
+    }
+
     use super::*;
 
     fn channels() -> Vec<Entry> {

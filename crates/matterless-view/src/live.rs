@@ -358,7 +358,11 @@ async fn run(
                             // server. React opens a picker and Edit opens a
                             // box, and what either produces arrives later as
                             // its own ask.
-                            Action::React | Action::Edit | Action::Thread | Action::Link => Ok(()),
+                            Action::React
+                            | Action::Edit
+                            | Action::Forward
+                            | Action::Thread
+                            | Action::Link => Ok(()),
                         };
                         match done {
                             // The socket echoes the change, which is what

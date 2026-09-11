@@ -219,6 +219,29 @@ fn named_by(rows: &[Row]) -> Vec<String> {
     wanted
 }
 
+/// A link to one message that will open anywhere.
+///
+/// The team is part of the path even though a message belongs to a channel,
+/// which is how Mattermost's own links are shaped. A direct message has no
+/// team of its own, and any team the reader is on resolves the link -- which
+/// is what the official client does too.
+///
+/// `None` when the store cannot name a team, rather than a link with a hole in
+/// it: a URL that 404s is worse than an action that says it cannot.
+pub fn permalink(store: &Store, server: &str, post_id: &str) -> Option<String> {
+    let post = store.post(post_id).ok().flatten()?;
+    let channel = store.channel(&post.channel_id).ok().flatten()?;
+    let team = if channel.team_id.is_empty() {
+        store.any_team_name().ok().flatten()?
+    } else {
+        store.team_name(&channel.team_id).ok().flatten()?
+    };
+    Some(format!(
+        "{}/{team}/pl/{post_id}",
+        server.trim_end_matches('/')
+    ))
+}
+
 /// The custom emoji a page of rows uses, by name to the id behind their image.
 ///
 /// A standard emoji is a character the parser already resolved. A custom one is
@@ -315,6 +338,77 @@ mod tests {
                 previews: Vec::new(),
             },
         }]
+    }
+
+    fn stored(store: &Store, channel_id: &str, team_id: &str) {
+        let channel: matterless_core::model::Channel = serde_json::from_value(serde_json::json!({
+            "id": channel_id, "team_id": team_id, "type": "O", "name": "dev",
+        }))
+        .expect("a channel");
+        store.upsert_channels(&[channel]).expect("stored");
+        store
+            .upsert_posts(&[said("p1", channel_id)])
+            .expect("stored");
+    }
+
+    fn said(id: &str, channel_id: &str) -> matterless_core::Post {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "channel_id": channel_id, "user_id": "u1",
+            "create_at": 1, "update_at": 1, "message": "hello",
+        }))
+        .expect("a post")
+    }
+
+    fn team(id: &str, name: &str) -> matterless_core::model::Team {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "name": name, "display_name": name,
+        }))
+        .expect("a team")
+    }
+
+    /// The shape Mattermost's own links have, and the trailing slash a server
+    /// address may or may not carry.
+    #[test]
+    fn a_permalink_names_the_team_the_channel_is_in() {
+        let store = Store::open_in_memory().expect("a store");
+        store
+            .upsert_teams(&[team("t1", "voyager"), team("t2", "northwind")])
+            .expect("teams");
+        stored(&store, "c1", "t1");
+
+        assert_eq!(
+            permalink(&store, "https://chat.invalid", "p1").as_deref(),
+            Some("https://chat.invalid/voyager/pl/p1")
+        );
+        assert_eq!(
+            permalink(&store, "https://chat.invalid/", "p1").as_deref(),
+            Some("https://chat.invalid/voyager/pl/p1")
+        );
+    }
+
+    /// A direct message has no team of its own, so any team the reader is on
+    /// resolves the link rather than the link being unbuildable.
+    #[test]
+    fn a_direct_message_borrows_a_team() {
+        let store = Store::open_in_memory().expect("a store");
+        store.upsert_teams(&[team("t2", "northwind")]).expect("teams");
+        stored(&store, "c1", "");
+        assert_eq!(
+            permalink(&store, "https://chat.invalid", "p1").as_deref(),
+            Some("https://chat.invalid/northwind/pl/p1")
+        );
+    }
+
+    /// No team at all means no link, rather than one with a hole where the
+    /// team should be: a URL that 404s is worse than an action that says it
+    /// cannot.
+    #[test]
+    fn no_team_means_no_link() {
+        let store = Store::open_in_memory().expect("a store");
+        stored(&store, "c1", "");
+        assert_eq!(permalink(&store, "https://chat.invalid", "p1"), None);
+        // And a message this store has never met is not a link either.
+        assert_eq!(permalink(&store, "https://chat.invalid", "nope"), None);
     }
 
     /// A name nobody has asked about is asked about; one already answered is
