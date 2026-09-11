@@ -117,6 +117,8 @@ pub enum Ask {
     /// written to. Asked of the server because neither is in the local store
     /// by definition.
     Discover { query: String },
+    /// Stop a conversation counting unread, or start again.
+    Mute { channel_id: String, muted: bool },
     /// Stop being in a channel.
     Leave { channel_id: String },
     /// Join a public channel, then open it.
@@ -423,6 +425,25 @@ async fn run(
                         let found = discover(&rest, engine.store(), &me_id, &query).await;
                         println!("{} other ways to read \"{query}\"", found.len());
                         wake.wake(Update::Discovered { query, found });
+                    }
+                    Ask::Mute { channel_id, muted } => {
+                        match rest.set_channel_muted(&channel_id, &me_id, muted).await {
+                            Ok(()) => {
+                                println!(
+                                    "{channel_id} is now {}",
+                                    if muted { "muted" } else { "unmuted" }
+                                );
+                                // Muting is a membership setting, and the
+                                // sidebar reads it from the same rows the
+                                // counts come from.
+                                if let Ok((_, mode)) =
+                                    membership(&rest, engine.store(), &me_id).await
+                                {
+                                    wake.wake(Update::Membership(mode));
+                                }
+                            }
+                            Err(error) => eprintln!("muting {channel_id}: {error}"),
+                        }
                     }
                     Ask::Leave { channel_id } => {
                         match rest.leave_channel(&channel_id, &me_id).await {

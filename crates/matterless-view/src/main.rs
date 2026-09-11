@@ -954,6 +954,20 @@ impl App {
         header::offered(direct)
     }
 
+    /// Whether the conversation on screen is muted, as the sidebar has it.
+    fn muted(&self) -> bool {
+        let Some(open) = self.sidebar.selected.as_deref() else {
+            return false;
+        };
+        self.sidebar.entries.iter().any(|entry| {
+            matches!(
+                entry,
+                matterless_view::sidebar::Entry::Channel { id, muted, .. }
+                    if id == open && *muted
+            )
+        })
+    }
+
     /// Which strip button the pointer is on, from the boxes just placed.
     fn on_header(&self) -> Option<header::Act> {
         self.input
@@ -985,6 +999,20 @@ impl App {
                     self.listing.expect("Pinned");
                     link.send(matterless_view::live::Ask::Pinned {
                         channel_id: channel,
+                    });
+                }
+            }
+            header::Act::Mute => {
+                let muted = self.muted();
+                if let (Some(channel), Some(link)) =
+                    (self.sidebar.selected.clone(), self.link.as_ref())
+                {
+                    link.send(matterless_view::live::Ask::Mute {
+                        channel_id: channel,
+                        // What it becomes, decided here rather than waited
+                        // for: the button has to change the instant it is
+                        // pressed, as the reaction pills do.
+                        muted: !muted,
                     });
                 }
             }
@@ -1909,6 +1937,7 @@ impl App {
             format!("{} (offline)", self.title())
         });
         header.offered = self.header_offers();
+        header.muted = self.muted();
         scene.clip_to(strip.x, strip.y, strip.width, strip.height);
         let mut canvas = Canvas {
             scene: &mut scene,
