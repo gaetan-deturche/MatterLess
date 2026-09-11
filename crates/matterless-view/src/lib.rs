@@ -20,6 +20,7 @@ pub mod feed;
 pub mod header;
 pub mod listing;
 pub mod live;
+pub mod menu;
 pub mod open;
 pub mod picker;
 pub mod profile;

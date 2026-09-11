@@ -220,6 +220,11 @@ struct App {
     loading_older: bool,
     /// False once the beginning of the channel has been reached.
     more_history: bool,
+    /// The menu currently open, whichever of the two it is.
+    ///
+    /// One at a time and one field: a right-click on the sidebar while the
+    /// message menu is open should replace it, not stack a second one over it.
+    menu: matterless_view::menu::Menu,
 }
 
 /// How many followed threads the list holds. Well past what anybody reads in
@@ -367,6 +372,7 @@ impl App {
             depth: matterless_view::feed::PAGE,
             loading_older: false,
             more_history: true,
+            menu: matterless_view::menu::Menu::default(),
         };
         app.sidebar.selected = Some(channel);
         // Focused before anything is clicked: a chat window that needs a click
@@ -408,6 +414,11 @@ impl App {
             &row,
             Rect::new(0.0, 0.0, self.size.0 as f32, self.size.1 as f32),
         )
+    }
+
+    /// The whole window, which is what a floating panel is clamped inside.
+    fn window_rect(&self) -> Rect {
+        Rect::new(0.0, 0.0, self.size.0 as f32, self.size.1 as f32)
     }
 
     fn rail_rect(&self) -> Rect {
@@ -972,6 +983,24 @@ impl App {
                 }
             }
             Press::Person(username) => self.show_profile(&username),
+            // Inside the app rather than out of it: the message is on this
+            // server and in this store, so following a quoted card is a scroll
+            // and not a browser.
+            Press::Post {
+                channel_id,
+                post_id,
+            } => {
+                if self.sidebar.selected.as_deref() != Some(channel_id.as_str()) {
+                    self.sidebar.selected = Some(channel_id.clone());
+                    self.open_channel(&channel_id);
+                }
+                let within = self.stream_rect();
+                if !self.stream.to_post(&post_id, within) {
+                    // Older than the pages loaded so far. Saying so beats
+                    // leaving the reader somewhere arbitrary and silent.
+                    println!("{post_id} is further back than this channel is loaded");
+                }
+            }
         }
     }
 
@@ -1176,6 +1205,379 @@ impl App {
     }
 
     /// A link to this message that will open anywhere.
+    /// The menu behind a message's `...`.
+    ///
+    /// Built from the row on screen rather than from the store: what it offers
+    /// has to agree with what the reader can see, and a row that has just been
+    /// saved should say so before the server has answered.
+    fn offer_message_menu(&mut self, post_id: &str, under: Rect) {
+        use matterless_view::actions::Action;
+        use matterless_view::menu::{Item, Style, Tint};
+        let Some(post) = self
+            .stream
+            .rows
+            .iter()
+            .chain(self.thread.iter().flat_map(|thread| thread.rows.iter()))
+            .find_map(|row| match row {
+                Row::Post { post } | Row::Continuation { post } if post.post_id == post_id => {
+                    Some(post)
+                }
+                _ => None,
+            })
+        else {
+            return;
+        };
+        let mine = post.author_id == self.me;
+        let said = |action: Action, on: bool| Item::new(action.slug(), action.said(on));
+        let mut items = vec![
+            said(Action::Follow, post.following),
+            said(Action::Unread, false),
+            said(Action::Save, post.saved),
+            said(Action::Pin, post.pinned),
+        ];
+        if mine {
+            // Only on the reader's own: the server refuses either on anybody
+            // else's, and offering what will be refused is a worse answer than
+            // not offering it.
+            items.push(Item::rule());
+            items.push(said(Action::Edit, false));
+            items.push(said(Action::Delete, false).asks(vec![
+                // Asked, not assumed: a delete cannot be undone and the item
+                // above it is one slip away.
+                Item::new("delete.now", "Delete").tinted(Tint::Danger),
+                Item::new("delete.keep", "Keep"),
+            ]));
+        }
+        items.push(said(Action::Forward, false));
+        items.push(
+            said(Action::Remind, false).asks(
+                matterless_view::actions::reminders(matterless_view::clock::minutes_today())
+                    .into_iter()
+                    .map(|(label, seconds)| Item::new(&format!("remind.{seconds}"), label))
+                    .collect(),
+            ),
+        );
+        items.push(Item::rule());
+        items.push(said(Action::CopyText, false));
+        items.push(said(Action::Link, false));
+        self.menu.show(
+            post_id,
+            matterless_view::menu::Anchor::Under(under),
+            Style::message(),
+            items,
+        );
+    }
+
+    /// The menu a right-click on a channel row offers.
+    ///
+    /// Items that cannot apply are left out rather than drawn dead: a direct
+    /// message has no members to add and cannot be left -- the server refuses
+    /// -- and a row that never becomes available is a worse answer than no row.
+    fn offer_channel_menu(&mut self) {
+        use matterless_view::menu::{Item, Style, Tint};
+        let Some(channel_id) = self
+            .input
+            .contexted()
+            .and_then(|name| name.strip_prefix("sidebar/channel/"))
+            .map(str::to_string)
+        else {
+            return;
+        };
+        let Some((x, y)) = self.input.pointer_at() else {
+            return;
+        };
+        let Some(store) = self.store.as_deref() else {
+            return;
+        };
+        let Ok(Some(channel)) = store.channel(&channel_id) else {
+            return;
+        };
+        // A conversation rather than a channel: no membership to manage.
+        let conversation = channel.channel_type == "D" || channel.channel_type == "G";
+        let muted = self.sidebar.entries.iter().any(|entry| {
+            matches!(entry, Entry::Channel { id, muted, .. } if *id == channel_id && *muted)
+        });
+
+        let categories = store.sidebar().unwrap_or_default();
+        let kind = |wanted: &str| {
+            categories
+                .iter()
+                .position(|(category, _)| {
+                    category.category_type == wanted && category.team_id == channel.team_id
+                })
+                .map(|at| &categories[at])
+        };
+        let favourites = kind("favorites");
+        // Where un-favouriting puts a channel back.
+        let plain = kind("channels");
+        let favourite = favourites.is_some_and(|(_, held)| held.contains(&channel_id));
+
+        let mut items = vec![Item::new("channel.unread", "Mark as Unread").marked("\u{2630}")];
+        if let (Some((favourites, _)), Some((plain, _))) = (favourites, plain) {
+            let into = if favourite { &plain.id } else { &favourites.id };
+            items.push(
+                Item::new(
+                    &format!("channel.move.{into}"),
+                    if favourite {
+                        "Remove from Favorites"
+                    } else {
+                        "Favorite"
+                    },
+                )
+                .marked("\u{2606}"),
+            );
+        }
+        items.push(
+            Item::new(
+                "channel.mute",
+                if muted {
+                    "Unmute Channel"
+                } else {
+                    "Mute Channel"
+                },
+            )
+            .marked("\u{1f514}"),
+        );
+        // Everywhere it could go, minus wherever it already is.
+        let targets: Vec<Item> = categories
+            .iter()
+            .filter(|(category, held)| {
+                category.team_id == channel.team_id
+                    && category.category_type != "direct_messages"
+                    && !held.contains(&channel_id)
+            })
+            .map(|(category, _)| {
+                Item::new(
+                    &format!("channel.move.{}", category.id),
+                    &category.display_name,
+                )
+            })
+            .collect();
+        if !targets.is_empty() {
+            items.push(Item::rule());
+            items.push(
+                Item::new("channel.move", "Move to\u{2026}")
+                    .marked("\u{1f5c0}")
+                    .nests(targets),
+            );
+        }
+        items.push(Item::rule());
+        items.push(Item::new("channel.link", "Copy Link").marked("\u{1f517}"));
+        if !conversation {
+            items.push(Item::new("channel.add", "Add Members").marked("\u{1f464}"));
+            items.push(Item::rule());
+            items.push(
+                Item::new("channel.leave", "Leave Channel")
+                    .marked("\u{21e5}")
+                    .tinted(Tint::Flag),
+            );
+        }
+        self.menu.show(
+            &channel_id,
+            matterless_view::menu::Anchor::At(x, y),
+            Style::channel(),
+            items,
+        );
+    }
+
+    /// Runs whichever item was chosen.
+    ///
+    /// The channel menu's ids carry a prefix and the message menu's do not,
+    /// which is what says which of the two answered: both offer a "Mark as
+    /// Unread" and they mean different things by it.
+    fn act_on_menu(&mut self, about: &str, chosen: &str) {
+        use matterless_view::actions::Action;
+        if let Some(rest) = chosen.strip_prefix("channel.") {
+            self.act_on_channel_menu(about, rest);
+            return;
+        }
+        // Answered by doing nothing, which is what keeping it means.
+        if chosen == "delete.keep" {
+            return;
+        }
+        if let Some(seconds) = chosen
+            .strip_prefix("remind.")
+            .and_then(|seconds| seconds.parse::<i64>().ok())
+        {
+            if let Some(link) = self.link.as_ref() {
+                link.send(matterless_view::live::Ask::Remind {
+                    post_id: about.to_string(),
+                    when: matterless_view::clock::now() + seconds,
+                });
+            }
+            return;
+        }
+        let action = match chosen {
+            "delete.now" => Action::Delete,
+            slug => match Action::from_slug(slug) {
+                Some(action) => action,
+                None => return,
+            },
+        };
+        let post = self
+            .stream
+            .rows
+            .iter()
+            .chain(self.thread.iter().flat_map(|thread| thread.rows.iter()))
+            .find_map(|row| match row {
+                Row::Post { post } | Row::Continuation { post } if post.post_id == about => {
+                    Some(post.clone())
+                }
+                _ => None,
+            });
+        match action {
+            // What the toggle becomes, decided here rather than by the server:
+            // the row has to change the instant it is chosen.
+            Action::Save => {
+                let on = !post.is_some_and(|post| post.saved);
+                self.act(action, about.to_string(), on);
+            }
+            Action::Pin => {
+                let on = !post.is_some_and(|post| post.pinned);
+                self.act(action, about.to_string(), on);
+            }
+            Action::Follow => {
+                let following = !post.as_ref().is_some_and(|post| post.following);
+                let root = post
+                    .map(|post| {
+                        if post.root_id.is_empty() {
+                            post.post_id
+                        } else {
+                            post.root_id
+                        }
+                    })
+                    .unwrap_or_else(|| about.to_string());
+                if let Some(link) = self.link.as_ref() {
+                    link.send(matterless_view::live::Ask::Follow {
+                        root_id: root,
+                        following,
+                    });
+                }
+            }
+            Action::CopyText => match self
+                .store
+                .as_ref()
+                .and_then(|store| store.post(about).ok().flatten())
+            {
+                // The raw markdown, not the rendered body: what was typed is
+                // what somebody pasting it elsewhere means to carry.
+                Some(said) => {
+                    self.clipboard = said.message;
+                    println!("copied a message");
+                }
+                None => eprintln!("no copy of {about} to read"),
+            },
+            other => self.act(other, about.to_string(), true),
+        }
+    }
+
+    /// Runs one item of the channel menu.
+    fn act_on_channel_menu(&mut self, channel_id: &str, chosen: &str) {
+        use matterless_view::live::Ask;
+        if let Some(category_id) = chosen.strip_prefix("move.") {
+            let team_id = self
+                .store
+                .as_ref()
+                .and_then(|store| store.channel(channel_id).ok().flatten())
+                .map(|channel| channel.team_id)
+                .unwrap_or_default();
+            if let Some(link) = self.link.as_ref() {
+                link.send(Ask::Move {
+                    channel_id: channel_id.to_string(),
+                    team_id,
+                    category_id: category_id.to_string(),
+                });
+            }
+            return;
+        }
+        match chosen {
+            "unread" => {
+                if let Some(link) = self.link.as_ref() {
+                    link.send(Ask::Unseen {
+                        channel_id: channel_id.to_string(),
+                    });
+                }
+            }
+            "mute" => {
+                let muted = self.sidebar.entries.iter().any(|entry| {
+                    matches!(entry, Entry::Channel { id, muted, .. } if id == channel_id && *muted)
+                });
+                if let Some(link) = self.link.as_ref() {
+                    link.send(Ask::Mute {
+                        channel_id: channel_id.to_string(),
+                        muted: !muted,
+                    });
+                }
+            }
+            "link" => match self.store.as_deref().and_then(|store| {
+                matterless_view::feed::channel_link(store, &self.server, channel_id)
+            }) {
+                Some(link) => {
+                    self.clipboard = link;
+                    println!("copied a channel link");
+                }
+                None => eprintln!("no team to build a link from"),
+            },
+            "add" => {
+                // The same picker the strip's own button opens, so there is
+                // one way of choosing somebody rather than two that drift.
+                let mut input = std::mem::take(&mut self.input);
+                self.switcher.show(&mut self.fonts, &mut input);
+                self.switcher.instead(
+                    matterless_view::switcher::Asking::Add(channel_id.to_string()),
+                );
+                self.input = input;
+            }
+            "leave" => {
+                if let Some(link) = self.link.as_ref() {
+                    link.send(Ask::Leave {
+                        channel_id: channel_id.to_string(),
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Runs whatever a click on a conversation asked for.
+    ///
+    /// One place for both panels: the channel and the thread draw the same
+    /// rows with the same controls, and two copies of this is how they would
+    /// come to disagree about what pressing one of them does.
+    fn acted(&mut self, chose: Option<matterless_view::stream::Chose>) {
+        use matterless_view::stream::Chose;
+        match chose {
+            Some(Chose::Thread(root)) => self.open_thread(&root),
+            Some(Chose::Retry(pending)) => self.retry(&pending),
+            Some(Chose::Act {
+                action,
+                post_id,
+                on,
+            }) => self.act(action, post_id, on),
+            Some(Chose::Press(press)) => self.press(press),
+            Some(Chose::Save { file_id, name }) => {
+                if let Some(link) = self.link.as_ref() {
+                    link.send(matterless_view::live::Ask::Download { file_id, name });
+                }
+            }
+            Some(Chose::React {
+                post_id,
+                emoji,
+                on,
+            }) => {
+                if let Some(link) = self.link.as_ref() {
+                    link.send(matterless_view::live::Ask::React {
+                        post_id,
+                        emoji,
+                        on,
+                    });
+                }
+            }
+            Some(Chose::More { post_id, under }) => self.offer_message_menu(&post_id, under),
+            None => {}
+        }
+    }
+
     fn permalink(&self, post_id: &str) -> Option<String> {
         matterless_view::feed::permalink(self.store.as_deref()?, &self.server, post_id)
     }
@@ -1738,6 +2140,10 @@ impl App {
         if let Some(row) = self.edited_row() {
             boxes.extend(self.edit.boxes(row, self.stream_rect()));
         }
+        // Last and deepest: a menu is over everything, and its catcher covers
+        // the window so a click beside it shuts it rather than reaching what
+        // it is covering.
+        boxes.extend(self.menu.boxes(self.window_rect()));
         boxes
     }
 
@@ -2421,6 +2827,18 @@ impl App {
             self.picker.draw(&mut canvas, near, stream);
             self.picker.query.draw(&mut canvas, field, true);
         }
+        // The menu over even that: it is the thing the reader just asked for.
+        if self.menu.open() {
+            let window = self.window_rect();
+            scene.clip_to(0.0, 0.0, self.size.0 as f32, self.size.1 as f32);
+            let mut canvas = Canvas {
+                scene: &mut scene,
+                painter: &mut self.painter,
+                fonts: &mut self.fonts,
+                palette: &self.palette,
+            };
+            self.menu.draw(&mut canvas, window, &self.input);
+        }
         scene
     }
 
@@ -2693,6 +3111,19 @@ impl ApplicationHandler<Update> for App {
                 if down && let Some(text) = &event.text {
                     self.input.apply(UiEvent::Typed(text.to_string()), &[]);
                 }
+                // A menu goes away on Escape before anything else reads the
+                // keystroke, and takes the keystroke with it: closing a menu
+                // and the thread pane behind it with one press is two answers
+                // to one question.
+                if down && self.menu.open() {
+                    self.menu.react(&self.input);
+                    if !self.menu.open() {
+                        self.input.settle();
+                        self.react();
+                        self.redraw();
+                        return;
+                    }
+                }
                 if down && self.input.chord(Key::Char('k')) {
                     let mut input = std::mem::take(&mut self.input);
                     self.switcher.show(&mut self.fonts, &mut input);
@@ -2744,6 +3175,19 @@ impl ApplicationHandler<Update> for App {
                 }
             }
             WindowEvent::MouseInput { state, button, .. } => {
+                // The other button asks what can be done here. Only the
+                // sidebar answers, which is where the app puts its own.
+                if button == winit::event::MouseButton::Right {
+                    if state != winit::event::ElementState::Pressed {
+                        return;
+                    }
+                    let boxes = self.targets();
+                    self.input.apply(UiEvent::Contexted, &boxes);
+                    self.offer_channel_menu();
+                    self.react();
+                    self.redraw();
+                    return;
+                }
                 if button != winit::event::MouseButton::Left {
                     return;
                 }
@@ -2754,6 +3198,17 @@ impl ApplicationHandler<Update> for App {
                     UiEvent::PointerReleased
                 };
                 self.input.apply(event, &boxes);
+                // The menu first, and alone: while one is open its catcher
+                // covers the window, so everything under it is out of reach
+                // until it has been answered or dismissed.
+                if self.menu.open() {
+                    if let Some((about, chosen)) = self.menu.react(&self.input) {
+                        self.act_on_menu(&about, &chosen);
+                    }
+                    self.react();
+                    self.redraw();
+                    return;
+                }
                 // A team on the rail takes the reader to the first
                 // conversation it holds: a team is not itself somewhere to be,
                 // and landing on nothing would be a press that did nothing.
@@ -2792,27 +3247,16 @@ impl ApplicationHandler<Update> for App {
                 // A message opens its thread. Taken before the composer reacts,
                 // because opening one narrows the column the composer sits in.
                 let stream = self.stream_rect();
-                match self.stream.react(&self.input, &boxes, stream) {
-                    Some(matterless_view::stream::Chose::Thread(root)) => self.open_thread(&root),
-                    Some(matterless_view::stream::Chose::Retry(pending)) => self.retry(&pending),
-                    Some(matterless_view::stream::Chose::Act {
-                        action,
-                        post_id,
-                        on,
-                    }) => self.act(action, post_id, on),
-                    Some(matterless_view::stream::Chose::Press(press)) => self.press(press),
-                    Some(matterless_view::stream::Chose::Save { file_id, name }) => {
-                        if let Some(link) = self.link.as_ref() {
-                            link.send(matterless_view::live::Ask::Download { file_id, name });
-                        }
-                    }
-                    Some(matterless_view::stream::Chose::React { post_id, emoji, on }) => {
-                        if let Some(link) = self.link.as_ref() {
-                            link.send(matterless_view::live::Ask::React { post_id, emoji, on });
-                        }
-                    }
-                    None => {}
-                }
+                let chose = self.stream.react(&self.input, &boxes, stream);
+                self.acted(chose);
+                // And the same in the thread pane, which draws the same rows
+                // with the same controls on them: without this its toolbar was
+                // there to be hovered and did nothing when it was pressed.
+                let chose = match (self.thread_stream_rect(), self.thread.as_mut()) {
+                    (Some(within), Some(thread)) => thread.react(&self.input, &boxes, within),
+                    _ => None,
+                };
+                self.acted(chose);
                 self.react();
                 self.redraw();
             }

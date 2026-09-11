@@ -412,7 +412,14 @@ impl Sidebar {
             palette,
         };
         self.bar
-            .draw(&mut canvas, within, self.scroll, self.reach(within));
+            .draw(
+                &mut canvas,
+                "sidebar",
+                input,
+                within,
+                self.scroll,
+                self.reach(within),
+            );
     }
 }
 

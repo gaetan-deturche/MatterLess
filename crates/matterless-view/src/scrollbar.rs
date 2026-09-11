@@ -32,6 +32,9 @@ const EDGE: f32 = 4.0;
 const GROOVE_ALPHA: f32 = 0.14;
 const THUMB_ALPHA: f32 = 0.42;
 const HELD_ALPHA: f32 = 0.75;
+/// And louder again with the pointer anywhere on the track, before anything is
+/// held: `.track:hover .rail`, which is how a reader finds the bar at all.
+const GROOVE_HOVER_ALPHA: f32 = 0.24;
 
 /// A thumb shorter than this is not worth aiming at.
 ///
@@ -160,10 +163,21 @@ impl Scrollbar {
         Some(top / room * span)
     }
 
-    pub fn draw(&self, into: &mut Canvas<'_>, within: Rect, scroll: f32, reach: f32) {
+    pub fn draw(
+        &self,
+        into: &mut Canvas<'_>,
+        name: &str,
+        input: &Input,
+        within: Rect,
+        scroll: f32,
+        reach: f32,
+    ) {
         if !self.needed(reach) {
             return;
         }
+        // The whole track, not the thumb: the bar has to brighten before the
+        // pointer has found the four pixels it is aiming at.
+        let under = input.hovered() == Some(format!("{name}/scrollbar").as_str());
         let track = self.track(within);
         let thumb = self.thumb(within, scroll, reach);
         let Canvas { scene, palette, .. } = into;
@@ -183,7 +197,11 @@ impl Scrollbar {
             track.y,
             GROOVE,
             track.height,
-            quiet(GROOVE_ALPHA),
+            quiet(if under || self.held.is_some() {
+                GROOVE_HOVER_ALPHA
+            } else {
+                GROOVE_ALPHA
+            }),
             GROOVE / 2.0,
         );
         scene.rounded(
@@ -191,7 +209,7 @@ impl Scrollbar {
             thumb.y,
             thumb.width,
             thumb.height,
-            quiet(if self.held.is_some() {
+            quiet(if under || self.held.is_some() {
                 HELD_ALPHA
             } else {
                 THUMB_ALPHA

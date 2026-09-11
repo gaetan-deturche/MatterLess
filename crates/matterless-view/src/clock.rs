@@ -54,9 +54,32 @@ pub fn today() -> i64 {
     (since + i64::from(utc_offset_minutes()) * 60).div_euclid(86_400)
 }
 
+/// Now, in seconds since the epoch. The unit every timestamp here is in.
+pub fn now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| since.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// How far into the reader's own day it is, in minutes.
+///
+/// What "tomorrow morning" has to be measured from: a reminder set at eleven
+/// at night and one set at eight in the morning both mean nine o'clock, and
+/// they are ten hours apart.
+pub fn minutes_today() -> i64 {
+    (now() + i64::from(utc_offset_minutes()) * 60).rem_euclid(86_400) / 60
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The time of day has to be a time of day, whatever the machine says.
+    #[test]
+    fn the_time_of_day_is_inside_a_day() {
+        assert!((0..24 * 60).contains(&minutes_today()));
+    }
 
     /// Today has to be a day this program could be running on, or every date
     /// separator is wrong by the same amount and nothing says so.

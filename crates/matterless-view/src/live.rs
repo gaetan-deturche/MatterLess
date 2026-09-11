@@ -127,6 +127,22 @@ pub enum Ask {
     Mute { channel_id: String, muted: bool },
     /// Stop being in a channel.
     Leave { channel_id: String },
+    /// Make a whole channel unread again, from its newest message down.
+    ///
+    /// Which is what the app means by it: the channel goes back to unread
+    /// from there, rather than every message in it being forgotten.
+    Unseen { channel_id: String },
+    /// Move a channel into one of the team's sidebar categories.
+    ///
+    /// Favouriting is this with the favourites category as the target, which
+    /// is why there is no separate ask for it.
+    Move {
+        channel_id: String,
+        team_id: String,
+        category_id: String,
+    },
+    /// Be told about one message again later.
+    Remind { post_id: String, when: i64 },
     /// Join a public channel, then open it.
     Join { channel_id: String },
     /// Find or create the conversation with one person, then open it.
@@ -402,14 +418,23 @@ async fn run(
                             Action::Save => rest.set_post_saved(&me_id, &post_id, on).await,
                             Action::Pin => rest.set_post_pinned(&post_id, on).await,
                             Action::Delete => rest.delete_post(&post_id).await,
+                            // From this message down, which is what the app
+                            // means by marking one unread: the channel goes
+                            // back to being unread from here, not everywhere.
+                            Action::Unread => {
+                                rest.set_post_unread(&me_id, &post_id).await.map(|_| ())
+                            }
                             // Answered in the window: none of these needs the
-                            // server. React opens a picker and Edit opens a
-                            // box, and what either produces arrives later as
-                            // its own ask.
+                            // server here. React opens a picker, Edit opens a
+                            // box, Follow and Remind are asks of their own,
+                            // and copying never leaves the machine.
                             Action::React
                             | Action::Edit
                             | Action::Forward
                             | Action::Thread
+                            | Action::Follow
+                            | Action::Remind
+                            | Action::CopyText
                             | Action::Link => Ok(()),
                         };
                         match done {
@@ -511,6 +536,63 @@ async fn run(
                                 }
                             }
                             Err(error) => eprintln!("leaving {channel_id}: {error}"),
+                        }
+                    }
+                    Ask::Unseen { channel_id } => {
+                        // Marked from the newest message down, which needs the
+                        // newest message: the store's copy may be a session
+                        // old, so the server is asked for it.
+                        match rest.posts(&channel_id, 1).await {
+                            Ok(newest) => match newest.order.first() {
+                                // An empty channel has nothing to be unread
+                                // about, and saying so is not a failure.
+                                None => println!("{channel_id} is empty"),
+                                Some(post_id) => {
+                                    match rest.set_post_unread(&me_id, post_id).await {
+                                        Ok(member) => {
+                                            let store = engine.store();
+                                            if let Err(error) =
+                                                store.upsert_channel_members(&[member])
+                                            {
+                                                eprintln!("storing the membership: {error}");
+                                            }
+                                            println!("{channel_id} marked unread");
+                                            if let Ok((_, mode)) =
+                                                membership(&rest, engine.store(), &me_id).await
+                                            {
+                                                wake.wake(Update::Membership(mode));
+                                            }
+                                        }
+                                        Err(error) => {
+                                            eprintln!("marking {channel_id} unread: {error}")
+                                        }
+                                    }
+                                }
+                            },
+                            Err(error) => eprintln!("reading {channel_id}: {error}"),
+                        }
+                    }
+                    Ask::Move {
+                        channel_id,
+                        team_id,
+                        category_id,
+                    } => {
+                        match moved(&rest, &me_id, &team_id, &channel_id, &category_id).await {
+                            Ok(()) => {
+                                println!("moved {channel_id}");
+                                if let Ok((_, mode)) =
+                                    membership(&rest, engine.store(), &me_id).await
+                                {
+                                    wake.wake(Update::Membership(mode));
+                                }
+                            }
+                            Err(error) => eprintln!("moving {channel_id}: {error}"),
+                        }
+                    }
+                    Ask::Remind { post_id, when } => {
+                        match rest.set_reminder(&me_id, &post_id, when).await {
+                            Ok(()) => println!("reminder set on {post_id}"),
+                            Err(error) => eprintln!("setting a reminder: {error}"),
                         }
                     }
                     Ask::Join { channel_id } => {
@@ -1395,6 +1477,43 @@ fn listed(title: &str, store: &Store, list: PostList, me_id: &str) -> Update {
 /// Teams first, because a channel is asked for per team and a direct message
 /// comes back under every one of them -- so they are deduplicated by id or the
 /// same conversation is stored several times over.
+/// Moves one channel into one of a team's sidebar categories.
+///
+/// The server replaces a category wholesale, `channel_ids` and all, so moving
+/// one channel means sending two of them back: the one losing it and the one
+/// gaining it. Sending only the gainer leaves the channel in both.
+async fn moved(
+    rest: &matterless_core::rest::RestClient,
+    me_id: &str,
+    team_id: &str,
+    channel_id: &str,
+    category_id: &str,
+) -> matterless_core::Result<()> {
+    let held = rest.sidebar_categories(me_id, team_id).await?;
+    let mut changed: Vec<matterless_core::model::SidebarCategory> = Vec::new();
+    for category in &held.categories {
+        let holds = category.channel_ids.iter().any(|id| id == channel_id);
+        let wanted = category.id == category_id;
+        if holds == wanted {
+            continue;
+        }
+        let mut copy = category.clone();
+        if wanted {
+            // Newest first within the category it arrives in, which is where
+            // the official client puts it too.
+            copy.channel_ids.insert(0, channel_id.to_string());
+        } else {
+            copy.channel_ids.retain(|id| id != channel_id);
+        }
+        changed.push(copy);
+    }
+    if changed.is_empty() {
+        return Ok(());
+    }
+    rest.update_sidebar_categories(me_id, team_id, &changed)
+        .await
+}
+
 async fn membership(
     rest: &matterless_core::rest::RestClient,
     store: &Store,
