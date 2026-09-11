@@ -1381,7 +1381,7 @@ const LARGEST: u64 = 100 * 1024 * 1024;
 /// an id, and the post is created with that id in `file_ids`. An upload with
 /// no post attached is orphaned rather than broken, which is why a failed send
 /// here costs nothing but disk on the server.
-async fn upload(
+pub async fn upload(
     rest: &matterless_core::rest::RestClient,
     engine: &SyncEngine,
     context: &SyncContext,
