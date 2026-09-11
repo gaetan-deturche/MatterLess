@@ -34,6 +34,8 @@ pub enum Chose {
     },
     /// Follow something somebody wrote: a link, a person, a conversation.
     Press(matterless_layout::row::Press),
+    /// Keep a file somebody attached.
+    Save { file_id: String, name: String },
     /// Add or remove this reaction.
     React {
         post_id: String,
@@ -186,6 +188,22 @@ impl Stream {
                         });
                     }
                 }
+                for (ordinal, (_, file)) in self.filed(index).into_iter().enumerate() {
+                    let _ = file;
+                    let card = self.card_rect(index, ordinal, top, inner.x);
+                    if let Some(card) = card {
+                        placed.push(Placed {
+                            name: format!("{}/row/{index}/save/{ordinal}", self.name),
+                            rect: Rect::new(
+                                card.right() - SAVE - 10.0,
+                                card.y + (card.height - 22.0) / 2.0,
+                                SAVE,
+                                22.0,
+                            ),
+                            depth: 3,
+                        });
+                    }
+                }
                 for (ordinal, (block, _)) in self.pills(index).into_iter().enumerate() {
                     placed.push(Placed {
                         name: format!("{}/row/{index}/reaction/{ordinal}", self.name),
@@ -202,6 +220,13 @@ impl Stream {
             top = bottom;
         }
         placed.extend(self.bar.boxes(&self.name, within, self.reach(within)));
+        if let Some(rect) = self.to_newest(within) {
+            placed.push(Placed {
+                name: format!("{}/newest", self.name),
+                rect,
+                depth: 5,
+            });
+        }
         // The pressable words from the frame just gone: they sit under the
         // pills and the toolbar, which are things in their own right rather
         // than words in a sentence.
@@ -216,6 +241,66 @@ impl Stream {
             });
         }
         placed
+    }
+
+    /// The file cards on one row, paired with the block that measured each.
+    ///
+    /// In one place because two things ask -- the drawing and the hit test --
+    /// and the nth card has to be the nth file for both of them.
+    fn filed(
+        &self,
+        index: usize,
+    ) -> Vec<(&matterless_layout::row::Block, &matterless_render::FileRef)> {
+        let (Some(Row::Post { post } | Row::Continuation { post }), Some(laid)) =
+            (self.rows.get(index), self.laid.get(index))
+        else {
+            return Vec::new();
+        };
+        laid.blocks
+            .iter()
+            .filter(|block| block.kind == matterless_layout::row::Kind::Attachment)
+            .zip(post.files.iter())
+            .filter(|(_, file)| !file.image && !file.video)
+            .collect()
+    }
+
+    /// Where one file card sits on screen.
+    fn card_rect(&self, index: usize, ordinal: usize, top: f32, left: f32) -> Option<Rect> {
+        let (block, _) = self.filed(index).into_iter().nth(ordinal)?;
+        Some(Rect::new(
+            left + self.theme.gutter,
+            top + block.y,
+            (self.theme.text_width() * 0.6).min(320.0),
+            block.height,
+        ))
+    }
+
+    /// How far from the newest message the reader is sitting.
+    ///
+    /// Zero when they are at the bottom, which is where a conversation opens
+    /// and where it stays while they read along.
+    pub fn behind(&self, within: Rect) -> f32 {
+        (self.reach(within) - self.scroll).max(0.0)
+    }
+
+    /// The button that takes them back to the newest message.
+    ///
+    /// Floated over the conversation near the bottom, where the eye already is
+    /// when it reaches the end of what it was reading. `None` while they are
+    /// already there: a button that does nothing is one more thing to read.
+    pub fn to_newest(&self, within: Rect) -> Option<Rect> {
+        // A screenful and a bit. Less than that and the button appears while
+        // somebody is simply reading the last few messages, which is exactly
+        // when they do not want anything jumping into the middle of it.
+        if self.behind(within) < within.height * 0.75 {
+            return None;
+        }
+        Some(Rect::new(
+            within.x + (within.width - JUMP) / 2.0,
+            within.bottom() - 44.0,
+            JUMP,
+            28.0,
+        ))
     }
 
     /// The panel minus the margin it keeps clear of its own edges.
@@ -333,6 +418,20 @@ impl Stream {
             self.scroll = (self.scroll - y).clamp(0.0, self.reach(within));
         }
         let clicked = input.clicked()?;
+        if let Some(rest) = clicked.strip_prefix(&format!("{}/row/", self.name))
+            && let Some((index, ordinal)) = rest.split_once("/save/")
+            && let (Ok(index), Ok(ordinal)) = (index.parse::<usize>(), ordinal.parse::<usize>())
+            && let Some((_, file)) = self.filed(index).into_iter().nth(ordinal)
+        {
+            return Some(Chose::Save {
+                file_id: file.id.clone(),
+                name: file.name.clone(),
+            });
+        }
+        if clicked == format!("{}/newest", self.name) {
+            self.scroll = self.reach(within);
+            return None;
+        }
         // Words first: they are the innermost thing in a row, and a click on
         // one is a click on them rather than on the message holding them.
         if let Some(at) = clicked
@@ -657,24 +756,38 @@ impl Stream {
             fonts,
             palette,
         } = into;
-        for (action, rect) in self.toolbar(index, top, within) {
+        // One raised box behind the whole strip rather than a fill per button.
+        // The app floats a single panel into the corner of the message, and a
+        // row of separate plates reads as several things rather than one.
+        let placed = self.toolbar(index, top, within);
+        if let (Some(first), Some(last)) = (placed.first(), placed.last()) {
+            scene.rounded(
+                first.1.x - 4.0,
+                first.1.y - 3.0,
+                last.1.right() - first.1.x + 8.0,
+                first.1.height + 6.0,
+                palette.raised,
+                CARD,
+            );
+        }
+        for (action, rect) in placed {
             let on = match action {
                 crate::actions::Action::Save => post.saved,
                 crate::actions::Action::Pin => post.pinned,
                 _ => false,
             };
             let under = input.hovered() == Some(self.action_name(index, action).as_str());
-            scene.fill(
-                rect.x,
-                rect.y,
-                rect.width,
-                rect.height,
-                if under {
-                    [palette.ink[0], palette.ink[1], palette.ink[2], 45]
-                } else {
-                    palette.surface
-                },
-            );
+            // Only the one under the pointer is lit; the rest are the panel.
+            if under {
+                scene.rounded(
+                    rect.x,
+                    rect.y,
+                    rect.width,
+                    rect.height,
+                    palette.signal_soft,
+                    4.0,
+                );
+            }
             let glyphs = painter.run(
                 fonts,
                 action.label(on),
@@ -764,26 +877,43 @@ impl Stream {
         let Some(Row::Post { post } | Row::Continuation { post }) = self.rows.get(index) else {
             return;
         };
-        let Some(laid) = self.laid.get(index) else {
-            return;
-        };
         let Canvas {
             scene,
             painter,
             fonts,
             palette,
         } = into;
-        for (block, file) in laid
-            .blocks
-            .iter()
-            .filter(|block| block.kind == matterless_layout::row::Kind::Attachment)
-            .zip(post.files.iter())
-            .filter(|(_, file)| !file.image && !file.video)
-        {
+        let _ = post;
+        for (ordinal, (block, file)) in self.filed(index).into_iter().enumerate() {
             let x = left + self.theme.gutter;
             let y = top + block.y;
             let width = (self.theme.text_width() * 0.6).min(320.0);
             scene.rounded(x, y, width, block.height, palette.raised, CARD);
+            // Somewhere to put it. Every other client offers this and a file
+            // nobody can keep is a file nobody can open.
+            let save = Rect::new(
+                x + width - SAVE - 10.0,
+                y + (block.height - 22.0) / 2.0,
+                SAVE,
+                22.0,
+            );
+            let _ = ordinal;
+            scene.rounded(
+                save.x,
+                save.y,
+                save.width,
+                save.height,
+                palette.surface,
+                5.0,
+            );
+            let keep = painter.run(
+                fonts,
+                "Save",
+                save.x + 9.0,
+                save.y + 2.0,
+                Run::label(f32::MAX),
+            );
+            scene.glyphs(keep, palette.signal, palette.faint);
             let name = painter.run(
                 fonts,
                 &file.name,
@@ -940,6 +1070,25 @@ impl Stream {
             top = bottom;
         }
         self.presses = presses;
+        if let Some(rect) = self.to_newest(within) {
+            let lit = input.hovered() == Some(format!("{}/newest", self.name).as_str());
+            scene.rounded(
+                rect.x,
+                rect.y,
+                rect.width,
+                rect.height,
+                if lit { palette.raised } else { palette.surface },
+                rect.height / 2.0,
+            );
+            let glyphs = painter.run(
+                fonts,
+                "Jump to newest",
+                rect.x + 22.0,
+                rect.y + 5.0,
+                Run::label(f32::MAX),
+            );
+            scene.glyphs(glyphs, palette.signal, palette.faint);
+        }
         let mut canvas = Canvas {
             scene,
             painter,
@@ -959,6 +1108,10 @@ pub const AVATAR: f32 = 28.0;
 const PILL: f32 = 10.0;
 const CARD: f32 = 6.0;
 const MENTION: f32 = 3.0;
+/// How wide the "jump to newest" button is.
+const JUMP: f32 = 150.0;
+/// How wide the button that keeps a file is.
+const SAVE: f32 = 46.0;
 
 /// A face on a thread footer, and how many of them are shown.
 const FACE: f32 = 18.0;
