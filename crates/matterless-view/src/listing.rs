@@ -17,6 +17,8 @@ const ROW: f32 = 52.0;
 const PADDING: f32 = 10.0;
 const TITLE: f32 = 26.0;
 const WIDTH: f32 = 620.0;
+/// What the stylesheet cuts a floating panel's corners by.
+const PANEL: f32 = 8.0;
 
 /// One message in a list, resolved to what a row needs.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -262,7 +264,14 @@ impl Listing {
             fonts,
             palette,
         } = into;
-        scene.fill(panel.x, panel.y, panel.width, panel.height, palette.surface);
+        scene.rounded(
+            panel.x,
+            panel.y,
+            panel.width,
+            panel.height,
+            palette.surface,
+            PANEL,
+        );
         let heading = painter.run(
             fonts,
             &self.title,
