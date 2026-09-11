@@ -18,6 +18,9 @@ pub struct Header {
     /// What this conversation offers, decided by the caller: only it knows
     /// whether the conversation can be left.
     pub offered: Vec<Act>,
+    /// Whether this conversation is muted, which is the one button whose word
+    /// changes with the state it is in.
+    pub muted: bool,
 }
 
 /// The strip's height. Fixed: it is one line of text and a rule.
@@ -41,22 +44,37 @@ pub enum Act {
     Saved,
     /// The threads they follow.
     Threads,
+    /// Stop this conversation counting unread, or start again.
+    Mute,
     /// Stop being in this channel.
     Leave,
 }
 
 impl Act {
-    pub fn label(self) -> &'static str {
+    /// What the button says. `on` only means anything to the one that is a
+    /// toggle: a state a button can be in has to read differently, or pressing
+    /// it twice looks like nothing happened.
+    pub fn label(self, on: bool) -> &'static str {
+        match (self, on) {
+            (Act::Pinned, _) => "pinned",
+            (Act::Saved, _) => "saved",
+            (Act::Threads, _) => "threads",
+            (Act::Mute, false) => "mute",
+            (Act::Mute, true) => "unmute",
+            (Act::Leave, _) => "leave",
+        }
+    }
+
+    /// What a hit test carries, which never changes with the state: a click on
+    /// "unmute" has to land on the same button "mute" did.
+    pub fn slug(self) -> &'static str {
         match self {
             Act::Pinned => "pinned",
             Act::Saved => "saved",
             Act::Threads => "threads",
+            Act::Mute => "mute",
             Act::Leave => "leave",
         }
-    }
-
-    pub fn slug(self) -> &'static str {
-        self.label()
     }
 
     pub fn from_slug(slug: &str) -> Option<Self> {
@@ -64,6 +82,7 @@ impl Act {
             "pinned" => Act::Pinned,
             "saved" => Act::Saved,
             "threads" => Act::Threads,
+            "mute" => Act::Mute,
             "leave" => Act::Leave,
             _ => return None,
         })
@@ -76,7 +95,9 @@ impl Act {
 /// be left, and the server would refuse. The rest are the reader's own lists
 /// and are the same everywhere.
 pub fn offered(direct: bool) -> Vec<Act> {
-    let mut offered = vec![Act::Threads, Act::Saved, Act::Pinned];
+    // Muting is offered everywhere, including a direct message: a conversation
+    // that need not interrupt you is not only ever a channel.
+    let mut offered = vec![Act::Threads, Act::Saved, Act::Pinned, Act::Mute];
     if !direct {
         offered.push(Act::Leave);
     }
@@ -105,6 +126,7 @@ impl Header {
         Self {
             title: title.into(),
             offered: offered(false),
+            muted: false,
         }
     }
 
@@ -173,7 +195,7 @@ impl Header {
             }
             let glyphs = painter.run(
                 fonts,
-                act.label(),
+                act.label(self.muted),
                 rect.x + 8.0,
                 rect.y + 2.0,
                 Run::label(f32::MAX),
@@ -242,7 +264,12 @@ mod tests {
     fn a_slug_names_exactly_one_button() {
         for act in offered(false) {
             assert_eq!(Act::from_slug(act.slug()), Some(act));
+            // And the slug does not move when the word does, or a click on
+            // "unmute" lands on nothing.
+            assert_eq!(Act::from_slug(act.slug()), Some(act));
         }
+        assert_ne!(Act::Mute.label(false), Act::Mute.label(true));
+        assert_eq!(Act::Mute.slug(), "mute");
         assert_eq!(Act::from_slug("nonsense"), None);
     }
 
@@ -252,7 +279,7 @@ mod tests {
     fn the_buttons_sit_inside_the_strip() {
         let panel = Rect::new(260.0, 0.0, 700.0, 600.0);
         let placed = place(panel, &offered(false));
-        assert_eq!(placed.len(), 4);
+        assert_eq!(placed.len(), 5);
         for pair in placed.windows(2) {
             assert!(pair[0].1.right() <= pair[1].1.x);
         }
