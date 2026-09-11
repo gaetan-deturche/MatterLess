@@ -39,6 +39,8 @@ pub mod toast;
 pub mod tooltip;
 pub mod tray;
 pub mod typing;
+pub mod update;
+pub mod updater_bar;
 
 use atlas::{Atlas, SIDE};
 use cosmic_text::SwashCache;

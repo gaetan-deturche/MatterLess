@@ -220,6 +220,10 @@ struct App {
     loading_older: bool,
     /// False once the beginning of the channel has been reached.
     more_history: bool,
+    /// A newer build, once the release has said there is one.
+    offered: matterless_view::updater_bar::Bar,
+    /// What it is offering, kept so accepting it needs no second look.
+    offer: Option<matterless_view::update::Offer>,
     /// The notification area, which is what lets the window be shut.
     tray: matterless_view::tray::Tray,
     /// A way to wake the window from the tray's own window procedure.
@@ -385,6 +389,8 @@ impl App {
             more_history: true,
             menu: matterless_view::menu::Menu::default(),
             tooltip: matterless_view::tooltip::Tooltip::default(),
+            offered: matterless_view::updater_bar::Bar::default(),
+            offer: None,
             tray: matterless_view::tray::Tray::default(),
             waker: None,
             taskbar: matterless_view::taskbar::Taskbar::default(),
@@ -712,6 +718,10 @@ impl App {
         // Kept for the tray, which has to reach the window from a window
         // procedure of its own.
         self.waker = Some(proxy.clone());
+        // Looked for once, here, rather than on a timer: an update is not
+        // urgent, and asking again mid-session would interrupt reading to talk
+        // about the client rather than about anything the reader came for.
+        let looking = matterless_view::update::asks();
         let Some(store) = self.store.clone() else {
             println!("no database, so nothing to keep up to date");
             return;
@@ -736,12 +746,13 @@ impl App {
         })));
         println!("connecting to {server}");
         self.server = server.clone();
-        self.link = Some(matterless_view::live::start(
-            store,
-            server,
-            token,
-            Proxy(proxy),
-        ));
+        let link = matterless_view::live::start(store, server, token, Proxy(proxy));
+        if looking {
+            link.send(matterless_view::live::Ask::LookForUpdate);
+        } else {
+            println!("no update check in a dev build");
+        }
+        self.link = Some(link);
     }
 
     /// Applies what the socket reported.
@@ -921,6 +932,17 @@ impl App {
                 if matterless_view::live::renames_emoji(&deltas) {
                     self.rename_emoji();
                 }
+            }
+            Update::Updatable(offer) => {
+                self.offered.offer(&offer.version);
+                self.offer = Some(offer);
+                let window = self.window_rect();
+                self.offered.measure(&mut self.fonts, window);
+            }
+            Update::UpdateFailed(why) => {
+                self.offered.failed(&why);
+                let window = self.window_rect();
+                self.offered.measure(&mut self.fonts, window);
             }
             // Answered before this, in `user_event`, because it is the one
             // update that can end the loop and this has no way to say so.
@@ -2393,6 +2415,9 @@ impl App {
         // the window so a click beside it shuts it rather than reaching what
         // it is covering.
         boxes.extend(self.menu.boxes(self.window_rect()));
+        // Over the conversation but under a menu: the offer floats in the
+        // corner and is not the thing the reader just asked for.
+        boxes.extend(self.offered.boxes());
         boxes
     }
 
@@ -2474,6 +2499,31 @@ impl App {
 
     /// Hands the frame's input to the widgets that want it.
     fn react(&mut self) {
+        // Where the offer sits, before anything asks what is under the
+        // pointer: it is measured rather than computed per frame because
+        // measuring needs the fonts and a hit test does not have them.
+        if self.offered.open() {
+            let window = self.window_rect();
+            self.offered.measure(&mut self.fonts, window);
+            match self.offered.react(&self.input) {
+                Some(matterless_view::updater_bar::Chose::Install) => {
+                    match (self.offer.clone(), self.link.as_ref()) {
+                        (Some(offer), Some(link)) => {
+                            println!("installing {}", offer.version);
+                            link.send(matterless_view::live::Ask::InstallUpdate(offer));
+                        }
+                        _ => self.offered.failed("there is nothing to install"),
+                    }
+                    // Measured again: the button says something else now.
+                    self.offered.measure(&mut self.fonts, window);
+                }
+                Some(matterless_view::updater_bar::Chose::Later) => {
+                    println!("the update was put off");
+                    self.offer = None;
+                }
+                None => {}
+            }
+        }
         // The editor first of all: it is the only panel that is part of a
         // message rather than in front of one, and while it is open the keys
         // belong to it rather than to the composer at the bottom.
@@ -3075,6 +3125,16 @@ impl App {
             };
             self.picker.draw(&mut canvas, near, stream);
             self.picker.query.draw(&mut canvas, field, true);
+        }
+        if self.offered.open() {
+            scene.clip_to(0.0, 0.0, self.size.0 as f32, self.size.1 as f32);
+            let mut canvas = Canvas {
+                scene: &mut scene,
+                painter: &mut self.painter,
+                fonts: &mut self.fonts,
+                palette: &self.palette,
+            };
+            self.offered.draw(&mut canvas, &self.input);
         }
         // The menu over even that: it is the thing the reader just asked for.
         if self.menu.open() {
