@@ -3149,22 +3149,49 @@ impl App {
     }
 }
 
-/// The application's own icon, for the title bar, the taskbar and Alt-Tab.
+/// The application's own icon, at `side` pixels square.
 ///
-/// The same 512px PNG the app ships, decoded once and handed to winit as raw
-/// pixels. Without it the window wears the default, which on Windows is the
-/// blank sheet that says "some program" -- and there is no badge worth putting
-/// in the corner of a blank sheet.
-fn window_icon() -> Option<winit::window::Icon> {
+/// Windows keeps two icons per window and uses them for different things: the
+/// small one is the title bar, the big one is the taskbar button and Alt-Tab.
+/// They have to be set separately -- `with_window_icon` sets only the small
+/// one, which is why the title bar was right while the taskbar button stayed
+/// on the blank sheet that says "some program".
+///
+/// Scaled here rather than handed over at 512 and left to Windows: an icon
+/// resized once by a proper filter into the size it will be shown at is the
+/// same argument the badge and the tray picture make.
+fn window_icon(side: u32) -> Option<winit::window::Icon> {
     const ICON: &[u8] = include_bytes!("../resources/icons/icon.png");
     let decoded = image::load_from_memory(ICON)
         .inspect_err(|error| eprintln!("the window icon would not decode: {error}"))
         .ok()?
+        .resize_exact(side, side, image::imageops::FilterType::Lanczos3)
         .into_rgba8();
-    let (width, height) = decoded.dimensions();
-    winit::window::Icon::from_rgba(decoded.into_raw(), width, height)
+    winit::window::Icon::from_rgba(decoded.into_raw(), side, side)
         .inspect_err(|error| eprintln!("the window icon was refused: {error}"))
         .ok()
+}
+
+/// What Windows asks for at 100% scaling: 16 for the title bar, 32 for the
+/// taskbar. Both are resampled by the shell for a higher DPI, which is a
+/// better trade than handing it one size and letting it guess the other.
+const SMALL_ICON: u32 = 16;
+const BIG_ICON: u32 = 32;
+
+/// The attributes a window starts from.
+///
+/// Split out because the taskbar's icon is a Windows-only attribute: the
+/// window carries two icons there, and setting only the one winit's portable
+/// call reaches leaves the taskbar button on the default.
+#[cfg(windows)]
+fn window_attributes() -> winit::window::WindowAttributes {
+    use winit::platform::windows::WindowAttributesExtWindows;
+    Window::default_attributes().with_taskbar_icon(window_icon(BIG_ICON))
+}
+
+#[cfg(not(windows))]
+fn window_attributes() -> winit::window::WindowAttributes {
+    Window::default_attributes()
 }
 
 /// This window's handle, for the Win32 calls that need one.
@@ -3270,9 +3297,9 @@ impl ApplicationHandler<Update> for App {
         let window = Arc::new(
             events
                 .create_window(
-                    Window::default_attributes()
+                    window_attributes()
                         .with_title("MatterLess -- list on Vulkan")
-                        .with_window_icon(window_icon())
+                        .with_window_icon(window_icon(SMALL_ICON))
                         .with_active(!quiet)
                         .with_inner_size(winit::dpi::LogicalSize::new(
                             self.size.0 as f64,
