@@ -208,11 +208,10 @@ impl Sidebar {
                     }
                     // Three states, and the quiet one is the default: a read
                     // channel recedes, an unread one does not, and a muted one
-                    // recedes further still. That last was written down and
-                    // not done -- muted and read were both `faint`, the same
-                    // colour, so a muted channel looked like any other.
+                    // recedes further still. Three inks for three states, now
+                    // that the palette has a ladder rather than two rungs.
                     let ink = if *muted {
-                        dimmer(palette)
+                        palette.faint
                     } else if *unread > 0 || chosen {
                         palette.ink
                     } else {
@@ -286,40 +285,20 @@ impl Sidebar {
 const DOT: f32 = 6.0;
 const GUTTER: f32 = 12.0;
 
-/// A third level of quiet, below the one the palette names.
-///
-/// Mixed toward the ground rather than added to the palette: this is the only
-/// place that needs it, and a fourth ink everything else has to ignore is a
-/// worse answer than a mix where it is used.
-fn dimmer(palette: &matterless_paint::Palette) -> [u8; 3] {
-    let toward = |ink: u8, ground: u8| {
-        // Just under halfway, so it stays legible against the ground while
-        // reading as clearly quieter than the row above it.
-        (f32::from(ink) + (f32::from(ground) - f32::from(ink)) * 0.45) as u8
-    };
-    [
-        toward(palette.faint[0], palette.ground[0]),
-        toward(palette.faint[1], palette.ground[1]),
-        toward(palette.faint[2], palette.ground[2]),
-    ]
-}
-
 /// What colour says about somebody, or nothing at all.
 ///
 /// Offline draws no dot rather than a grey one. Absence is the common case,
 /// and a sidebar of grey dots is a sidebar of noise -- the question the dot
 /// answers is "are they there", and the answer is the dot's presence.
 fn dot(status: &str, palette: &matterless_paint::Palette) -> Option<[u8; 4]> {
+    let solid = |ink: [u8; 3]| [ink[0], ink[1], ink[2], 255];
     match status {
-        "online" => Some([61, 184, 111, 255]),
-        "away" => Some([240, 178, 62, 255]),
-        "dnd" | "ooo" => Some([214, 77, 77, 255]),
+        "online" => Some(solid(palette.ok)),
+        "away" => Some(solid(palette.flag)),
+        "dnd" | "ooo" => Some(solid(palette.danger)),
         // Includes "offline" and anything a newer server invents: a status
         // this build does not know is not one it should guess a colour for.
-        _ => {
-            let _ = palette;
-            None
-        }
+        _ => None,
     }
 }
 
@@ -409,20 +388,14 @@ mod tests {
         assert_eq!(sidebar.reach(within), 0.0);
     }
 
-    /// A muted channel has to look different from a read one, or the whole
-    /// idea of muting is invisible: it was drawn in the same `faint` as every
-    /// other read channel, which is no state at all.
+    /// Three states need three inks. Muted was drawn in the same colour as
+    /// every read channel, which is no state at all.
     #[test]
-    fn a_muted_channel_recedes_further_than_a_read_one() {
+    fn the_three_states_of_a_row_are_three_colours() {
         let palette = matterless_paint::Palette::default();
-        assert_ne!(dimmer(&palette), palette.faint);
-        assert_ne!(dimmer(&palette), palette.ink);
-        // And still readable: mixed toward the ground, never all the way to
-        // it, or a muted channel is a blank row.
-        assert_ne!(
-            dimmer(&palette),
-            [palette.ground[0], palette.ground[1], palette.ground[2]]
-        );
+        assert_ne!(palette.ink, palette.soft);
+        assert_ne!(palette.soft, palette.faint);
+        assert_ne!(palette.ink, palette.faint);
     }
 
     /// Offline draws nothing, and so does a status this build has never heard

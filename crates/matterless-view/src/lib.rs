@@ -62,13 +62,24 @@ pub struct Vertex {
     /// per vertex because both kinds are in one draw call, and splitting the
     /// call by sampler would cost more state changes than a float does.
     pub filtered: f32,
+    /// Where this corner sits relative to the quad's middle, and half the
+    /// quad's size. The fragment needs both to know where it is inside the
+    /// rectangle, and per-vertex is how it gets there without a second buffer.
+    pub local: [f32; 2],
+    pub half_size: [f32; 2],
+    /// How far the corners are cut. Zero is a square one, which is every
+    /// glyph and most fills.
+    pub radius: f32,
 }
 
 impl Vertex {
     const LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
         array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
         step_mode: wgpu::VertexStepMode::Vertex,
-        attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2, 2 => Float32x4, 3 => Float32],
+        attributes: &wgpu::vertex_attr_array![
+            0 => Float32x2, 1 => Float32x2, 2 => Float32x4, 3 => Float32,
+            4 => Float32x2, 5 => Float32x2, 6 => Float32,
+        ],
     };
 }
 
@@ -131,6 +142,7 @@ pub fn vertices_of(
                 width,
                 height,
                 colour,
+                radius,
             } => {
                 let rgba = [
                     colour[0] as f32 / 255.0,
@@ -138,11 +150,13 @@ pub fn vertices_of(
                     colour[2] as f32 / 255.0,
                     colour[3] as f32 / 255.0,
                 ];
-                push_quad(
+                quad(
                     into,
                     [*x, *y, *x + *width, *y + *height],
                     [solid_uv[0], solid_uv[1], solid_uv[0], solid_uv[1]],
                     rgba,
+                    0.0,
+                    *radius,
                 );
             }
             Piece::Image {
@@ -151,6 +165,7 @@ pub fn vertices_of(
                 width,
                 height,
                 key,
+                radius,
             } => {
                 // Nothing until the bytes have arrived. The layout already
                 // reserved the room, so an absent picture leaves a gap rather
@@ -173,6 +188,7 @@ pub fn vertices_of(
                     // White, so the picture keeps its own colours.
                     [1.0, 1.0, 1.0, 1.0],
                     1.0,
+                    *radius,
                 );
             }
             Piece::Text { glyphs, ink, faint } => {
@@ -221,51 +237,46 @@ pub fn vertices_of(
 
 /// A quad sampled point-for-point, which is what a glyph and a fill want.
 fn push_quad(into: &mut Vec<Vertex>, rect: [f32; 4], uv: [f32; 4], colour: [f32; 4]) {
-    quad(into, rect, uv, colour, 0.0);
+    quad(into, rect, uv, colour, 0.0, 0.0);
 }
 
-fn quad(into: &mut Vec<Vertex>, rect: [f32; 4], uv: [f32; 4], colour: [f32; 4], filtered: f32) {
+/// Six vertices for one rectangle.
+///
+/// Each corner carries where it sits relative to the middle and how big half
+/// the rectangle is, so the fragment can measure its own distance to a rounded
+/// edge. That is three floats a vertex to avoid a second buffer and a second
+/// bind group for something every quad already knows about itself.
+fn quad(
+    into: &mut Vec<Vertex>,
+    rect: [f32; 4],
+    uv: [f32; 4],
+    colour: [f32; 4],
+    filtered: f32,
+    radius: f32,
+) {
     let [x0, y0, x1, y1] = rect;
     let [u0, v0, u1, v1] = uv;
-    let corners = [
-        Vertex {
-            position: [x0, y0],
-            uv: [u0, v0],
-            colour,
-            filtered,
-        },
-        Vertex {
-            position: [x1, y0],
-            uv: [u1, v0],
-            colour,
-            filtered,
-        },
-        Vertex {
-            position: [x1, y1],
-            uv: [u1, v1],
-            colour,
-            filtered,
-        },
-        Vertex {
-            position: [x0, y0],
-            uv: [u0, v0],
-            colour,
-            filtered,
-        },
-        Vertex {
-            position: [x1, y1],
-            uv: [u1, v1],
-            colour,
-            filtered,
-        },
-        Vertex {
-            position: [x0, y1],
-            uv: [u0, v1],
-            colour,
-            filtered,
-        },
-    ];
-    into.extend_from_slice(&corners);
+    let half_size = [(x1 - x0) / 2.0, (y1 - y0) / 2.0];
+    // Never more than half the shorter side: past that the corners meet and
+    // the distance stops describing a rectangle at all.
+    let radius = radius.min(half_size[0].min(half_size[1])).max(0.0);
+    let corner = |x: f32, y: f32, u: f32, v: f32| Vertex {
+        position: [x, y],
+        uv: [u, v],
+        colour,
+        filtered,
+        local: [x - (x0 + half_size[0]), y - (y0 + half_size[1])],
+        half_size,
+        radius,
+    };
+    into.extend([
+        corner(x0, y0, u0, v0),
+        corner(x1, y0, u1, v0),
+        corner(x1, y1, u1, v1),
+        corner(x0, y0, u0, v0),
+        corner(x1, y1, u1, v1),
+        corner(x0, y1, u0, v1),
+    ]);
 }
 
 /// One layer's vertices and the rectangle they are clipped to.

@@ -527,6 +527,7 @@ impl Stream {
                 width: block.wrap,
                 height: block.height,
                 key: picture_key(file),
+                radius: 0.0,
             })
             .collect()
     }
@@ -592,6 +593,7 @@ impl Stream {
                         width: self.theme.emoji_size,
                         height: self.theme.emoji_size,
                         key: emoji_key(id),
+                        radius: 0.0,
                     }]);
                 }
                 text_at += self.theme.emoji_size + 4.0;
@@ -694,6 +696,7 @@ impl Stream {
                 width: FACE,
                 height: FACE,
                 key: avatar_key(&face.user_id, face.avatar_at),
+                radius: FACE / 2.0,
             }]);
             x += FACE + 3.0;
         }
@@ -850,6 +853,11 @@ impl Stream {
                         width: AVATAR,
                         height: AVATAR,
                         key: avatar_key(&post.author_id, post.avatar_at),
+                        // A face is a circle, which is half its side -- the
+                        // stylesheet's `border-radius: 50%` said so and a
+                        // square face was the loudest difference between the
+                        // two clients.
+                        radius: AVATAR / 2.0,
                     }]);
                 }
                 scene.extend(self.pictures(index, top, within.x));
@@ -930,12 +938,14 @@ fn shift(piece: matterless_paint::Piece, by: f32) -> matterless_paint::Piece {
             width,
             height,
             colour,
+            radius,
         } => Piece::Fill {
             x: x + by,
             y,
             width,
             height,
             colour,
+            radius,
         },
         Piece::Press {
             x,
@@ -967,12 +977,14 @@ fn shift(piece: matterless_paint::Piece, by: f32) -> matterless_paint::Piece {
             width,
             height,
             key,
+            radius,
         } => Piece::Image {
             x: x + by,
             y,
             width,
             height,
             key,
+            radius,
         },
     }
 }
