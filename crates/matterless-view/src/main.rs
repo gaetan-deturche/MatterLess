@@ -2257,6 +2257,33 @@ impl ApplicationHandler<Update> for App {
                 }
                 self.redraw();
             }
+            // A file dragged onto the window goes to the conversation under
+            // the pointer -- the thread if one is open and the pointer is in
+            // it, the channel otherwise. Dropping is the whole gesture: no
+            // dialog to open, and no dependency for one.
+            WindowEvent::DroppedFile(path) => {
+                let Some(channel_id) = self.sidebar.selected.clone() else {
+                    eprintln!("no conversation to send that to");
+                    return;
+                };
+                let over_thread = self.thread_rect().zip(self.input.pointer_at()).is_some_and(
+                    |(pane, (x, y))| {
+                        x >= pane.x && x <= pane.right() && y >= pane.y && y <= pane.bottom()
+                    },
+                );
+                let root_id = if over_thread {
+                    self.open_root().unwrap_or_default()
+                } else {
+                    String::new()
+                };
+                if let Some(link) = self.link.as_ref() {
+                    link.send(matterless_view::live::Ask::Upload {
+                        channel_id,
+                        root_id,
+                        path,
+                    });
+                }
+            }
             WindowEvent::CursorLeft { .. } => {
                 self.input.apply(UiEvent::PointerLeft, &[]);
                 self.redraw();

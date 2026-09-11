@@ -101,6 +101,16 @@ pub enum Ask {
         emoji: String,
         on: bool,
     },
+    /// Send a file that was dropped on the window.
+    ///
+    /// The path rather than the bytes: reading a hundred and fifty megabytes
+    /// on the thread that draws would stall the window for as long as the disk
+    /// took, and the socket thread is already the one that waits for things.
+    Upload {
+        channel_id: String,
+        root_id: String,
+        path: std::path::PathBuf,
+    },
     /// What else this name could mean, beyond the conversations already held.
     ///
     /// Public channels the reader is not in, and people they may never have
@@ -399,6 +409,13 @@ async fn run(
                             Ok(()) => println!("{} on {post_id}", action.slug()),
                             Err(error) => eprintln!("{} on {post_id}: {error}", action.slug()),
                         }
+                    }
+                    Ask::Upload {
+                        channel_id,
+                        root_id,
+                        path,
+                    } => {
+                        upload(&rest, &engine, &context, &channel_id, &root_id, &path).await;
                     }
                     Ask::Discover { query } => {
                         let found = discover(&rest, engine.store(), &me_id, &query).await;
@@ -1348,4 +1365,88 @@ async fn discover(
         });
     }
     found
+}
+
+/// The largest file this window will send.
+///
+/// The server's own limit is in its client config and is larger than this on
+/// this deployment; the point of a cap here is that a file is read into memory
+/// whole, so an accidental drop of something enormous is refused rather than
+/// spending a gigabyte finding out the server would refuse it too.
+const LARGEST: u64 = 100 * 1024 * 1024;
+
+/// Sends a file, then a message carrying it.
+///
+/// Two steps because the server's are two: the bytes go up and come back with
+/// an id, and the post is created with that id in `file_ids`. An upload with
+/// no post attached is orphaned rather than broken, which is why a failed send
+/// here costs nothing but disk on the server.
+async fn upload(
+    rest: &matterless_core::rest::RestClient,
+    engine: &SyncEngine,
+    context: &SyncContext,
+    channel_id: &str,
+    root_id: &str,
+    path: &std::path::Path,
+) {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        eprintln!("that file has no name this window can send");
+        return;
+    };
+    match std::fs::metadata(path) {
+        Ok(held) if held.len() > LARGEST => {
+            eprintln!(
+                "{name} is {} MB, which is too large",
+                held.len() / 1_048_576
+            );
+            return;
+        }
+        Err(error) => {
+            eprintln!("{name}: {error}");
+            return;
+        }
+        _ => {}
+    }
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            eprintln!("{name}: {error}");
+            return;
+        }
+    };
+    println!("sending {name}, {} bytes", bytes.len());
+
+    let sent = match rest.upload_file(channel_id, name, &bytes, None).await {
+        Ok(sent) => sent,
+        Err(error) => {
+            eprintln!("uploading {name}: {error}");
+            return;
+        }
+    };
+    let file_ids: Vec<String> = sent.file_infos.into_iter().map(|file| file.id).collect();
+    if file_ids.is_empty() {
+        eprintln!("{name} uploaded but the server named no file");
+        return;
+    }
+    // No message of its own: the file is the message. A caption would need a
+    // composer that knows a drop is coming, which is a different feature.
+    let request = matterless_core::model::NewPost {
+        channel_id,
+        message: "",
+        root_id,
+        pending_post_id: "",
+        file_ids: &file_ids,
+    };
+    match rest.create_post(&request).await {
+        Ok(post) => {
+            let event = matterless_core::Event::Posted {
+                channel_id: post.channel_id.clone(),
+                post: Box::new(post),
+            };
+            if let Err(error) = engine.apply_event(&event, context) {
+                eprintln!("storing the message that carries {name}: {error}");
+            }
+        }
+        Err(error) => eprintln!("sending {name}: {error}"),
+    }
 }
