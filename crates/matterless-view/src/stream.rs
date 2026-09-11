@@ -1297,6 +1297,7 @@ impl Stream {
                     size: 13.5,
                     line_height: 18.0,
                     bold: true,
+                    mono: false,
                     // Cut by the panel's clip rather than wrapped: a card is a
                     // fixed height and a wrapped name would run out of it.
                     wrap: f32::MAX,
