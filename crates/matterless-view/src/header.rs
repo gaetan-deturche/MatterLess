@@ -44,6 +44,8 @@ pub enum Act {
     Saved,
     /// The threads they follow.
     Threads,
+    /// Put somebody else in this channel.
+    Add,
     /// Stop this conversation counting unread, or start again.
     Mute,
     /// Stop being in this channel.
@@ -59,6 +61,7 @@ impl Act {
             (Act::Pinned, _) => "pinned",
             (Act::Saved, _) => "saved",
             (Act::Threads, _) => "threads",
+            (Act::Add, _) => "add",
             (Act::Mute, false) => "mute",
             (Act::Mute, true) => "unmute",
             (Act::Leave, _) => "leave",
@@ -72,6 +75,7 @@ impl Act {
             Act::Pinned => "pinned",
             Act::Saved => "saved",
             Act::Threads => "threads",
+            Act::Add => "add",
             Act::Mute => "mute",
             Act::Leave => "leave",
         }
@@ -82,6 +86,7 @@ impl Act {
             "pinned" => Act::Pinned,
             "saved" => Act::Saved,
             "threads" => Act::Threads,
+            "add" => Act::Add,
             "mute" => Act::Mute,
             "leave" => Act::Leave,
             _ => return None,
@@ -98,7 +103,10 @@ pub fn offered(direct: bool) -> Vec<Act> {
     // Muting is offered everywhere, including a direct message: a conversation
     // that need not interrupt you is not only ever a channel.
     let mut offered = vec![Act::Threads, Act::Saved, Act::Pinned, Act::Mute];
+    // Adding and leaving both belong to a channel. A direct message's
+    // membership is the two people in it, and the server decides that.
     if !direct {
+        offered.push(Act::Add);
         offered.push(Act::Leave);
     }
     offered
@@ -250,8 +258,10 @@ mod tests {
     /// button is not there rather than there and refused.
     #[test]
     fn leaving_is_only_offered_where_it_means_something() {
-        assert!(offered(false).contains(&Act::Leave));
-        assert!(!offered(true).contains(&Act::Leave));
+        for only_a_channel in [Act::Leave, Act::Add] {
+            assert!(offered(false).contains(&only_a_channel));
+            assert!(!offered(true).contains(&only_a_channel));
+        }
         // The lists are the reader's own and are the same everywhere.
         for direct in [true, false] {
             assert!(offered(direct).contains(&Act::Saved));
@@ -279,7 +289,7 @@ mod tests {
     fn the_buttons_sit_inside_the_strip() {
         let panel = Rect::new(260.0, 0.0, 700.0, 600.0);
         let placed = place(panel, &offered(false));
-        assert_eq!(placed.len(), 5);
+        assert_eq!(placed.len(), 6);
         for pair in placed.windows(2) {
             assert!(pair[0].1.right() <= pair[1].1.x);
         }

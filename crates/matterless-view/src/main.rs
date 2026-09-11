@@ -1002,6 +1002,16 @@ impl App {
                     });
                 }
             }
+            header::Act::Add => {
+                let Some(channel) = self.sidebar.selected.clone() else {
+                    return;
+                };
+                let mut input = std::mem::take(&mut self.input);
+                self.switcher.show(&mut self.fonts, &mut input);
+                self.switcher
+                    .instead(matterless_view::switcher::Asking::Add(channel));
+                self.input = input;
+            }
             header::Act::Mute => {
                 let muted = self.muted();
                 if let (Some(channel), Some(link)) =
@@ -1402,7 +1412,8 @@ impl App {
             Action::Forward => {
                 let mut input = std::mem::take(&mut self.input);
                 self.switcher.show(&mut self.fonts, &mut input);
-                self.switcher.forward_instead(&post_id);
+                self.switcher
+                    .instead(matterless_view::switcher::Asking::Forward(post_id));
                 self.input = input;
             }
             other => {
@@ -1750,33 +1761,44 @@ impl App {
                 &entries,
             );
             if let Some(reached) = chosen {
-                use matterless_view::switcher::Reach;
-                // The same list answers two questions: where am I going, and
-                // where is this going. Which one was asked is remembered on
-                // the switcher rather than guessed here.
-                let forwarding = self.switcher.forwarding.clone();
+                use matterless_view::switcher::{Asking, Reach};
+                // Which of the three questions this was is remembered on the
+                // switcher rather than guessed here.
+                let asking = self.switcher.asking.clone();
                 self.switcher.hide(&mut input);
                 self.input = input;
-                match (forwarding, reached.reach) {
+                match (asking, reached.reach) {
                     // A message can only be forwarded somewhere the reader can
-                    // already write, so the other two reaches are not offered
-                    // an answer here.
-                    (Some(post_id), Reach::Open) => self.forward(&post_id, &reached.id),
-                    (Some(_), _) => eprintln!("that is not somewhere to forward to yet"),
-                    (None, Reach::Open) => {
+                    // already write, so the other two reaches are no answer.
+                    (Asking::Forward(post_id), Reach::Open) => self.forward(&post_id, &reached.id),
+                    (Asking::Forward(_), _) => {
+                        eprintln!("that is not somewhere to forward to yet")
+                    }
+                    // Only a person can be added to a channel, which is why
+                    // this list offers no conversations while it is asking.
+                    (Asking::Add(channel_id), Reach::Direct) => {
+                        if let Some(link) = self.link.as_ref() {
+                            link.send(matterless_view::live::Ask::AddMember {
+                                channel_id,
+                                user_id: reached.id,
+                            });
+                        }
+                    }
+                    (Asking::Add(_), _) => eprintln!("that is not somebody to add"),
+                    (Asking::Jump, Reach::Open) => {
                         self.sidebar.selected = Some(reached.id.clone());
                         self.open_channel(&reached.id);
                     }
                     // Both need the server before there is anything to open,
                     // so the window hears back rather than guessing an id.
-                    (None, Reach::Join) => {
+                    (Asking::Jump, Reach::Join) => {
                         if let Some(link) = self.link.as_ref() {
                             link.send(matterless_view::live::Ask::Join {
                                 channel_id: reached.id,
                             });
                         }
                     }
-                    (None, Reach::Direct) => {
+                    (Asking::Jump, Reach::Direct) => {
                         if let Some(link) = self.link.as_ref() {
                             link.send(matterless_view::live::Ask::Direct {
                                 user_id: reached.id,
