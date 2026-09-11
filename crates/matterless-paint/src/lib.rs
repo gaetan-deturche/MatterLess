@@ -506,7 +506,15 @@ impl Painter {
                         radius: CODE,
                     });
                     pieces.push(Piece::Text {
-                        glyphs: self.glyphs_of(fonts, block, x + 8.0, y + 8.0, theme).0,
+                        glyphs: self
+                            .glyphs_of(
+                                fonts,
+                                block,
+                                x + theme.code_padding,
+                                y + theme.code_padding_y,
+                                theme,
+                            )
+                            .0,
                         ink: palette.ink,
                         faint: palette.faint,
                         signal: palette.signal,

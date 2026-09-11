@@ -86,7 +86,10 @@ impl Stream {
     /// honest and the DOM one not.
     pub fn lay_out(&mut self, fonts: &mut Fonts, width: f32) {
         self.theme = Theme {
-            width,
+            // The content's width, not the panel's: the stream keeps a margin
+            // clear of its own edges, so a message never starts against the
+            // sidebar nor ends against the scrollbar.
+            width: width - Theme::default().pad_x * 2.0,
             // So a date in this year can leave the year off.
             today: crate::clock::today(),
             // The clock on every row, in the reader's own time rather than
@@ -108,7 +111,7 @@ impl Stream {
 
     /// How far it can be scrolled before it runs out.
     pub fn reach(&self, within: Rect) -> f32 {
-        (self.total() - within.height).max(0.0)
+        (self.total() + self.theme.pad_top + self.theme.pad_bottom - within.height).max(0.0)
     }
 
     /// Shows the newest message, which is where a conversation opens.
@@ -148,12 +151,13 @@ impl Stream {
     /// thousands of rows where a sidebar is hundreds, and placing them all
     /// would cost more than the drawing does.
     pub fn boxes(&self, within: Rect, hovered: Option<usize>) -> Vec<Placed> {
+        let inner = self.inner(within);
         let mut placed = vec![Placed {
             name: self.name.clone(),
             rect: within,
             depth: 1,
         }];
-        let mut top = within.y - self.scroll;
+        let mut top = within.y + self.theme.pad_top - self.scroll;
         for (index, row) in self.laid.iter().enumerate() {
             let bottom = top + row.height;
             if bottom >= within.y && top <= within.bottom() {
@@ -162,9 +166,9 @@ impl Stream {
                     // Clipped to the panel, so a row half off the top is only
                     // hit where it can actually be seen.
                     rect: Rect::new(
-                        within.x,
+                        inner.x,
                         top.max(within.y),
-                        within.width,
+                        inner.width,
                         (bottom.min(within.bottom()) - top.max(within.y)).max(0.0),
                     ),
                     depth: 2,
@@ -186,7 +190,7 @@ impl Stream {
                     placed.push(Placed {
                         name: format!("{}/row/{index}/reaction/{ordinal}", self.name),
                         rect: Rect::new(
-                            within.x + self.theme.gutter + block.x,
+                            inner.x + self.theme.gutter + block.x,
                             top + block.y,
                             block.wrap,
                             block.height,
@@ -212,6 +216,20 @@ impl Stream {
             });
         }
         placed
+    }
+
+    /// The panel minus the margin it keeps clear of its own edges.
+    ///
+    /// Everything a row owns is placed in here -- its hit box, its hover fill,
+    /// its text -- while the panel itself keeps the outer rect for its clip
+    /// and its scrollbar, which belong to the edge rather than to the content.
+    fn inner(&self, within: Rect) -> Rect {
+        Rect::new(
+            within.x + self.theme.pad_x,
+            within.y,
+            (within.width - self.theme.pad_x * 2.0).max(1.0),
+            within.height,
+        )
     }
 
     /// Whether any of these messages is in this stream.
@@ -284,7 +302,7 @@ impl Stream {
     /// `None` when it is scrolled out of view, which is the honest answer: a
     /// panel anchored to a row nobody can see would float over nothing.
     pub fn row_rect(&self, post_id: &str, within: Rect) -> Option<Rect> {
-        let mut top = within.y - self.scroll;
+        let mut top = within.y + self.theme.pad_top - self.scroll;
         for (index, laid) in self.laid.iter().enumerate() {
             let bottom = top + laid.height;
             let matches = matches!(
@@ -292,7 +310,8 @@ impl Stream {
                 Some(Row::Post { post } | Row::Continuation { post }) if post.post_id == post_id
             );
             if matches && bottom >= within.y && top <= within.bottom() {
-                return Some(Rect::new(within.x, top, within.width, laid.height));
+                let inner = self.inner(within);
+                return Some(Rect::new(inner.x, top, inner.width, laid.height));
             }
             top = bottom;
         }
@@ -380,7 +399,8 @@ impl Stream {
         if post.pending || post.failed {
             return Vec::new();
         }
-        let strip = Rect::new(within.x, top + 2.0, within.width, crate::actions::HEIGHT);
+        let inner = self.inner(within);
+        let strip = Rect::new(inner.x, top + 2.0, inner.width, crate::actions::HEIGHT);
         crate::actions::place(
             strip,
             &crate::actions::offered(post.author_id == self.me),
@@ -436,7 +456,7 @@ impl Stream {
     /// which is exactly what leaving the gutter empty says.
     pub fn faces(&self, within: Rect) -> Vec<(String, u32, u32)> {
         let mut wanted = Vec::new();
-        let mut top = within.y - self.scroll;
+        let mut top = within.y + self.theme.pad_top - self.scroll;
         for (index, laid) in self.laid.iter().enumerate() {
             let bottom = top + laid.height;
             if bottom >= within.y && top <= within.bottom() {
@@ -806,12 +826,13 @@ impl Stream {
             palette,
         } = into;
         let hovered = self.hovered(input);
-        let mut top = within.y - self.scroll;
+        let inner = self.inner(within);
+        let mut top = within.y + self.theme.pad_top - self.scroll;
         for (index, row) in self.laid.iter().enumerate() {
             let bottom = top + row.height;
             if bottom >= within.y && top <= within.bottom() {
                 if hovered == Some(index) {
-                    scene.fill(within.x, top, within.width, row.height, palette.surface);
+                    scene.fill(inner.x, top, inner.width, row.height, palette.surface);
                 }
                 {
                     let mut canvas = Canvas {
@@ -821,14 +842,14 @@ impl Stream {
                         palette,
                     };
                     // Before the text, or a pill would cover the count on it.
-                    self.reactions(&mut canvas, index, top, within.x);
+                    self.reactions(&mut canvas, index, top, inner.x);
                 }
                 let pieces = painter.pieces_of(fonts, row, top, &self.theme, palette, &self.custom);
                 // Shifted into this panel's column: a row plan is laid out from
                 // zero and knows nothing of where it lands.
                 let pieces: Vec<matterless_paint::Piece> = pieces
                     .into_iter()
-                    .map(|piece| shift(piece, within.x))
+                    .map(|piece| shift(piece, inner.x))
                     .collect();
                 for piece in &pieces {
                     if let matterless_paint::Piece::Press {
@@ -882,7 +903,7 @@ impl Stream {
                 // so it costs no height and a continuation simply has none.
                 if let Some(Row::Post { post }) = self.rows.get(index) {
                     scene.extend([matterless_paint::Piece::Image {
-                        x: within.x + 2.0,
+                        x: inner.x + 2.0,
                         y: top + 4.0,
                         width: AVATAR,
                         height: AVATAR,
@@ -894,7 +915,7 @@ impl Stream {
                         radius: AVATAR / 2.0,
                     }]);
                 }
-                scene.extend(self.pictures(index, top, within.x));
+                scene.extend(self.pictures(index, top, inner.x));
                 // The toolbar last of the row's own drawing, so it sits over
                 // the message rather than under the first word of it.
                 if hovered == Some(index) {
@@ -912,9 +933,9 @@ impl Stream {
                     fonts,
                     palette,
                 };
-                self.cards(&mut canvas, index, top, within.x);
-                self.footer(&mut canvas, index, top, within.x, hovered == Some(index));
-                self.quote_bars(&mut canvas, index, top, within.x);
+                self.cards(&mut canvas, index, top, inner.x);
+                self.footer(&mut canvas, index, top, inner.x, hovered == Some(index));
+                self.quote_bars(&mut canvas, index, top, inner.x);
             }
             top = bottom;
         }

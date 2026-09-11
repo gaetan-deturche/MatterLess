@@ -26,17 +26,31 @@ pub struct Theme {
     pub line_height: f32,
     /// The author-and-time line above a message, which a continuation omits.
     pub header_height: f32,
-    /// Above and below a row's content.
+    /// The author's name, which the stylesheet sets a little below the body.
+    pub header_size: f32,
+    /// Above and below a row's content. `.post { padding: 3px 0 }`.
     pub row_padding: f32,
+    /// Between two rows. The stream is a flex column with `gap: 2px`, which is
+    /// two pixels every row owes the one after it.
+    pub row_gap: f32,
+    /// What the stream keeps clear of its own edges: `padding: 12px 16px 4px`.
+    /// Sideways this is why a message does not start against the panel, and a
+    /// long line does not end against the scrollbar.
+    pub pad_x: f32,
+    pub pad_top: f32,
+    pub pad_bottom: f32,
     /// Between the blocks inside a message.
     pub block_gap: f32,
     pub code_size: f32,
     pub code_line_height: f32,
-    /// Padding a code block draws around its lines.
+    /// Padding a code block draws around its lines: `10px 12px`.
     pub code_padding: f32,
+    pub code_padding_y: f32,
     /// A file card: an attachment that is not a picture, drawn as a fixed row
     /// with its name and size on it.
     pub card_height: f32,
+    /// The words on a pill and on a separator, both set small.
+    pub small_size: f32,
     /// Inside a reaction pill, and between two of them.
     pub pill_padding: f32,
     pub pill_gap: f32,
@@ -71,14 +85,21 @@ impl Default for Theme {
             body_size: 14.0,
             line_height: 21.0,
             header_height: 20.0,
+            header_size: 13.5,
             row_padding: 3.0,
+            row_gap: 2.0,
+            pad_x: 16.0,
+            pad_top: 12.0,
+            pad_bottom: 4.0,
             block_gap: 6.0,
             code_size: 12.5,
             code_line_height: 18.0,
-            code_padding: 16.0,
+            code_padding: 12.0,
+            code_padding_y: 10.0,
             card_height: 56.0,
             pill_padding: 7.0,
-            pill_gap: 4.0,
+            pill_gap: 5.0,
+            small_size: 11.5,
             emoji_size: 16.0,
             reaction_height: 25.0,
             separator_height: 34.0,
@@ -487,8 +508,8 @@ pub fn lay_out(fonts: &mut Fonts, row: &Row, theme: &Theme) -> RowLayout {
                     kind: Kind::Separator,
                     // The words go in the block, so both shells draw the same
                     // line rather than each deciding what a day is called.
-                    spans: vec![plain(day_name(*epoch_day, theme.today))],
-                    size: theme.body_size,
+                    spans: vec![plain(spaced(&day_name(*epoch_day, theme.today)))],
+                    size: theme.small_size,
                     wrap: theme.text_width(),
                 }],
             };
@@ -502,8 +523,8 @@ pub fn lay_out(fonts: &mut Fonts, row: &Row, theme: &Theme) -> RowLayout {
                     height: theme.separator_height,
                     lines: 1,
                     kind: Kind::Separator,
-                    spans: vec![plain("New messages".to_string())],
-                    size: theme.body_size,
+                    spans: vec![plain(spaced("New messages"))],
+                    size: theme.small_size,
                     wrap: theme.text_width(),
                 }],
             };
@@ -588,7 +609,7 @@ pub fn lay_out(fonts: &mut Fonts, row: &Row, theme: &Theme) -> RowLayout {
             lines: 1,
             kind: Kind::Header,
             spans,
-            size: theme.body_size,
+            size: theme.header_size,
             wrap: theme.text_width(),
         });
         y += theme.header_height;
@@ -631,7 +652,7 @@ pub fn lay_out(fonts: &mut Fonts, row: &Row, theme: &Theme) -> RowLayout {
         // this will too once the renderer can scroll sideways. That is a change
         // to `wrap` alone -- the count stays right, because it asks what will be
         // drawn rather than what was written.
-        let wrap = (theme.text_width() - theme.code_padding).max(40.0);
+        let wrap = (theme.text_width() - theme.code_padding * 2.0).max(40.0);
         let count = crate::extent_of(
             fonts,
             block,
@@ -866,10 +887,33 @@ pub fn lay_out(fonts: &mut Fonts, row: &Row, theme: &Theme) -> RowLayout {
     }
 
     RowLayout {
-        height: y + theme.row_padding,
+        // The gap the stream's flex column puts between every pair. Owed by
+        // each row rather than subtracted from the last, which would make the
+        // last row a different height for no reason a reader could see.
+        height: y + theme.row_padding + theme.row_gap,
         blocks,
     }
 }
+
+/// A separator's words, as the stylesheet sets them: upper case, with the
+/// letters held apart.
+///
+/// A hair space between letters rather than a tracking value, because the
+/// shaper is handed a string and nothing else -- and a run of small upper-
+/// case letters set tight is a smudge at this size.
+fn spaced(words: &str) -> String {
+    words
+        .to_uppercase()
+        .chars()
+        .flat_map(|letter| [letter, HAIR])
+        .collect::<String>()
+        .trim_end()
+        .to_string()
+}
+
+/// The thinnest space the shaper has, which is what `letter-spacing` on a
+/// small upper-case run comes to.
+const HAIR: char = ' ';
 
 /// What a date separator says: "Tuesday 4 September", and the year when it is
 /// not the one the reader is in.
@@ -1298,7 +1342,10 @@ mod tests {
             .iter()
             .find(|block| block.kind == Kind::Code)
             .expect("a code block");
-        assert_eq!(code.wrap, theme.text_width() - theme.code_padding);
+        // Both sides: the stylesheet pads a fence `10px 12px`, and shaping to
+        // a width that only accounted for one of them would run the last
+        // letter of a full line out past its own background.
+        assert_eq!(code.wrap, theme.text_width() - theme.code_padding * 2.0);
     }
 
     /// Bold is wider, so the same words can need another line -- which a
