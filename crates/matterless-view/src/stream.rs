@@ -563,6 +563,14 @@ impl Stream {
         }
     }
 
+    /// Every pressable run of words from the frame just gone.
+    ///
+    /// So a caller holding only a box's name can say what it leads to: the
+    /// name carries an index into this and nothing else.
+    pub fn presses_seen(&self) -> &[(matterless_layout::row::Press, Rect)] {
+        &self.presses
+    }
+
     /// Where a pressable run of words was last drawn.
     ///
     /// So a panel opened from one can point at it. Answers the first, which is
