@@ -59,6 +59,9 @@ pub struct Stream {
     pub me: String,
     /// Where each pressable run of words was drawn, from the frame just gone.
     presses: Vec<(matterless_layout::row::Press, Rect)>,
+    /// This panel's own bar. Each list has one, because a drag in the thread
+    /// pane must not scroll the channel behind it.
+    pub bar: crate::scrollbar::Scrollbar,
 }
 
 impl Stream {
@@ -72,6 +75,7 @@ impl Stream {
             custom: std::collections::HashMap::new(),
             me: String::new(),
             presses: Vec::new(),
+            bar: crate::scrollbar::Scrollbar::default(),
         }
     }
 
@@ -193,6 +197,7 @@ impl Stream {
             }
             top = bottom;
         }
+        placed.extend(self.bar.boxes(&self.name, within, self.reach(within)));
         // The pressable words from the frame just gone: they sit under the
         // pills and the toolbar, which are things in their own right rather
         // than words in a sentence.
@@ -296,6 +301,15 @@ impl Stream {
 
     /// Applies a frame's input. Answers what the click asked for.
     pub fn react(&mut self, input: &Input, placed: &[Placed], within: Rect) -> Option<Chose> {
+        // The bar first: while it is held, the hand decides where the list is
+        // and nothing else may write that position.
+        if let Some(scroll) =
+            self.bar
+                .react(&self.name, input, within, self.scroll, self.reach(within))
+        {
+            self.scroll = scroll.clamp(0.0, self.reach(within));
+            return None;
+        }
         if let Some((_, y)) = input.wheel_over(placed, |name| name == self.name) {
             self.scroll = (self.scroll - y).clamp(0.0, self.reach(within));
         }
@@ -863,6 +877,14 @@ impl Stream {
             top = bottom;
         }
         self.presses = presses;
+        let mut canvas = Canvas {
+            scene,
+            painter,
+            fonts,
+            palette,
+        };
+        self.bar
+            .draw(&mut canvas, within, self.scroll, self.reach(within));
     }
 }
 
