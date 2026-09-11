@@ -31,6 +31,9 @@ const SIGIL: f32 = 14.0;
 /// A button in the strip, and the gap between two of them.
 const BUTTON: f32 = 62.0;
 const GAP: f32 = 4.0;
+/// The search field in the middle of the strip, which is where the app puts
+/// it and where a reader raised on any chat client will look.
+const FIND: f32 = 240.0;
 
 /// What a button in the strip does.
 ///
@@ -110,6 +113,30 @@ pub fn offered(direct: bool) -> Vec<Act> {
         offered.push(Act::Leave);
     }
     offered
+}
+
+/// The search field, in the middle of the strip.
+///
+/// `None` when the strip is too narrow to hold one without crowding the name
+/// on its left or the buttons on its right: a field squeezed between two
+/// things it collides with is worse than a keystroke.
+pub fn find(within: Rect, offered: &[Act]) -> Option<Rect> {
+    let strip = strip(within);
+    let buttons = place(within, offered);
+    let right = buttons
+        .first()
+        .map(|(_, rect)| rect.x)
+        .unwrap_or(strip.right());
+    let room = right - (strip.x + LEFT + SIGIL + 180.0);
+    if room < FIND {
+        return None;
+    }
+    Some(Rect::new(
+        right - GAP * 3.0 - FIND,
+        strip.y + 8.0,
+        FIND,
+        strip.height - 16.0,
+    ))
 }
 
 /// Where each button sits, laid out from the right edge inwards.
@@ -194,6 +221,20 @@ impl Header {
         );
         scene.glyphs(name, palette.ink, palette.faint);
 
+        // A field rather than a button: it is the only thing on the strip that
+        // takes words, and drawing it as anything else would hide that.
+        if let Some(rect) = find(within, &self.offered) {
+            scene.rounded(rect.x, rect.y, rect.width, rect.height, palette.raised, 5.0);
+            let glyphs = painter.run(
+                fonts,
+                "Search messages...",
+                rect.x + 10.0,
+                rect.y + 4.0,
+                Run::label(f32::MAX),
+            );
+            scene.glyphs(glyphs, palette.faint, palette.faint);
+        }
+
         // Right-aligned, because the left is where the name is and the eye
         // reads from there.
         for (act, rect) in place(within, &self.offered) {
@@ -243,6 +284,13 @@ pub fn boxes(within: Rect, offered: &[Act]) -> Vec<Placed> {
     for (act, rect) in place(within, offered) {
         placed.push(Placed {
             name: format!("header/{}", act.slug()),
+            rect,
+            depth: 2,
+        });
+    }
+    if let Some(rect) = find(within, offered) {
+        placed.push(Placed {
+            name: "header/find".to_string(),
             rect,
             depth: 2,
         });
