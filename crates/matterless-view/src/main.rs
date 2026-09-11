@@ -7,6 +7,14 @@
 //!
 //! Run it with `cargo run -p matterless-view`.
 
+// Keeps the console window from appearing behind the window on Windows release
+// builds; dev builds keep it, so the diagnostics this prints are visible.
+//
+// The app has carried this since it was written. Without it a release build
+// opens a black console first, with a taskbar button of its own, and the
+// window arrives behind it.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 use matterless_layout::Fonts;
 use matterless_layout::row::{RowLayout, Theme, lay_out};
 use matterless_paint::{Painter, Palette, Scene};
@@ -3354,6 +3362,16 @@ impl ApplicationHandler<Update> for App {
         // seizes the keyboard every time it starts interrupts whoever is
         // watching it.
         let quiet = std::env::var_os("MATTERLESS_QUIET").is_some();
+        // Created hidden, and shown at the bottom of this function once there
+        // is something to see.
+        //
+        // Not cosmetic: the shell asks a window for its icon with `WM_GETICON`,
+        // which is a `SendMessage` and blocks on the owner pumping messages.
+        // Setting up Vulkan below takes well over a second and pumps nothing,
+        // so a window shown first gets a taskbar button the shell cannot ask
+        // about -- it gives up, draws the generic "some program" icon, and
+        // corrects itself only once the app starts answering. The icons were
+        // set all along; nobody was there to hand them over.
         let window = Arc::new(
             events
                 .create_window(
@@ -3361,6 +3379,7 @@ impl ApplicationHandler<Update> for App {
                         .with_title("MatterLess -- list on Vulkan")
                         .with_window_icon(window_icon(SMALL_ICON))
                         .with_active(!quiet)
+                        .with_visible(false)
                         .with_inner_size(winit::dpi::LogicalSize::new(
                             self.size.0 as f64,
                             self.size.1 as f64,
@@ -3368,9 +3387,6 @@ impl ApplicationHandler<Update> for App {
                 )
                 .expect("a window"),
         );
-        if quiet {
-            behind(&window);
-        }
         self.window = Some(Arc::clone(&window));
         // Before anything else can want it: the close button means one thing
         // with a tray and another without, and the answer must not depend on
@@ -3429,6 +3445,14 @@ impl ApplicationHandler<Update> for App {
         // Already held, from before the tray was told about it.
         debug_assert!(self.window.is_some());
         self.relayout();
+        // Everything is ready, so the window can be seen -- and the message
+        // loop is about to start, so the shell's question about the icon will
+        // be answered rather than timed out.
+        if quiet {
+            behind(&window);
+        } else {
+            window.set_visible(true);
+        }
     }
 
     /// What the socket reported, delivered on the thread that owns the window.
