@@ -200,6 +200,8 @@ struct App {
     listing: matterless_view::listing::Listing,
     /// Who somebody is, when their name has been pressed.
     profile: matterless_view::profile::Profile,
+    /// Where this window is signed in, for building a link to a message.
+    server: String,
     /// How far back the open channel is read. Grows as older pages arrive.
     depth: u32,
     /// True while a page of history is in flight, so the same page is not asked
@@ -339,6 +341,7 @@ impl App {
             asked_about: Vec::new(),
             listing: matterless_view::listing::Listing::default(),
             profile: matterless_view::profile::Profile::default(),
+            server: String::new(),
             depth: matterless_view::feed::PAGE,
             loading_older: false,
             more_history: true,
@@ -616,6 +619,7 @@ impl App {
             let _ = waking.send_event(matterless_view::live::Update::Activated(channel_id));
         })));
         println!("connecting to {server}");
+        self.server = server.clone();
         self.link = Some(matterless_view::live::start(
             store,
             server,
@@ -896,6 +900,24 @@ impl App {
             near,
         );
         self.want_faces();
+    }
+
+    /// A link to this message that will open anywhere.
+    fn permalink(&self, post_id: &str) -> Option<String> {
+        matterless_view::feed::permalink(self.store.as_deref()?, &self.server, post_id)
+    }
+
+    /// Sends a link to one message into another conversation.
+    ///
+    /// A link rather than a copy of the words, which is what the official
+    /// client does and the honest thing besides: the message stays one
+    /// message, with one author and one set of replies, and the forward is a
+    /// pointer to it rather than a second copy that can drift.
+    fn forward(&mut self, post_id: &str, channel_id: &str) {
+        match self.permalink(post_id) {
+            Some(link) => self.post_message(channel_id, "", link),
+            None => eprintln!("no team to build a link from"),
+        }
     }
 
     /// Re-reads the sidebar, keeping where the reader is and how far they had
@@ -1242,11 +1264,20 @@ impl App {
                     .show(&post_id, &said.message, &mut self.fonts, &mut input);
                 self.input = input;
             }
-            Action::Link => {
+            Action::Link => match self.permalink(&post_id) {
                 // Into this window's own clipboard, which is where everything
                 // else it copies goes until there is a platform one.
-                self.clipboard = format!("/pl/{post_id}");
-                println!("copied a permalink");
+                Some(link) => {
+                    self.clipboard = link;
+                    println!("copied a permalink");
+                }
+                None => eprintln!("no team to build a link from"),
+            },
+            Action::Forward => {
+                let mut input = std::mem::take(&mut self.input);
+                self.switcher.show(&mut self.fonts, &mut input);
+                self.switcher.forward_instead(&post_id);
+                self.input = input;
             }
             other => {
                 if let Some(link) = self.link.as_ref() {
@@ -1592,10 +1623,19 @@ impl App {
                 &entries,
             );
             if let Some(channel) = chosen {
+                // The same list answers two questions: where am I going, and
+                // where is this going. Which one was asked is remembered on
+                // the switcher rather than guessed here.
+                let forwarding = self.switcher.forwarding.clone();
                 self.switcher.hide(&mut input);
                 self.input = input;
-                self.sidebar.selected = Some(channel.clone());
-                self.open_channel(&channel);
+                match forwarding {
+                    Some(post_id) => self.forward(&post_id, &channel),
+                    None => {
+                        self.sidebar.selected = Some(channel.clone());
+                        self.open_channel(&channel);
+                    }
+                }
                 return;
             }
             self.input = input;

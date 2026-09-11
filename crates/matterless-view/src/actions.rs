@@ -27,6 +27,8 @@ pub enum Action {
     Pin,
     /// Copy a permalink.
     Link,
+    /// Send a link to it into another conversation.
+    Forward,
     /// Change what it says. Only ever offered on the reader's own.
     Edit,
     /// Delete it. Only ever offered on the reader's own.
@@ -42,6 +44,7 @@ impl Action {
             Action::Save => "save",
             Action::Pin => "pin",
             Action::Link => "link",
+            Action::Forward => "forward",
             Action::Edit => "edit",
             Action::Delete => "delete",
         }
@@ -54,6 +57,7 @@ impl Action {
             "save" => Action::Save,
             "pin" => Action::Pin,
             "link" => Action::Link,
+            "forward" => Action::Forward,
             "edit" => Action::Edit,
             "delete" => Action::Delete,
             _ => return None,
@@ -72,6 +76,7 @@ impl Action {
             (Action::Pin, false) => "pin",
             (Action::Pin, true) => "pinned",
             (Action::Link, _) => "link",
+            (Action::Forward, _) => "forward",
             (Action::Edit, _) => "edit",
             (Action::Delete, _) => "delete",
         }
@@ -95,6 +100,7 @@ pub fn offered(mine: bool) -> Vec<Action> {
         Action::Save,
         Action::Pin,
         Action::Link,
+        Action::Forward,
     ];
     if mine {
         offered.push(Action::Edit);
@@ -160,7 +166,7 @@ mod tests {
     fn the_buttons_sit_in_order_inside_the_row() {
         let row = Rect::new(100.0, 50.0, 600.0, 40.0);
         let placed = place(row, &offered(true), |_| 40.0);
-        assert_eq!(placed.len(), 7);
+        assert_eq!(placed.len(), 8);
         assert_eq!(placed[0].0, Action::React);
         for pair in placed.windows(2) {
             assert!(
