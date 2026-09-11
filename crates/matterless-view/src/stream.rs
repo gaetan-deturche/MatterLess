@@ -403,12 +403,26 @@ impl Stream {
                 }
                 (block, finished) => {
                     if let Some((start, end)) = finished {
+                        let x = left + self.theme.gutter;
+                        let width = self.theme.text_width().min(self.theme.preview_width);
+                        // Its own ground and a bar down the left, corners cut
+                        // on the right only: `border-radius: 0 5px 5px 0`, and
+                        // padded `8px 10px` so the ground reaches past the
+                        // words rather than hugging them.
+                        into.scene.rounded(
+                            x,
+                            top + start - 8.0,
+                            width,
+                            end - start + 16.0,
+                            into.palette.ground,
+                            CARD,
+                        );
                         into.scene.fill(
-                            left + self.theme.gutter,
-                            top + start,
+                            x,
+                            top + start - 8.0,
                             self.theme.quote_bar,
-                            end - start,
-                            into.palette.faint_fill(),
+                            end - start + 16.0,
+                            into.palette.rule,
                         );
                     }
                     run = block.map(|block| (block.y, block.y + block.height));
@@ -1024,6 +1038,7 @@ impl Stream {
                     // And before it for the same reason: a ground painted
                     // after the words it is meant to be behind covers them.
                     self.attached(&mut canvas, index, top, inner.x);
+                    self.quote_bars(&mut canvas, index, top, inner.x);
                 }
                 let pieces = painter.pieces_of(fonts, row, top, &self.theme, palette, &self.custom);
                 // Shifted into this panel's column: a row plan is laid out from
@@ -1127,7 +1142,6 @@ impl Stream {
                 };
                 self.cards(&mut canvas, index, top, inner.x);
                 self.footer(&mut canvas, index, top, inner.x, hovered == Some(index));
-                self.quote_bars(&mut canvas, index, top, inner.x);
             }
             top = bottom;
         }
