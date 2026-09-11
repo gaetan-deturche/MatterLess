@@ -208,7 +208,9 @@ impl Switcher {
                         },
                     ))
                 }
-                Entry::Heading { .. } => None,
+                // Only a conversation is somewhere to go. A heading, a team
+                // and the reader's own name are not.
+                Entry::Heading { .. } | Entry::Team { .. } | Entry::Me { .. } => None,
             })
             .collect();
         // Stable, so equal scores keep the sidebar's order rather than
@@ -349,6 +351,7 @@ mod tests {
             mentions: 0,
             muted: false,
             direct: false,
+            private: false,
             counterpart: None,
         }]);
         let order: Vec<&str> = switcher.found.iter().map(|one| one.id.as_str()).collect();
@@ -428,6 +431,7 @@ mod tests {
             mentions: 0,
             muted: false,
             direct: false,
+            private: false,
             counterpart: None,
         }];
         switcher.narrow(&dev);
@@ -451,6 +455,7 @@ mod tests {
                 mentions: 0,
                 muted: false,
                 direct: false,
+                private: false,
                 counterpart: None,
             })
             .collect()
