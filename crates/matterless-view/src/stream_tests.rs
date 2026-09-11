@@ -114,6 +114,247 @@ fn the_footer_opens_the_thread() {
     );
 }
 
+/// A conversation of one message carrying both kinds of preview card.
+fn carded(fonts: &mut Fonts) -> Stream {
+    let mut stream = Stream::new("stream");
+    let mut said = post("root", "");
+    said.previews = vec![
+        matterless_render::Preview::Page {
+            url: "https://example.com/a".into(),
+            title: "A page".into(),
+            description: "what it is about".into(),
+            site_name: "example.com".into(),
+            image: None,
+        },
+        matterless_render::Preview::Permalink {
+            post_id: "quoted".into(),
+            channel_id: "c9".into(),
+            channel_label: "somewhere".into(),
+            author_name: "somebody".into(),
+            create_at: 0,
+            nodes: vec![Node::Paragraph {
+                children: vec![Node::Text {
+                    value: "what they said".into(),
+                }],
+            }],
+        },
+    ];
+    stream.rows = vec![Row::Post { post: said }];
+    stream.lay_out(fonts, panel().width);
+    stream
+}
+
+/// A card is a link, and the whole card is it -- not just the words inside.
+///
+/// It was drawn and nothing else: pressing one did nothing at all, which for a
+/// quoted message means the one thing it exists to offer was missing.
+#[test]
+fn a_page_card_opens_its_link() {
+    let mut fonts = Fonts::new();
+    let mut stream = carded(&mut fonts);
+    assert_eq!(
+        click(&mut stream, "stream/row/0/preview/0"),
+        Some(Chose::Press(matterless_layout::row::Press::Link(
+            "https://example.com/a".to_string()
+        )))
+    );
+}
+
+/// And a quoted card goes to the message it quotes, which is somewhere inside
+/// the app rather than out of it.
+#[test]
+fn a_quoted_card_goes_to_the_message() {
+    let mut fonts = Fonts::new();
+    let mut stream = carded(&mut fonts);
+    assert_eq!(
+        click(&mut stream, "stream/row/0/preview/1"),
+        Some(Chose::Press(matterless_layout::row::Press::Post {
+            channel_id: "c9".to_string(),
+            post_id: "quoted".to_string(),
+        }))
+    );
+}
+
+/// Following one means seeing what it was said among, so the message lands
+/// with the conversation above it still on screen.
+#[test]
+fn following_a_message_leaves_the_conversation_above_it() {
+    let mut fonts = Fonts::new();
+    let mut stream = Stream::new("stream");
+    stream.rows = (0..60)
+        .map(|at| Row::Post {
+            post: post(&format!("p{at}"), ""),
+        })
+        .collect();
+    stream.lay_out(&mut fonts, panel().width);
+    let within = panel();
+
+    assert!(stream.to_post("p30", within));
+    let rect = stream
+        .row_rect("p30", within)
+        .expect("it was scrolled into view");
+    assert!(rect.y >= within.y && rect.bottom() <= within.bottom());
+    assert!(
+        rect.y > within.y + 10.0,
+        "not jammed against the top, or its conversation is gone"
+    );
+
+    // A message that is not loaded cannot be scrolled to, and saying so is
+    // what lets the caller leave the reader where they were.
+    assert!(!stream.to_post("never-loaded", within));
+}
+
+/// Clicks the middle of a box while one row is hovered, which is what makes
+/// that row's controls exist at all.
+fn click_hovering(stream: &mut Stream, hovered: usize, name: &str) -> Option<Chose> {
+    let within = panel();
+    let placed = stream.boxes(within, Some(hovered));
+    let target = placed
+        .iter()
+        .find(|item| item.name == name)
+        .unwrap_or_else(|| panic!("{name} is placed"));
+    let at = (
+        target.rect.x + target.rect.width / 2.0,
+        target.rect.y + target.rect.height / 2.0,
+    );
+    let mut input = Input::default();
+    input.apply(Event::PointerMoved { x: at.0, y: at.1 }, &placed);
+    input.apply(Event::PointerPressed, &placed);
+    input.apply(Event::PointerReleased, &placed);
+    stream.react(&input, &placed, within)
+}
+
+/// Three controls on the hovered message, not eight.
+///
+/// The port had every action as its own flat button across the top of the row,
+/// which is the menu spilled into the message. The app offers react, reply and
+/// more, and everything else is behind the third.
+#[test]
+fn a_hovered_message_offers_three_controls() {
+    let mut fonts = Fonts::new();
+    let stream = conversation(&mut fonts);
+    let named: Vec<String> = stream
+        .boxes(panel(), Some(1))
+        .into_iter()
+        .map(|placed| placed.name)
+        .filter(|name| name.contains("/tool/"))
+        .collect();
+    assert_eq!(
+        named,
+        vec![
+            "stream/row/1/tool/react",
+            "stream/row/1/tool/reply",
+            "stream/row/1/tool/more",
+        ]
+    );
+    // And none at all on a message nobody is pointing at.
+    assert!(
+        !stream
+            .boxes(panel(), None)
+            .iter()
+            .any(|placed| placed.name.contains("/tool/"))
+    );
+}
+
+/// Reply opens the thread, which is what the row used to do when the whole
+/// message was a button.
+#[test]
+fn reply_opens_the_thread() {
+    let mut fonts = Fonts::new();
+    let mut stream = conversation(&mut fonts);
+    assert_eq!(
+        click_hovering(&mut stream, 1, "stream/row/1/tool/reply"),
+        Some(Chose::Thread("root".to_string()))
+    );
+}
+
+/// The react button opens the quick faces rather than reacting: it is a way in
+/// to seven of them and the search behind them, and reacting on the first
+/// press would mean the reader never got to choose.
+#[test]
+fn react_opens_the_faces_rather_than_reacting() {
+    let mut fonts = Fonts::new();
+    let mut stream = conversation(&mut fonts);
+    assert_eq!(
+        click_hovering(&mut stream, 1, "stream/row/1/tool/react"),
+        None
+    );
+    let open = stream.boxes(panel(), Some(1));
+    assert!(open.iter().any(|placed| placed.name == "stream/faces/0"));
+
+    // And then a face is the reaction it stands for.
+    assert_eq!(
+        click_hovering(&mut stream, 1, "stream/faces/0"),
+        Some(Chose::React {
+            post_id: "root".to_string(),
+            emoji: "+1".to_string(),
+            on: true,
+        })
+    );
+    assert!(
+        !stream
+            .boxes(panel(), Some(1))
+            .iter()
+            .any(|placed| placed.name == "stream/faces/0"),
+        "answered, so they are gone"
+    );
+}
+
+/// The last face is not a face: it opens the whole picker, which is what
+/// anything outside the quick seven needs.
+#[test]
+fn the_end_of_the_quick_row_opens_the_picker() {
+    let mut fonts = Fonts::new();
+    let mut stream = conversation(&mut fonts);
+    click_hovering(&mut stream, 1, "stream/row/1/tool/react");
+    let last = crate::actions::QUICK.len();
+    assert_eq!(
+        click_hovering(&mut stream, 1, &format!("stream/faces/{last}")),
+        Some(Chose::Act {
+            action: crate::actions::Action::React,
+            post_id: "root".to_string(),
+            on: true,
+        })
+    );
+}
+
+/// A click anywhere else puts the faces away, the way a `details` closes when
+/// the page is clicked.
+#[test]
+fn the_faces_close_when_something_else_is_pressed() {
+    let mut fonts = Fonts::new();
+    let mut stream = conversation(&mut fonts);
+    click_hovering(&mut stream, 1, "stream/row/1/tool/react");
+    click_hovering(&mut stream, 1, "stream/faces/elsewhere");
+    assert!(
+        !stream
+            .boxes(panel(), Some(1))
+            .iter()
+            .any(|placed| placed.name.starts_with("stream/faces")),
+        "the catcher shut them"
+    );
+}
+
+/// More asks for the menu, and says which button to hang it under: by the time
+/// the shell reacts, the pointer has already moved.
+#[test]
+fn more_asks_for_the_menu_under_itself() {
+    let mut fonts = Fonts::new();
+    let mut stream = conversation(&mut fonts);
+    let button = stream
+        .boxes(panel(), Some(1))
+        .into_iter()
+        .find(|placed| placed.name == "stream/row/1/tool/more")
+        .expect("the button");
+    match click_hovering(&mut stream, 1, "stream/row/1/tool/more") {
+        Some(Chose::More { post_id, under }) => {
+            assert_eq!(post_id, "root");
+            assert_eq!(under, button.rect);
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
 /// A message is not a button. It was one, and that swallowed every click on a
 /// mention or a link inside it -- while giving no hint that pressing a
 /// sentence would do anything at all.

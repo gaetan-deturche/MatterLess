@@ -19,7 +19,7 @@ use matterless_ui::input::Input;
 use matterless_ui::{Placed, Rect};
 
 /// What a click on a row asked for.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Chose {
     /// Open this thread.
     Thread(String),
@@ -44,6 +44,11 @@ pub enum Chose {
         /// change the instant it is pressed.
         on: bool,
     },
+    /// Open the menu behind `...`, under the button that was pressed.
+    ///
+    /// The rect travels with it because the menu hangs off the button, and by
+    /// the time the shell reacts the pointer has already moved.
+    More { post_id: String, under: Rect },
 }
 
 /// One conversation: its rows, their heights, and where the reader is in it.
@@ -64,6 +69,12 @@ pub struct Stream {
     /// This panel's own bar. Each list has one, because a drag in the thread
     /// pane must not scroll the channel behind it.
     pub bar: crate::scrollbar::Scrollbar,
+    /// The message whose quick faces are open, and the button they hang from.
+    ///
+    /// Held rather than recomputed because the row it belongs to scrolls: the
+    /// rect is where the button was when it was pressed, which is where the
+    /// row of faces stays until it is answered or dismissed.
+    picking: Option<(String, Rect)>,
 }
 
 impl Stream {
@@ -78,6 +89,7 @@ impl Stream {
             me: String::new(),
             presses: Vec::new(),
             bar: crate::scrollbar::Scrollbar::default(),
+            picking: None,
         }
     }
 
@@ -119,6 +131,31 @@ impl Stream {
     /// Shows the newest message, which is where a conversation opens.
     pub fn to_bottom(&mut self, within: Rect) {
         self.scroll = self.reach(within);
+    }
+
+    /// Brings one message into view, a third of the way down the panel.
+    ///
+    /// A third rather than the top: a message with nothing above it on screen
+    /// has lost the conversation it was part of, which is most of why anybody
+    /// follows a link to one.
+    ///
+    /// Answers whether it was found. A message the store has never loaded
+    /// cannot be scrolled to, and saying so lets the caller leave the reader
+    /// at the newest instead of somewhere arbitrary.
+    pub fn to_post(&mut self, post_id: &str, within: Rect) -> bool {
+        let mut top = 0.0;
+        for (index, laid) in self.laid.iter().enumerate() {
+            let found = matches!(
+                self.rows.get(index),
+                Some(Row::Post { post } | Row::Continuation { post }) if post.post_id == post_id
+            );
+            if found {
+                self.scroll = (top - within.height / 3.0).clamp(0.0, self.reach(within));
+                return true;
+            }
+            top += laid.height;
+        }
+        false
     }
 
     pub fn clamp(&mut self, within: Rect) {
@@ -180,9 +217,9 @@ impl Stream {
                 // pill rather than on the message behind it.
                 // Only the hovered row has a toolbar, so only it has buttons.
                 if hovered == Some(index) {
-                    for (action, rect) in self.toolbar(index, top, within) {
+                    for (tool, rect) in self.tools(index, top, within) {
                         placed.push(Placed {
-                            name: self.action_name(index, action),
+                            name: self.tool_name(index, tool),
                             rect,
                             depth: 3,
                         });
@@ -200,6 +237,19 @@ impl Stream {
                                 SAVE,
                                 22.0,
                             ),
+                            depth: 3,
+                        });
+                    }
+                }
+                for (ordinal, rect) in
+                    self.preview_runs(index, top, inner.x).into_iter().enumerate()
+                {
+                    // Only when it leads somewhere: a card whose link this
+                    // window will not open must not look pressable.
+                    if self.preview_press(index, ordinal).is_some() {
+                        placed.push(Placed {
+                            name: self.preview_name(index, ordinal),
+                            rect,
                             depth: 3,
                         });
                     }
@@ -239,6 +289,28 @@ impl Stream {
                 rect: *rect,
                 depth: 3,
             });
+        }
+        // The quick faces over all of it, with a catcher under them: they hang
+        // outside the row that opened them and a click anywhere else puts them
+        // away, which is what a `details` gets from the browser for nothing.
+        if let Some(panel) = self.faces_panel(within) {
+            placed.push(Placed {
+                name: format!("{}/faces/elsewhere", self.name),
+                rect: within,
+                depth: 6,
+            });
+            placed.push(Placed {
+                name: format!("{}/faces", self.name),
+                rect: panel,
+                depth: 7,
+            });
+            for (at, face) in crate::actions::faces(panel).into_iter().enumerate() {
+                placed.push(Placed {
+                    name: format!("{}/faces/{at}", self.name),
+                    rect: face,
+                    depth: 8,
+                });
+            }
         }
         placed
     }
@@ -378,15 +450,19 @@ impl Stream {
         }
     }
 
-    /// The bar beside each preview card.
+    /// Where each preview card sits on one row.
     ///
-    /// Drawn over the run of consecutive `Preview` blocks rather than per
-    /// line, so a card of three lines has one bar down its side rather than
-    /// three stubs with gaps between them.
-    fn quote_bars(&self, into: &mut Canvas<'_>, index: usize, top: f32, left: f32) {
+    /// A run of consecutive `Preview` blocks rather than one per line, so a
+    /// card of three lines is one card -- which is what the bar down its side,
+    /// the hit box and the hover all have to agree about. The nth run is the
+    /// nth preview, because the layout leaves a gap between two of them.
+    fn preview_runs(&self, index: usize, top: f32, left: f32) -> Vec<Rect> {
         let Some(laid) = self.laid.get(index) else {
-            return;
+            return Vec::new();
         };
+        let x = left + self.theme.gutter;
+        let width = self.theme.text_width().min(self.theme.preview_width);
+        let mut runs = Vec::new();
         let mut run: Option<(f32, f32)> = None;
         for block in laid
             .blocks
@@ -403,31 +479,87 @@ impl Stream {
                 }
                 (block, finished) => {
                     if let Some((start, end)) = finished {
-                        let x = left + self.theme.gutter;
-                        let width = self.theme.text_width().min(self.theme.preview_width);
-                        // Its own ground and a bar down the left, corners cut
-                        // on the right only: `border-radius: 0 5px 5px 0`, and
-                        // padded `8px 10px` so the ground reaches past the
+                        // Padded `8px 10px`, so the ground reaches past the
                         // words rather than hugging them.
-                        into.scene.rounded(
-                            x,
-                            top + start - 8.0,
-                            width,
-                            end - start + 16.0,
-                            into.palette.ground,
-                            CARD,
-                        );
-                        into.scene.fill(
-                            x,
-                            top + start - 8.0,
-                            self.theme.quote_bar,
-                            end - start + 16.0,
-                            into.palette.rule,
-                        );
+                        runs.push(Rect::new(x, top + start - 8.0, width, end - start + 16.0));
                     }
                     run = block.map(|block| (block.y, block.y + block.height));
                 }
             }
+        }
+        runs
+    }
+
+    /// What one preview card leads to.
+    ///
+    /// A page card is its link and a quoted card is the message it quotes,
+    /// which is the difference between leaving the app and moving inside it.
+    fn preview_press(
+        &self,
+        index: usize,
+        ordinal: usize,
+    ) -> Option<matterless_layout::row::Press> {
+        let (Row::Post { post } | Row::Continuation { post }) = self.rows.get(index)? else {
+            return None;
+        };
+        match post.previews.get(ordinal)? {
+            matterless_render::Preview::Page { url, .. } => {
+                matterless_layout::row::openable_link(url)
+            }
+            matterless_render::Preview::Permalink {
+                post_id,
+                channel_id,
+                ..
+            } => Some(matterless_layout::row::Press::Post {
+                channel_id: channel_id.clone(),
+                post_id: post_id.clone(),
+            }),
+        }
+    }
+
+    /// What one row's preview card is called.
+    fn preview_name(&self, index: usize, ordinal: usize) -> String {
+        format!("{}/row/{index}/preview/{ordinal}", self.name)
+    }
+
+    /// Draws each preview card: its own ground, and the bar down its left.
+    fn quote_bars(
+        &self,
+        into: &mut Canvas<'_>,
+        index: usize,
+        top: f32,
+        left: f32,
+        input: &Input,
+    ) {
+        for (ordinal, rect) in self.preview_runs(index, top, left).into_iter().enumerate() {
+            let under = input.hovered() == Some(self.preview_name(index, ordinal).as_str());
+            // Corners cut on the right only: `border-radius: 0 5px 5px 0`.
+            into.scene.rounded(
+                rect.x,
+                rect.y,
+                rect.width,
+                rect.height,
+                into.palette.ground,
+                CARD,
+            );
+            // The bar takes the signal colour under the pointer, which is the
+            // only thing saying a card is something to press.
+            into.scene.fill(
+                rect.x,
+                rect.y,
+                self.theme.quote_bar,
+                rect.height,
+                if under {
+                    [
+                        into.palette.signal[0],
+                        into.palette.signal[1],
+                        into.palette.signal[2],
+                        255,
+                    ]
+                } else {
+                    into.palette.rule
+                },
+            );
         }
     }
 
@@ -478,7 +610,73 @@ impl Stream {
         if let Some((_, y)) = input.wheel_over(placed, |name| name == self.name) {
             self.scroll = (self.scroll - y).clamp(0.0, self.reach(within));
         }
+        // Escape puts the faces away before anything else reads the frame: a
+        // panel that stays open under a keystroke meant to close it is the one
+        // thing every reader tries first.
+        if self.picking.is_some() && input.struck(matterless_ui::input::Key::Escape) {
+            self.picking = None;
+            return None;
+        }
         let clicked = input.clicked()?;
+        // The quick faces, while they are open. Before the rows, because they
+        // float over one and a click on a face is not a click on the message
+        // it happens to be in front of.
+        if let Some((post_id, _)) = self.picking.clone() {
+            let chosen = clicked.strip_prefix(&format!("{}/faces", self.name));
+            // The panel itself keeps them open, the way a `details` does.
+            if chosen == Some("") {
+                return None;
+            }
+            match chosen.and_then(|rest| rest.strip_prefix('/')) {
+                // A face: the reaction it stands for.
+                Some(at) if at.parse::<usize>().is_ok_and(|at| at < crate::actions::QUICK.len()) => {
+                    self.picking = None;
+                    let (name, _) = crate::actions::QUICK[at.parse::<usize>().expect("checked")];
+                    return Some(Chose::React {
+                        post_id,
+                        emoji: name.to_string(),
+                        // Always on: the quick row adds a reaction, and taking
+                        // one back is what the pill under the message is for.
+                        on: true,
+                    });
+                }
+                // The one past them opens the search rather than reacting.
+                Some(at) if at.parse::<usize>().is_ok() => {
+                    self.picking = None;
+                    return Some(Chose::Act {
+                        action: crate::actions::Action::React,
+                        post_id,
+                        on: true,
+                    });
+                }
+                // The catcher, or anything else on the window: they close,
+                // and the click still counts for whatever it landed on, which
+                // is what the catcher does in the app too.
+                _ => self.picking = None,
+            }
+        }
+        // One of the three controls on the hovered message.
+        if let Some((index, tool)) = self.tool_at(clicked)
+            && let Some(Row::Post { post } | Row::Continuation { post }) = self.rows.get(index)
+        {
+            let post_id = post.post_id.clone();
+            let under = self
+                .tools(index, self.top_of(index, within), within)
+                .into_iter()
+                .find(|(one, _)| *one == tool)
+                .map(|(_, rect)| rect)
+                .unwrap_or(within);
+            return match tool {
+                crate::actions::Tool::React => {
+                    self.picking = Some((post_id, under));
+                    None
+                }
+                crate::actions::Tool::Reply => {
+                    self.root_of(index).map(Chose::Thread)
+                }
+                crate::actions::Tool::More => Some(Chose::More { post_id, under }),
+            };
+        }
         if let Some(rest) = clicked.strip_prefix(&format!("{}/row/", self.name))
             && let Some((index, ordinal)) = rest.split_once("/save/")
             && let (Ok(index), Ok(ordinal)) = (index.parse::<usize>(), ordinal.parse::<usize>())
@@ -502,6 +700,15 @@ impl Stream {
         {
             return Some(Chose::Press(press.clone()));
         }
+        // A preview card, which sits inside a row and is a link in its own
+        // right: the whole card, not just the words in it.
+        if let Some(rest) = clicked.strip_prefix(&format!("{}/row/", self.name))
+            && let Some((index, ordinal)) = rest.split_once("/preview/")
+            && let (Ok(index), Ok(ordinal)) = (index.parse::<usize>(), ordinal.parse::<usize>())
+            && let Some(press) = self.preview_press(index, ordinal)
+        {
+            return Some(Chose::Press(press));
+        }
         // A pill next, because it sits inside a row and its name says so.
         if let Some((index, ordinal)) = self.reaction_at(clicked)
             && let Some(Row::Post { post } | Row::Continuation { post }) = self.rows.get(index)
@@ -513,20 +720,6 @@ impl Stream {
                 // What it will become, decided here rather than by the server:
                 // the pill has to change the instant it is pressed.
                 on: !reaction.mine,
-            });
-        }
-        // Then a toolbar button, which also sits inside a row.
-        if let Some((index, action)) = self.action_at(clicked)
-            && let Some(Row::Post { post } | Row::Continuation { post }) = self.rows.get(index)
-        {
-            return Some(Chose::Act {
-                action,
-                post_id: post.post_id.clone(),
-                on: match action {
-                    crate::actions::Action::Save => !post.saved,
-                    crate::actions::Action::Pin => !post.pinned,
-                    _ => true,
-                },
             });
         }
         let index = self.index_of(clicked)?;
@@ -547,11 +740,11 @@ impl Stream {
         }
     }
 
-    /// The actions offered on a row, and where each button sits.
+    /// The three controls offered on a row, and where each sits.
     ///
     /// Only on the row under the pointer: a toolbar on every message at once
     /// would be a wall of buttons over a conversation.
-    fn toolbar(&self, index: usize, top: f32, within: Rect) -> Vec<(crate::actions::Action, Rect)> {
+    pub fn tools(&self, index: usize, top: f32, within: Rect) -> Vec<(crate::actions::Tool, Rect)> {
         let Some(Row::Post { post } | Row::Continuation { post }) = self.rows.get(index) else {
             return Vec::new();
         };
@@ -560,29 +753,28 @@ impl Stream {
             return Vec::new();
         }
         let inner = self.inner(within);
-        let strip = Rect::new(inner.x, top + 2.0, inner.width, crate::actions::HEIGHT);
-        crate::actions::place(
-            strip,
-            &crate::actions::offered(post.author_id == self.me),
-            // Measured against the same label that is drawn, so a button is
-            // never narrower than the word inside it.
-            |action| action.label(false).chars().count() as f32 * 7.0,
-        )
+        let Some(laid) = self.laid.get(index) else {
+            return Vec::new();
+        };
+        crate::actions::tools(Rect::new(inner.x, top, inner.width, laid.height))
     }
 
-    /// What the toolbar of a row is called, per button.
-    fn action_name(&self, index: usize, action: crate::actions::Action) -> String {
-        format!("{}/row/{index}/action/{}", self.name, action.slug())
+    /// What one of a row's controls is called.
+    fn tool_name(&self, index: usize, tool: crate::actions::Tool) -> String {
+        format!("{}/row/{index}/tool/{}", self.name, tool.slug())
     }
 
-    /// The row and action a button name refers to.
-    fn action_at(&self, name: &str) -> Option<(usize, crate::actions::Action)> {
+    /// The row and control a button name refers to.
+    fn tool_at(&self, name: &str) -> Option<(usize, crate::actions::Tool)> {
         let rest = name.strip_prefix(&format!("{}/row/", self.name))?;
-        let (index, slug) = rest.split_once("/action/")?;
-        Some((
-            index.parse().ok()?,
-            crate::actions::Action::from_slug(slug)?,
-        ))
+        let (index, slug) = rest.split_once("/tool/")?;
+        Some((index.parse().ok()?, crate::actions::Tool::from_slug(slug)?))
+    }
+
+    /// Where the quick faces hang, while they are open.
+    fn faces_panel(&self, within: Rect) -> Option<Rect> {
+        let (_, under) = self.picking.as_ref()?;
+        Some(crate::actions::faces_panel(*under, within))
     }
 
     /// The row a name refers to, if it is one of this panel's.
@@ -606,8 +798,15 @@ impl Stream {
     pub fn hovered(&self, input: &Input) -> Option<usize> {
         let name = input.hovered()?;
         self.index_of(name)
-            .or_else(|| self.action_at(name).map(|(index, _)| index))
+            .or_else(|| self.tool_at(name).map(|(index, _)| index))
             .or_else(|| self.reaction_at(name).map(|(index, _)| index))
+            .or_else(|| {
+                name.strip_prefix(&format!("{}/row/", self.name))?
+                    .split_once("/preview/")?
+                    .0
+                    .parse()
+                    .ok()
+            })
     }
 
     /// The faces the rows on screen need, so the caller can fetch the missing.
@@ -806,63 +1005,168 @@ impl Stream {
         }
     }
 
-    /// Draws the row's toolbar, one button at a time.
+    /// Draws the three controls that float into the corner of a message.
+    ///
+    /// One panel behind all three, which is what `.tools` is: a bordered strip
+    /// with its own ground, because it can sit over the end of a long line.
     fn buttons(&self, into: &mut Canvas<'_>, index: usize, top: f32, within: Rect, input: &Input) {
-        let Some(Row::Post { post } | Row::Continuation { post }) = self.rows.get(index) else {
+        let placed = self.tools(index, top, within);
+        if placed.is_empty() {
+            return;
+        }
+        let open_on = self.picking.as_ref().map(|(post_id, _)| post_id.clone());
+        let here = self.post_at(index).map(str::to_string);
+        let inner = self.inner(within);
+        let Some(height) = self.laid.get(index).map(|laid| laid.height) else {
             return;
         };
+        let strip = crate::actions::strip(Rect::new(inner.x, top, inner.width, height));
         let Canvas {
             scene,
             painter,
             fonts,
             palette,
         } = into;
-        // One raised box behind the whole strip rather than a fill per button.
-        // The app floats a single panel into the corner of the message, and a
-        // row of separate plates reads as several things rather than one.
-        let placed = self.toolbar(index, top, within);
-        if let (Some(first), Some(last)) = (placed.first(), placed.last()) {
-            scene.rounded(
-                first.1.x - 4.0,
-                first.1.y - 3.0,
-                last.1.right() - first.1.x + 8.0,
-                first.1.height + 6.0,
-                palette.raised,
-                CARD,
-            );
-        }
-        for (action, rect) in placed {
-            let on = match action {
-                crate::actions::Action::Save => post.saved,
-                crate::actions::Action::Pin => post.pinned,
-                _ => false,
-            };
-            let under = input.hovered() == Some(self.action_name(index, action).as_str());
-            // Only the one under the pointer is lit; the rest are the panel.
-            if under {
+        // `border: 1px solid var(--rule)` drawn as a hairline the surface sits
+        // inside, which is the only way one quad has an edge.
+        scene.floating(
+            strip.x,
+            strip.y,
+            strip.width,
+            strip.height,
+            palette.rule,
+            crate::actions::CORNER,
+            1.0,
+        );
+        scene.rounded(
+            strip.x + 1.0,
+            strip.y + 1.0,
+            strip.width - 2.0,
+            strip.height - 2.0,
+            palette.surface,
+            crate::actions::CORNER - 1.0,
+        );
+        for (tool, rect) in placed {
+            let under = input.hovered() == Some(self.tool_name(index, tool).as_str());
+            // Open counts as hovered: the button that opened a panel must not
+            // go dark the moment the pointer moves onto what it opened.
+            let open = tool == crate::actions::Tool::React && open_on.is_some() && open_on == here;
+            if under || open {
                 scene.rounded(
                     rect.x,
                     rect.y,
                     rect.width,
                     rect.height,
-                    palette.signal_soft,
-                    4.0,
+                    palette.ground,
+                    crate::actions::SQUARE_CORNER,
                 );
             }
+            // Centred in its own square: the glyphs are different widths, and
+            // laying them out from the left is what put the smiley off-centre
+            // beside the two next to it.
             let glyphs = painter.run(
                 fonts,
-                action.label(on),
-                rect.x + 8.0,
-                rect.y + 3.0,
-                Run::label(f32::MAX),
+                tool.mark(),
+                rect.x + 6.0,
+                rect.y + 4.0,
+                Run::label(f32::MAX).sized(14.0),
             );
-            // A button already done reads loud, so pressing it twice is
-            // visibly two different things.
             scene.glyphs(
                 glyphs,
-                if on { palette.ink } else { palette.faint },
+                if under || open {
+                    palette.ink
+                } else {
+                    palette.soft
+                },
                 palette.faint,
             );
+        }
+    }
+
+    /// The message one row is, if it is one.
+    fn post_at(&self, index: usize) -> Option<&str> {
+        match self.rows.get(index)? {
+            Row::Post { post } | Row::Continuation { post } => Some(post.post_id.as_str()),
+            _ => None,
+        }
+    }
+
+    /// Where a row's top edge is on screen.
+    fn top_of(&self, index: usize, within: Rect) -> f32 {
+        within.y + self.theme.pad_top - self.scroll
+            + self
+                .laid
+                .iter()
+                .take(index)
+                .map(|row| row.height)
+                .sum::<f32>()
+    }
+
+    /// Draws the quick faces, while they are open.
+    fn quick(&self, into: &mut Canvas<'_>, within: Rect, input: &Input) {
+        let Some(panel) = self.faces_panel(within) else {
+            return;
+        };
+        let name = self.name.clone();
+        let Canvas {
+            scene,
+            painter,
+            fonts,
+            palette,
+        } = into;
+        scene.floating(
+            panel.x,
+            panel.y,
+            panel.width,
+            panel.height,
+            palette.rule,
+            crate::actions::CORNER,
+            4.0,
+        );
+        scene.rounded(
+            panel.x + 1.0,
+            panel.y + 1.0,
+            panel.width - 2.0,
+            panel.height - 2.0,
+            palette.surface,
+            crate::actions::CORNER - 1.0,
+        );
+        for (at, rect) in crate::actions::faces(panel).into_iter().enumerate() {
+            let under = input.hovered() == Some(format!("{name}/faces/{at}").as_str());
+            if under {
+                scene.rounded(rect.x, rect.y, rect.width, rect.height, palette.raised, 5.0);
+            }
+            match crate::actions::QUICK.get(at) {
+                Some((_, face)) => {
+                    let glyphs = painter.run(
+                        fonts,
+                        face,
+                        rect.x + 3.0,
+                        rect.y + 2.0,
+                        Run::label(f32::MAX).sized(15.0),
+                    );
+                    scene.glyphs(glyphs, palette.ink, palette.faint);
+                }
+                // The one that is not a face: set apart by a rule of its own,
+                // because it opens a search rather than reacting.
+                None => {
+                    scene.fill(
+                        rect.x - 3.0,
+                        rect.y + 2.0,
+                        1.0,
+                        rect.height - 4.0,
+                        palette.rule,
+                    );
+                    let glyphs = painter.run(
+                        fonts,
+                        "\u{22ef}",
+                        rect.x + 5.0,
+                        rect.y + 3.0,
+                        Run::label(f32::MAX).sized(13.0),
+                    );
+                    scene.glyphs(glyphs, palette.faint, palette.faint);
+                }
+            }
         }
     }
 
@@ -1011,6 +1315,8 @@ impl Stream {
         // How many of them have been underlined already, so each row draws
         // only its own.
         let mut marked = 0usize;
+        // Taken before the canvas is unpacked, which borrows the rest of it.
+        let name = self.name.clone();
         let Canvas {
             scene,
             painter,
@@ -1038,7 +1344,7 @@ impl Stream {
                     // And before it for the same reason: a ground painted
                     // after the words it is meant to be behind covers them.
                     self.attached(&mut canvas, index, top, inner.x);
-                    self.quote_bars(&mut canvas, index, top, inner.x);
+                    self.quote_bars(&mut canvas, index, top, inner.x, input);
                 }
                 let pieces = painter.pieces_of(fonts, row, top, &self.theme, palette, &self.custom);
                 // Shifted into this panel's column: a row plan is laid out from
@@ -1082,8 +1388,13 @@ impl Stream {
                 // Only a link is underlined. A mention and a channel link say
                 // what they are with their own ground, and a rule under them
                 // as well would be saying it twice.
-                for (press, rect) in presses.iter().skip(marked) {
-                    if !matches!(press, matterless_layout::row::Press::Link(_)) {
+                for (at, (press, rect)) in presses.iter().enumerate().skip(marked) {
+                    let link = matches!(press, matterless_layout::row::Press::Link(_));
+                    // A mention takes one only under the pointer: its ground
+                    // already says it is pressable, and a permanent rule as
+                    // well would be saying it twice. `.mention:hover`.
+                    let under = input.hovered() == Some(format!("{}/press/{at}", name).as_str());
+                    if !link && !under {
                         continue;
                     }
                     scene.fill(
@@ -1172,7 +1483,17 @@ impl Stream {
             palette,
         };
         self.bar
-            .draw(&mut canvas, within, self.scroll, self.reach(within));
+            .draw(
+                &mut canvas,
+                &self.name,
+                input,
+                within,
+                self.scroll,
+                self.reach(within),
+            );
+        // Over everything, including the bar: the faces hang outside the row
+        // that opened them and belong in front of whatever they overlap.
+        self.quick(&mut canvas, within, input);
     }
 }
 

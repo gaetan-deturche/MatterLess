@@ -416,6 +416,17 @@ impl Run {
         self.bold = true;
         self
     }
+
+    /// The same run at another size, with the line box following it.
+    ///
+    /// Line height moves with the size rather than staying where `label` put
+    /// it: a 12.5px menu row spaced for 13px text sits a pixel low, and a
+    /// column of them sits a pixel lower each time.
+    pub fn sized(mut self, size: f32) -> Self {
+        self.size = size;
+        self.line_height = size * 1.4;
+        self
+    }
 }
 
 /// Holds the rasterised glyphs between frames.

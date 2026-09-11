@@ -200,6 +200,15 @@ pub enum Press {
     /// A conversation, by its name rather than its id -- which is all a
     /// `~channel` in a message carries.
     Channel(String),
+    /// One message, where it was said.
+    ///
+    /// What a quoted permalink card leads to. By ids rather than by its URL:
+    /// the message is on this server and in the local store, so following it
+    /// is a scroll rather than a browser.
+    Post {
+        channel_id: String,
+        post_id: String,
+    },
 }
 
 /// A piece of text with the styling that changes its width.
@@ -341,6 +350,13 @@ fn lines_of(nodes: &[Node], indent: f32, into: &mut Vec<Line>, code: &mut Vec<St
 /// scheme: `file:` reaching into the reader's disk, or anything the shell has
 /// been taught to run. Only the two the web uses are carried; everything else
 /// draws as words and does nothing when pressed.
+/// The same question from outside this module: a preview card carries a URL
+/// the server fetched, and it deserves the scheme check a link in a message
+/// gets.
+pub fn openable_link(href: &str) -> Option<Press> {
+    openable(href)
+}
+
 fn openable(href: &str) -> Option<Press> {
     let scheme = href.split_once("://")?.0;
     matches!(scheme.to_ascii_lowercase().as_str(), "http" | "https")

@@ -23,6 +23,9 @@ pub enum Event {
     },
     PointerPressed,
     PointerReleased,
+    /// The other button went down, which is a question rather than a command:
+    /// it asks what can be done here instead of doing something.
+    Contexted,
     /// Positive `y` scrolls towards older content, matching a wheel's own sign.
     Wheel {
         x: f32,
@@ -97,6 +100,8 @@ pub struct Input {
     pressed_now: Option<String>,
     /// Set for one frame when a press and its release agreed.
     clicked: Option<String>,
+    /// The box the other button was pressed on, for one frame.
+    contexted: Option<String>,
     wheel: (f32, f32),
     focus: Option<String>,
     typed: String,
@@ -122,6 +127,11 @@ impl Input {
                 // Focus follows the press, not the release: a reader who holds
                 // the button down on a field expects it to be theirs already.
                 self.focus = self.hovered.clone();
+            }
+            Event::Contexted => {
+                // No press and release to agree: the menu opens where the
+                // button went down, which is what every platform does with it.
+                self.contexted = self.hovered.clone();
             }
             Event::PointerReleased => {
                 // Only when the release agrees with the press. Dragging off and
@@ -173,6 +183,11 @@ impl Input {
     }
 
     /// True when this box was clicked, which is the question a button asks.
+    /// The box the other button was pressed on, which asks for a menu.
+    pub fn contexted(&self) -> Option<&str> {
+        self.contexted.as_deref()
+    }
+
     pub fn clicked_on(&self, name: &str) -> bool {
         self.clicked.as_deref() == Some(name)
     }
@@ -233,6 +248,7 @@ impl Input {
     /// typed text do not. Forgetting this is how one click becomes many.
     pub fn settle(&mut self) {
         self.clicked = None;
+        self.contexted = None;
         self.pressed_now = None;
         self.wheel = (0.0, 0.0);
         self.typed.clear();
@@ -359,5 +375,20 @@ mod tests {
         input.apply(Event::PointerLeft, &placed);
         assert_eq!(input.hovered(), None);
         assert_eq!(input.wheel_over(&placed, |_| true), None);
+    }
+
+    /// The other button asks rather than acts: it lands on a box for one
+    /// frame, and it is not a click, or every right-click would also open
+    /// whatever it was over.
+    #[test]
+    fn the_other_button_is_not_a_click() {
+        let placed = shell();
+        let mut input = Input::default();
+        input.apply(Event::PointerMoved { x: 100.0, y: 30.0 }, &placed);
+        input.apply(Event::Contexted, &placed);
+        assert_eq!(input.contexted(), Some("sidebar/one"));
+        assert_eq!(input.clicked(), None);
+        input.settle();
+        assert_eq!(input.contexted(), None, "and only for the one frame");
     }
 }

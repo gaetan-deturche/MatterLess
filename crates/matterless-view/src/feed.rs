@@ -228,6 +228,26 @@ fn named_by(rows: &[Row]) -> Vec<String> {
 ///
 /// `None` when the store cannot name a team, rather than a link with a hole in
 /// it: a URL that 404s is worse than an action that says it cannot.
+/// A link to a conversation itself, for the clipboard.
+///
+/// By name rather than by id, the way the app builds it: a channel link the
+/// reader can read tells them where it goes before they follow it.
+pub fn channel_link(store: &Store, server: &str, channel_id: &str) -> Option<String> {
+    let channel = store.channel(channel_id).ok().flatten()?;
+    // A direct message belongs to no team; any team the reader is on resolves
+    // the link, as it does for a post permalink.
+    let team = if channel.team_id.is_empty() {
+        store.any_team_name().ok().flatten()?
+    } else {
+        store.team_name(&channel.team_id).ok().flatten()?
+    };
+    Some(format!(
+        "{}/{team}/channels/{}",
+        server.trim_end_matches('/'),
+        channel.name
+    ))
+}
+
 pub fn permalink(store: &Store, server: &str, post_id: &str) -> Option<String> {
     let post = store.post(post_id).ok().flatten()?;
     let channel = store.channel(&post.channel_id).ok().flatten()?;
