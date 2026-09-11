@@ -331,6 +331,53 @@ impl Stream {
         })
     }
 
+    /// The ground and the bar behind a webhook's attachment.
+    ///
+    /// Drawn over the run of consecutive `Attached` blocks for the same reason
+    /// the quote bars are: a notice of four lines is one card, not four.
+    fn attached(&self, into: &mut Canvas<'_>, index: usize, top: f32, left: f32) {
+        let Some(laid) = self.laid.get(index) else {
+            return;
+        };
+        let mut run: Option<(f32, f32)> = None;
+        for block in laid
+            .blocks
+            .iter()
+            .filter(|block| block.kind == matterless_layout::row::Kind::Attached)
+            .map(Some)
+            .chain(std::iter::once(None))
+        {
+            match (block, run) {
+                (Some(block), Some((start, end))) if (block.y - end).abs() < 0.5 => {
+                    run = Some((start, block.y + block.height));
+                }
+                (block, finished) => {
+                    if let Some((start, end)) = finished {
+                        let x = left + self.theme.gutter;
+                        // Padded `8px 12px`, so the ground reaches beyond the
+                        // words on every side rather than hugging them.
+                        into.scene.rounded(
+                            x,
+                            top + start - 8.0,
+                            self.theme.text_width(),
+                            end - start + 16.0,
+                            into.palette.surface,
+                            CARD,
+                        );
+                        into.scene.fill(
+                            x,
+                            top + start - 8.0,
+                            self.theme.quote_bar,
+                            end - start + 16.0,
+                            into.palette.rule,
+                        );
+                    }
+                    run = block.map(|block| (block.y, block.y + block.height));
+                }
+            }
+        }
+    }
+
     /// The bar beside each preview card.
     ///
     /// Drawn over the run of consecutive `Preview` blocks rather than per
@@ -974,6 +1021,9 @@ impl Stream {
                     };
                     // Before the text, or a pill would cover the count on it.
                     self.reactions(&mut canvas, index, top, inner.x);
+                    // And before it for the same reason: a ground painted
+                    // after the words it is meant to be behind covers them.
+                    self.attached(&mut canvas, index, top, inner.x);
                 }
                 let pieces = painter.pieces_of(fonts, row, top, &self.theme, palette, &self.custom);
                 // Shifted into this panel's column: a row plan is laid out from

@@ -416,7 +416,7 @@ impl Painter {
             let x = theme.gutter + block.x;
             let y = top + block.y;
             match block.kind {
-                Kind::Separator => {
+                Kind::Unread | Kind::Separator => {
                     // The words first, so their width decides where the two
                     // rules stop: a rule drawn under the label would strike
                     // through it.
@@ -428,7 +428,12 @@ impl Painter {
                         .max()
                         .map(|right| right as f32 + 8.0)
                         .unwrap_or(0.0);
-                    let rule = palette.faint_fill();
+                    // `.unread` takes `--flag` for its words and for the
+                    // rules either side: it is the one separator that is not
+                    // just saying where a day ended.
+                    let flagged = block.kind == Kind::Unread;
+                    let ink = if flagged { palette.flag } else { palette.faint };
+                    let rule = [ink[0], ink[1], ink[2], 255];
                     let gap = 14.0;
                     if said > 0.0 {
                         // Centred, with a rule either side of it.
@@ -458,8 +463,8 @@ impl Painter {
                         );
                         pieces.push(Piece::Text {
                             glyphs,
-                            ink: palette.faint,
-                            faint: palette.faint,
+                            ink,
+                            faint: ink,
                             signal: palette.signal,
                         });
                     } else {
@@ -474,15 +479,11 @@ impl Painter {
                     }
                 }
                 Kind::Header => {
-                    // The avatar's square, until faces are drawn.
-                    pieces.push(Piece::Fill {
-                        x: 0.0,
-                        y,
-                        width: 28.0,
-                        height: 28.0,
-                        colour: palette.surface,
-                        radius: 0.0,
-                    });
+                    // No square behind the face any more. It was a stand-in
+                    // from before faces were drawn at all, and once they were
+                    // it sat under every round avatar as a hard-cornered grey
+                    // block -- visible at each corner of the circle. Whoever
+                    // draws the face draws its ground with it.
                     pieces.push(Piece::Text {
                         glyphs: self.glyphs_of(fonts, block, x, y, theme).0,
                         ink: palette.ink,
@@ -560,6 +561,18 @@ impl Painter {
                 // One line of a card: the bar beside it is drawn by whoever
                 // owns the row, because it spans the whole run of them and a
                 // single line does not know it is the first or the last.
+                // Its own ground and its own bar, as `.attachment` has them:
+                // a border down the left, the panel behind it, and the corners
+                // cut on the right only -- which is what `0 4px 4px 0` says.
+                Kind::Attached => {
+                    let (glyphs, _, _) = self.glyphs_of(fonts, block, x, y, theme);
+                    pieces.push(Piece::Text {
+                        glyphs,
+                        ink: palette.ink,
+                        faint: palette.soft,
+                        signal: palette.signal,
+                    });
+                }
                 Kind::Preview => {
                     let (glyphs, _, _) = self.glyphs_of(fonts, block, x, y, theme);
                     pieces.push(Piece::Text {

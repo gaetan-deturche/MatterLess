@@ -63,6 +63,8 @@ pub struct Theme {
     pub indent: f32,
     /// The bar beside a preview card, and the gap between it and the text.
     pub quote_bar: f32,
+    /// What a webhook's attachment is set at: `font-size: 13.5px`.
+    pub attached_size: f32,
     /// How many lines of a description or a quoted message are kept. Past this
     /// a card stops being a summary and starts being the page.
     pub preview_lines: usize,
@@ -106,6 +108,7 @@ impl Default for Theme {
             footer_height: 26.0,
             indent: 18.0,
             quote_bar: 3.0,
+            attached_size: 13.5,
             preview_lines: 3,
             utc_offset_minutes: 0,
             today: 0,
@@ -157,11 +160,18 @@ pub enum Kind {
     /// Pre-wrapped: it scrolls sideways rather than wrapping.
     Code,
     Reactions,
+    /// The line that says where a reader stopped last time. Its own kind
+    /// rather than a separator with a flag on it, because what it is drawn in
+    /// is the whole of the difference.
+    Unread,
     /// An image or a file card, whose size the server told us.
     Attachment,
     /// One line of a link or permalink card. A card is several of these
     /// stacked with no gap, so the bar drawn beside them reads as one.
     Preview,
+    /// One line of a webhook's attachment -- a Jira notice, a build result.
+    /// Stacked the same way, on its own ground with a bar down its left.
+    Attached,
     Footer,
     Separator,
 }
@@ -522,7 +532,7 @@ pub fn lay_out(fonts: &mut Fonts, row: &Row, theme: &Theme) -> RowLayout {
                     x: 0.0,
                     height: theme.separator_height,
                     lines: 1,
-                    kind: Kind::Separator,
+                    kind: Kind::Unread,
                     spans: vec![plain(spaced("New messages"))],
                     size: theme.small_size,
                     wrap: theme.text_width(),
@@ -715,6 +725,66 @@ pub fn lay_out(fonts: &mut Fonts, row: &Row, theme: &Theme) -> RowLayout {
             });
             y += height + theme.block_gap;
         }
+    }
+
+    // What a webhook sent, which for a great many posts here *is* the message:
+    // a bot puts its whole payload in `attachments` and leaves the body empty,
+    // so a post with none of this drawn is a post with nothing on it at all.
+    for attached in post.map(|post| post.attachments.as_slice()).unwrap_or(&[]) {
+        let x = theme.quote_bar + theme.indent / 2.0;
+        let wrap = (theme.text_width() - x - theme.indent / 2.0).max(40.0);
+        let mut push = |text: &str, bold: bool, faint: bool, fonts: &mut Fonts| {
+            if text.trim().is_empty() {
+                return;
+            }
+            let style = crate::Style {
+                size: theme.attached_size,
+                line_height: theme.line_height,
+                bold,
+                italic: false,
+                mono: false,
+            };
+            let count = crate::extent_of(fonts, text, wrap, style).lines.max(1);
+            blocks.push(Block {
+                y,
+                x,
+                height: count as f32 * theme.line_height,
+                lines: count,
+                kind: Kind::Attached,
+                spans: vec![TextSpan {
+                    text: text.to_string(),
+                    bold,
+                    italic: false,
+                    mono: false,
+                    faint,
+                    press: None,
+                    emoji: None,
+                }],
+                size: theme.attached_size,
+                wrap,
+            });
+            y += count as f32 * theme.line_height;
+        };
+        let plain_of = matterless_render::markdown::plain_text;
+        push(&plain_of(&attached.pretext), false, true, fonts);
+        push(
+            attached.title.as_deref().unwrap_or_default(),
+            true,
+            false,
+            fonts,
+        );
+        push(&plain_of(&attached.text), false, false, fonts);
+        // A field is a name and a value, and the app sets them as a pair on
+        // one line rather than as a table this renderer has no grid for.
+        for field in &attached.fields {
+            push(
+                &format!("{}: {}", field.title, plain_of(&field.value)),
+                false,
+                false,
+                fonts,
+            );
+        }
+        y += theme.block_gap;
     }
 
     // A link or permalink card, as a stack of lines rather than one block: a
