@@ -16,6 +16,7 @@ use cosmic_text::{
     Action, Attrs, Buffer, Cursor, Edit, Editor, Metrics, Motion, Selection, Shaping,
 };
 use matterless_layout::Fonts;
+use matterless_paint::Run;
 use matterless_ui::input::{Input, Key};
 use matterless_ui::{Placed, Rect};
 
@@ -33,6 +34,15 @@ pub struct Composer {
     pub touched: bool,
 }
 
+/// A button inside the box.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Button {
+    /// Pick a file, for a reader who would rather not drag one.
+    Attach,
+    /// Send what is typed, for a reader who would rather not press return.
+    Send,
+}
+
 /// What the channel's own composer is called.
 pub const NAME: &str = "composer";
 
@@ -47,6 +57,14 @@ const MARGIN: f32 = 12.0;
 const MAX_LINES: usize = 8;
 /// What the stylesheet cuts the box's corners by.
 const BOX: f32 = 8.0;
+/// The buttons inside the box: one to attach, one to send.
+const BUTTON: f32 = 26.0;
+const SEND: f32 = 52.0;
+/// The row they sit on, along the bottom of the box.
+const TOOLS: f32 = 34.0;
+/// What the attach button shows. A paperclip, which is what every client uses
+/// and what a reader will look for.
+const CLIP: &str = "📎";
 
 impl Default for Composer {
     fn default() -> Self {
@@ -59,7 +77,8 @@ impl Composer {
         Self {
             editor: Editor::new(Buffer::new_empty(Metrics::new(SIZE, LINE))),
             name: name.into(),
-            placeholder: "Write a message".to_string(),
+            placeholder: "Write a message... (Enter to send, Shift+Enter for a new line)"
+                .to_string(),
             touched: false,
         }
     }
@@ -100,10 +119,58 @@ impl Composer {
 
     /// The height the strip needs, which grows with the message.
     pub fn height(&self) -> f32 {
-        self.lines() as f32 * LINE + PADDING * 2.0 + MARGIN * 2.0
+        self.lines() as f32 * LINE + PADDING * 2.0 + MARGIN * 2.0 + TOOLS
+    }
+
+    /// The row of buttons along the bottom of the box, and the room it takes.
+    ///
+    /// Its own row rather than beside the text: a button level with the first
+    /// line would be somewhere different once the box had grown to eight, and
+    /// a reader should not have to find it again after typing.
+    fn tools(&self, within: Rect) -> Rect {
+        let outer = self.box_of(within);
+        Rect::new(outer.x, outer.bottom() - TOOLS, outer.width, TOOLS)
     }
 
     /// The strip at the bottom of a panel, and what is left above it.
+    /// Where the attach button sits, inside the box on the left.
+    pub fn attach(&self, within: Rect) -> Rect {
+        let tools = self.tools(within);
+        Rect::new(tools.x + 6.0, tools.y + 4.0, BUTTON, BUTTON)
+    }
+
+    /// Where the send button sits, inside the box on the right.
+    pub fn send(&self, within: Rect) -> Rect {
+        let tools = self.tools(within);
+        Rect::new(tools.right() - SEND - 6.0, tools.y + 4.0, SEND, BUTTON)
+    }
+
+    /// The two buttons, so a pointer can land on them.
+    pub fn boxes_in(&self, within: Rect) -> Vec<Placed> {
+        vec![
+            Placed {
+                name: format!("{}/attach", self.name),
+                rect: self.attach(within),
+                depth: 3,
+            },
+            Placed {
+                name: format!("{}/send", self.name),
+                rect: self.send(within),
+                depth: 3,
+            },
+        ]
+    }
+
+    /// What a press on one of them means, if it landed on one.
+    pub fn pressed(&self, input: &Input) -> Option<Button> {
+        let clicked = input.clicked()?;
+        match clicked.strip_prefix(&format!("{}/", self.name))? {
+            "attach" => Some(Button::Attach),
+            "send" => Some(Button::Send),
+            _ => None,
+        }
+    }
+
     pub fn strip(&self, within: Rect) -> Rect {
         let height = self.height().min(within.height);
         Rect::new(within.x, within.bottom() - height, within.width, height)
@@ -388,5 +455,51 @@ impl Composer {
                 [palette.ink[0], palette.ink[1], palette.ink[2], 255],
             );
         }
+
+        // A paperclip and a Send, for the readers who would rather press a
+        // button than learn that Enter sends and a drop attaches. Nothing here
+        // can be reached any other way than by the keyboard otherwise.
+        let attach = self.attach(within);
+        let clip = painter.run(
+            fonts,
+            CLIP,
+            attach.x + 6.0,
+            attach.y + 4.0,
+            Run::label(f32::MAX),
+        );
+        scene.glyphs(clip, palette.soft, palette.faint);
+
+        // Lit only when there is something to send: a button that does nothing
+        // is a button that has to be tried to find out.
+        let send = self.send(within);
+        let ready = !self.is_empty();
+        scene.rounded(
+            send.x,
+            send.y,
+            send.width,
+            send.height,
+            if ready {
+                [palette.signal[0], palette.signal[1], palette.signal[2], 255]
+            } else {
+                palette.raised
+            },
+            5.0,
+        );
+        let label = painter.run(
+            fonts,
+            "Send",
+            send.x + 12.0,
+            send.y + 4.0,
+            Run::label(f32::MAX),
+        );
+        scene.glyphs(
+            label,
+            if ready {
+                [palette.ground[0], palette.ground[1], palette.ground[2]]
+            } else {
+                palette.faint
+            },
+            palette.faint,
+        );
     }
 }

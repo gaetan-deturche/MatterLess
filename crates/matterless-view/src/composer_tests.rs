@@ -207,15 +207,24 @@ fn the_box_grows_with_the_message_and_shrinks_again() {
 fn it_stops_growing_at_the_cap() {
     let mut fonts = Fonts::new();
     let (mut composer, mut input) = ready(&mut fonts);
+    // Up to the cap it grows a line at a time.
+    for _ in 0..MAX_LINES - 1 {
+        holding(&mut input, shift());
+        press(&mut input, Key::Enter);
+        frame(&mut composer, &mut fonts, &mut input);
+    }
+    let capped = composer.height();
+    assert!(capped > LINE + PADDING * 2.0 + MARGIN * 2.0, "it grew");
+
+    // Past it, nothing moves. The property rather than the formula: the box
+    // has a row of buttons along its bottom now, and a test that spells out
+    // its height has to be edited every time anything is added to it.
     for _ in 0..MAX_LINES * 2 {
         holding(&mut input, shift());
         press(&mut input, Key::Enter);
         frame(&mut composer, &mut fonts, &mut input);
     }
-    assert_eq!(
-        composer.height(),
-        MAX_LINES as f32 * LINE + PADDING * 2.0 + MARGIN * 2.0
-    );
+    assert_eq!(composer.height(), capped);
 }
 
 /// The strip and the space above it tile the panel exactly, or a gap would
