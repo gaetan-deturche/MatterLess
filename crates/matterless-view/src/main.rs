@@ -202,6 +202,9 @@ struct App {
     profile: matterless_view::profile::Profile,
     /// Where this window is signed in, for building a link to a message.
     server: String,
+    /// How this reader reads threads, which decides both what the sidebar
+    /// counts and whether a reply is a row in the channel.
+    threads: matterless_core::model::ThreadMode,
     /// How far back the open channel is read. Grows as older pages arrive.
     depth: u32,
     /// True while a page of history is in flight, so the same page is not asked
@@ -286,7 +289,11 @@ impl App {
                  named after the wrong half of its pair until the socket signs in"
             );
         }
-        let entries = Self::entries(store.as_deref(), &me);
+        let entries = Self::entries(
+            store.as_deref(),
+            &me,
+            matterless_core::model::ThreadMode::Collapsed,
+        );
         let sidebar = Sidebar::new(entries);
         let (channel, rows) = Self::feed();
         let mut app = Self {
@@ -342,6 +349,10 @@ impl App {
             listing: matterless_view::listing::Listing::default(),
             profile: matterless_view::profile::Profile::default(),
             server: String::new(),
+            // Until the server is asked. Collapsed is what this deployment
+            // uses and what every other part of the window assumed outright,
+            // so it is the assumption made once and in the open.
+            threads: matterless_core::model::ThreadMode::Collapsed,
             depth: matterless_view::feed::PAGE,
             loading_older: false,
             more_history: true,
@@ -506,9 +517,13 @@ impl App {
     /// Built here rather than inline because it is built twice -- once from
     /// whatever was known at startup, and again once the server has said who
     /// the reader is, which is what makes the unread counts real.
-    fn entries(store: Option<&matterless_store::Store>, me: &str) -> Vec<Entry> {
+    fn entries(
+        store: Option<&matterless_store::Store>,
+        me: &str,
+        threads: matterless_core::model::ThreadMode,
+    ) -> Vec<Entry> {
         let groups = store
-            .map(|store| matterless_view::sidebar_feed::groups(store, me))
+            .map(|store| matterless_view::sidebar_feed::groups(store, me, threads))
             .unwrap_or_default();
         // Without a reader there is no membership row, and the store answers
         // with each channel's *total* message count -- which looks like an
@@ -655,7 +670,16 @@ impl App {
                     self.listing.fill(found);
                 }
             }
-            Update::Membership => self.rebuild_sidebar(),
+            Update::Membership(mode) => {
+                self.threads = mode;
+                self.rebuild_sidebar();
+                // The counts are not the only thing the mode decides: a reply
+                // is a row in the channel under one and not under the other,
+                // so the conversation is replanned too.
+                if let Some(channel) = self.sidebar.selected.clone() {
+                    self.open_channel(&channel);
+                }
+            }
             Update::Statuses(found) => {
                 for (user_id, status) in found {
                     self.presence.insert(user_id, status);
@@ -935,7 +959,7 @@ impl App {
     fn rebuild_sidebar(&mut self) {
         let open = self.sidebar.selected.clone();
         let scroll = self.sidebar.scroll;
-        self.sidebar = Sidebar::new(Self::entries(self.store.as_deref(), &self.me));
+        self.sidebar = Sidebar::new(Self::entries(self.store.as_deref(), &self.me, self.threads));
         self.sidebar.selected = open;
         self.sidebar.scroll = scroll;
     }
