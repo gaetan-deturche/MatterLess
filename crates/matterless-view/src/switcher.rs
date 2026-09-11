@@ -373,6 +373,7 @@ mod tests {
             direct: false,
             private: false,
             counterpart: None,
+        counterpart_avatar_at: 0,
         }]);
         let order: Vec<&str> = switcher.found.iter().map(|one| one.id.as_str()).collect();
         assert_eq!(order, vec!["near", "far"]);
@@ -453,6 +454,7 @@ mod tests {
             direct: false,
             private: false,
             counterpart: None,
+        counterpart_avatar_at: 0,
         }];
         switcher.narrow(&dev);
         assert_eq!(switcher.found.len(), 1);
@@ -477,6 +479,7 @@ mod tests {
                 direct: false,
                 private: false,
                 counterpart: None,
+            counterpart_avatar_at: 0,
             })
             .collect()
     }

@@ -57,6 +57,12 @@ pub enum Entry {
         /// channel and for a group, which has no single other person to be
         /// around or not.
         counterpart: Option<String>,
+        /// When that person last changed their picture.
+        ///
+        /// Part of what the picture is called, so a new photograph is a new
+        /// name and nothing has to be evicted by hand -- and the same name the
+        /// conversation uses, so one fetch serves both.
+        counterpart_avatar_at: i64,
     },
 }
 
@@ -149,6 +155,18 @@ impl Sidebar {
                     crate::rail::icon_key(id),
                     crate::rail::ICON_FETCHED,
                     crate::rail::ICON_FETCHED,
+                )),
+                // The other person's face, under the name the conversation
+                // uses: asked for at the size the messages want, since one
+                // picture serves both and the larger is the one worth holding.
+                Entry::Channel {
+                    counterpart: Some(who),
+                    counterpart_avatar_at,
+                    ..
+                } => Some((
+                    crate::stream::avatar_key(who, *counterpart_avatar_at),
+                    crate::stream::AVATAR as u32,
+                    crate::stream::AVATAR as u32,
                 )),
                 _ => None,
             })
@@ -360,6 +378,7 @@ impl Sidebar {
                     direct,
                     private,
                     counterpart,
+                    counterpart_avatar_at,
                 } => {
                     let chosen = self.selected.as_deref() == Some(id.as_str());
                     if chosen || input.hovered() == Some(name.as_str()) {
@@ -373,23 +392,12 @@ impl Sidebar {
                     }
                     let loud = asking(*unread, *mentions, *muted);
                     let ink = ink_of(palette, chosen, loud, *muted);
-                    // Whether somebody is around, which is the one thing that
-                    // decides whether you write to them now. Only here: a dot
-                    // on every message row would say nothing about the
-                    // conversation and turn the margin into a light display.
-                    if let Some(lit) = counterpart
-                        .as_deref()
-                        .and_then(|who| presence.get(who))
-                        .and_then(|status| dot(status, palette))
-                    {
-                        scene.fill(
-                            row.rect.x + 2.0,
-                            row.rect.y + row.rect.height / 2.0 - DOT / 2.0,
-                            DOT,
-                            DOT,
-                            lit,
-                        );
-                    }
+                    let box_of = Rect::new(
+                        row.rect.x + ICON_LEFT,
+                        row.rect.y + (row.rect.height - ICON) / 2.0,
+                        ICON,
+                        ICON,
+                    );
                     // What kind of conversation this is, in its own box
                     // beside the name rather than spliced onto the front of
                     // it: a channel's type is something about the channel, and
@@ -399,20 +407,72 @@ impl Sidebar {
                     } else {
                         palette.surface
                     };
-                    kind_icon(
-                        scene,
-                        painter,
-                        fonts,
-                        palette,
-                        Rect::new(
-                            row.rect.x + ICON_LEFT,
-                            row.rect.y + (row.rect.height - ICON) / 2.0,
-                            ICON,
-                            ICON,
+                    match counterpart.as_deref() {
+                        // A one-to-one conversation is labelled by the person
+                        // it is with. A face is quicker to recognise than a
+                        // name is to read, which is the whole reason the app
+                        // puts one here rather than a mark.
+                        Some(who) => {
+                            // `background: var(--surface-2)` under it, which is
+                            // what a picture with transparency sits on and what
+                            // fills the circle before one has arrived.
+                            scene.rounded(
+                                box_of.x,
+                                box_of.y,
+                                FACE,
+                                FACE,
+                                palette.raised,
+                                FACE / 2.0,
+                            );
+                            scene.extend([matterless_paint::Piece::Image {
+                                x: box_of.x,
+                                y: box_of.y,
+                                width: FACE,
+                                height: FACE,
+                                key: crate::stream::avatar_key(who, *counterpart_avatar_at),
+                                // `border-radius: 50%`, which is half its side.
+                                radius: FACE / 2.0,
+                            }]);
+                        }
+                        None => kind_icon(
+                            scene,
+                            painter,
+                            fonts,
+                            palette,
+                            box_of,
+                            Kind::of(*direct, *private, false),
+                            behind,
                         ),
-                        Kind::of(*direct, *private, counterpart.is_some()),
-                        behind,
-                    );
+                    }
+                    // Whether somebody is around, which is the one thing that
+                    // decides whether you write to them now. Only here: a dot
+                    // on every message row would say nothing about the
+                    // conversation and turn the margin into a light display.
+                    //
+                    // After the face and not before it. The scene is painted in
+                    // the order it is built, so a dot drawn first is a dot the
+                    // picture lands on top of -- which is what happened.
+                    //
+                    // On the corner of the face rather than out in the margin,
+                    // so it reads as belonging to that person, with a ring in
+                    // the panel's own colour holding it to the face instead of
+                    // letting it float over the next row.
+                    if let Some(lit) = counterpart
+                        .as_deref()
+                        .and_then(|who| presence.get(who))
+                        .and_then(|status| dot(status, palette))
+                    {
+                        let at = (box_of.x + FACE - DOT + 1.0, box_of.y + FACE - DOT + 1.0);
+                        scene.rounded(
+                            at.0 - RING,
+                            at.1 - RING,
+                            DOT + RING * 2.0,
+                            DOT + RING * 2.0,
+                            palette.surface,
+                            (DOT + RING * 2.0) / 2.0,
+                        );
+                        scene.rounded(at.0, at.1, DOT, DOT, lit, DOT / 2.0);
+                    }
                     // The count first, because it decides how much room the
                     // name has. Muted channels keep theirs: muting is "do not
                     // interrupt me", not "hide this from me".
@@ -531,7 +591,13 @@ impl Sidebar {
 /// Kept on channel rows too, which never have one: a sidebar whose names do
 /// not line up reads as broken, and the alternative is indenting only the
 /// conversations that happen to have a dot right now.
-const DOT: f32 = 6.0;
+/// The presence dot, and the ring that holds it to the face: `max(7px, 32%)`
+/// of an 18px face, inside `box-shadow: 0 0 0 1.5px var(--surface)`.
+const DOT: f32 = 7.0;
+const RING: f32 = 1.5;
+/// A face in a row, which the app draws two pixels larger than the marks the
+/// other kinds of conversation get.
+const FACE: f32 = 18.0;
 /// Where the name starts: past the type icon and the gap after it.
 const GUTTER: f32 = ICON_LEFT + ICON + 7.0;
 /// The channel-type icon, and where its box begins.
@@ -773,6 +839,69 @@ fn dot(status: &str, palette: &matterless_paint::Palette) -> Option<[u8; 4]> {
 mod tests {
     use super::asking;
 
+    /// A presence dot goes on top of the face, not under it.
+    ///
+    /// This scene is painted in the order it is built, so anything drawn
+    /// before a picture is drawn behind it -- and the dot went in first, which
+    /// meant it was there and invisible. The same mistake has been made five
+    /// times in this file in one form or another, always by adding the new
+    /// thing where it reads best rather than where it paints.
+    #[test]
+    fn a_presence_dot_is_painted_over_the_face_it_belongs_to() {
+        use matterless_paint::{Painter, Palette, Piece, Scene};
+
+        let palette = Palette::default();
+        let mut fonts = matterless_layout::Fonts::new();
+        let mut painter = Painter::new();
+        let mut scene = Scene::default();
+        let mut sidebar = Sidebar::new(vec![Entry::Channel {
+            id: "d1".into(),
+            label: "somebody".into(),
+            unread: 0,
+            mentions: 0,
+            muted: false,
+            direct: true,
+            private: false,
+            counterpart: Some("u9".into()),
+            counterpart_avatar_at: 7,
+        }]);
+        sidebar.selected = None;
+        let within = Rect::new(0.0, 0.0, 240.0, 400.0);
+        let mut presence = std::collections::HashMap::new();
+        presence.insert("u9".to_string(), "online".to_string());
+        let placed = sidebar.boxes(within);
+        sidebar.draw(
+            &mut Canvas {
+                scene: &mut scene,
+                painter: &mut painter,
+                fonts: &mut fonts,
+                palette: &palette,
+            },
+            &placed,
+            within,
+            &Input::default(),
+            &presence,
+        );
+
+        let pieces: Vec<&Piece> = scene.layers.iter().flat_map(|layer| layer.pieces.iter()).collect();
+        let face = pieces
+            .iter()
+            .position(|piece| {
+                matches!(piece, Piece::Image { key, .. } if key.starts_with("avatar/u9"))
+            })
+            .expect("the face is drawn");
+        // The dot is the only thing in the row painted in the live colour.
+        let lit = dot("online", &palette).expect("online has a colour");
+        let mark = pieces
+            .iter()
+            .position(|piece| matches!(piece, Piece::Fill { colour, .. } if *colour == lit))
+            .expect("the dot is drawn");
+        assert!(
+            mark > face,
+            "the dot is painted at {mark}, before the face at {face}, so the face covers it"
+        );
+    }
+
     /// A muted channel never reads as unread, however much arrives in it.
     ///
     /// Twice now this has drifted: first to looking identical to a read
@@ -814,6 +943,7 @@ mod tests {
                 direct: false,
                 private: false,
                 counterpart: None,
+                counterpart_avatar_at: 0,
             },
             Entry::Channel {
                 id: "two".into(),
@@ -824,6 +954,7 @@ mod tests {
                 direct: false,
                 private: false,
                 counterpart: None,
+                counterpart_avatar_at: 0,
             },
         ])
     }
@@ -906,6 +1037,7 @@ mod tests {
                 direct: false,
                 private: false,
                 counterpart: None,
+                counterpart_avatar_at: 0,
             },
             Entry::Team {
                 id: "t2".into(),
@@ -1006,6 +1138,7 @@ mod tests {
                     direct: false,
                     private: false,
                     counterpart: None,
+                counterpart_avatar_at: 0,
                 })
                 .collect(),
         );
