@@ -71,11 +71,32 @@ impl Canvas {
 /// holds only what changes a size.
 #[derive(Debug, Clone, Copy)]
 pub struct Palette {
+    /// Behind everything.
     pub ground: [u8; 4],
-    pub ink: [u8; 3],
-    pub faint: [u8; 3],
-    /// Behind a code block.
+    /// A panel raised off the ground: the sidebar, a card, a dialog.
     pub surface: [u8; 4],
+    /// Raised again: a code block, a pill, a field inside a panel.
+    pub raised: [u8; 4],
+    /// What the eye should land on.
+    pub ink: [u8; 3],
+    /// A step down: a name beside a message, a label above a group.
+    pub soft: [u8; 3],
+    /// Quieter still: a timestamp, a read channel, a count.
+    pub faint: [u8; 3],
+    /// A line between two panes.
+    pub rule: [u8; 4],
+    /// A line inside one, which should carry less weight than the panes do.
+    pub rule_soft: [u8; 4],
+    /// Something to follow: a link, a mention, the selected row.
+    pub signal: [u8; 3],
+    /// Behind something signalled -- a mention's own line.
+    pub signal_soft: [u8; 4],
+    /// Something waiting: an unread divider, a pinned mark.
+    pub flag: [u8; 3],
+    /// Somebody is here.
+    pub ok: [u8; 3],
+    /// Something is wrong, or somebody does not want to be disturbed.
+    pub danger: [u8; 3],
 }
 
 impl Palette {
@@ -90,13 +111,26 @@ impl Palette {
 }
 
 impl Default for Palette {
-    /// The app's dark theme.
+    /// The app's dark theme, to the byte.
+    ///
+    /// Taken from its stylesheet rather than matched by eye: two clients of
+    /// one server looking almost the same is worse than looking different,
+    /// because the difference reads as a rendering fault rather than a choice.
     fn default() -> Self {
         Self {
-            ground: [15, 20, 27, 255],
-            ink: [223, 231, 240],
-            faint: [138, 152, 168],
-            surface: [23, 30, 39, 255],
+            ground: [12, 18, 24, 255],
+            surface: [20, 29, 38, 255],
+            raised: [27, 39, 52, 255],
+            ink: [227, 234, 241],
+            soft: [148, 164, 179],
+            faint: [109, 125, 140],
+            rule: [37, 51, 66, 255],
+            rule_soft: [28, 39, 51, 255],
+            signal: [75, 203, 236],
+            signal_soft: [16, 50, 61, 255],
+            flag: [224, 161, 63],
+            ok: [78, 196, 155],
+            danger: [226, 104, 90],
         }
     }
 }
@@ -152,6 +186,8 @@ pub enum Piece {
         width: f32,
         height: f32,
         colour: [u8; 4],
+        /// How far the corners are cut. Zero is a square one.
+        radius: f32,
     },
     Text {
         glyphs: Vec<PlacedGlyph>,
@@ -170,6 +206,9 @@ pub enum Piece {
         width: f32,
         height: f32,
         key: String,
+        /// How far the corners are cut. Half the side makes a circle, which is
+        /// what a face is drawn as.
+        radius: f32,
     },
     /// Where a pressable run of words ended up. Nothing is drawn for it.
     ///
@@ -231,7 +270,21 @@ impl Scene {
         self.layers.last_mut().expect("a layer")
     }
 
+    /// A rectangle with square corners.
     pub fn fill(&mut self, x: f32, y: f32, width: f32, height: f32, colour: [u8; 4]) {
+        self.rounded(x, y, width, height, colour, 0.0);
+    }
+
+    /// A rectangle with its corners cut, which is most of them.
+    pub fn rounded(
+        &mut self,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        colour: [u8; 4],
+        radius: f32,
+    ) {
         if width <= 0.0 || height <= 0.0 {
             return;
         }
@@ -241,6 +294,7 @@ impl Scene {
             width,
             height,
             colour,
+            radius,
         });
     }
 
@@ -355,6 +409,7 @@ impl Painter {
                             width: (left - gap).max(0.0),
                             height: 1.0,
                             colour: rule,
+                            radius: 0.0,
                         });
                         pieces.push(Piece::Fill {
                             x: left + said + gap,
@@ -362,6 +417,7 @@ impl Painter {
                             width: (theme.width - left - said - gap).max(0.0),
                             height: 1.0,
                             colour: rule,
+                            radius: 0.0,
                         });
                         let (glyphs, _, _) = self.glyphs_of(
                             fonts,
@@ -382,6 +438,7 @@ impl Painter {
                             width: theme.width,
                             height: 1.0,
                             colour: rule,
+                            radius: 0.0,
                         });
                     }
                 }
@@ -393,6 +450,7 @@ impl Painter {
                         width: 28.0,
                         height: 28.0,
                         colour: palette.surface,
+                        radius: 0.0,
                     });
                     pieces.push(Piece::Text {
                         glyphs: self.glyphs_of(fonts, block, x, y, theme).0,
@@ -411,6 +469,7 @@ impl Painter {
                         width: theme.text_width(),
                         height: block.height,
                         colour: palette.surface,
+                        radius: 0.0,
                     });
                     pieces.push(Piece::Text {
                         glyphs: self.glyphs_of(fonts, block, x + 8.0, y + 8.0, theme).0,
@@ -450,6 +509,7 @@ impl Painter {
                             width,
                             height: width,
                             key: format!("emoji/{id}"),
+                            radius: 0.0,
                         });
                     }
                 }
@@ -478,6 +538,7 @@ impl Painter {
                             width: 120.0,
                             height: (block.height - 4.0).max(1.0),
                             colour: palette.surface,
+                            radius: 0.0,
                         });
                     }
                 }
@@ -506,12 +567,16 @@ impl Painter {
     pub fn paint_pieces(&mut self, canvas: &mut Canvas, fonts: &mut Fonts, pieces: &[Piece]) {
         for piece in pieces {
             match piece {
+                // Square corners here whatever the radius says: this path
+                // exists to check heights and glyph positions on a machine
+                // with no display, and a rounded corner is neither.
                 Piece::Fill {
                     x,
                     y,
                     width,
                     height,
                     colour,
+                    ..
                 } => canvas.fill(*x as i32, *y as i32, *width as i32, *height as i32, *colour),
                 // Nothing is drawn for a press: it is a box a pointer can
                 // land on, and the words in it are already drawn as text.

@@ -304,6 +304,7 @@ impl Picker {
                     width: 18.0,
                     height: 18.0,
                     key: crate::stream::emoji_key(id),
+                    radius: 0.0,
                 }]),
                 (None, None) => {}
             }

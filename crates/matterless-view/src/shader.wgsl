@@ -24,6 +24,13 @@ struct In {
     @location(1) uv: vec2<f32>,
     @location(2) colour: vec4<f32>,
     @location(3) filtered: f32,
+    // Where this corner sits relative to the quad's middle, and how big half
+    // the quad is. Together they let the fragment know where it is inside the
+    // rectangle without the rectangle being uploaded twice.
+    @location(4) local: vec2<f32>,
+    @location(5) half_size: vec2<f32>,
+    // Zero for a square corner, which is every glyph and most fills.
+    @location(6) radius: f32,
 };
 
 struct Out {
@@ -31,6 +38,9 @@ struct Out {
     @location(0) uv: vec2<f32>,
     @location(1) colour: vec4<f32>,
     @location(2) filtered: f32,
+    @location(3) local: vec2<f32>,
+    @location(4) half_size: vec2<f32>,
+    @location(5) radius: f32,
 };
 
 @vertex
@@ -48,7 +58,18 @@ fn vertex(in: In) -> Out {
     out.uv = in.uv;
     out.colour = in.colour;
     out.filtered = in.filtered;
+    out.local = in.local;
+    out.half_size = in.half_size;
+    out.radius = in.radius;
     return out;
+}
+
+// How far a point is outside a rectangle with rounded corners. Negative
+// inside, zero on the edge. The standard rounded-box distance: shrink the box
+// by the radius, measure to that, and give back the radius.
+fn rounded_box(point: vec2<f32>, half_size: vec2<f32>, radius: f32) -> f32 {
+    let corner = abs(point) - half_size + vec2<f32>(radius);
+    return length(max(corner, vec2<f32>(0.0))) + min(max(corner.x, corner.y), 0.0) - radius;
 }
 
 @fragment
@@ -62,5 +83,18 @@ fn fragment(in: Out) -> @location(0) vec4<f32> {
     let sharp = textureSample(atlas, atlas_sampler, in.uv);
     let soft = textureSample(atlas, smooth_sampler, in.uv);
     let texel = select(sharp, soft, in.filtered > 0.5);
-    return vec4<f32>(texel.rgb * in.colour.rgb, texel.a * in.colour.a);
+    // A corner is cut here rather than by building the shape out of quads: the
+    // rectangle is already a quad, and this costs one distance per pixel of it
+    // instead of a mesh per rounded thing on screen. One pixel of falloff, so
+    // the curve has an edge rather than a staircase.
+    //
+    // Skipped entirely at radius zero, which is every glyph: the atlas already
+    // carries a letter's coverage, and softening the quad it sits on would eat
+    // the outermost row of it.
+    var coverage = 1.0;
+    if in.radius > 0.0 {
+        let distance = rounded_box(in.local, in.half_size, in.radius);
+        coverage = 1.0 - smoothstep(-0.5, 0.5, distance);
+    }
+    return vec4<f32>(texel.rgb * in.colour.rgb, texel.a * in.colour.a * coverage);
 }

@@ -19,6 +19,8 @@ const WIDTH: f32 = 280.0;
 const PADDING: f32 = 12.0;
 const LINE: f32 = 20.0;
 const FACE: f32 = 48.0;
+/// What a panel's corners are cut by, from the stylesheet.
+const PANEL: f32 = 8.0;
 
 /// A person, reduced to what a card says about them.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -136,13 +138,21 @@ impl Profile {
             fonts,
             palette,
         } = into;
-        scene.fill(panel.x, panel.y, panel.width, panel.height, palette.surface);
+        scene.rounded(
+            panel.x,
+            panel.y,
+            panel.width,
+            panel.height,
+            palette.surface,
+            PANEL,
+        );
         scene.extend([matterless_paint::Piece::Image {
             x: panel.x + PADDING,
             y: panel.y + PADDING,
             width: FACE,
             height: FACE,
             key: crate::stream::avatar_key(&card.user_id, card.avatar_at),
+            radius: FACE / 2.0,
         }]);
         for (at, (said, bold)) in lines.into_iter().enumerate() {
             let run = if bold {
