@@ -220,6 +220,11 @@ struct App {
     loading_older: bool,
     /// False once the beginning of the channel has been reached.
     more_history: bool,
+    /// The taskbar button: its overlay badge, and its flashing.
+    taskbar: matterless_view::taskbar::Taskbar,
+    /// Whether this window has the keyboard, which decides both whether an
+    /// arriving message interrupts and whether the button should be flashing.
+    focused: bool,
     /// What the button under the pointer is for, once it has been rested on.
     tooltip: matterless_view::tooltip::Tooltip,
     /// The menu currently open, whichever of the two it is.
@@ -376,6 +381,11 @@ impl App {
             more_history: true,
             menu: matterless_view::menu::Menu::default(),
             tooltip: matterless_view::tooltip::Tooltip::default(),
+            taskbar: matterless_view::taskbar::Taskbar::default(),
+            // Assumed until the platform says otherwise, which it does on the
+            // first focus event: a window that starts out believing it is
+            // ignored would flash at the first message.
+            focused: true,
         };
         app.sidebar.selected = Some(channel);
         // Focused before anything is clicked: a chat window that needs a click
@@ -1690,6 +1700,44 @@ impl App {
         None
     }
 
+    /// Redraws the taskbar overlay from the store.
+    ///
+    /// From the store rather than from anything passed in: the badge has to
+    /// agree with the sidebar, and both of them have to agree with the
+    /// notification policy -- muted channels contribute to none of the three.
+    ///
+    /// Cheap to call, and called often. `Taskbar::show` compares against what
+    /// it last handed the shell, so the common case -- a message that changes
+    /// nothing about what is waiting -- costs one comparison.
+    fn update_badge(&mut self) {
+        let Some(store) = self.store.as_deref() else {
+            return;
+        };
+        if self.me.is_empty() {
+            // Without a reader every channel's *total* count looks unread, and
+            // the badge would open on a number in the thousands.
+            return;
+        }
+        let collapsed = self.threads == matterless_core::model::ThreadMode::Collapsed;
+        let Ok(state) = store.badge_state(&self.me, collapsed) else {
+            return;
+        };
+        let attention = state.attention();
+        let scale = self
+            .window
+            .as_ref()
+            .map(|window| window.scale_factor())
+            .unwrap_or(1.0);
+        let overlay = matterless_view::badge::wanted(attention, state.any_unread, scale);
+        let told = matterless_view::badge::described(attention, state.any_unread);
+        if self
+            .taskbar
+            .show(raw_window(self.window.as_ref()), overlay, &told)
+        {
+            println!("badge: {attention} wanting an answer, unread {}", state.any_unread);
+        }
+    }
+
     fn permalink(&self, post_id: &str) -> Option<String> {
         matterless_view::feed::permalink(self.store.as_deref()?, &self.server, post_id)
     }
@@ -1711,6 +1759,10 @@ impl App {
     /// scrolled: a list that jumps to the top every time a count changes is
     /// worse than one showing a stale number.
     fn rebuild_sidebar(&mut self) {
+        // The taskbar carries the same counts as the list, so they are settled
+        // together: a badge recomputed anywhere else is a badge that disagrees
+        // with the sidebar under it.
+        self.update_badge();
         // The teams beside it, from the same entries the sidebar just got:
         // a rail counting something the list does not show would be two
         // answers to one question.
@@ -1942,10 +1994,17 @@ impl App {
         let Some(store) = self.store.clone() else {
             return;
         };
-        // A message in the channel being looked at is one the reader can
-        // already see, so interrupting them about it is noise. The app leaves
-        // this to window focus, which this window cannot ask about yet.
-        let open = self.sidebar.selected.clone().unwrap_or_default();
+        // A message in the channel being looked at *while looking at it* is
+        // one the reader can already see, so interrupting them about it is
+        // noise. Focus is half of that rule: the same channel behind another
+        // window is not being read.
+        let open = if self.focused {
+            self.sidebar.selected.clone().unwrap_or_default()
+        } else {
+            String::new()
+        };
+        let mut asked = false;
+        let mut named = false;
         for delta in deltas {
             let matterless_sync::Delta::PostUpserted {
                 post_id,
@@ -1968,11 +2027,24 @@ impl App {
                 said.preview.chars().count(),
                 said.resolved
             );
+            asked = true;
+            named |= said.resolved;
             let Some(clicked) = self.clicked.clone() else {
                 continue;
             };
             matterless_view::toast::raise(channel_id, &title, &body, clicked);
         }
+        // The button flashes for the same things the toast fires for, and only
+        // while the window is not being looked at: asking for attention you
+        // already have is how an app becomes irritating. Something that named
+        // the reader keeps flashing until it is seen; anything else is one
+        // nudge.
+        if asked && !self.focused {
+            self.taskbar
+                .ask_for_attention(raw_window(self.window.as_ref()), named);
+        }
+        // Whatever arrived changed what is waiting.
+        self.update_badge();
     }
 
     /// Asks for the faces on screen that have not been asked for yet.
@@ -3012,6 +3084,48 @@ impl App {
     }
 }
 
+/// The application's own icon, for the title bar, the taskbar and Alt-Tab.
+///
+/// The same 512px PNG the app ships, decoded once and handed to winit as raw
+/// pixels. Without it the window wears the default, which on Windows is the
+/// blank sheet that says "some program" -- and there is no badge worth putting
+/// in the corner of a blank sheet.
+fn window_icon() -> Option<winit::window::Icon> {
+    const ICON: &[u8] = include_bytes!("../resources/icons/icon.png");
+    let decoded = image::load_from_memory(ICON)
+        .inspect_err(|error| eprintln!("the window icon would not decode: {error}"))
+        .ok()?
+        .into_rgba8();
+    let (width, height) = decoded.dimensions();
+    winit::window::Icon::from_rgba(decoded.into_raw(), width, height)
+        .inspect_err(|error| eprintln!("the window icon was refused: {error}"))
+        .ok()
+}
+
+/// This window's handle, for the Win32 calls that need one.
+///
+/// Zero when there is no window yet or the platform has no such thing, which
+/// every caller treats as "do nothing": the badge and the flashing are both
+/// decoration over a window that already works.
+fn raw_window(window: Option<&Arc<Window>>) -> matterless_view::taskbar::RawWindow {
+    #[cfg(windows)]
+    {
+        use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        let Some(Ok(handle)) = window.map(|window| window.window_handle()) else {
+            return 0;
+        };
+        let RawWindowHandle::Win32(win32) = handle.as_raw() else {
+            return 0;
+        };
+        win32.hwnd.get()
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = window;
+        0
+    }
+}
+
 /// Puts a just-created window at the bottom of the stack, without focus.
 ///
 /// `with_active(false)` asks not to be *activated*, which is not the same as
@@ -3093,6 +3207,7 @@ impl ApplicationHandler<Update> for App {
                 .create_window(
                     Window::default_attributes()
                         .with_title("MatterLess -- list on Vulkan")
+                        .with_window_icon(window_icon())
                         .with_active(!quiet)
                         .with_inner_size(winit::dpi::LogicalSize::new(
                             self.size.0 as f64,
@@ -3230,6 +3345,26 @@ impl ApplicationHandler<Update> for App {
                         channel_id,
                         root_id,
                         path,
+                    });
+                }
+            }
+            WindowEvent::Focused(focused) => {
+                self.focused = focused;
+                if focused {
+                    // Looked at, so it has been answered: the flashing stops
+                    // even though whatever caused it may still be unread. The
+                    // badge is what carries that, and it stays.
+                    self.taskbar.calm(raw_window(self.window.as_ref()));
+                }
+                // Which conversation counts as "being read" depends on this, so
+                // the socket thread has to hear about it.
+                if let Some(link) = self.link.as_ref() {
+                    link.send(matterless_view::live::Ask::Looking {
+                        channel_id: if focused {
+                            self.sidebar.selected.clone().unwrap_or_default()
+                        } else {
+                            String::new()
+                        },
                     });
                 }
             }

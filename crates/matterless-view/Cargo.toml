@@ -54,6 +54,11 @@ windows = { version = "0.61.3", features = [
     # Opening the window without raising it over the reader's work.
     "Win32_Foundation",
     "Win32_UI_WindowsAndMessaging",
-    # Handing a link to the shell without a command line to parse it.
+    # Handing a link to the shell without a command line to parse it, and
+    # reaching ITaskbarList3 for the overlay badge.
     "Win32_UI_Shell",
+    # Rasterising the badge's digits, and building the icon it becomes.
+    "Win32_Graphics_Gdi",
+    # ITaskbarList3 is a COM object, so it has to be created like one.
+    "Win32_System_Com",
 ] }

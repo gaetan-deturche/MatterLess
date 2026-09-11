@@ -360,15 +360,44 @@ mod tests {
         assert_eq!(reacted_by("tada", 0, &[]), ":tada:");
     }
 
-    /// Seven names wrap, so a popular reaction is not one long line.
+    /// Everyone is named. Six to a line is where it *wraps*, not where it
+    /// stops: a popular reaction is several lines, not the first six people
+    /// and a count of the rest.
     #[test]
-    fn a_long_list_of_names_wraps() {
-        let said = reacted_by(
-            "tada",
-            8,
-            &names(&["a", "b", "c", "d", "e", "f", "g", "h"]),
+    fn everybody_who_reacted_is_named() {
+        let everyone = [
+            "ana", "bo", "cy", "dee", "eve", "finn", "gus", "hal", "ivy", "jo", "kit", "lou",
+            "mei", "nils",
+        ];
+        let said = reacted_by("tada", everyone.len(), &names(&everyone));
+        for person in everyone {
+            assert!(said.contains(person), "{person} is missing from {said}");
+        }
+        assert!(
+            !said.contains("other"),
+            "nobody was reduced to a count: {said}"
         );
-        assert!(said.contains('\n'), "{said}");
-        assert!(said.ends_with("and h reacted with :tada:"), "{said}");
+        assert_eq!(
+            said.lines().count(),
+            3,
+            "fourteen people wrap onto three lines: {said}"
+        );
+        assert!(said.ends_with("and nils reacted with :tada:"), "{said}");
+    }
+
+    /// The count is only ever reached for names that did not arrive, which is
+    /// what it is for -- and the port hydrates every reactor, so in practice
+    /// it is the empty case that exercises it.
+    #[test]
+    fn only_the_names_that_are_missing_are_counted() {
+        // Ten reacted and all ten are known: nothing is counted.
+        let known = ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j"];
+        assert!(!reacted_by("tada", 10, &names(&known)).contains("other"));
+        // Ten reacted and two names never arrived: those two, and only those.
+        let said = reacted_by("tada", 10, &names(&known[..8]));
+        assert!(said.contains("2 others"), "{said}");
+        for person in &known[..8] {
+            assert!(said.contains(person), "{person} is missing from {said}");
+        }
     }
 }

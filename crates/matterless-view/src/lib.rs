@@ -11,6 +11,7 @@
 
 pub mod actions;
 pub mod atlas;
+pub mod badge;
 pub mod clock;
 pub mod composer;
 #[cfg(test)]
@@ -33,6 +34,7 @@ pub mod stream;
 #[cfg(test)]
 mod stream_tests;
 pub mod switcher;
+pub mod taskbar;
 pub mod toast;
 pub mod tooltip;
 pub mod typing;
