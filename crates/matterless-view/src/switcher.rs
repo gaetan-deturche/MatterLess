@@ -23,7 +23,9 @@ pub const NAME: &str = "switcher";
 const ROWS: usize = 8;
 const ROW: f32 = 30.0;
 const PADDING: f32 = 10.0;
-const WIDTH: f32 = 520.0;
+const WIDTH: f32 = 560.0;
+/// What the stylesheet cuts a dialog's corners by.
+const PANEL: f32 = 8.0;
 
 /// How many letters before the server is asked. One or two match half a team,
 /// and the reader is still typing.
@@ -305,7 +307,25 @@ impl Switcher {
         } = into;
         // A panel over the conversation rather than beside it: this is a thing
         // the reader is doing instead of reading, not as well as.
-        scene.fill(panel.x, panel.y, panel.width, panel.height, palette.surface);
+        // The window behind it, dimmed. `rgb(0 0 0 / 0.4)` over everything:
+        // the switcher is a thing the reader is doing instead of reading, and
+        // a panel floating over a fully lit window does not say that.
+        scene.fill(
+            within.x,
+            within.y,
+            within.width,
+            within.height,
+            [0, 0, 0, 102],
+        );
+        scene.floating(
+            panel.x,
+            panel.y,
+            panel.width,
+            panel.height,
+            palette.surface,
+            PANEL,
+            12.0,
+        );
         for (at, one) in self.found.iter().enumerate() {
             let y = panel.y + PADDING + self.query.height() + at as f32 * ROW;
             if at == self.chosen {

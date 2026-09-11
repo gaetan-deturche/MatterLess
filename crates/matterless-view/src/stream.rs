@@ -1229,6 +1229,7 @@ fn shift(piece: matterless_paint::Piece, by: f32) -> matterless_paint::Piece {
             height,
             colour,
             radius,
+            softness,
         } => Piece::Fill {
             x: x + by,
             y,
@@ -1236,6 +1237,7 @@ fn shift(piece: matterless_paint::Piece, by: f32) -> matterless_paint::Piece {
             height,
             colour,
             radius,
+            softness,
         },
         Piece::Press {
             x,

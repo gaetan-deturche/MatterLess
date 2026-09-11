@@ -71,6 +71,9 @@ pub struct Vertex {
     /// How far the corners are cut. Zero is a square one, which is every
     /// glyph and most fills.
     pub radius: f32,
+    /// How far the edge fades. One pixel is a crisp shape; twenty is a
+    /// shadow, which is the same shape drawn soft.
+    pub softness: f32,
 }
 
 impl Vertex {
@@ -79,7 +82,7 @@ impl Vertex {
         step_mode: wgpu::VertexStepMode::Vertex,
         attributes: &wgpu::vertex_attr_array![
             0 => Float32x2, 1 => Float32x2, 2 => Float32x4, 3 => Float32,
-            4 => Float32x2, 5 => Float32x2, 6 => Float32,
+            4 => Float32x2, 5 => Float32x2, 6 => Float32, 7 => Float32,
         ],
     };
 }
@@ -144,6 +147,7 @@ pub fn vertices_of(
                 height,
                 colour,
                 radius,
+                softness,
             } => {
                 let rgba = [
                     colour[0] as f32 / 255.0,
@@ -158,6 +162,7 @@ pub fn vertices_of(
                     rgba,
                     0.0,
                     *radius,
+                    *softness,
                 );
             }
             Piece::Image {
@@ -190,6 +195,7 @@ pub fn vertices_of(
                     [1.0, 1.0, 1.0, 1.0],
                     1.0,
                     *radius,
+                    1.0,
                 );
             }
             Piece::Text {
@@ -245,7 +251,7 @@ pub fn vertices_of(
 
 /// A quad sampled point-for-point, which is what a glyph and a fill want.
 fn push_quad(into: &mut Vec<Vertex>, rect: [f32; 4], uv: [f32; 4], colour: [f32; 4]) {
-    quad(into, rect, uv, colour, 0.0, 0.0);
+    quad(into, rect, uv, colour, 0.0, 0.0, 1.0);
 }
 
 /// Six vertices for one rectangle.
@@ -261,6 +267,7 @@ fn quad(
     colour: [f32; 4],
     filtered: f32,
     radius: f32,
+    softness: f32,
 ) {
     let [x0, y0, x1, y1] = rect;
     let [u0, v0, u1, v1] = uv;
@@ -276,6 +283,7 @@ fn quad(
         local: [x - (x0 + half_size[0]), y - (y0 + half_size[1])],
         half_size,
         radius,
+        softness,
     };
     into.extend([
         corner(x0, y0, u0, v0),
