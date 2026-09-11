@@ -202,6 +202,10 @@ pub enum Piece {
         colour: [u8; 4],
         /// How far the corners are cut. Zero is a square one.
         radius: f32,
+        /// How far the edge fades. One is a crisp shape; twenty is a shadow,
+        /// which `box-shadow` is and which the rounded-box distance already
+        /// describes -- it needs a wider falloff and nothing else.
+        softness: f32,
     },
     Text {
         glyphs: Vec<PlacedGlyph>,
@@ -301,6 +305,49 @@ impl Scene {
         colour: [u8; 4],
         radius: f32,
     ) {
+        self.soft(x, y, width, height, colour, radius, 1.0);
+    }
+
+    /// A panel and the shadow it casts, which is what every floating thing in
+    /// the app has: `box-shadow: 0 10px 30px rgb(0 0 0 / 0.3)`.
+    ///
+    /// Drawn under it rather than around it, offset down, because that is what
+    /// a shadow is -- and one shape with a wide edge is the whole of it.
+    #[allow(clippy::too_many_arguments)]
+    pub fn floating(
+        &mut self,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        colour: [u8; 4],
+        radius: f32,
+        drop: f32,
+    ) {
+        self.soft(
+            x,
+            y + drop,
+            width,
+            height,
+            [0, 0, 0, 90],
+            radius,
+            drop * 3.0,
+        );
+        self.rounded(x, y, width, height, colour, radius);
+    }
+
+    /// The same, drawn soft. A shadow is a shape with a wide edge.
+    #[allow(clippy::too_many_arguments)]
+    pub fn soft(
+        &mut self,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        colour: [u8; 4],
+        radius: f32,
+        softness: f32,
+    ) {
         if width <= 0.0 || height <= 0.0 {
             return;
         }
@@ -311,6 +358,7 @@ impl Scene {
             height,
             colour,
             radius,
+            softness,
         });
     }
 
@@ -445,6 +493,7 @@ impl Painter {
                             height: 1.0,
                             colour: rule,
                             radius: 0.0,
+                            softness: 1.0,
                         });
                         pieces.push(Piece::Fill {
                             x: left + said + gap,
@@ -453,6 +502,7 @@ impl Painter {
                             height: 1.0,
                             colour: rule,
                             radius: 0.0,
+                            softness: 1.0,
                         });
                         let (glyphs, _, _, _) = self.glyphs_of(
                             fonts,
@@ -475,6 +525,7 @@ impl Painter {
                             height: 1.0,
                             colour: rule,
                             radius: 0.0,
+                            softness: 1.0,
                         });
                     }
                 }
@@ -505,6 +556,7 @@ impl Painter {
                         // panel it is in, as the stylesheet has it.
                         colour: palette.raised,
                         radius: CODE,
+                        softness: 1.0,
                     });
                     pieces.push(Piece::Text {
                         glyphs: self
@@ -531,6 +583,7 @@ impl Painter {
                         height: block.height,
                         colour: palette.rule,
                         radius: 0.0,
+                        softness: 1.0,
                     });
                     pieces.push(Piece::Text {
                         glyphs,
@@ -550,6 +603,7 @@ impl Painter {
                         height: height - 2.0,
                         colour: palette.raised,
                         radius: 3.0,
+                        softness: 1.0,
                     }));
                     pieces.push(Piece::Text {
                         glyphs,
@@ -625,6 +679,7 @@ impl Painter {
                             height: (block.height - 4.0).max(1.0),
                             colour: palette.surface,
                             radius: 0.0,
+                            softness: 1.0,
                         });
                     }
                 }

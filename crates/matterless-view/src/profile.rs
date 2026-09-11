@@ -15,7 +15,7 @@ use matterless_ui::{Placed, Rect};
 
 pub const NAME: &str = "profile";
 
-const WIDTH: f32 = 280.0;
+const WIDTH: f32 = 268.0;
 const PADDING: f32 = 12.0;
 const LINE: f32 = 20.0;
 const FACE: f32 = 48.0;
@@ -138,13 +138,14 @@ impl Profile {
             fonts,
             palette,
         } = into;
-        scene.rounded(
+        scene.floating(
             panel.x,
             panel.y,
             panel.width,
             panel.height,
             palette.surface,
             PANEL,
+            10.0,
         );
         scene.rounded(
             panel.x + PADDING,

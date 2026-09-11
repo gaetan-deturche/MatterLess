@@ -264,13 +264,14 @@ impl Listing {
             fonts,
             palette,
         } = into;
-        scene.rounded(
+        scene.floating(
             panel.x,
             panel.y,
             panel.width,
             panel.height,
             palette.surface,
             PANEL,
+            10.0,
         );
         let heading = painter.run(
             fonts,

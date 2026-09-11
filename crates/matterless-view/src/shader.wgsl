@@ -31,6 +31,8 @@ struct In {
     @location(5) half_size: vec2<f32>,
     // Zero for a square corner, which is every glyph and most fills.
     @location(6) radius: f32,
+    // How far the edge fades. One pixel is a crisp shape; twenty is a shadow.
+    @location(7) softness: f32,
 };
 
 struct Out {
@@ -41,6 +43,7 @@ struct Out {
     @location(3) local: vec2<f32>,
     @location(4) half_size: vec2<f32>,
     @location(5) radius: f32,
+    @location(6) softness: f32,
 };
 
 @vertex
@@ -61,6 +64,7 @@ fn vertex(in: In) -> Out {
     out.local = in.local;
     out.half_size = in.half_size;
     out.radius = in.radius;
+    out.softness = in.softness;
     return out;
 }
 
@@ -91,10 +95,15 @@ fn fragment(in: Out) -> @location(0) vec4<f32> {
     // Skipped entirely at radius zero, which is every glyph: the atlas already
     // carries a letter's coverage, and softening the quad it sits on would eat
     // the outermost row of it.
+    // A shadow is the same shape with a wide falloff, which the distance
+    // already gives: `box-shadow` blurred over twenty pixels is this function
+    // with `softness` at twenty instead of one. No second pass, no blur
+    // kernel, and no texture for something the geometry already describes.
     var coverage = 1.0;
-    if in.radius > 0.0 {
+    if in.radius > 0.0 || in.softness > 1.0 {
         let distance = rounded_box(in.local, in.half_size, in.radius);
-        coverage = 1.0 - smoothstep(-0.5, 0.5, distance);
+        let fade = max(in.softness, 1.0) * 0.5;
+        coverage = 1.0 - smoothstep(-fade, fade, distance);
     }
     return vec4<f32>(texel.rgb * in.colour.rgb, texel.a * in.colour.a * coverage);
 }

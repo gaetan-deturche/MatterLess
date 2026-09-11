@@ -273,13 +273,14 @@ impl Picker {
             fonts,
             palette,
         } = into;
-        scene.rounded(
+        scene.floating(
             panel.x,
             panel.y,
             panel.width,
             panel.height,
             palette.surface,
             PANEL,
+            10.0,
         );
         for (at, rect) in cells {
             let Some(choice) = self.found.get(at) else {
