@@ -14,7 +14,7 @@
 
 use cosmic_text::{Attrs, Buffer, Color, Family, Metrics, Shaping, SwashCache, Weight};
 use matterless_layout::Fonts;
-use matterless_layout::row::{Block, Kind, RowLayout, TextSpan, Theme};
+use matterless_layout::row::{Block, Kind, Press, RowLayout, TextSpan, Theme};
 use std::collections::HashMap;
 
 /// A surface to draw on, in straight RGBA8.
@@ -171,19 +171,19 @@ pub enum Piece {
         height: f32,
         key: String,
     },
-    /// Where a link's words ended up. Nothing is drawn for it.
+    /// Where a pressable run of words ended up. Nothing is drawn for it.
     ///
     /// A piece all the same, because only the shaping knows where the words
     /// landed and it already runs once per block: asking a second time would
     /// be a second shaping pass, and a hit box derived any other way drifts
-    /// from the text under it. One per line a link spans, so a link that wraps
-    /// is pressable on both halves.
-    Link {
+    /// from the text under it. One per line the run spans, so a link that
+    /// wraps is pressable on both halves.
+    Press {
         x: f32,
         y: f32,
         width: f32,
         height: f32,
-        href: String,
+        press: Press,
     },
 }
 
@@ -373,18 +373,18 @@ impl Painter {
                     });
                 }
                 Kind::Text => {
-                    let (glyphs, rooms, links) = self.glyphs_of(fonts, block, x, y, theme);
+                    let (glyphs, rooms, presses) = self.glyphs_of(fonts, block, x, y, theme);
                     pieces.push(Piece::Text {
                         glyphs,
                         ink: palette.ink,
                         faint: palette.faint,
                     });
-                    pieces.extend(links.into_iter().map(|link| Piece::Link {
-                        x: link.x,
-                        y: link.y,
-                        width: link.width,
-                        height: link.height,
-                        href: link.href,
+                    pieces.extend(presses.into_iter().map(|one| Piece::Press {
+                        x: one.x,
+                        y: one.y,
+                        width: one.width,
+                        height: one.height,
+                        press: one.press,
                     }));
                     // A custom emoji's placeholder, turned into the picture it
                     // was standing in for. Drawn to the room the spaces
@@ -465,9 +465,9 @@ impl Painter {
                     height,
                     colour,
                 } => canvas.fill(*x as i32, *y as i32, *width as i32, *height as i32, *colour),
-                // Nothing is drawn for a link: it is a box a pointer can land
-                // on, and the words inside it are already drawn as text.
-                Piece::Link { .. } => {}
+                // Nothing is drawn for a press: it is a box a pointer can
+                // land on, and the words in it are already drawn as text.
+                Piece::Press { .. } => {}
                 // The snapshot path has no network, so a picture is drawn as
                 // the space it occupies. That is the honest answer: this path
                 // exists to check heights and glyph positions, and a filled box
@@ -565,7 +565,7 @@ impl Painter {
         x: f32,
         y: f32,
         theme: &Theme,
-    ) -> (Vec<PlacedGlyph>, Rooms, Links) {
+    ) -> (Vec<PlacedGlyph>, Rooms, Presses) {
         if block.spans.is_empty() {
             return (Vec::new(), HashMap::new(), Vec::new());
         }
@@ -591,9 +591,9 @@ impl Painter {
         // are walked: its glyphs are spaces and drawing them would draw
         // nothing, so the span they belong to is turned into a picture instead.
         let mut rooms: Rooms = HashMap::new();
-        // Where each link's words ended up, per line, widened glyph by glyph
+        // Where each pressable run ended up, per line, widened glyph by glyph
         // the same way an emoji's room is.
-        let mut links: Links = Vec::new();
+        let mut presses: Presses = Vec::new();
         // Never more lines than the layout reserved. The buffer wraps to the
         // width it was given and will happily produce a fourth line for a
         // three-line block -- which draws over the message underneath. The
@@ -601,24 +601,25 @@ impl Painter {
         for run in shaped.layout_runs().take(block.lines.max(1)) {
             for glyph in run.glyphs {
                 let at = span_of(glyph.metadata);
-                if marks(glyph.metadata, LINK)
-                    && let Some(href) = block.spans.get(at).and_then(|span| span.link.as_ref())
+                if marks(glyph.metadata, PRESS)
+                    && let Some(press) = block.spans.get(at).and_then(|span| span.press.as_ref())
                 {
-                    // One box per line the link spans, widened glyph by glyph:
+                    // One box per line the run spans, widened glyph by glyph:
                     // a link that wraps is pressable on both halves rather
                     // than on one box straddling the gap between them.
-                    match links.last_mut() {
+                    match presses.last_mut() {
                         Some(last)
-                            if last.href == *href && (last.y - (y + run.line_top)).abs() < 0.5 =>
+                            if last.press == *press
+                                && (last.y - (y + run.line_top)).abs() < 0.5 =>
                         {
                             last.width = (glyph.x + x + glyph.w - last.x).max(last.width);
                         }
-                        _ => links.push(LinkBox {
+                        _ => presses.push(PressBox {
                             x: glyph.x + x,
                             y: y + run.line_top,
                             width: glyph.w,
                             height: line_height,
-                            href: href.clone(),
+                            press: press.clone(),
                         }),
                     }
                 }
@@ -641,7 +642,7 @@ impl Painter {
                 });
             }
         }
-        (placed, rooms, links)
+        (placed, rooms, presses)
     }
 }
 
@@ -653,18 +654,18 @@ type Room = (f32, f32, f32);
 type Rooms = HashMap<usize, Room>;
 
 /// Marks a faint span so its glyphs can be told apart after shaping.
-/// Where a link's words ended up on one line.
+/// Where a pressable run of words ended up on one line.
 #[derive(Debug, Clone, PartialEq)]
-pub struct LinkBox {
+pub struct PressBox {
     pub x: f32,
     pub y: f32,
     pub width: f32,
     pub height: f32,
-    pub href: String,
+    pub press: Press,
 }
 
-/// The link boxes one block produced, in the order they were shaped.
-type Links = Vec<LinkBox>;
+/// The press boxes one block produced, in the order they were shaped.
+type Presses = Vec<PressBox>;
 
 /// What a glyph remembers about the span it came from.
 ///
@@ -675,7 +676,7 @@ type Links = Vec<LinkBox>;
 /// placeholder, and a faint timestamp are all "which span was that".
 const FAINT: usize = 1;
 const EMOJI: usize = 2;
-const LINK: usize = 4;
+const PRESS: usize = 4;
 /// How many flags share the low bits. The span index rides above them.
 const FLAGS: usize = 8;
 
@@ -687,8 +688,8 @@ fn marked(span: &TextSpan, at: usize) -> usize {
     if span.emoji.is_some() {
         flags |= EMOJI;
     }
-    if span.link.is_some() {
-        flags |= LINK;
+    if span.press.is_some() {
+        flags |= PRESS;
     }
     at * FLAGS + flags
 }

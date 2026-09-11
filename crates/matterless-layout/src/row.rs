@@ -139,6 +139,24 @@ pub enum Kind {
     Separator,
 }
 
+/// What pressing a run of words does.
+///
+/// Three things in a message point somewhere: a link, a person, and a
+/// conversation. They are one idea rather than three, because what they share
+/// is the part that is hard -- knowing where the words ended up -- and only
+/// what happens afterwards differs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Press {
+    /// A web address. Never any other scheme: a message is text somebody else
+    /// wrote, and a markdown href can name anything the shell will run.
+    Link(String),
+    /// Somebody, by username.
+    Person(String),
+    /// A conversation, by its name rather than its id -- which is all a
+    /// `~channel` in a message carries.
+    Channel(String),
+}
+
 /// A piece of text with the styling that changes its width.
 ///
 /// Carried out of the layout rather than consumed by it: a renderer has to draw
@@ -150,11 +168,11 @@ pub struct TextSpan {
     pub bold: bool,
     pub italic: bool,
     pub mono: bool,
-    /// Where this text points, when it is part of a link. Carried out of the
-    /// layout for the same reason the styling is: only the shaping knows where
-    /// the words landed, and re-deriving them from the markdown is how a hit
-    /// box and the text under it come to disagree.
-    pub link: Option<String>,
+    /// What pressing these words does, when they are more than words. Carried
+    /// out of the layout for the same reason the styling is: only the shaping
+    /// knows where they landed, and re-deriving that from the markdown is how
+    /// a hit box and the text under it come to disagree.
+    pub press: Option<Press>,
     /// Drawn in the quieter ink: a timestamp, a reaction's count, anything the
     /// eye should pass over on its way to the message.
     pub faint: bool,
@@ -261,22 +279,23 @@ fn lines_of(nodes: &[Node], indent: f32, into: &mut Vec<Line>, code: &mut Vec<St
 /// scheme: `file:` reaching into the reader's disk, or anything the shell has
 /// been taught to run. Only the two the web uses are carried; everything else
 /// draws as words and does nothing when pressed.
-fn openable(href: &str) -> Option<&str> {
+fn openable(href: &str) -> Option<Press> {
     let scheme = href.split_once("://")?.0;
-    matches!(scheme.to_ascii_lowercase().as_str(), "http" | "https").then_some(href)
+    matches!(scheme.to_ascii_lowercase().as_str(), "http" | "https")
+        .then(|| Press::Link(href.to_string()))
 }
 
 /// Collects inline content into styled spans.
 ///
-/// `link` is the href the words are inside, threaded down like the styling is:
-/// a link's text can be emphasised, code, or an emoji, and every piece of it
+/// `press` is what the words are inside, threaded down like the styling is: a
+/// link's text can be emphasised, code, or an emoji, and every piece of it
 /// points at the same place.
 fn inline(
     nodes: &[Node],
     bold: bool,
     italic: bool,
     mono: bool,
-    link: Option<&str>,
+    press: Option<&Press>,
     into: &mut Vec<TextSpan>,
 ) {
     for node in nodes {
@@ -286,35 +305,38 @@ fn inline(
                 bold,
                 italic,
                 mono,
-                link: link.map(str::to_string),
+                press: press.cloned(),
                 faint: false,
                 emoji: None,
             }),
-            Node::Strong { children } => inline(children, true, italic, mono, link, into),
+            Node::Strong { children } => inline(children, true, italic, mono, press, into),
             Node::Emphasis { children } | Node::Strike { children } => {
-                inline(children, bold, true, mono, link, into)
+                inline(children, bold, true, mono, press, into)
             }
             // Only what is worth opening. A message is untrusted text and a
             // href in it can name any scheme at all; anything but the web is
             // drawn as words and does nothing when pressed.
             Node::Link { children, href } => {
-                inline(children, bold, italic, mono, openable(href), into)
+                inline(children, bold, italic, mono, openable(href).as_ref(), into)
             }
             Node::InlineCode { value } | Node::InlineMath { value } => into.push(TextSpan {
                 text: value.clone(),
                 bold,
                 italic,
                 mono: true,
-                link: link.map(str::to_string),
+                press: press.cloned(),
                 faint: false,
                 emoji: None,
             }),
+            // A mention and a channel link point at somebody and somewhere
+            // whatever they are nested inside, so they name their own press
+            // rather than inheriting the surrounding one.
             Node::UserMention { username, .. } => into.push(TextSpan {
                 text: format!("@{username}"),
                 bold,
                 italic,
                 mono,
-                link: link.map(str::to_string),
+                press: Some(Press::Person(username.clone())),
                 faint: false,
                 emoji: None,
             }),
@@ -323,7 +345,7 @@ fn inline(
                 bold,
                 italic,
                 mono,
-                link: link.map(str::to_string),
+                press: Some(Press::Channel(name.clone())),
                 faint: false,
                 emoji: None,
             }),
@@ -338,7 +360,7 @@ fn inline(
                     bold,
                     italic,
                     mono,
-                    link: link.map(str::to_string),
+                    press: press.cloned(),
                     faint: false,
                     emoji: None,
                 },
@@ -347,7 +369,7 @@ fn inline(
                     bold,
                     italic,
                     mono,
-                    link: link.map(str::to_string),
+                    press: press.cloned(),
                     faint: false,
                     emoji: Some(name.clone()),
                 },
@@ -357,7 +379,7 @@ fn inline(
                 bold,
                 italic,
                 mono,
-                link: link.map(str::to_string),
+                press: press.cloned(),
                 faint: false,
                 emoji: None,
             }),
@@ -366,7 +388,7 @@ fn inline(
                 bold,
                 italic,
                 mono,
-                link: link.map(str::to_string),
+                press: press.cloned(),
                 faint: false,
                 emoji: None,
             }),
@@ -441,7 +463,7 @@ pub fn lay_out(fonts: &mut Fonts, row: &Row, theme: &Theme) -> RowLayout {
             bold: false,
             italic: false,
             mono: false,
-            link: None,
+            press: None,
             faint: false,
             emoji: None,
         }
@@ -510,7 +532,7 @@ pub fn lay_out(fonts: &mut Fonts, row: &Row, theme: &Theme) -> RowLayout {
                 bold: true,
                 italic: false,
                 mono: false,
-                link: None,
+                press: None,
                 faint: false,
                 emoji: None,
             });
@@ -520,7 +542,7 @@ pub fn lay_out(fonts: &mut Fonts, row: &Row, theme: &Theme) -> RowLayout {
                 bold: false,
                 italic: false,
                 mono: false,
-                link: None,
+                press: None,
                 faint: true,
                 emoji: None,
             });
@@ -530,7 +552,7 @@ pub fn lay_out(fonts: &mut Fonts, row: &Row, theme: &Theme) -> RowLayout {
                     bold: false,
                     italic: false,
                     mono: false,
-                    link: None,
+                    press: None,
                     faint: true,
                     emoji: None,
                 });
@@ -612,7 +634,7 @@ pub fn lay_out(fonts: &mut Fonts, row: &Row, theme: &Theme) -> RowLayout {
                 bold: false,
                 italic: false,
                 mono: true,
-                link: None,
+                press: None,
                 faint: false,
                 emoji: None,
             }],
@@ -685,7 +707,7 @@ pub fn lay_out(fonts: &mut Fonts, row: &Row, theme: &Theme) -> RowLayout {
                     italic: false,
                     mono: false,
                     faint,
-                    link: None,
+                    press: None,
                     emoji: None,
                 }],
                 size: theme.body_size,
@@ -810,7 +832,7 @@ pub fn lay_out(fonts: &mut Fonts, row: &Row, theme: &Theme) -> RowLayout {
                 bold: false,
                 italic: false,
                 mono: false,
-                link: None,
+                press: None,
                 faint: true,
                 emoji: None,
             }],
@@ -864,6 +886,89 @@ mod tests {
                 value: value.into(),
             }],
         }
+    }
+
+    /// What a run of words points at, and what it refuses to.
+    ///
+    /// A message is text somebody else wrote. The scheme check lives here as
+    /// well as at the point of opening, so neither one alone can be changed
+    /// into a way to reach `file:` on the reader's disk.
+    #[test]
+    fn only_the_web_a_person_and_a_conversation_are_pressable() {
+        let pressed = |node: Node| {
+            let mut spans = Vec::new();
+            inline(&[node], false, false, false, None, &mut spans);
+            spans.into_iter().find_map(|span| span.press)
+        };
+        let words = || {
+            vec![Node::Text {
+                value: "somewhere".into(),
+            }]
+        };
+
+        assert_eq!(
+            pressed(Node::Link {
+                href: "https://example.invalid/x".into(),
+                children: words(),
+            }),
+            Some(Press::Link("https://example.invalid/x".into()))
+        );
+        assert_eq!(
+            pressed(Node::UserMention {
+                username: "ada".into(),
+                everyone: false,
+            }),
+            Some(Press::Person("ada".into()))
+        );
+        assert_eq!(
+            pressed(Node::ChannelLink { name: "dev".into() }),
+            Some(Press::Channel("dev".into()))
+        );
+        for refused in [
+            "file:///c:/windows",
+            "javascript:alert(1)",
+            "ms-settings://x",
+        ] {
+            assert_eq!(
+                pressed(Node::Link {
+                    href: refused.into(),
+                    children: words(),
+                }),
+                None,
+                "{refused} should not be pressable"
+            );
+        }
+    }
+
+    /// A mention inside a link points at the person, not at the page: it is
+    /// its own destination whatever it is nested in.
+    #[test]
+    fn a_mention_keeps_its_own_destination_inside_a_link() {
+        let mut spans = Vec::new();
+        inline(
+            &[Node::Link {
+                href: "https://example.invalid/x".into(),
+                children: vec![
+                    Node::Text {
+                        value: "see ".into(),
+                    },
+                    Node::UserMention {
+                        username: "ada".into(),
+                        everyone: false,
+                    },
+                ],
+            }],
+            false,
+            false,
+            false,
+            None,
+            &mut spans,
+        );
+        assert_eq!(
+            spans[0].press,
+            Some(Press::Link("https://example.invalid/x".into()))
+        );
+        assert_eq!(spans[1].press, Some(Press::Person("ada".into())));
     }
 
     /// A card takes room, or the message under it is drawn over.

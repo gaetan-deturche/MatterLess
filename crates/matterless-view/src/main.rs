@@ -198,6 +198,8 @@ struct App {
     asked_about: Vec<String>,
     /// Saved or pinned messages, whichever was last asked for.
     listing: matterless_view::listing::Listing,
+    /// Who somebody is, when their name has been pressed.
+    profile: matterless_view::profile::Profile,
     /// How far back the open channel is read. Grows as older pages arrive.
     depth: u32,
     /// True while a page of history is in flight, so the same page is not asked
@@ -336,6 +338,7 @@ impl App {
             presence: std::collections::HashMap::new(),
             asked_about: Vec::new(),
             listing: matterless_view::listing::Listing::default(),
+            profile: matterless_view::profile::Profile::default(),
             depth: matterless_view::feed::PAGE,
             loading_older: false,
             more_history: true,
@@ -824,6 +827,70 @@ impl App {
         });
     }
 
+    /// Follows something somebody wrote: a link, a person, a conversation.
+    fn press(&mut self, press: matterless_layout::row::Press) {
+        use matterless_layout::row::Press;
+        match press {
+            Press::Link(href) => {
+                matterless_view::open::link(&href);
+            }
+            // By name, because that is all a `~channel` in a message carries.
+            // A name this store has never met is not an error worth a dialog:
+            // it is a channel the reader is not in.
+            Press::Channel(name) => {
+                match self
+                    .store
+                    .as_ref()
+                    .and_then(|store| store.channel_by_name(&name).ok().flatten())
+                {
+                    Some(channel) => {
+                        self.sidebar.selected = Some(channel.id.clone());
+                        self.open_channel(&channel.id);
+                    }
+                    None => println!("no channel called {name} in the local store"),
+                }
+            }
+            Press::Person(username) => self.show_profile(&username),
+        }
+    }
+
+    /// Opens a card on somebody, from what the store already holds.
+    ///
+    /// Anchored to the words that were pressed, which the stream recorded when
+    /// it drew them -- the card has to point at the name it is about, and a
+    /// mention appears many times in a conversation.
+    fn show_profile(&mut self, username: &str) {
+        let Some(user) = self
+            .store
+            .as_ref()
+            .and_then(|store| store.user_by_username(username).ok().flatten())
+        else {
+            println!("nobody called {username} in the local store");
+            return;
+        };
+        let near = self
+            .stream
+            .pressed_rect(&matterless_layout::row::Press::Person(username.to_string()))
+            .unwrap_or_else(|| self.stream_rect());
+        self.profile.show(
+            matterless_view::profile::Card {
+                full_name: format!("{} {}", user.first_name, user.last_name)
+                    .trim()
+                    .to_string(),
+                // This client does not model a job title, so the nickname
+                // is what it has that is worth a line. Empty far more often
+                // than not, which the card is built to handle.
+                nickname: user.nickname.clone(),
+                status: self.presence.get(&user.id).cloned().unwrap_or_default(),
+                avatar_at: user.last_picture_update,
+                username: user.username,
+                user_id: user.id,
+            },
+            near,
+        );
+        self.want_faces();
+    }
+
     /// Names any reaction that can be neither drawn nor fetched.
     ///
     /// Names only, never message text. A pill with no character and no picture
@@ -993,6 +1060,7 @@ impl App {
         // The picker's grid is mostly custom emoji, which are pictures like any
         // other and go through the same asked set.
         wanted.extend(self.picker.wants());
+        wanted.extend(self.profile.wants());
         for (key, width, height) in wanted {
             if self.asked.insert(key.clone()) {
                 link.send(matterless_view::live::Ask::Fetch { key, width, height });
@@ -1229,6 +1297,7 @@ impl App {
         }
         boxes.extend(self.picker.boxes(self.picked_near, self.stream_rect()));
         boxes.extend(self.listing.boxes(self.stream_rect()));
+        boxes.extend(self.profile.boxes(self.stream_rect()));
         if let Some(row) = self.edited_row() {
             boxes.extend(self.edit.boxes(row, self.stream_rect()));
         }
@@ -1341,6 +1410,20 @@ impl App {
             }
             self.input = input;
             return;
+        }
+
+        // The card is dismissed rather than interacted with: it says who
+        // somebody is and has nothing to press. Escape, or a click anywhere
+        // that is not on it -- which is what a reader expects of a popover and
+        // means it never has to be closed deliberately.
+        if self.profile.open()
+            && (self.input.struck(Key::Escape)
+                || self
+                    .input
+                    .clicked()
+                    .is_some_and(|name| name != matterless_view::profile::NAME))
+        {
+            self.profile.hide();
         }
 
         // A list of messages stands in front of the conversation, like the
@@ -1788,6 +1871,20 @@ impl App {
             self.edit.draw(&mut canvas, row, stream);
         }
 
+        // Over the conversation and under nothing: a card is the answer to a
+        // question the reader just asked, so whatever it covers is not what
+        // they are looking at.
+        if self.profile.open() {
+            scene.clip_to(0.0, 0.0, self.size.0 as f32, self.size.1 as f32);
+            let mut canvas = Canvas {
+                scene: &mut scene,
+                painter: &mut self.painter,
+                fonts: &mut self.fonts,
+                palette: &self.palette,
+            };
+            self.profile.draw(&mut canvas, stream);
+        }
+
         // Over everything, including the toolbar it was opened from: it is a
         // small panel and whatever it covers is not what the reader is doing.
         if self.picker.open() {
@@ -2124,9 +2221,7 @@ impl ApplicationHandler<Update> for App {
                         post_id,
                         on,
                     }) => self.act(action, post_id, on),
-                    Some(matterless_view::stream::Chose::Open(href)) => {
-                        matterless_view::open::link(&href);
-                    }
+                    Some(matterless_view::stream::Chose::Press(press)) => self.press(press),
                     Some(matterless_view::stream::Chose::React { post_id, emoji, on }) => {
                         if let Some(link) = self.link.as_ref() {
                             link.send(matterless_view::live::Ask::React { post_id, emoji, on });
