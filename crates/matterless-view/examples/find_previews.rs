@@ -23,12 +23,33 @@ fn main() {
         let posts = store
             .channel_page(&channel.id, None, 200)
             .unwrap_or_default();
+        // What a webhook sent, which for a bot post is the whole message.
+        let attached = posts
+            .iter()
+            .filter(|post| {
+                post.props
+                    .get("attachments")
+                    .and_then(|value| value.as_array())
+                    .is_some_and(|list| !list.is_empty())
+            })
+            .count();
         let kinds: Vec<&str> = posts
             .iter()
             .flat_map(|post| post.metadata.embeds.iter())
             .map(|embed| embed.embed_type.as_str())
             .filter(|kind| *kind == "opengraph" || *kind == "permalink")
             .collect();
+        if attached > 0 {
+            println!(
+                "{} -- {} ({attached} webhook attachments)",
+                channel.id,
+                if channel.display_name.is_empty() {
+                    channel.name.clone()
+                } else {
+                    channel.display_name.clone()
+                }
+            );
+        }
         if kinds.is_empty() {
             continue;
         }
