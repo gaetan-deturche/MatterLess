@@ -134,6 +134,27 @@ impl Sidebar {
         placed
     }
 
+    /// The pictures this list wants, so the caller can fetch them the usual
+    /// way.
+    ///
+    /// The team icons -- the same ones the rail shows, under the same name, so
+    /// they are asked for at one size and drawn at two. An atlas holds one
+    /// picture per name, so asking for a second size here would mean whichever
+    /// panel got there first decided the size for both.
+    pub fn wants(&self) -> Vec<(String, u32, u32)> {
+        self.entries
+            .iter()
+            .filter_map(|entry| match entry {
+                Entry::Team { id, .. } => Some((
+                    crate::rail::icon_key(id),
+                    crate::rail::ICON_FETCHED,
+                    crate::rail::ICON_FETCHED,
+                )),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Scrolls a team's heading to the top of the panel.
     ///
     /// What the rail does: a team is not somewhere to be, it is somewhere in
@@ -278,11 +299,31 @@ impl Sidebar {
                 // "Favorites" and a "Channels", and unqualified they read as
                 // duplicates -- but qualifying each one says the team four
                 // times over.
-                Entry::Team { label, .. } => {
+                Entry::Team { id, label } => {
+                    // The team's own picture, which tells two teams apart
+                    // faster than their names do. A tile behind it, so one
+                    // with transparency in it -- or one that has not arrived
+                    // yet -- reads as a tile rather than as a hole.
+                    scene.rounded(
+                        row.rect.x + 4.0,
+                        row.rect.y + 6.0,
+                        TEAM_ICON,
+                        TEAM_ICON,
+                        palette.raised,
+                        TEAM_ICON_CORNER,
+                    );
+                    scene.extend([matterless_paint::Piece::Image {
+                        x: row.rect.x + 4.0,
+                        y: row.rect.y + 6.0,
+                        width: TEAM_ICON,
+                        height: TEAM_ICON,
+                        key: crate::rail::icon_key(id),
+                        radius: TEAM_ICON_CORNER,
+                    }]);
                     let glyphs = painter.run(
                         fonts,
                         label,
-                        row.rect.x + 4.0,
+                        row.rect.x + 4.0 + TEAM_ICON + 7.0,
                         row.rect.y + 8.0,
                         Run {
                             size: 14.5,
@@ -330,23 +371,8 @@ impl Sidebar {
                             palette.ground,
                         );
                     }
-                    // Unread is full contrast and bold, read recedes, and
-                    // where the reader actually is outranks both.
-                    let loud = *unread > 0 || *mentions > 0;
-                    let mut ink = if chosen {
-                        palette.signal
-                    } else if loud {
-                        palette.ink
-                    } else {
-                        palette.faint
-                    };
-                    // A muted channel is its own colour dimmed, count
-                    // included, not a different colour: replacing it is how
-                    // muted and read came to look identical -- both of them
-                    // were simply the faint ink. `opacity: 0.45`.
-                    if *muted {
-                        ink = palette.dimmed(ink, MUTED);
-                    }
+                    let loud = asking(*unread, *mentions, *muted);
+                    let ink = ink_of(palette, chosen, loud, *muted);
                     // Whether somebody is around, which is the one thing that
                     // decides whether you write to them now. Only here: a dot
                     // on every message row would say nothing about the
@@ -364,12 +390,29 @@ impl Sidebar {
                             lit,
                         );
                     }
-                    // What kind of conversation this is, in one character.
-                    let sigil = match (*direct, *private) {
-                        (true, _) => "@",
-                        (false, true) => "🔒",
-                        (false, false) => "#",
+                    // What kind of conversation this is, in its own box
+                    // beside the name rather than spliced onto the front of
+                    // it: a channel's type is something about the channel, and
+                    // a character sitting inside the name reads as part of it.
+                    let behind = if chosen || input.hovered() == Some(name.as_str()) {
+                        palette.ground
+                    } else {
+                        palette.surface
                     };
+                    kind_icon(
+                        scene,
+                        painter,
+                        fonts,
+                        palette,
+                        Rect::new(
+                            row.rect.x + ICON_LEFT,
+                            row.rect.y + (row.rect.height - ICON) / 2.0,
+                            ICON,
+                            ICON,
+                        ),
+                        Kind::of(*direct, *private, counterpart.is_some()),
+                        behind,
+                    );
                     // The count first, because it decides how much room the
                     // name has. Muted channels keep theirs: muting is "do not
                     // interrupt me", not "hide this from me".
@@ -405,12 +448,7 @@ impl Sidebar {
                         .map(|(_, rect)| rect.x - GAP)
                         .unwrap_or(within.right() - TRACK)
                         - left;
-                    let named = matterless_layout::elided(
-                        fonts,
-                        &format!("{sigil} {label}"),
-                        room,
-                        name_style(loud),
-                    );
+                    let named = matterless_layout::elided(fonts, label, room, name_style(loud));
                     let glyphs = painter.run(
                         fonts,
                         &named,
@@ -494,7 +532,18 @@ impl Sidebar {
 /// not line up reads as broken, and the alternative is indenting only the
 /// conversations that happen to have a dot right now.
 const DOT: f32 = 6.0;
-const GUTTER: f32 = 12.0;
+/// Where the name starts: past the type icon and the gap after it.
+const GUTTER: f32 = ICON_LEFT + ICON + 7.0;
+/// The channel-type icon, and where its box begins.
+const ICON: f32 = 16.0;
+const ICON_LEFT: f32 = 4.0;
+/// How solid it is: `color: var(--ink-faint); opacity: 0.85`. Quieter than the
+/// name it labels, because it says what kind of thing this is rather than
+/// which one.
+const ICON_INK: f32 = 0.85;
+/// A team's picture beside its name: 18px at `border-radius: 4px`.
+const TEAM_ICON: f32 = 18.0;
+const TEAM_ICON_CORNER: f32 = 4.0;
 /// The gap the name keeps from the count beside it.
 const GAP: f32 = 6.0;
 /// What the scrollbar floats over, which the rows have to keep clear of: it
@@ -509,6 +558,137 @@ const COUNT_SIZE: f32 = 10.5;
 const COUNT_LINE: f32 = 14.0;
 const COUNT_PADDING: f32 = 6.0;
 const COUNT_HEIGHT: f32 = 18.0;
+
+/// What kind of conversation a row is.
+///
+/// Four, not two: the port had one flag for "direct" covering both a message
+/// to one person and a message to several, which are different things with
+/// different icons.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    Public,
+    Private,
+    Group,
+    Direct,
+}
+
+impl Kind {
+    fn of(direct: bool, private: bool, counterpart: bool) -> Self {
+        match (direct, private, counterpart) {
+            // One other person, so there is somebody to name.
+            (true, _, true) => Kind::Direct,
+            // Several, so there is not.
+            (true, _, false) => Kind::Group,
+            (false, true, _) => Kind::Private,
+            (false, false, _) => Kind::Public,
+        }
+    }
+}
+
+/// Draws what kind of conversation a row is, inside `box_of`.
+///
+/// Shapes rather than characters for the two that have no character. The
+/// padlock in a text font is an emoji: it arrives in colour and at whatever
+/// size the emoji face feels like, so beside a plain `#` it read as a picture
+/// somebody had put in the channel's name. These are drawn from the same
+/// rounded boxes as everything else here, so they are one ink, one size, and
+/// sit in the same box the hash does.
+fn kind_icon(
+    scene: &mut matterless_paint::Scene,
+    painter: &mut matterless_paint::Painter,
+    fonts: &mut matterless_layout::Fonts,
+    palette: &matterless_paint::Palette,
+    box_of: Rect,
+    kind: Kind,
+    behind: [u8; 4],
+) {
+    let ink = palette.dimmed(palette.faint, ICON_INK);
+    let solid = [ink[0], ink[1], ink[2], 255];
+    // The box is sixteen wide, the same `viewBox` these shapes were drawn in,
+    // so the numbers below are the stylesheet's own.
+    let at = |x: f32, y: f32| (box_of.x + x, box_of.y + y);
+    match kind {
+        Kind::Private => {
+            // A padlock, because posting in a private channel is a different
+            // act. Its shackle is a ring made by punching the row's own colour
+            // out of a capsule: a scene of filled boxes has no stroke.
+            let (x, y) = at(4.5, 1.5);
+            scene.rounded(x, y, 7.0, 8.0, solid, 3.5);
+            let (x, y) = at(6.0, 3.0);
+            scene.rounded(x, y, 4.0, 6.5, behind, 2.0);
+            let (x, y) = at(3.0, 7.5);
+            scene.rounded(x, y, 10.0, 6.5, solid, 1.5);
+        }
+        Kind::Group => {
+            // Several people: two heads and two shoulders, the nearer one
+            // whole and the further one behind it.
+            let (x, y) = at(9.0, 3.5);
+            scene.rounded(x, y, 3.5, 3.5, solid, 1.75);
+            let (x, y) = at(9.6, 8.8);
+            scene.rounded(x, y, 3.9, 4.2, solid, 1.7);
+            let (x, y) = at(3.25, 2.5);
+            scene.rounded(x, y, 4.5, 4.5, solid, 2.25);
+            let (x, y) = at(1.5, 8.2);
+            scene.rounded(x, y, 8.0, 4.8, solid, 2.4);
+        }
+        // The hash every chat client uses, so it needs no explaining, and the
+        // at-sign that stands in for a face until the sidebar carries a
+        // picture version to fetch one by.
+        Kind::Public | Kind::Direct => {
+            let glyphs = painter.run(
+                fonts,
+                if kind == Kind::Public { "#" } else { "@" },
+                box_of.x + if kind == Kind::Public { 3.5 } else { 2.5 },
+                box_of.y + 0.5,
+                Run::label(f32::MAX).bold(),
+            );
+            scene.glyphs(glyphs, ink, ink);
+        }
+    }
+}
+
+/// What colour a channel's name and count are drawn in.
+///
+/// Unread is full contrast; a read channel recedes, but only one step -- both
+/// on the same colour leaves font weight as the only difference between them,
+/// which at 13px is nearly nothing. Where the reader actually is outranks both.
+///
+/// And a muted channel is that colour *dimmed*, count included, rather than a
+/// different one. Replacing it is how muted and read came to look identical:
+/// both of them were simply the faint ink. `opacity: 0.45`, which a scene of
+/// opaque quads has to mix by hand.
+fn ink_of(
+    palette: &matterless_paint::Palette,
+    chosen: bool,
+    loud: bool,
+    muted: bool,
+) -> [u8; 3] {
+    let ink = if chosen {
+        palette.signal
+    } else if loud {
+        palette.ink
+    } else {
+        palette.soft
+    };
+    if muted {
+        palette.dimmed(ink, MUTED)
+    } else {
+        ink
+    }
+}
+
+/// Whether a row reads as unread: full contrast, and bold.
+///
+/// Nothing in a muted channel does, whatever is in it. That is what muting
+/// says, and it is why the app works this out rather than reading the count --
+/// a muted channel that went bold on every arriving message would be
+/// interrupting in the one way it was told not to.
+///
+/// It still shows how much is there. Muting is "do not interrupt me", not
+/// "hide this from me".
+fn asking(unread: i64, mentions: i64, muted: bool) -> bool {
+    (unread > 0 || mentions > 0) && !muted
+}
 
 /// How the count is measured, which has to match how it is drawn -- the pill
 /// is sized from this and the number is set by it.
@@ -591,6 +771,31 @@ fn dot(status: &str, palette: &matterless_paint::Palette) -> Option<[u8; 4]> {
 
 #[cfg(test)]
 mod tests {
+    use super::asking;
+
+    /// A muted channel never reads as unread, however much arrives in it.
+    ///
+    /// Twice now this has drifted: first to looking identical to a read
+    /// channel, then to going bold on every message. Both are the same
+    /// mistake -- deciding how loud a row is from its count alone, when the
+    /// reader has already said they do not want to be interrupted by it.
+    #[test]
+    fn a_muted_channel_is_never_loud() {
+        for (unread, mentions) in [(1, 0), (0, 1), (40, 12)] {
+            assert!(
+                !asking(unread, mentions, true),
+                "{unread} unread and {mentions} mentions went loud while muted"
+            );
+            assert!(
+                asking(unread, mentions, false),
+                "{unread} unread and {mentions} mentions stayed quiet unmuted"
+            );
+        }
+        // And an empty channel is quiet either way.
+        assert!(!asking(0, 0, false));
+        assert!(!asking(0, 0, true));
+    }
+
     use super::*;
     use matterless_ui::input::Event;
 
@@ -746,9 +951,22 @@ mod tests {
     #[test]
     fn the_three_states_of_a_row_are_three_colours() {
         let palette = matterless_paint::Palette::default();
-        assert_ne!(palette.ink, palette.soft);
-        assert_ne!(palette.soft, palette.faint);
-        assert_ne!(palette.ink, palette.faint);
+        // Read, unread, muted -- as the row actually picks them. This used to
+        // assert only that the palette held three distinct colours, which it
+        // does whatever the rows do with them: it passed for as long as muted
+        // and read were both drawn in the faint ink.
+        let read = super::ink_of(&palette, false, false, false);
+        let unread = super::ink_of(&palette, false, true, false);
+        let muted = super::ink_of(&palette, false, false, true);
+        let muted_with_messages = super::ink_of(&palette, false, false, true);
+        assert_ne!(read, unread, "an unread channel looks like a read one");
+        assert_ne!(read, muted, "a muted channel looks like a read one");
+        assert_ne!(unread, muted);
+        // A muted channel does not brighten when something arrives in it: it
+        // is never `loud`, so this is the same colour as plain muted.
+        assert_eq!(muted, muted_with_messages);
+        // Where the reader is outranks all of it.
+        assert_ne!(super::ink_of(&palette, true, false, false), read);
     }
 
     /// Offline draws nothing, and so does a status this build has never heard

@@ -97,7 +97,7 @@ impl Rail {
         self.teams
             .iter()
             .filter(|team| !team.directs)
-            .map(|team| (icon_key(&team.id), TILE as u32, TILE as u32))
+            .map(|team| (icon_key(&team.id), ICON_FETCHED, ICON_FETCHED))
             .collect()
     }
 
@@ -217,6 +217,14 @@ impl Rail {
         }
     }
 }
+
+/// The size a team's icon is fetched at.
+///
+/// One size for one key: the sidebar draws the same picture smaller, and an
+/// atlas holds one image per name -- so whichever asked first would decide the
+/// size for both. Fetched at the larger of the two, which is this one, and
+/// scaled down where it is drawn small.
+pub const ICON_FETCHED: u32 = TILE as u32;
 
 /// What a team's icon is called in the atlas.
 pub fn icon_key(team_id: &str) -> String {
