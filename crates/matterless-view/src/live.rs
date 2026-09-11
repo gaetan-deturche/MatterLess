@@ -50,6 +50,13 @@ pub enum Update {
     Older { channel_id: String, more: bool },
     /// Who is around, by user id.
     Statuses(Vec<(String, String)>),
+    /// What else a name could mean, for the query that was asked.
+    Discovered {
+        query: String,
+        found: Vec<crate::switcher::Match>,
+    },
+    /// A conversation is ready to be opened, having been joined or created.
+    Reached { channel_id: String },
     /// The sidebar's channels and counts have been refreshed in the store,
     /// and here is how this reader reads threads.
     Membership(matterless_core::model::ThreadMode),
@@ -94,6 +101,16 @@ pub enum Ask {
         emoji: String,
         on: bool,
     },
+    /// What else this name could mean, beyond the conversations already held.
+    ///
+    /// Public channels the reader is not in, and people they may never have
+    /// written to. Asked of the server because neither is in the local store
+    /// by definition.
+    Discover { query: String },
+    /// Join a public channel, then open it.
+    Join { channel_id: String },
+    /// Find or create the conversation with one person, then open it.
+    Direct { user_id: String },
     /// Every channel and membership, from the server into the store.
     ///
     /// The unread counts are arithmetic on two numbers the server keeps -- a
@@ -383,6 +400,45 @@ async fn run(
                             Err(error) => eprintln!("{} on {post_id}: {error}", action.slug()),
                         }
                     }
+                    Ask::Discover { query } => {
+                        let found = discover(&rest, engine.store(), &me_id, &query).await;
+                        println!("{} other ways to read \"{query}\"", found.len());
+                        wake.wake(Update::Discovered { query, found });
+                    }
+                    Ask::Join { channel_id } => {
+                        match rest.join_channel(&channel_id, &me_id).await {
+                            Ok(_) => {
+                                println!("joined {channel_id}");
+                                // The sidebar has a new row in it, and only a
+                                // fresh membership pull will show it.
+                                if let Ok((counted, mode)) =
+                                    membership(&rest, engine.store(), &me_id).await
+                                {
+                                    println!("{counted} channels after joining");
+                                    wake.wake(Update::Membership(mode));
+                                }
+                                wake.wake(Update::Reached { channel_id });
+                            }
+                            Err(error) => eprintln!("joining {channel_id}: {error}"),
+                        }
+                    }
+                    Ask::Direct { user_id } => match rest.direct_channel(&me_id, &user_id).await {
+                        Ok(channel) => {
+                            // Stored before it is opened: the window reads the
+                            // conversation out of the store, and a channel it
+                            // has never heard of reads as empty.
+                            if let Err(error) = engine.store().upsert_channels(std::slice::from_ref(&channel)) {
+                                eprintln!("storing a new conversation: {error}");
+                            }
+                            if let Ok((_, mode)) = membership(&rest, engine.store(), &me_id).await {
+                                wake.wake(Update::Membership(mode));
+                            }
+                            wake.wake(Update::Reached {
+                                channel_id: channel.id,
+                            });
+                        }
+                        Err(error) => eprintln!("opening a conversation: {error}"),
+                    },
                     Ask::Membership => match membership(&rest, engine.store(), &me_id).await {
                         Ok((counted, mode)) => {
                             println!("{counted} channels refreshed, threads are {mode:?}");
@@ -788,6 +844,18 @@ mod tests {
         assert!(!context.followed_threads.contains("some-other-root"));
     }
 
+    /// A query is whatever somebody typed. Anything but the unreserved set has
+    /// to be escaped, or a space ends the parameter and the server answers a
+    /// different question than the one asked.
+    #[test]
+    fn a_query_parameter_survives_what_a_reader_types() {
+        assert_eq!(encoded("curiosity"), "curiosity");
+        assert_eq!(encoded("two words"), "two%20words");
+        assert_eq!(encoded("a&b=c"), "a%26b%3Dc");
+        assert_eq!(encoded("../../etc"), "..%2F..%2Fetc");
+        assert_eq!(encoded("café"), "caf%C3%A9");
+    }
+
     /// A reaction names its post and nothing else -- no channel, which is why
     /// the window has to decide whether it matters.
     #[test]
@@ -1189,4 +1257,95 @@ async fn membership(
         counted,
         matterless_core::resolve_thread_mode(&config, &preferences),
     ))
+}
+
+/// Percent-encodes a value for one query parameter.
+///
+/// Everything but the unreserved set, which is the only safe rule when the
+/// value is whatever somebody typed into a box.
+fn encoded(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.as_bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(*byte as char)
+            }
+            other => out.push_str(&format!("%{other:02X}")),
+        }
+    }
+    out
+}
+
+/// How many of each kind a discovery offers. A switcher shows eight rows in
+/// total, so more than this is answering a question nobody can see.
+const DISCOVERED: u32 = 10;
+
+/// What else a name could mean: channels not joined, and people not written to.
+///
+/// The reader's own conversations are matched locally and instantly; this is
+/// only the rest, so anything the store already holds is filtered out rather
+/// than offered twice under two different verbs.
+async fn discover(
+    rest: &matterless_core::rest::RestClient,
+    store: &Store,
+    me_id: &str,
+    query: &str,
+) -> Vec<crate::switcher::Match> {
+    let wanted = query.to_lowercase();
+    let mut found = Vec::new();
+
+    for team in store.teams().unwrap_or_default() {
+        let channels = rest
+            .public_channels(&team.id, 0, 200)
+            .await
+            .unwrap_or_default();
+        for channel in channels {
+            // Already in it, so the sidebar match covers it.
+            if store.channel(&channel.id).ok().flatten().is_some() {
+                continue;
+            }
+            if !channel.display_name.to_lowercase().contains(&wanted)
+                && !channel.name.to_lowercase().contains(&wanted)
+            {
+                continue;
+            }
+            found.push(crate::switcher::Match {
+                id: channel.id,
+                label: format!("{} -- join", channel.display_name),
+                direct: false,
+                reach: crate::switcher::Reach::Join,
+            });
+            if found.len() >= DISCOVERED as usize {
+                break;
+            }
+        }
+    }
+
+    // People, by whatever the server suggests for the letters typed. Encoded,
+    // because a query is whatever the reader typed: a space or an ampersand in
+    // it would otherwise end the parameter and the server would answer a
+    // different question.
+    let people = rest
+        .autocomplete_users(&format!("/users/autocomplete?name={}", encoded(&wanted)))
+        .await
+        .unwrap_or_default();
+    // Remembered, so a conversation opened with one of them is labelled by
+    // their name rather than their id: the sidebar resolves a direct message's
+    // counterpart out of the store, and somebody met for the first time here
+    // is not in it yet.
+    if let Err(error) = store.upsert_users(&people) {
+        eprintln!("storing the people found: {error}");
+    }
+    for person in people.into_iter().take(DISCOVERED as usize) {
+        if person.id == me_id {
+            continue;
+        }
+        found.push(crate::switcher::Match {
+            id: person.id,
+            label: format!("@{} -- message", person.username),
+            direct: true,
+            reach: crate::switcher::Reach::Direct,
+        });
+    }
+    found
 }

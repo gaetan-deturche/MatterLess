@@ -25,12 +25,33 @@ const ROW: f32 = 30.0;
 const PADDING: f32 = 10.0;
 const WIDTH: f32 = 520.0;
 
-/// One match: the channel it names and how to say it.
+/// How many letters before the server is asked. One or two match half a team,
+/// and the reader is still typing.
+const LEAST: usize = 2;
+
+/// What choosing a match does.
+///
+/// The same list offers three things a reader might mean by a name: a
+/// conversation they are in, one they are not, and a person they have never
+/// written to. Only the last step differs, so they are one list rather than
+/// three panels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reach {
+    /// A conversation in the sidebar. Opening it is a local read.
+    Open,
+    /// A public channel this reader is not in. Joining comes first.
+    Join,
+    /// Somebody, by user id. The conversation may not exist yet.
+    Direct,
+}
+
+/// One match: what it names, how to say it, and what to do with it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Match {
     pub id: String,
     pub label: String,
     pub direct: bool,
+    pub reach: Reach,
 }
 
 /// The quick switcher, open or shut.
@@ -47,6 +68,13 @@ pub struct Switcher {
     /// get wrong.
     pub query: Composer,
     found: Vec<Match>,
+    /// What the server suggested for the query last asked, which the reader is
+    /// not already in. Kept apart from `found` so a slow answer never reorders
+    /// the rows under a reader who is mid-keystroke.
+    offered: Vec<Match>,
+    /// The query `offered` belongs to, so a late answer for an older query is
+    /// dropped rather than shown against a newer one.
+    asked: String,
     /// Which row return would take.
     chosen: usize,
 }
@@ -66,6 +94,8 @@ impl Switcher {
             forwarding: None,
             query,
             found: Vec::new(),
+            offered: Vec::new(),
+            asked: String::new(),
             chosen: 0,
         }
     }
@@ -78,6 +108,8 @@ impl Switcher {
         // ordinary way after a forward is the ordinary switcher again.
         self.forwarding = None;
         self.query.placeholder = "Jump to…".to_string();
+        self.offered.clear();
+        self.asked.clear();
         self.query.clear(fonts);
         self.chosen = 0;
         self.found.clear();
@@ -137,6 +169,7 @@ impl Switcher {
                             id: id.clone(),
                             label: label.clone(),
                             direct: *direct,
+                            reach: Reach::Open,
                         },
                     ))
                 }
@@ -147,6 +180,20 @@ impl Switcher {
         // shuffling as the reader types.
         scored.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
         self.found = scored.into_iter().take(ROWS).map(|(_, one)| one).collect();
+        // What the reader is already in comes first, always. Somewhere they
+        // visit every day must never be pushed down the list by a channel they
+        // have never opened.
+        let held: std::collections::HashSet<&str> =
+            self.found.iter().map(|one| one.id.as_str()).collect();
+        let room = ROWS.saturating_sub(self.found.len());
+        let extra: Vec<Match> = self
+            .offered
+            .iter()
+            .filter(|one| !held.contains(one.id.as_str()))
+            .take(room)
+            .cloned()
+            .collect();
+        self.found.extend(extra);
         self.chosen = self.chosen.min(self.found.len().saturating_sub(1));
     }
 
@@ -158,7 +205,7 @@ impl Switcher {
         within: Rect,
         clipboard: &mut String,
         entries: &[Entry],
-    ) -> Option<String> {
+    ) -> Option<Match> {
         if !self.open {
             return None;
         }
@@ -181,9 +228,31 @@ impl Switcher {
         self.query.lay_out(fonts, panel.width);
         self.narrow(entries);
         if entered {
-            return self.found.get(self.chosen).map(|one| one.id.clone());
+            return self.found.get(self.chosen).cloned();
         }
         None
+    }
+
+    /// What the server has not been asked about yet.
+    ///
+    /// `None` while the query is unchanged or too short to be worth a request:
+    /// one or two letters match half a team, and the reader is still typing.
+    pub fn to_ask(&mut self) -> Option<String> {
+        let query = self.query.text().trim().to_string();
+        if query.len() < LEAST || query == self.asked {
+            return None;
+        }
+        self.asked = query.clone();
+        Some(query)
+    }
+
+    /// Takes what the server suggested, if it is still the question being
+    /// asked: a slow answer to an older query would reorder the list under a
+    /// reader who has since typed more.
+    pub fn offer(&mut self, query: &str, offered: Vec<Match>) {
+        if query == self.asked {
+            self.offered = offered;
+        }
     }
 
     pub fn draw(&self, into: &mut Canvas<'_>, within: Rect) {
@@ -225,6 +294,65 @@ impl Switcher {
 
 #[cfg(test)]
 mod tests {
+    /// What the reader is already in comes first, always. Somewhere they visit
+    /// every day must never be pushed down the list by a channel they have
+    /// never opened.
+    #[test]
+    fn the_conversations_already_held_lead() {
+        use super::*;
+        let mut switcher = Switcher::new();
+        switcher.offered = vec![Match {
+            id: "far".into(),
+            label: "dev far away -- join".into(),
+            direct: false,
+            reach: Reach::Join,
+        }];
+        switcher.narrow(&[Entry::Channel {
+            id: "near".into(),
+            label: "dev".into(),
+            unread: 0,
+            mentions: 0,
+            muted: false,
+            direct: false,
+            counterpart: None,
+        }]);
+        let order: Vec<&str> = switcher.found.iter().map(|one| one.id.as_str()).collect();
+        assert_eq!(order, vec!["near", "far"]);
+    }
+
+    /// A slow answer to an older query must not reorder the list under a
+    /// reader who has since typed more.
+    #[test]
+    fn a_late_answer_to_an_older_question_is_dropped() {
+        use super::*;
+        let mut switcher = Switcher::new();
+        switcher.asked = "curio".into();
+        let stale = vec![Match {
+            id: "x".into(),
+            label: "something".into(),
+            direct: false,
+            reach: Reach::Join,
+        }];
+        switcher.offer("cur", stale.clone());
+        assert!(switcher.offered.is_empty());
+        switcher.offer("curio", stale);
+        assert_eq!(switcher.offered.len(), 1);
+    }
+
+    /// One or two letters match half a team, and the reader is still typing.
+    #[test]
+    fn the_server_is_not_asked_about_a_letter_or_two() {
+        use super::*;
+        let mut fonts = Fonts::new();
+        let mut switcher = Switcher::new();
+        switcher.query.fill("c", &mut fonts);
+        assert_eq!(switcher.to_ask(), None);
+        switcher.query.fill("cur", &mut fonts);
+        assert_eq!(switcher.to_ask().as_deref(), Some("cur"));
+        // And not twice for the same question.
+        assert_eq!(switcher.to_ask(), None);
+    }
+
     /// The same list answers two questions, and it has to say which one it is
     /// asking -- otherwise a reader forwards a message believing they are
     /// changing channel.

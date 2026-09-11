@@ -670,6 +670,11 @@ impl App {
                     self.listing.fill(found);
                 }
             }
+            Update::Discovered { query, found } => self.switcher.offer(&query, found),
+            Update::Reached { channel_id } => {
+                self.sidebar.selected = Some(channel_id.clone());
+                self.open_channel(&channel_id);
+            }
             Update::Membership(mode) => {
                 self.threads = mode;
                 self.rebuild_sidebar();
@@ -1655,21 +1660,49 @@ impl App {
                 &mut self.clipboard,
                 &entries,
             );
-            if let Some(channel) = chosen {
+            if let Some(reached) = chosen {
+                use matterless_view::switcher::Reach;
                 // The same list answers two questions: where am I going, and
                 // where is this going. Which one was asked is remembered on
                 // the switcher rather than guessed here.
                 let forwarding = self.switcher.forwarding.clone();
                 self.switcher.hide(&mut input);
                 self.input = input;
-                match forwarding {
-                    Some(post_id) => self.forward(&post_id, &channel),
-                    None => {
-                        self.sidebar.selected = Some(channel.clone());
-                        self.open_channel(&channel);
+                match (forwarding, reached.reach) {
+                    // A message can only be forwarded somewhere the reader can
+                    // already write, so the other two reaches are not offered
+                    // an answer here.
+                    (Some(post_id), Reach::Open) => self.forward(&post_id, &reached.id),
+                    (Some(_), _) => eprintln!("that is not somewhere to forward to yet"),
+                    (None, Reach::Open) => {
+                        self.sidebar.selected = Some(reached.id.clone());
+                        self.open_channel(&reached.id);
+                    }
+                    // Both need the server before there is anything to open,
+                    // so the window hears back rather than guessing an id.
+                    (None, Reach::Join) => {
+                        if let Some(link) = self.link.as_ref() {
+                            link.send(matterless_view::live::Ask::Join {
+                                channel_id: reached.id,
+                            });
+                        }
+                    }
+                    (None, Reach::Direct) => {
+                        if let Some(link) = self.link.as_ref() {
+                            link.send(matterless_view::live::Ask::Direct {
+                                user_id: reached.id,
+                            });
+                        }
                     }
                 }
                 return;
+            }
+            // Whatever the letters could still mean, asked once per query
+            // rather than once per keystroke.
+            if let Some(query) = self.switcher.to_ask()
+                && let Some(link) = self.link.as_ref()
+            {
+                link.send(matterless_view::live::Ask::Discover { query });
             }
             self.input = input;
             return;
