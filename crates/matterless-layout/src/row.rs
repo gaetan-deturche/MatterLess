@@ -59,7 +59,7 @@ pub struct Theme {
     pub reaction_height: f32,
     pub separator_height: f32,
     pub footer_height: f32,
-    /// How far a list item or a quote is pushed in.
+    /// How far a list item or a quote is pushed in: `padding-left: 22px`.
     pub indent: f32,
     /// The bar beside a preview card, and the gap between it and the text.
     pub quote_bar: f32,
@@ -106,7 +106,7 @@ impl Default for Theme {
             reaction_height: 25.0,
             separator_height: 34.0,
             footer_height: 26.0,
-            indent: 18.0,
+            indent: 22.0,
             quote_bar: 3.0,
             attached_size: 13.5,
             preview_lines: 3,
@@ -159,6 +159,9 @@ pub enum Kind {
     Text,
     /// Pre-wrapped: it scrolls sideways rather than wrapping.
     Code,
+    /// A line inside a blockquote: text with a bar down its left and set a
+    /// step quieter.
+    Quote,
     Reactions,
     /// The line that says where a reader stopped last time. Its own kind
     /// rather than a separator with a flag on it, because what it is drawn in
@@ -236,6 +239,9 @@ const NBSP: &str = "\u{00A0}";
 
 /// One paragraph-like run of inline content, and how far it is pushed in.
 struct Line {
+    /// Inside a blockquote, which is drawn with a bar rather than only an
+    /// indent.
+    quoted: bool,
     spans: Vec<TextSpan>,
     indent: f32,
     heading: bool,
@@ -249,6 +255,7 @@ fn lines_of(nodes: &[Node], indent: f32, into: &mut Vec<Line>, code: &mut Vec<St
                 let mut spans = Vec::new();
                 inline(children, false, false, false, None, &mut spans);
                 into.push(Line {
+                    quoted: false,
                     spans,
                     indent,
                     heading: false,
@@ -258,12 +265,23 @@ fn lines_of(nodes: &[Node], indent: f32, into: &mut Vec<Line>, code: &mut Vec<St
                 let mut spans = Vec::new();
                 inline(children, true, false, false, None, &mut spans);
                 into.push(Line {
+                    quoted: false,
                     spans,
                     indent,
                     heading: true,
                 });
             }
-            Node::Blockquote { children } => lines_of(children, indent + 1.0, into, code),
+            // A quote is pushed in like a list item, and marked so whoever
+            // draws it can put a bar down its left and set it in the softer
+            // ink: `blockquote { border-left: 3px solid var(--rule); color:
+            // var(--ink-soft) }`.
+            Node::Blockquote { children } => {
+                let from = into.len();
+                lines_of(children, indent + 1.0, into, code);
+                for line in into.iter_mut().skip(from) {
+                    line.quoted = true;
+                }
+            }
             Node::List { items, .. } => {
                 for item in items {
                     lines_of(item, indent + 1.0, into, code);
@@ -283,6 +301,7 @@ fn lines_of(nodes: &[Node], indent: f32, into: &mut Vec<Line>, code: &mut Vec<St
                 }
             }
             Node::Rule => into.push(Line {
+                quoted: false,
                 spans: Vec::new(),
                 indent,
                 heading: false,
@@ -300,6 +319,7 @@ fn lines_of(nodes: &[Node], indent: f32, into: &mut Vec<Line>, code: &mut Vec<St
                 );
                 if !spans.is_empty() {
                     into.push(Line {
+                        quoted: false,
                         spans,
                         indent,
                         heading: false,
@@ -453,11 +473,7 @@ fn line_count(fonts: &mut Fonts, line: &Line, width: f32, theme: &Theme) -> usiz
     if line.spans.is_empty() {
         return 1;
     }
-    let size = if line.heading {
-        theme.body_size * 1.15
-    } else {
-        theme.body_size
-    };
+    let size = theme.body_size;
     let metrics = Metrics::new(size, theme.line_height);
     let mut buffer = Buffer::new(&mut fonts.system, metrics);
     let mut buffer = buffer.borrow_with(&mut fonts.system);
@@ -634,17 +650,16 @@ pub fn lay_out(fonts: &mut Fonts, row: &Row, theme: &Theme) -> RowLayout {
         let wrap = theme.text_width() - x;
         let count = line_count(fonts, &line, wrap, theme);
         let height = count as f32 * theme.line_height;
-        let size = if line.heading {
-            theme.body_size * 1.15
-        } else {
-            theme.body_size
-        };
+        // A heading is not bigger, only heavier: `.heading { font-weight:
+        // 600 }` and nothing about size. Scaling it by 1.15 made every `#` in
+        // a message louder than the app draws it.
+        let size = theme.body_size;
         blocks.push(Block {
             y,
             x,
             height,
             lines: count,
-            kind: Kind::Text,
+            kind: if line.quoted { Kind::Quote } else { Kind::Text },
             spans: line.spans,
             size,
             wrap,
