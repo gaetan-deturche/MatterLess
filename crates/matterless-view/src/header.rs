@@ -253,6 +253,7 @@ impl Header {
                 size: 15.0,
                 line_height: 20.0,
                 bold: false,
+                mono: false,
                 wrap: f32::MAX,
             },
         );
@@ -269,6 +270,7 @@ impl Header {
                 size: 15.0,
                 line_height: 20.0,
                 bold: true,
+                mono: false,
                 wrap: f32::MAX,
             },
         );
@@ -304,6 +306,7 @@ impl Header {
                     size: 15.0,
                     line_height: 20.0,
                     bold: false,
+                    mono: false,
                     wrap: f32::MAX,
                 },
             );

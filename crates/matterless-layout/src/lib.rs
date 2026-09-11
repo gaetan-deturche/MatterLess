@@ -88,6 +88,53 @@ pub struct Extent {
 /// The width is the width the text actually gets -- inside whatever gutter the
 /// caller draws around it. Getting that wrong by even a few percent moves the
 /// line count by one on a great many messages, which is a whole line of height.
+/// The character that stands in for what was cut.
+///
+/// One glyph rather than three dots: `text-overflow: ellipsis` is a single
+/// character, and three periods are wider and read as a pause in the name.
+pub const ELLIPSIS: char = '\u{2026}';
+
+/// `text` cut to fit `width`, with an ellipsis where it was cut.
+///
+/// What `text-overflow: ellipsis` does, and it has to be done here rather than
+/// left to a clip: a clipped name ends mid-letter, so there is no way to tell a
+/// channel whose name is long from one whose name happens to end there. And a
+/// clip only hides what is drawn inside the panel -- it says nothing about a
+/// name running under the scrollbar.
+///
+/// Measured rather than counted, because the answer depends on the letters: a
+/// name of fifteen `i`s and one of fifteen `W`s do not end in the same place.
+pub fn elided(fonts: &mut Fonts, text: &str, width: f32, style: Style) -> String {
+    if width <= 0.0 {
+        return String::new();
+    }
+    if extent_of(fonts, text, f32::MAX, style).width <= width {
+        return text.to_string();
+    }
+    // The longest prefix that still fits once the ellipsis is on it. Found by
+    // halving rather than by walking: a sidebar is hundreds of rows and a
+    // channel name is dozens of characters, and this runs on every frame.
+    let ends: Vec<usize> = text
+        .char_indices()
+        .map(|(at, _)| at)
+        .chain(std::iter::once(text.len()))
+        .collect();
+    let mut low = 0usize;
+    let mut high = ends.len() - 1;
+    while low < high {
+        let middle = (low + high).div_ceil(2);
+        let trial = format!("{}{ELLIPSIS}", &text[..ends[middle]]);
+        if extent_of(fonts, &trial, f32::MAX, style).width <= width {
+            low = middle;
+        } else {
+            high = middle - 1;
+        }
+    }
+    // Nothing fits: the ellipsis alone still says the name goes on, where an
+    // empty row says the channel has no name.
+    format!("{}{ELLIPSIS}", &text[..ends[low]])
+}
+
 pub fn extent_of(fonts: &mut Fonts, text: &str, width: f32, style: Style) -> Extent {
     let metrics = Metrics::new(style.size, style.line_height);
     let mut buffer = Buffer::new(&mut fonts.system, metrics);
@@ -123,6 +170,77 @@ pub fn extent_of(fonts: &mut Fonts, text: &str, width: f32, style: Style) -> Ext
         lines,
         height: lines as f32 * style.line_height,
         width: widest,
+    }
+}
+
+#[cfg(test)]
+mod elide_tests {
+    use super::*;
+
+    fn style() -> Style {
+        Style {
+            size: 13.0,
+            line_height: 18.0,
+            bold: false,
+            italic: false,
+            mono: false,
+        }
+    }
+
+    /// A name that fits is left alone: an ellipsis on a name with room to
+    /// spare is a lie about the name.
+    #[test]
+    fn a_name_that_fits_is_untouched() {
+        let mut fonts = Fonts::new();
+        assert_eq!(elided(&mut fonts, "Hot Line", 400.0, style()), "Hot Line");
+    }
+
+    /// One that does not is cut, and says so.
+    #[test]
+    fn a_name_that_does_not_fit_is_cut_and_says_so() {
+        let mut fonts = Fonts::new();
+        let long = "Voyager | Demande d'archivage Branch";
+        let cut = elided(&mut fonts, long, 120.0, style());
+        assert!(cut.ends_with(ELLIPSIS), "{cut}");
+        assert!(cut.chars().count() < long.chars().count());
+        assert!(long.starts_with(cut.trim_end_matches(ELLIPSIS)));
+        // And it actually fits, which is the whole point.
+        assert!(extent_of(&mut fonts, &cut, f32::MAX, style()).width <= 120.0);
+    }
+
+    /// The width is measured, not counted: the same number of wide letters
+    /// takes more room than narrow ones, so they cannot cut in the same place.
+    #[test]
+    fn where_it_cuts_depends_on_the_letters() {
+        let mut fonts = Fonts::new();
+        let narrow = elided(&mut fonts, &"i".repeat(60), 100.0, style());
+        let wide = elided(&mut fonts, &"W".repeat(60), 100.0, style());
+        assert!(
+            narrow.chars().count() > wide.chars().count(),
+            "{} narrow against {} wide",
+            narrow.chars().count(),
+            wide.chars().count()
+        );
+    }
+
+    /// No room at all still says the name goes on, where an empty row would
+    /// say the channel has no name.
+    #[test]
+    fn nothing_fitting_still_says_something() {
+        let mut fonts = Fonts::new();
+        assert_eq!(elided(&mut fonts, "anything", 1.0, style()), "\u{2026}");
+        assert_eq!(elided(&mut fonts, "anything", 0.0, style()), "");
+    }
+
+    /// Cutting has to land on a character, not inside one: slicing a string by
+    /// bytes panics halfway through a letter, and a sidebar is full of them.
+    #[test]
+    fn it_cuts_between_letters_not_inside_them() {
+        let mut fonts = Fonts::new();
+        for width in [3.0, 9.0, 17.0, 44.0, 90.0] {
+            let cut = elided(&mut fonts, "Curiosite\u{301} | Cymatique\u{301}s", width, style());
+            assert!(cut.is_char_boundary(cut.len()));
+        }
     }
 }
 

@@ -415,6 +415,7 @@ impl Composer {
                     size: SIZE,
                     line_height: LINE,
                     bold: false,
+                    mono: false,
                     wrap: f32::MAX,
                 },
             );

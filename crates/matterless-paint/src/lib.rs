@@ -100,6 +100,25 @@ pub struct Palette {
 }
 
 impl Palette {
+    /// `colour` at `opacity` over this palette's own panel.
+    ///
+    /// What CSS gets for nothing and a scene of opaque quads does not: a muted
+    /// channel is its own colour dimmed, not a different colour. Replacing it
+    /// instead is how "muted" and "read" came to look identical -- both of
+    /// them were simply the faint ink.
+    pub fn dimmed(&self, colour: [u8; 3], opacity: f32) -> [u8; 3] {
+        let opacity = opacity.clamp(0.0, 1.0);
+        let mut over = [0u8; 3];
+        for channel in 0..3 {
+            let under = f32::from(self.surface[channel]);
+            let ink = f32::from(colour[channel]);
+            over[channel] = (ink * opacity + under * (1.0 - opacity)).round() as u8;
+        }
+        over
+    }
+}
+
+impl Palette {
     /// The quieter ink as something to fill with.
     ///
     /// A bar beside a quote is the same colour as the text it belongs to, and
@@ -397,6 +416,8 @@ pub struct Run {
     pub size: f32,
     pub line_height: f32,
     pub bold: bool,
+    /// The monospaced face, for the counts the stylesheet sets in one.
+    pub mono: bool,
     /// Where it wraps. Interface text is usually given more room than it needs
     /// and clipped by its box instead.
     pub wrap: f32,
@@ -408,12 +429,20 @@ impl Run {
             size: 13.0,
             line_height: 18.0,
             bold: false,
+            mono: false,
             wrap,
         }
     }
 
     pub fn bold(mut self) -> Self {
         self.bold = true;
+        self
+    }
+
+    /// The monospaced face. Asked for by the unread counts, where it is what
+    /// keeps a column of one- and two-digit numbers the same width.
+    pub fn mono(mut self) -> Self {
+        self.mono = true;
         self
     }
 
@@ -805,6 +834,9 @@ impl Painter {
         let mut shaped = buffer.borrow_with(fonts.system_mut());
         shaped.set_size(Some(run.wrap), None);
         let mut attrs = Attrs::new();
+        if run.mono {
+            attrs = attrs.family(Family::Monospace);
+        }
         if run.bold {
             attrs = attrs.weight(Weight::BOLD);
         }

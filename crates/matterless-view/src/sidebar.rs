@@ -288,6 +288,7 @@ impl Sidebar {
                             size: 14.5,
                             line_height: 20.0,
                             bold: true,
+                            mono: false,
                             wrap: f32::MAX,
                         },
                     );
@@ -303,6 +304,7 @@ impl Sidebar {
                             size: 10.5,
                             line_height: 14.0,
                             bold: true,
+                            mono: false,
                             wrap: f32::MAX,
                         },
                     );
@@ -328,21 +330,23 @@ impl Sidebar {
                             palette.ground,
                         );
                     }
-                    // Three states, and the quiet one is the default: a read
-                    // channel recedes, an unread one does not, and a muted one
-                    // recedes further still. Three inks for three states, now
-                    // that the palette has a ladder rather than two rungs.
-                    let ink = if *muted {
-                        palette.faint
-                    } else if *unread > 0 || chosen {
+                    // Unread is full contrast and bold, read recedes, and
+                    // where the reader actually is outranks both.
+                    let loud = *unread > 0 || *mentions > 0;
+                    let mut ink = if chosen {
+                        palette.signal
+                    } else if loud {
                         palette.ink
                     } else {
                         palette.faint
                     };
-                    // Never wrapped: a row is one line tall, and a name long
-                    // enough to wrap would run into the row beneath it. The
-                    // panel's own clip cuts it off instead, which is what
-                    // `overflow: hidden` did for the same rows in HTML.
+                    // A muted channel is its own colour dimmed, count
+                    // included, not a different colour: replacing it is how
+                    // muted and read came to look identical -- both of them
+                    // were simply the faint ink. `opacity: 0.45`.
+                    if *muted {
+                        ink = palette.dimmed(ink, MUTED);
+                    }
                     // Whether somebody is around, which is the one thing that
                     // decides whether you write to them now. Only here: a dot
                     // on every message row would say nothing about the
@@ -366,41 +370,102 @@ impl Sidebar {
                         (false, true) => "🔒",
                         (false, false) => "#",
                     };
-                    let glyphs = painter.run(
+                    // The count first, because it decides how much room the
+                    // name has. Muted channels keep theirs: muting is "do not
+                    // interrupt me", not "hide this from me".
+                    let count = if *mentions > 0 { *mentions } else { *unread };
+                    let pill = (count > 0).then(|| {
+                        let said = count.to_string();
+                        let wide =
+                            matterless_layout::extent_of(fonts, &said, f32::MAX, count_style())
+                                .width;
+                        let width = wide + COUNT_PADDING * 2.0;
+                        (
+                            said,
+                            Rect::new(
+                                // Clear of the scrollbar, which floats over
+                                // the rows rather than taking room from them.
+                                (row.rect.right() - width)
+                                    .min(within.right() - TRACK - width - 2.0),
+                                row.rect.y + (row.rect.height - COUNT_HEIGHT) / 2.0,
+                                width,
+                                COUNT_HEIGHT,
+                            ),
+                        )
+                    });
+
+                    // Cut to what is left, with an ellipsis where it was cut.
+                    // A clipped name ends mid-letter and says nothing about
+                    // there being more of it -- and the clip never stopped one
+                    // running under the scrollbar anyway, because the panel is
+                    // wider than the rows inside it.
+                    let left = row.rect.x + GUTTER;
+                    let room = pill
+                        .as_ref()
+                        .map(|(_, rect)| rect.x - GAP)
+                        .unwrap_or(within.right() - TRACK)
+                        - left;
+                    let named = matterless_layout::elided(
                         fonts,
                         &format!("{sigil} {label}"),
-                        row.rect.x + GUTTER,
+                        room,
+                        name_style(loud),
+                    );
+                    let glyphs = painter.run(
+                        fonts,
+                        &named,
+                        left,
                         row.rect.y + 4.0,
-                        Run::label(f32::MAX),
+                        if loud {
+                            Run::label(f32::MAX).bold()
+                        } else {
+                            Run::label(f32::MAX)
+                        },
                     );
                     scene.glyphs(glyphs, ink, palette.faint);
-                    let count = if *mentions > 0 { *mentions } else { *unread };
-                    if count > 0 && !*muted {
-                        // Behind the number, so a long name is cut by the
-                        // count rather than running under it. All the way to
-                        // the panel's edge rather than just the count's own
-                        // width: the rows are inset by the column's padding
-                        // and the name is clipped by the panel, so a strip of
-                        // it showed through in the gap between the two.
-                        scene.fill(
-                            row.rect.right() - 30.0,
-                            row.rect.y,
-                            within.right() - row.rect.right() + 30.0,
-                            row.rect.height,
-                            if chosen || input.hovered() == Some(name.as_str()) {
-                                palette.ground
-                            } else {
-                                palette.surface
-                            },
+
+                    if let Some((said, rect)) = pill {
+                        // A mention is the one count worth colouring: it is
+                        // the difference between "there is more here" and "you
+                        // are being asked". Not in a muted channel, where it
+                        // was still asked for quietly.
+                        let asked = *mentions > 0 && !*muted;
+                        let (behind, over) = if asked {
+                            (
+                                [palette.signal[0], palette.signal[1], palette.signal[2], 255],
+                                [palette.surface[0], palette.surface[1], palette.surface[2]],
+                            )
+                        } else if *muted {
+                            let dim = palette.dimmed(
+                                [palette.raised[0], palette.raised[1], palette.raised[2]],
+                                MUTED,
+                            );
+                            ([dim[0], dim[1], dim[2], 255], ink)
+                        } else {
+                            (palette.raised, ink)
+                        };
+                        scene.rounded(
+                            rect.x,
+                            rect.y,
+                            rect.width,
+                            rect.height,
+                            behind,
+                            COUNT_HEIGHT / 2.0,
                         );
                         let glyphs = painter.run(
                             fonts,
-                            &count.to_string(),
-                            row.rect.right() - 22.0,
-                            row.rect.y + 4.0,
-                            Run::label(30.0),
+                            &said,
+                            rect.x + COUNT_PADDING,
+                            rect.y + (rect.height - COUNT_LINE) / 2.0,
+                            Run {
+                                size: COUNT_SIZE,
+                                line_height: COUNT_LINE,
+                                bold: loud,
+                                mono: true,
+                                wrap: f32::MAX,
+                            },
                         );
-                        scene.glyphs(glyphs, palette.ink, palette.faint);
+                        scene.glyphs(glyphs, over, palette.faint);
                     }
                 }
             }
@@ -430,6 +495,44 @@ impl Sidebar {
 /// conversations that happen to have a dot right now.
 const DOT: f32 = 6.0;
 const GUTTER: f32 = 12.0;
+/// The gap the name keeps from the count beside it.
+const GAP: f32 = 6.0;
+/// What the scrollbar floats over, which the rows have to keep clear of: it
+/// takes no room from them, so nothing stopped a name running under it.
+const TRACK: f32 = 12.0;
+/// How much of its colour a muted row keeps: `opacity: 0.45`.
+const MUTED: f32 = 0.45;
+/// The unread count: `font-size: 10.5px` in a `border-radius: 9px` capsule
+/// padded `0 6px`, set in the monospaced face so a column of one- and
+/// two-digit numbers is the same width.
+const COUNT_SIZE: f32 = 10.5;
+const COUNT_LINE: f32 = 14.0;
+const COUNT_PADDING: f32 = 6.0;
+const COUNT_HEIGHT: f32 = 18.0;
+
+/// How the count is measured, which has to match how it is drawn -- the pill
+/// is sized from this and the number is set by it.
+fn count_style() -> matterless_layout::Style {
+    matterless_layout::Style {
+        size: COUNT_SIZE,
+        line_height: COUNT_LINE,
+        bold: false,
+        italic: false,
+        mono: true,
+    }
+}
+
+/// And the same for a name, which is bold once its channel is unread: a bold
+/// name measured as a plain one is cut a letter or two short.
+fn name_style(bold: bool) -> matterless_layout::Style {
+    matterless_layout::Style {
+        size: 13.0,
+        line_height: 18.0,
+        bold,
+        italic: false,
+        mono: false,
+    }
+}
 
 /// How tall each kind of row is.
 fn height_of(entry: &Entry) -> f32 {

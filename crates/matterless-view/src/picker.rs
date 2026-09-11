@@ -302,6 +302,7 @@ impl Picker {
                             size: 18.0,
                             line_height: 22.0,
                             bold: false,
+                            mono: false,
                             wrap: f32::MAX,
                         },
                     );
