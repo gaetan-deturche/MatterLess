@@ -2129,6 +2129,7 @@ impl App {
         wanted.extend(self.picker.wants());
         wanted.extend(self.profile.wants());
         wanted.extend(self.rail.wants());
+        wanted.extend(self.sidebar.wants());
         for (key, width, height) in wanted {
             if self.asked.insert(key.clone()) {
                 link.send(matterless_view::live::Ask::Fetch { key, width, height });
