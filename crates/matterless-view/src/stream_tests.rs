@@ -125,6 +125,26 @@ fn clicking_a_message_does_nothing() {
     assert_eq!(click(&mut stream, "stream/row/2"), None);
 }
 
+/// The way back, offered only when there is somewhere to go back from.
+///
+/// A button that appears while somebody is reading the last few messages is
+/// exactly the thing they do not want jumping into the middle of it.
+#[test]
+fn the_way_back_appears_only_once_the_reader_has_left() {
+    let mut fonts = Fonts::new();
+    let mut stream = conversation(&mut fonts);
+    let within = panel();
+    stream.to_bottom(within);
+    assert_eq!(stream.behind(within), 0.0);
+    assert!(stream.to_newest(within).is_none());
+
+    // Far enough back that the newest message is out of sight.
+    stream.scroll = 0.0;
+    if stream.reach(within) > within.height * 0.75 {
+        assert!(stream.to_newest(within).is_some());
+    }
+}
+
 /// Rows off the bottom are not placed at all, so a click where one would have
 /// been finds nothing.
 #[test]

@@ -2633,6 +2633,11 @@ impl ApplicationHandler<Update> for App {
                         on,
                     }) => self.act(action, post_id, on),
                     Some(matterless_view::stream::Chose::Press(press)) => self.press(press),
+                    Some(matterless_view::stream::Chose::Save { file_id, name }) => {
+                        if let Some(link) = self.link.as_ref() {
+                            link.send(matterless_view::live::Ask::Download { file_id, name });
+                        }
+                    }
                     Some(matterless_view::stream::Chose::React { post_id, emoji, on }) => {
                         if let Some(link) = self.link.as_ref() {
                             link.send(matterless_view::live::Ask::React { post_id, emoji, on });

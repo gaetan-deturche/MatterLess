@@ -101,6 +101,8 @@ pub enum Ask {
         emoji: String,
         on: bool,
     },
+    /// Keep a file somebody attached, next to the reader's other downloads.
+    Download { file_id: String, name: String },
     /// Send a file that was dropped on the window.
     ///
     /// The path rather than the bytes: reading a hundred and fifty megabytes
@@ -414,6 +416,16 @@ async fn run(
                             // went.
                             Ok(()) => println!("{} on {post_id}", action.slug()),
                             Err(error) => eprintln!("{} on {post_id}: {error}", action.slug()),
+                        }
+                    }
+                    Ask::Download { file_id, name } => {
+                        match rest.fetch_bytes(&format!("/files/{file_id}")).await {
+                            Ok(Some((bytes, _))) => match keep(&downloads(), &name, &bytes) {
+                                Ok(path) => println!("kept {}", path.display()),
+                                Err(error) => eprintln!("keeping {name}: {error}"),
+                            },
+                            Ok(None) => eprintln!("{name}: the server sent nothing"),
+                            Err(error) => eprintln!("fetching {name}: {error}"),
                         }
                     }
                     Ask::Upload {
@@ -831,6 +843,9 @@ pub fn renames_emoji(deltas: &[Delta]) -> bool {
 mod tests {
     use super::*;
     use matterless_store::{PostChange, Unread};
+
+    /// Both of them, because a name is stored by whichever client sent it.
+    const SEPARATORS: char = '\\';
     use matterless_sync::Arrival;
     use matterless_sync::notify::MentionVerdict;
 
@@ -912,6 +927,63 @@ mod tests {
         assert_eq!(context.thread_mode, ThreadMode::Collapsed);
         assert!(context.followed_threads.contains("root"));
         assert!(!context.followed_threads.contains("some-other-root"));
+    }
+
+    /// A file name is a string somebody else's client stored, so it must not
+    /// be able to decide where the file lands.
+    ///
+    /// Where it lands, rather than what it is called: `..` in the middle of a
+    /// name is harmless once there is no separator around it, and asserting on
+    /// the name would be asserting on the spelling of the guard rather than on
+    /// what the guard is for.
+    #[test]
+    fn a_file_name_cannot_choose_where_it_lands() {
+        let folder = std::env::temp_dir().join("matterless-keeps");
+        std::fs::create_dir_all(&folder).expect("a folder");
+        let landed = |name: &str| {
+            let path = keep(&folder, name, b"x").expect("written");
+            let parent = path.parent().map(std::path::Path::to_path_buf);
+            let called = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or_default()
+                .to_string();
+            let _ = std::fs::remove_file(&path);
+            (parent, called)
+        };
+
+        for hostile in [
+            "../../evil.txt".to_string(),
+            "..".to_string(),
+            "/etc/passwd".to_string(),
+            format!("C:{SEPARATORS}Windows{SEPARATORS}hosts"),
+            String::new(),
+        ] {
+            let (parent, called) = landed(&hostile);
+            assert_eq!(parent.as_deref(), Some(folder.as_path()), "{hostile}");
+            assert!(!called.is_empty(), "{hostile} landed with no name");
+        }
+
+        // An ordinary name survives intact, or this is a rename rather than a
+        // guard.
+        assert_eq!(
+            landed("renderer-divergence.html").1,
+            "renderer-divergence.html"
+        );
+    }
+
+    /// Two files of one name are two files. Replacing the one a reader kept
+    /// earlier is the kind of thing they only notice afterwards.
+    #[test]
+    fn a_second_file_of_the_same_name_does_not_replace_the_first() {
+        let folder = std::env::temp_dir().join("matterless-twice");
+        std::fs::create_dir_all(&folder).expect("a folder");
+        let first = keep(&folder, "notes.txt", b"one").expect("written");
+        let second = keep(&folder, "notes.txt", b"two").expect("written");
+        assert_ne!(first, second);
+        assert_eq!(std::fs::read(&first).expect("still there"), b"one");
+        let _ = std::fs::remove_file(&first);
+        let _ = std::fs::remove_file(&second);
     }
 
     /// A query is whatever somebody typed. Anything but the unreserved set has
@@ -1502,4 +1574,55 @@ pub async fn upload(
         }
         Err(error) => eprintln!("sending {name}: {error}"),
     }
+}
+
+/// Where this machine keeps what a person downloads.
+fn downloads() -> std::path::PathBuf {
+    let home = std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    let folder = home.join("Downloads");
+    if folder.is_dir() { folder } else { home }
+}
+
+/// Writes a downloaded file into a folder.
+///
+/// The name is taken apart and rebuilt rather than used as it came: it is a
+/// string the server stored on somebody else's say-so, and a path separator or
+/// a `..` in it would put the file somewhere nobody asked for.
+fn keep(folder: &std::path::Path, name: &str, bytes: &[u8]) -> std::io::Result<std::path::PathBuf> {
+    let safe: String = name
+        .chars()
+        .map(|character| {
+            if character.is_alphanumeric() || matches!(character, '.' | '-' | '_' | ' ') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let safe = safe.trim_matches(['.', ' ']).to_string();
+    let safe = if safe.is_empty() {
+        "attachment".to_string()
+    } else {
+        safe
+    };
+
+    // Never over something already there. A second copy of a file is a second
+    // file, and silently replacing one the reader kept earlier is the kind of
+    // thing they would only notice afterwards.
+    let mut path = folder.join(&safe);
+    let mut attempt = 1;
+    while path.exists() {
+        let (stem, extension) = safe.rsplit_once('.').unwrap_or((safe.as_str(), ""));
+        path = folder.join(if extension.is_empty() {
+            format!("{stem} ({attempt})")
+        } else {
+            format!("{stem} ({attempt}).{extension}")
+        });
+        attempt += 1;
+    }
+    std::fs::write(&path, bytes)?;
+    Ok(path)
 }
