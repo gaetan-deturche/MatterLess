@@ -940,6 +940,66 @@ impl App {
         self.want_faces();
     }
 
+    /// What the strip offers for the conversation on screen.
+    ///
+    /// A direct message cannot be left -- the server would refuse -- so the
+    /// button is not there rather than there and refused.
+    fn header_offers(&self) -> Vec<header::Act> {
+        let direct = self
+            .sidebar
+            .selected
+            .as_ref()
+            .and_then(|id| self.store.as_ref()?.channel(id).ok().flatten())
+            .is_some_and(|channel| channel.channel_type == "D" || channel.channel_type == "G");
+        header::offered(direct)
+    }
+
+    /// Which strip button the pointer is on, from the boxes just placed.
+    fn on_header(&self) -> Option<header::Act> {
+        self.input
+            .hovered()
+            .and_then(|name| name.strip_prefix("header/"))
+            .and_then(header::Act::from_slug)
+    }
+
+    /// Does what a strip button says.
+    fn act_on_header(&mut self, act: header::Act) {
+        match act {
+            header::Act::Threads => {
+                self.listing.expect("Threads");
+                if let Some(store) = self.store.clone() {
+                    let found = matterless_view::listing::followed(&store, &self.me, THREADS);
+                    self.listing.fill(found);
+                }
+            }
+            header::Act::Saved => {
+                self.listing.expect("Saved");
+                if let Some(link) = self.link.as_ref() {
+                    link.send(matterless_view::live::Ask::Saved);
+                }
+            }
+            header::Act::Pinned => {
+                if let (Some(channel), Some(link)) =
+                    (self.sidebar.selected.clone(), self.link.as_ref())
+                {
+                    self.listing.expect("Pinned");
+                    link.send(matterless_view::live::Ask::Pinned {
+                        channel_id: channel,
+                    });
+                }
+            }
+            header::Act::Leave => {
+                if let (Some(channel), Some(link)) =
+                    (self.sidebar.selected.clone(), self.link.as_ref())
+                {
+                    link.send(matterless_view::live::Ask::Leave {
+                        channel_id: channel,
+                    });
+                }
+            }
+        }
+    }
+
     /// A link to this message that will open anywhere.
     fn permalink(&self, post_id: &str) -> Option<String> {
         matterless_view::feed::permalink(self.store.as_deref()?, &self.server, post_id)
@@ -1402,6 +1462,7 @@ impl App {
         if let (Some(thread), Some(rect)) = (&self.thread, self.thread_stream_rect()) {
             boxes.extend(thread.boxes(rect, thread.hovered(&self.input)));
         }
+        boxes.extend(header::boxes(self.column_rect(), &self.header_offers()));
         boxes.extend(self.picker.boxes(self.picked_near, self.stream_rect()));
         boxes.extend(self.listing.boxes(self.stream_rect()));
         boxes.extend(self.profile.boxes(self.stream_rect()));
@@ -1841,11 +1902,13 @@ impl App {
         // Said in the header while it is down, and silent while it is up: a
         // client that has quietly stopped receiving is indistinguishable from a
         // quiet channel, and that is the state worth naming.
-        let header = Header::new(if self.connected {
+        let on_strip = self.on_header();
+        let mut header = Header::new(if self.connected {
             self.title()
         } else {
             format!("{} (offline)", self.title())
         });
+        header.offered = self.header_offers();
         scene.clip_to(strip.x, strip.y, strip.width, strip.height);
         let mut canvas = Canvas {
             scene: &mut scene,
@@ -1853,7 +1916,7 @@ impl App {
             fonts: &mut self.fonts,
             palette: &self.palette,
         };
-        header.draw(&mut canvas, strip);
+        header.draw(&mut canvas, strip, on_strip);
 
         scene.clip_to(stream.x, stream.y, stream.width, stream.height);
         let mut canvas = Canvas {
@@ -1873,7 +1936,10 @@ impl App {
             // Above the reply box, not the whole pane: replies drawn behind it
             // would show through the box's own margin.
             let rows = self.thread_composer.above(header::below(pane));
-            let title = Header::new(format!("Thread -- {} replies", thread.rows.len()));
+            let mut title = Header::new(format!("Thread -- {} replies", thread.rows.len()));
+            // A thread is not somewhere to leave, and its lists are the same
+            // ones the channel's strip already offers.
+            title.offered.clear();
             scene.clip_to(strip.x, strip.y, strip.width, strip.height);
             let mut canvas = Canvas {
                 scene: &mut scene,
@@ -1881,7 +1947,7 @@ impl App {
                 fonts: &mut self.fonts,
                 palette: &self.palette,
             };
-            title.draw(&mut canvas, strip);
+            title.draw(&mut canvas, strip, None);
 
             scene.clip_to(rows.x, rows.y, rows.width, rows.height);
             let mut canvas = Canvas {
@@ -2381,6 +2447,17 @@ impl ApplicationHandler<Update> for App {
                 let within = self.sidebar_rect();
                 if let Some(channel) = self.sidebar.react(&self.input, &boxes, within) {
                     self.open_channel(&channel);
+                }
+                // The strip's own buttons, which are the only visible way to
+                // reach the lists: a keystroke nobody has been told about is
+                // not a feature anybody has.
+                if let Some(act) = self
+                    .input
+                    .clicked()
+                    .and_then(|name| name.strip_prefix("header/"))
+                    .and_then(header::Act::from_slug)
+                {
+                    self.act_on_header(act);
                 }
                 // A message opens its thread. Taken before the composer reacts,
                 // because opening one narrows the column the composer sits in.
