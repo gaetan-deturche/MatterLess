@@ -45,6 +45,42 @@ pub enum Reach {
     Direct,
 }
 
+/// What the list is for this time.
+///
+/// One list rather than three panels, because the hard part -- finding the
+/// thing by name -- is the same every time and only what happens afterwards
+/// differs. A field per mode would be several booleans pretending to be a
+/// state, and two of them true is a question nobody asked.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum Asking {
+    /// Where am I going. The ordinary case.
+    #[default]
+    Jump,
+    /// Where is this message going.
+    Forward(String),
+    /// Who should be in this channel.
+    Add(String),
+}
+
+impl Asking {
+    /// What the box says, which is the only thing telling a reader which of
+    /// the three they are answering.
+    fn placeholder(&self) -> &'static str {
+        match self {
+            Asking::Jump => "Jump to…",
+            Asking::Forward(_) => "Forward to…",
+            Asking::Add(_) => "Add who…",
+        }
+    }
+
+    /// Whether a conversation the reader is already in is an answer.
+    ///
+    /// It is not, when the question is who to add: a channel is not somebody.
+    fn wants_channels(&self) -> bool {
+        !matches!(self, Asking::Add(_))
+    }
+}
+
 /// One match: what it names, how to say it, and what to do with it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Match {
@@ -56,12 +92,10 @@ pub struct Match {
 
 /// The quick switcher, open or shut.
 pub struct Switcher {
-    /// The message being forwarded, when it was opened to pick a destination
-    /// rather than to go somewhere. `None` is the ordinary case.
-    ///
-    /// Set through `forward_instead`, which also changes what the box says: the
-    /// same list answering two questions has to say which one it is asking.
-    pub forwarding: Option<String>,
+    /// Which question this list is asking. Set through `instead`, which also
+    /// changes what the box says: one list answering three questions has to
+    /// say which one it is on.
+    pub asking: Asking,
     pub open: bool,
     /// The query, in a real text field: it has a caret, a selection and
     /// clipboard, and writing a second lesser one would be a second thing to
@@ -91,7 +125,7 @@ impl Switcher {
         query.placeholder = "Jump to…".to_string();
         Self {
             open: false,
-            forwarding: None,
+            asking: Asking::Jump,
             query,
             found: Vec::new(),
             offered: Vec::new(),
@@ -106,8 +140,8 @@ impl Switcher {
         self.open = true;
         // Forgotten here rather than on close, so a switcher opened the
         // ordinary way after a forward is the ordinary switcher again.
-        self.forwarding = None;
-        self.query.placeholder = "Jump to…".to_string();
+        self.asking = Asking::Jump;
+        self.query.placeholder = Asking::Jump.placeholder().to_string();
         self.offered.clear();
         self.asked.clear();
         self.query.clear(fonts);
@@ -116,15 +150,15 @@ impl Switcher {
         input.focus_on(NAME);
     }
 
-    /// Turns an open switcher into "where should this go".
-    pub fn forward_instead(&mut self, post_id: &str) {
-        self.forwarding = Some(post_id.to_string());
-        self.query.placeholder = "Forward to…".to_string();
+    /// Turns an open switcher onto a different question.
+    pub fn instead(&mut self, asking: Asking) {
+        self.query.placeholder = asking.placeholder().to_string();
+        self.asking = asking;
     }
 
     pub fn hide(&mut self, input: &mut Input) {
         self.open = false;
-        self.forwarding = None;
+        self.asking = Asking::Jump;
         if input.focus() == Some(NAME) {
             input.focus_on(crate::composer::NAME);
         }
@@ -152,6 +186,7 @@ impl Switcher {
         let query = query.trim();
         let mut scored: Vec<(i32, Match)> = entries
             .iter()
+            .filter(|_| self.asking.wants_channels())
             .filter_map(|entry| match entry {
                 Entry::Channel {
                     id, label, direct, ..
@@ -353,9 +388,9 @@ mod tests {
         assert_eq!(switcher.to_ask(), None);
     }
 
-    /// The same list answers two questions, and it has to say which one it is
-    /// asking -- otherwise a reader forwards a message believing they are
-    /// changing channel.
+    /// One list answers three questions, and it has to say which one it is on
+    /// -- otherwise a reader adds somebody to a channel believing they are
+    /// going to one.
     #[test]
     fn it_says_which_question_it_is_asking() {
         use super::*;
@@ -364,18 +399,43 @@ mod tests {
         let mut switcher = Switcher::new();
 
         switcher.show(&mut fonts, &mut input);
-        assert_eq!(switcher.forwarding, None);
+        assert_eq!(switcher.asking, Asking::Jump);
         let jumping = switcher.query.placeholder.clone();
 
-        switcher.forward_instead("p1");
-        assert_eq!(switcher.forwarding.as_deref(), Some("p1"));
-        assert_ne!(switcher.query.placeholder, jumping);
+        for question in [Asking::Forward("p1".into()), Asking::Add("c1".into())] {
+            switcher.instead(question.clone());
+            assert_eq!(switcher.asking, question);
+            assert_ne!(switcher.query.placeholder, jumping);
+        }
 
         // Opened the ordinary way afterwards, it is the ordinary switcher
         // again rather than one still pointed at a message.
         switcher.show(&mut fonts, &mut input);
-        assert_eq!(switcher.forwarding, None);
+        assert_eq!(switcher.asking, Asking::Jump);
         assert_eq!(switcher.query.placeholder, jumping);
+    }
+
+    /// A channel is not somebody, so none is offered while the question is who
+    /// to add -- otherwise the obvious thing to press is the wrong answer.
+    #[test]
+    fn a_conversation_is_no_answer_to_who_should_join() {
+        use super::*;
+        let mut switcher = Switcher::new();
+        let dev = [Entry::Channel {
+            id: "near".into(),
+            label: "dev".into(),
+            unread: 0,
+            mentions: 0,
+            muted: false,
+            direct: false,
+            counterpart: None,
+        }];
+        switcher.narrow(&dev);
+        assert_eq!(switcher.found.len(), 1);
+
+        switcher.instead(Asking::Add("c1".into()));
+        switcher.narrow(&dev);
+        assert!(switcher.found.is_empty());
     }
 
     use super::*;

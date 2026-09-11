@@ -117,6 +117,8 @@ pub enum Ask {
     /// written to. Asked of the server because neither is in the local store
     /// by definition.
     Discover { query: String },
+    /// Put somebody else in a channel.
+    AddMember { channel_id: String, user_id: String },
     /// Stop a conversation counting unread, or start again.
     Mute { channel_id: String, muted: bool },
     /// Stop being in a channel.
@@ -425,6 +427,19 @@ async fn run(
                         let found = discover(&rest, engine.store(), &me_id, &query).await;
                         println!("{} other ways to read \"{query}\"", found.len());
                         wake.wake(Update::Discovered { query, found });
+                    }
+                    Ask::AddMember {
+                        channel_id,
+                        user_id,
+                    } => {
+                        // The same call that joins: adding somebody is putting
+                        // a member on a channel, and which member is the only
+                        // difference between doing it to yourself and to
+                        // somebody else.
+                        match rest.join_channel(&channel_id, &user_id).await {
+                            Ok(_) => println!("added {user_id} to {channel_id}"),
+                            Err(error) => eprintln!("adding {user_id}: {error}"),
+                        }
                     }
                     Ask::Mute { channel_id, muted } => {
                         match rest.set_channel_muted(&channel_id, &me_id, muted).await {
