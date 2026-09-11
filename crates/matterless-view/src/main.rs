@@ -591,6 +591,32 @@ impl App {
         // unread badge of four thousand.
         let counted = !me.is_empty();
         let (name, status, live) = who;
+        // When each of these people last changed their picture, in one query
+        // rather than one per row: a hundred and fifteen conversations is a
+        // hundred and fifteen round trips to answer the same question, and it
+        // is asked again every time the sidebar is rebuilt.
+        //
+        // The version is part of what the picture is called, so it has to be
+        // the same one the conversation uses -- otherwise the same face is
+        // fetched twice and held twice under two names.
+        let faces: std::collections::HashMap<String, i64> = {
+            let mut wanted: Vec<String> = groups
+                .iter()
+                .flat_map(|group| group.channels.iter())
+                .filter_map(|channel| channel.counterpart_id.clone())
+                .collect();
+            wanted.sort();
+            wanted.dedup();
+            store
+                .and_then(|store| store.users_by_ids(&wanted).ok())
+                .map(|found| {
+                    found
+                        .into_iter()
+                        .map(|(id, user)| (id, user.last_picture_update))
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
         // Said once, at the top, rather than in whichever channel happens to
         // be open: who the reader is has nothing to do with which conversation
         // they are reading.
@@ -600,6 +626,11 @@ impl App {
             live,
         }];
         let row = |channel: matterless_sidebar::ChannelSummary| Entry::Channel {
+            counterpart_avatar_at: channel
+                .counterpart_id
+                .as_deref()
+                .and_then(|who| faces.get(who).copied())
+                .unwrap_or(0),
             direct: channel.channel_type == "D" || channel.channel_type == "G",
             private: channel.channel_type == "P",
             // Only a one-to-one has a single other person; a group has several
