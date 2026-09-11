@@ -68,6 +68,16 @@ pub fn counterpart(channel_name: &str, me_id: &str) -> Option<String> {
 /// because filling it in may mean asking the server.
 pub fn label(channel: &Channel, me_id: &str, names: &HashMap<String, String>) -> String {
     if !channel.display_name.is_empty() {
+        // A group conversation's display name is its whole membership, the
+        // reader included -- and reading your own name in the list of people
+        // you are talking to is noise in every row of the sidebar. Dropped
+        // when the caller has resolved who the reader is; left alone when it
+        // has not, rather than guessing at a comma-separated list.
+        if channel.channel_type == "G"
+            && let Some(mine) = names.get(me_id)
+        {
+            return without(&channel.display_name, mine);
+        }
         return channel.display_name.clone();
     }
     if channel.channel_type == "D" {
@@ -79,6 +89,24 @@ pub fn label(channel: &Channel, me_id: &str, names: &HashMap<String, String>) ->
     }
     // Group DMs fall back to their generated name until participants are named.
     channel.name.clone()
+}
+
+/// One name taken out of a comma-separated list of them.
+///
+/// Matched whole rather than as a substring: "ada" appears inside
+/// "adam.smith", and removing it there would leave "m.smith".
+fn without(names: &str, mine: &str) -> String {
+    let kept: Vec<&str> = names
+        .split(',')
+        .map(str::trim)
+        .filter(|name| !name.is_empty() && *name != mine)
+        .collect();
+    // Everyone in it is the reader, which a note to self of several is not --
+    // so the original is a better answer than nothing at all.
+    if kept.is_empty() {
+        return names.to_string();
+    }
+    kept.join(", ")
 }
 
 /// Orders one group on the terms its category asks for.

@@ -56,6 +56,10 @@ pub fn found_for(store: &Store, posts: Vec<matterless_core::Post>, me: &str) -> 
             channels.insert(post.channel_id.clone(), channel);
         }
     }
+    // The reader too, so a group conversation's name can have their own out
+    // of it: it is a list of who is in the conversation, and reading your own
+    // name there says nothing.
+    people.push(me.to_string());
     people.sort();
     people.dedup();
     let known = store.users_by_ids(&people).unwrap_or_default();
@@ -106,6 +110,10 @@ pub fn followed(store: &Store, me: &str, limit: u32) -> Vec<Found> {
             channels.insert(thread.channel_id.clone(), channel);
         }
     }
+    // The reader too, so a group conversation's name can have their own out
+    // of it: it is a list of who is in the conversation, and reading your own
+    // name there says nothing.
+    people.push(me.to_string());
     people.sort();
     people.dedup();
     let known = store.users_by_ids(&people).unwrap_or_default();

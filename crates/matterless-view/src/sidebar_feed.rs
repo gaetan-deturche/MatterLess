@@ -28,11 +28,15 @@ pub fn groups(
 
     // A direct message is labelled by the other person, so those users have to
     // be resolved before anything can be named.
-    let counterparts: Vec<String> = channels
+    let mut counterparts: Vec<String> = channels
         .iter()
         .filter(|(channel, _)| channel.channel_type == "D")
         .filter_map(|(channel, _)| matterless_sidebar::counterpart(&channel.name, me_id))
         .collect();
+    // The reader too, so a group conversation can have their own name taken
+    // out of its membership: reading who you are in every row that lists the
+    // people you are talking to is noise.
+    counterparts.push(me_id.to_string());
     // The server's `TeammateNameDisplay` reaches the app through bootstrap,
     // which this window does not run. Phase 0 measured this deployment on
     // `username`, which is what an empty mode resolves to.
