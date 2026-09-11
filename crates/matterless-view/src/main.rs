@@ -573,21 +573,17 @@ impl App {
     /// server said who the token belongs to.
     fn signed_in(&mut self, id: &str) {
         self.me = id.to_string();
-        let open = self.sidebar.selected.clone();
-        let scroll = self.sidebar.scroll;
-        self.sidebar = Sidebar::new(Self::entries(self.store.as_deref(), id));
-        self.sidebar.selected = open;
-        self.sidebar.scroll = scroll;
-        // The channel already on screen never went through `open_channel`, so
-        // this is its one chance to be reconciled: it was drawn from the store
-        // before there was a connection to check it against.
-        if let (Some(channel), Some(link)) = (&self.sidebar.selected, self.link.as_ref()) {
-            link.send(matterless_view::live::Ask::Looking {
-                channel_id: channel.clone(),
-            });
-            link.send(matterless_view::live::Ask::Refresh {
-                channel_id: channel.clone(),
-            });
+        self.rebuild_sidebar();
+        // Opened properly now that there is a reader and a connection. The
+        // window draws a channel before either exists, so the one on screen at
+        // startup had never been through `open_channel` -- and every single
+        // thing that happens there was quietly missing for it. Its custom
+        // emoji went unresolved, it was never reconciled with the server, and
+        // it was never marked read, so its unread count climbed for as long as
+        // the reader kept looking at it. Three separate bugs from one path
+        // that skipped the other.
+        if let Some(channel) = self.sidebar.selected.clone() {
+            self.open_channel(&channel);
         }
     }
 
@@ -717,6 +713,17 @@ impl App {
                     && matterless_view::live::touches_thread(&deltas, &root)
                 {
                     self.reread_thread(&root);
+                }
+                // The counts in the sidebar are arithmetic on two numbers the
+                // server keeps, and they move without a single post arriving:
+                // reading a channel here, or on a phone, changes them. Rebuilt
+                // whenever one does, or a badge stays on screen after the
+                // messages behind it have been read.
+                if deltas
+                    .iter()
+                    .any(|delta| matches!(delta, matterless_sync::Delta::UnreadChanged { .. }))
+                {
+                    self.rebuild_sidebar();
                 }
                 // A reaction names its post and no channel, so whether it
                 // matters is a question only the window can answer. Without
@@ -889,6 +896,37 @@ impl App {
             near,
         );
         self.want_faces();
+    }
+
+    /// Re-reads the sidebar, keeping where the reader is and how far they had
+    /// scrolled: a list that jumps to the top every time a count changes is
+    /// worse than one showing a stale number.
+    fn rebuild_sidebar(&mut self) {
+        let open = self.sidebar.selected.clone();
+        let scroll = self.sidebar.scroll;
+        self.sidebar = Sidebar::new(Self::entries(self.store.as_deref(), &self.me));
+        self.sidebar.selected = open;
+        self.sidebar.scroll = scroll;
+    }
+
+    /// Says when the local copy of a channel is behind what the server says.
+    ///
+    /// The unread count is arithmetic on two numbers the server keeps -- the
+    /// channel's total and this reader's seen count -- and neither has
+    /// anything to do with which posts are held here. So a channel can read
+    /// "13 unread" while the newest message on screen is a week old, and the
+    /// badge and the conversation are both telling the truth about different
+    /// things. Worth saying out loud, because the two disagreeing is exactly
+    /// what a reader would call a bug.
+    fn report_hole(&self, channel: &str, store: &matterless_store::Store) {
+        let (Ok(newest), Ok(Some(known))) = (store.newest_post_at(channel), store.channel(channel))
+        else {
+            return;
+        };
+        if known.last_post_at > newest {
+            let behind = (known.last_post_at - newest) / 60_000;
+            println!("{channel}: the local copy is {behind} minutes behind the server");
+        }
     }
 
     /// Names any reaction that can be neither drawn nor fetched.
@@ -1637,6 +1675,7 @@ impl App {
                 self.stream.custom = matterless_view::feed::custom_emoji(&store, &rows);
                 self.stream.rows = rows;
                 self.report_blank_pills();
+                self.report_hole(channel, &store);
                 // A thread from the channel just left has nothing to do with
                 // the one just opened.
                 self.thread = None;
