@@ -32,8 +32,11 @@ export interface ReactionSummary {
   emoji: string;
   count: number;
   mine: boolean;
-  /** Who reacted, in order, the viewer as "You". Capped at eight -- `count` is
-   *  all of them, so the difference is "and N others". */
+  /** Who reacted, in order, the viewer as "You". Every one of them: on a post
+   *  with 48 reactors "and 40 others" answers none of the question the tooltip
+   *  exists for, and they are already hydrated to label the pill at all.
+   *  `count` is the same number unless a name failed to resolve, which is the
+   *  only case "and N others" is for. */
   names: string[];
 }
 /** Which of the server's three renditions of a file to draw.
