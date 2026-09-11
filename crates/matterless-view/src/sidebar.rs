@@ -24,7 +24,19 @@ pub struct Canvas<'a> {
 /// One line in the list: a channel, or the heading of a group.
 #[derive(Debug, Clone)]
 pub enum Entry {
-    /// A group's name -- "Favourites", a team, "Direct messages".
+    /// Who the reader is, and whether this window is hearing anything.
+    ///
+    /// The whole top of the sidebar in the app, and the only place either of
+    /// those is said: a client that has quietly stopped receiving looks
+    /// exactly like a quiet afternoon.
+    Me {
+        name: String,
+        status: String,
+        live: bool,
+    },
+    /// A team's name, above the groups that belong to it.
+    Team { label: String },
+    /// A group's name -- "Favourites", "Channels", "Direct messages".
     Heading { label: String },
     Channel {
         id: String,
@@ -35,6 +47,8 @@ pub enum Entry {
         /// A direct or group message, which is sigilled by a person rather than
         /// by a hash.
         direct: bool,
+        /// A channel not everybody can see, which the app marks with a lock.
+        private: bool,
         /// The other person, for a one-to-one conversation. `None` for a
         /// channel and for a group, which has no single other person to be
         /// around or not.
@@ -53,7 +67,11 @@ pub struct Sidebar {
 /// A row's height, and a heading's. Fixed, because a channel name is one line
 /// and a list of five hundred of them must not need measuring to be scrolled.
 const ROW: f32 = 26.0;
-const HEADING: f32 = 30.0;
+const HEADING: f32 = 26.0;
+/// The strip at the very top: a name on one line and a status on the next.
+const ME: f32 = 52.0;
+/// A team's name, above the groups belonging to it.
+const TEAM: f32 = 30.0;
 const PADDING: f32 = 8.0;
 
 impl Sidebar {
@@ -68,6 +86,8 @@ impl Sidebar {
     /// The name a row answers to when it is hit.
     fn name_of(entry: &Entry, index: usize) -> String {
         match entry {
+            Entry::Me { .. } => "sidebar/me".to_string(),
+            Entry::Team { .. } => format!("sidebar/team/{index}"),
             Entry::Heading { .. } => format!("sidebar/heading/{index}"),
             Entry::Channel { id, .. } => format!("sidebar/channel/{id}"),
         }
@@ -85,10 +105,7 @@ impl Sidebar {
             .axis(Axis::Column)
             .padding(PADDING);
         for (index, entry) in self.entries.iter().enumerate() {
-            let height = match entry {
-                Entry::Heading { .. } => HEADING,
-                Entry::Channel { .. } => ROW,
-            };
+            let height = height_of(entry);
             column = column.with(Node::new(Self::name_of(entry, index), Size::Fixed(height)));
         }
         // Scrolling moves the box the rows are solved inside, so every row moves
@@ -110,14 +127,7 @@ impl Sidebar {
 
     /// How far the list can be scrolled before it runs out.
     pub fn reach(&self, within: Rect) -> f32 {
-        let content: f32 = self
-            .entries
-            .iter()
-            .map(|entry| match entry {
-                Entry::Heading { .. } => HEADING,
-                Entry::Channel { .. } => ROW,
-            })
-            .sum();
+        let content: f32 = self.entries.iter().map(height_of).sum();
         (content + PADDING * 2.0 - within.height).max(0.0)
     }
 
@@ -177,13 +187,77 @@ impl Sidebar {
                 continue;
             }
             match entry {
-                Entry::Heading { label } => {
+                // Who the reader is, said once at the top rather than in a
+                // channel's title: whether this window is hearing anything has
+                // nothing to do with which conversation is open.
+                Entry::Me { name, status, live } => {
+                    let who = painter.run(
+                        fonts,
+                        name,
+                        row.rect.x + 4.0,
+                        row.rect.y + 10.0,
+                        Run::label(f32::MAX).bold(),
+                    );
+                    scene.glyphs(who, palette.ink, palette.faint);
+                    if let Some(lit) = dot(status, palette) {
+                        scene.rounded(
+                            row.rect.x + 4.0,
+                            row.rect.y + 32.0,
+                            DOT,
+                            DOT,
+                            lit,
+                            DOT / 2.0,
+                        );
+                    }
+                    let said = painter.run(
+                        fonts,
+                        &format!(
+                            "{}{}",
+                            spoken(status),
+                            if *live { "" } else { " -- offline" }
+                        ),
+                        row.rect.x + 4.0 + DOT + 6.0,
+                        row.rect.y + 28.0,
+                        Run::label(f32::MAX),
+                    );
+                    scene.glyphs(
+                        said,
+                        if *live { palette.soft } else { palette.danger },
+                        palette.faint,
+                    );
+                }
+                // A team's name leads the groups that belong to it, rather than
+                // every group's name carrying it: two teams each bring a
+                // "Favorites" and a "Channels", and unqualified they read as
+                // duplicates -- but qualifying each one says the team four
+                // times over.
+                Entry::Team { label } => {
                     let glyphs = painter.run(
                         fonts,
                         label,
-                        row.rect.x,
-                        row.rect.y + 10.0,
-                        Run::label(f32::MAX).bold(),
+                        row.rect.x + 4.0,
+                        row.rect.y + 8.0,
+                        Run {
+                            size: 14.5,
+                            line_height: 20.0,
+                            bold: true,
+                            wrap: f32::MAX,
+                        },
+                    );
+                    scene.glyphs(glyphs, palette.ink, palette.faint);
+                }
+                Entry::Heading { label } => {
+                    let glyphs = painter.run(
+                        fonts,
+                        &small_caps(label),
+                        row.rect.x + 4.0,
+                        row.rect.y + 8.0,
+                        Run {
+                            size: 10.5,
+                            line_height: 14.0,
+                            bold: true,
+                            wrap: f32::MAX,
+                        },
                     );
                     scene.glyphs(glyphs, palette.faint, palette.faint);
                 }
@@ -194,6 +268,7 @@ impl Sidebar {
                     mentions,
                     muted,
                     direct,
+                    private,
                     counterpart,
                 } => {
                     let chosen = self.selected.as_deref() == Some(id.as_str());
@@ -238,7 +313,12 @@ impl Sidebar {
                             lit,
                         );
                     }
-                    let sigil = if *direct { "@" } else { "#" };
+                    // What kind of conversation this is, in one character.
+                    let sigil = match (*direct, *private) {
+                        (true, _) => "@",
+                        (false, true) => "🔒",
+                        (false, false) => "#",
+                    };
                     let glyphs = painter.run(
                         fonts,
                         &format!("{sigil} {label}"),
@@ -285,6 +365,44 @@ impl Sidebar {
 const DOT: f32 = 6.0;
 const GUTTER: f32 = 12.0;
 
+/// How tall each kind of row is.
+fn height_of(entry: &Entry) -> f32 {
+    match entry {
+        // Two lines: a name and what they are doing.
+        Entry::Me { .. } => ME,
+        Entry::Team { .. } => TEAM,
+        Entry::Heading { .. } => HEADING,
+        Entry::Channel { .. } => ROW,
+    }
+}
+
+/// A heading, set the way the stylesheet sets one: upper case with the letters
+/// held apart, which is what small type at this weight needs to stay legible.
+fn small_caps(label: &str) -> String {
+    label
+        .to_uppercase()
+        .chars()
+        .flat_map(|letter| [letter, HAIR])
+        .collect::<String>()
+        .trim_end()
+        .to_string()
+}
+
+const HAIR: char = ' ';
+
+/// A status as a word somebody would say, rather than the token the server
+/// keeps it under.
+fn spoken(status: &str) -> &str {
+    match status {
+        "online" => "online",
+        "away" => "away",
+        "dnd" => "do not disturb",
+        "ooo" => "out of office",
+        "" => "signing in",
+        _ => "offline",
+    }
+}
+
 /// What colour says about somebody, or nothing at all.
 ///
 /// Offline draws no dot rather than a grey one. Absence is the common case,
@@ -319,6 +437,7 @@ mod tests {
                 mentions: 0,
                 muted: false,
                 direct: false,
+                private: false,
                 counterpart: None,
             },
             Entry::Channel {
@@ -328,6 +447,7 @@ mod tests {
                 mentions: 1,
                 muted: false,
                 direct: false,
+                private: false,
                 counterpart: None,
             },
         ])
@@ -433,6 +553,7 @@ mod tests {
                     mentions: 0,
                     muted: false,
                     direct: false,
+                    private: false,
                     counterpart: None,
                 })
                 .collect(),

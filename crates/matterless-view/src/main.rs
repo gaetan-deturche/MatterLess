@@ -293,6 +293,7 @@ impl App {
             store.as_deref(),
             &me,
             matterless_core::model::ThreadMode::Collapsed,
+            ("", "", false),
         );
         let sidebar = Sidebar::new(entries);
         let (channel, rows) = Self::feed();
@@ -521,6 +522,7 @@ impl App {
         store: Option<&matterless_store::Store>,
         me: &str,
         threads: matterless_core::model::ThreadMode,
+        who: (&str, &str, bool),
     ) -> Vec<Entry> {
         let groups = store
             .map(|store| matterless_view::sidebar_feed::groups(store, me, threads))
@@ -529,38 +531,77 @@ impl App {
         // with each channel's *total* message count -- which looks like an
         // unread badge of four thousand.
         let counted = !me.is_empty();
-        let mut entries: Vec<Entry> = Vec::new();
+        let (name, status, live) = who;
+        // Said once, at the top, rather than in whichever channel happens to
+        // be open: who the reader is has nothing to do with which conversation
+        // they are reading.
+        let mut entries: Vec<Entry> = vec![Entry::Me {
+            name: name.to_string(),
+            status: status.to_string(),
+            live,
+        }];
+        let row = |channel: matterless_sidebar::ChannelSummary| Entry::Channel {
+            direct: channel.channel_type == "D" || channel.channel_type == "G",
+            private: channel.channel_type == "P",
+            // Only a one-to-one has a single other person; a group has several
+            // and no dot could stand for all of them.
+            counterpart: if channel.channel_type == "D" {
+                channel.counterpart_id.clone()
+            } else {
+                None
+            },
+            id: channel.id,
+            label: channel.display_name,
+            unread: if counted { channel.unread } else { 0 },
+            mentions: if counted { channel.mentions } else { 0 },
+            muted: channel.muted,
+        };
+
+        // Whatever is unread, lifted out of wherever it lives and put at the
+        // top. Muted channels stay put however much they hold: muting says
+        // "do not interrupt me", and moving one to the front is interrupting.
+        let mut groups = groups;
+        if counted && store.is_some_and(|store| lifts_unreads(store, me)) {
+            let mut waiting: Vec<matterless_sidebar::ChannelSummary> = Vec::new();
+            for group in &mut groups {
+                group.channels.retain(|channel| {
+                    let asking = channel.unread > 0 && !channel.muted;
+                    if asking {
+                        waiting.push(channel.clone());
+                    }
+                    !asking
+                });
+            }
+            if !waiting.is_empty() {
+                waiting.sort_by_key(|channel| std::cmp::Reverse(channel.last_post_at));
+                entries.push(Entry::Heading {
+                    label: "Unreads".to_string(),
+                });
+                entries.extend(waiting.into_iter().map(row));
+            }
+        }
+
+        // A team's name once, above the groups belonging to it, rather than on
+        // each of them: two teams each bring a "Favorites" and a "Channels",
+        // and unqualified they read as duplicates -- but qualifying every one
+        // says the team's name four times down the list.
+        let mut team = String::new();
         for group in groups {
             if group.channels.is_empty() {
                 continue;
             }
-            // Named by its team when one contributes: two teams each bring a
-            // "Favorites" and a "Channels", and unqualified they read as
-            // duplicates of each other.
-            entries.push(Entry::Heading {
-                label: if group.team_name.is_empty() {
-                    group.display_name
-                } else {
-                    format!("{} -- {}", group.display_name, group.team_name)
-                },
-            });
-            for channel in group.channels {
-                entries.push(Entry::Channel {
-                    direct: channel.channel_type == "D" || channel.channel_type == "G",
-                    // Only a one-to-one has a single other person; a group has
-                    // several and no dot could stand for all of them.
-                    counterpart: if channel.channel_type == "D" {
-                        channel.counterpart_id.clone()
-                    } else {
-                        None
-                    },
-                    id: channel.id,
-                    label: channel.display_name,
-                    unread: if counted { channel.unread } else { 0 },
-                    mentions: if counted { channel.mentions } else { 0 },
-                    muted: channel.muted,
-                });
+            if group.team_name != team {
+                team = group.team_name.clone();
+                if !team.is_empty() {
+                    entries.push(Entry::Team {
+                        label: team.clone(),
+                    });
+                }
             }
+            entries.push(Entry::Heading {
+                label: group.display_name,
+            });
+            entries.extend(group.channels.into_iter().map(row));
         }
         println!(
             "sidebar: {} groups, {} channels -- {}",
@@ -575,8 +616,8 @@ impl App {
             entries
                 .iter()
                 .filter_map(|entry| match entry {
-                    Entry::Heading { label } => Some(label.as_str()),
-                    Entry::Channel { .. } => None,
+                    Entry::Heading { label } | Entry::Team { label } => Some(label.as_str()),
+                    _ => None,
                 })
                 .collect::<Vec<&str>>()
                 .join(" > ")
@@ -657,6 +698,9 @@ impl App {
             Update::Connected(up) => {
                 self.connected = up;
                 println!("socket {}", if up { "connected" } else { "lost" });
+                // The strip at the top of the sidebar says so, so it has to be
+                // rebuilt to stop saying the opposite.
+                self.rebuild_sidebar();
             }
             Update::SignedIn { id, username } => {
                 println!("reader is {username}");
@@ -686,8 +730,14 @@ impl App {
                 }
             }
             Update::Statuses(found) => {
+                let mine = found.iter().any(|(user_id, _)| user_id == &self.me);
                 for (user_id, status) in found {
                     self.presence.insert(user_id, status);
+                }
+                // The reader's own presence is on the strip, so learning it is
+                // a reason to draw the strip again.
+                if mine {
+                    self.rebuild_sidebar();
                 }
             }
             Update::Older { channel_id, more } => {
@@ -844,6 +894,9 @@ impl App {
                 _ => None,
             })
             .collect();
+        // The reader themselves, because their own presence is on the strip
+        // at the top of the sidebar and nothing else would ask for it.
+        wanted.push(self.me.clone());
         wanted.sort();
         wanted.dedup();
         // An unchanged set costs no request, which is the whole point: this is
@@ -954,6 +1007,15 @@ impl App {
         header::offered(direct)
     }
 
+    /// The reader's own name, as the store knows it.
+    fn my_name(&self) -> String {
+        self.store
+            .as_ref()
+            .and_then(|store| store.users_by_ids(std::slice::from_ref(&self.me)).ok())
+            .and_then(|known| known.get(&self.me).map(|user| user.username.clone()))
+            .unwrap_or_else(|| "signing in".to_string())
+    }
+
     /// Whether the conversation on screen is muted, as the sidebar has it.
     fn muted(&self) -> bool {
         let Some(open) = self.sidebar.selected.as_deref() else {
@@ -1062,7 +1124,14 @@ impl App {
     fn rebuild_sidebar(&mut self) {
         let open = self.sidebar.selected.clone();
         let scroll = self.sidebar.scroll;
-        self.sidebar = Sidebar::new(Self::entries(self.store.as_deref(), &self.me, self.threads));
+        let name = self.my_name();
+        let status = self.presence.get(&self.me).cloned().unwrap_or_default();
+        self.sidebar = Sidebar::new(Self::entries(
+            self.store.as_deref(),
+            &self.me,
+            self.threads,
+            (&name, &status, self.connected),
+        ));
         self.sidebar.selected = open;
         self.sidebar.scroll = scroll;
     }
@@ -1949,15 +2018,11 @@ impl App {
         // Read before the painter is borrowed, and given its own layer after: a
         // name too long for the strip is cut by the clip rather than running
         // along the top of the first message.
-        // Said in the header while it is down, and silent while it is up: a
-        // client that has quietly stopped receiving is indistinguishable from a
-        // quiet channel, and that is the state worth naming.
+        // The title and nothing else. Whether this window is still hearing
+        // anything is said at the top of the sidebar now, where it belongs: it
+        // is a fact about the connection rather than about the conversation.
         let on_strip = self.on_header();
-        let mut header = Header::new(if self.connected {
-            self.title()
-        } else {
-            format!("{} (offline)", self.title())
-        });
+        let mut header = Header::new(self.title());
         header.offered = self.header_offers();
         header.muted = self.muted();
         scene.clip_to(strip.x, strip.y, strip.width, strip.height);
@@ -2733,4 +2798,18 @@ fn named(key: &winit::keyboard::Key) -> Option<Key> {
 /// can be told from opening a different one.
 fn thread_name(root_id: &str) -> String {
     format!("thread/{root_id}")
+}
+
+/// Whether this reader wants unread conversations lifted into their own group.
+///
+/// A preference rather than a choice made here: the app reads the same one,
+/// and a sidebar that rearranges itself differently in two clients of one
+/// server is worse than either arrangement.
+fn lifts_unreads(store: &matterless_store::Store, me: &str) -> bool {
+    store
+        .preference(me, "sidebar_settings", "show_unread_section")
+        .ok()
+        .flatten()
+        .as_deref()
+        == Some("true")
 }
