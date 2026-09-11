@@ -3416,6 +3416,20 @@ impl ApplicationHandler<Update> for App {
         let surface = instance
             .create_surface(Arc::clone(&window))
             .expect("a surface");
+        // The integrated chip in preference to the card, deliberately.
+        //
+        // A chat window has no business waking a discrete GPU: it draws a few
+        // hundred quads when somebody scrolls, and on a machine doing real
+        // work on that card it should stay out of the way.
+        //
+        // It is not free, and the cost is worth knowing before somebody
+        // "fixes" this. Where the display hangs off a discrete card -- which
+        // is the usual desktop arrangement -- every finished frame is copied
+        // across to be shown. Measured on a machine with an RTX 5070 beside an
+        // integrated Radeon, that was 350ms of extra swapchain creation at
+        // start-up, and the surface came back in the other channel order,
+        // which is the display saying whose it is. `--example what_gpu` prints
+        // what any given machine offers and what each costs.
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::LowPower,
             compatible_surface: Some(&surface),
