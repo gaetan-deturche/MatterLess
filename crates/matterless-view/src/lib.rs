@@ -191,7 +191,12 @@ pub fn vertices_of(
                     *radius,
                 );
             }
-            Piece::Text { glyphs, ink, faint } => {
+            Piece::Text {
+                glyphs,
+                ink,
+                faint,
+                signal,
+            } => {
                 let shade = |colour: &[u8; 3]| {
                     [
                         colour[0] as f32 / 255.0,
@@ -200,7 +205,7 @@ pub fn vertices_of(
                         1.0,
                     ]
                 };
-                let (loud, quiet) = (shade(ink), shade(faint));
+                let (loud, quiet, followed) = (shade(ink), shade(faint), shade(signal));
                 for glyph in glyphs {
                     let Some(slot) = atlas.slot(queue, fonts, cache, glyph.key) else {
                         continue;
@@ -209,10 +214,12 @@ pub fn vertices_of(
                     // shader's tint leaves it as it is.
                     let rgba = if slot.colour {
                         [1.0, 1.0, 1.0, 1.0]
-                    } else if glyph.faint {
-                        quiet
                     } else {
-                        loud
+                        match glyph.shade {
+                            matterless_paint::Shade::Ink => loud,
+                            matterless_paint::Shade::Faint => quiet,
+                            matterless_paint::Shade::Signal => followed,
+                        }
                     };
                     // `left` and `top` are the bitmap's offset from the pen, and
                     // ignoring them puts every letter on its own baseline.

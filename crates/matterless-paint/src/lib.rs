@@ -140,14 +140,28 @@ impl Default for Palette {
 /// The unit both consumers share: the CPU snapshot rasterises it straight onto
 /// a buffer, and the GPU renderer looks it up in an atlas and emits a quad.
 /// Neither of them decides *where* -- that is settled here, once.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Shade {
+    /// What the eye should land on.
+    #[default]
+    Ink,
+    /// A timestamp, a count, anything to pass over.
+    Faint,
+    /// Something to follow. `a { color: var(--signal) }`, which a run of text
+    /// could not express while a glyph had only two inks to choose between.
+    Signal,
+}
+
+/// One glyph, placed, with the ink it takes.
 #[derive(Debug, Clone, Copy)]
 pub struct PlacedGlyph {
     pub key: cosmic_text::CacheKey,
     pub x: i32,
     pub y: i32,
-    /// Drawn in the quieter ink. Carried per glyph because one line mixes them:
-    /// an author's name and the time beside it are one shaped run.
-    pub faint: bool,
+    /// Which of the three inks this glyph takes. Carried per glyph because one
+    /// line mixes them: an author's name, the time beside it and a link in the
+    /// sentence after are all one shaped run.
+    pub shade: Shade,
 }
 
 /// Where the glyphs of an already-shaped buffer land.
@@ -166,7 +180,7 @@ pub fn placed_glyphs(buffer: &Buffer, x: f32, y: f32) -> Vec<PlacedGlyph> {
                 key: physical.cache_key,
                 x: physical.x,
                 y: physical.y,
-                faint: false,
+                shade: Shade::Ink,
             });
         }
     }
@@ -193,6 +207,8 @@ pub enum Piece {
         glyphs: Vec<PlacedGlyph>,
         ink: [u8; 3],
         faint: [u8; 3],
+        /// What a glyph a reader can follow is drawn in.
+        signal: [u8; 3],
     },
     /// A picture, named by the route it came from.
     ///
@@ -299,12 +315,26 @@ impl Scene {
     }
 
     pub fn glyphs(&mut self, glyphs: Vec<PlacedGlyph>, ink: [u8; 3], faint: [u8; 3]) {
+        self.inked(glyphs, ink, faint, ink);
+    }
+
+    /// The same, with a third ink for whatever a reader can follow.
+    pub fn inked(
+        &mut self,
+        glyphs: Vec<PlacedGlyph>,
+        ink: [u8; 3],
+        faint: [u8; 3],
+        signal: [u8; 3],
+    ) {
         if glyphs.is_empty() {
             return;
         }
-        self.current()
-            .pieces
-            .push(Piece::Text { glyphs, ink, faint });
+        self.current().pieces.push(Piece::Text {
+            glyphs,
+            ink,
+            faint,
+            signal,
+        });
     }
 
     pub fn extend(&mut self, pieces: impl IntoIterator<Item = Piece>) {
@@ -430,6 +460,7 @@ impl Painter {
                             glyphs,
                             ink: palette.faint,
                             faint: palette.faint,
+                            signal: palette.signal,
                         });
                     } else {
                         pieces.push(Piece::Fill {
@@ -456,6 +487,7 @@ impl Painter {
                         glyphs: self.glyphs_of(fonts, block, x, y, theme).0,
                         ink: palette.ink,
                         faint: palette.faint,
+                        signal: palette.signal,
                     });
                 }
                 Kind::Code => {
@@ -477,6 +509,7 @@ impl Painter {
                         glyphs: self.glyphs_of(fonts, block, x + 8.0, y + 8.0, theme).0,
                         ink: palette.ink,
                         faint: palette.faint,
+                        signal: palette.signal,
                     });
                 }
                 Kind::Text => {
@@ -485,6 +518,7 @@ impl Painter {
                         glyphs,
                         ink: palette.ink,
                         faint: palette.faint,
+                        signal: palette.signal,
                     });
                     pieces.extend(presses.into_iter().map(|one| Piece::Press {
                         x: one.x,
@@ -524,6 +558,7 @@ impl Painter {
                         glyphs,
                         ink: palette.ink,
                         faint: palette.faint,
+                        signal: palette.signal,
                     });
                 }
                 // Drawn by whoever owns the row rather than here. A pill is a
@@ -601,9 +636,17 @@ impl Painter {
                     *height as i32,
                     [40, 48, 58, 255],
                 ),
-                Piece::Text { glyphs, ink, faint } => {
+                Piece::Text {
+                    glyphs, ink, faint, ..
+                } => {
                     for glyph in glyphs {
-                        let shade = if glyph.faint { *faint } else { *ink };
+                        // This path checks heights and glyph positions on a
+                        // machine with no display, so a link takes the loud
+                        // ink rather than a third colour it cannot show.
+                        let shade = match glyph.shade {
+                            Shade::Faint => *faint,
+                            _ => *ink,
+                        };
                         let colour = Color::rgb(shade[0], shade[1], shade[2]);
                         self.glyphs.with_pixels(
                             fonts.system_mut(),
@@ -661,7 +704,7 @@ impl Painter {
                     key: physical.cache_key,
                     x: physical.x,
                     y: physical.y,
-                    faint: false,
+                    shade: Shade::Ink,
                 });
             }
         }
@@ -753,7 +796,15 @@ impl Painter {
                     key: physical.cache_key,
                     x: physical.x,
                     y: physical.y,
-                    faint: marks(glyph.metadata, FAINT),
+                    // A link wins over faint: a quiet link is still a link,
+                    // and there is nowhere in a message where both are meant.
+                    shade: if marks(glyph.metadata, PRESS) {
+                        Shade::Signal
+                    } else if marks(glyph.metadata, FAINT) {
+                        Shade::Faint
+                    } else {
+                        Shade::Ink
+                    },
                 });
             }
         }

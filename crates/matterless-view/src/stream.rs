@@ -1000,7 +1000,12 @@ fn shift(piece: matterless_paint::Piece, by: f32) -> matterless_paint::Piece {
             height,
             press,
         },
-        Piece::Text { glyphs, ink, faint } => Piece::Text {
+        Piece::Text {
+            glyphs,
+            ink,
+            faint,
+            signal,
+        } => Piece::Text {
             glyphs: glyphs
                 .into_iter()
                 .map(|glyph| matterless_paint::PlacedGlyph {
@@ -1010,6 +1015,7 @@ fn shift(piece: matterless_paint::Piece, by: f32) -> matterless_paint::Piece {
                 .collect(),
             ink,
             faint,
+            signal,
         },
         Piece::Image {
             x,
