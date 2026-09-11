@@ -123,6 +123,12 @@ fn conversation() -> Vec<Row> {
     rows
 }
 
+/// The strip of teams down the far left.
+///
+/// Its own column rather than a row inside the sidebar: a team is a different
+/// kind of thing from a conversation, and a list holding both means two things
+/// at once.
+const RAIL: f32 = 48.0;
 /// The sidebar's width. Fixed, as it is in the app today.
 const SIDEBAR: f32 = 260.0;
 /// The thread pane's width when one is open.
@@ -200,6 +206,8 @@ struct App {
     listing: matterless_view::listing::Listing,
     /// Who somebody is, when their name has been pressed.
     profile: matterless_view::profile::Profile,
+    /// The teams, down the far left.
+    rail: matterless_view::rail::Rail,
     /// Where this window is signed in, for building a link to a message.
     server: String,
     /// How this reader reads threads, which decides both what the sidebar
@@ -350,6 +358,7 @@ impl App {
             asked_about: Vec::new(),
             listing: matterless_view::listing::Listing::default(),
             profile: matterless_view::profile::Profile::default(),
+            rail: matterless_view::rail::Rail::default(),
             server: String::new(),
             // Until the server is asked. Collapsed is what this deployment
             // uses and what every other part of the window assumed outright,
@@ -371,6 +380,7 @@ impl App {
     fn shell(&self) -> Vec<Placed> {
         let mut row = Boxed::new("shell", Size::Grow(1.0))
             .axis(Axis::Row)
+            .with(Boxed::new("rail", Size::Fixed(RAIL)))
             .with(Boxed::new("sidebar-panel", Size::Fixed(SIDEBAR)))
             .with(
                 Boxed::new("channel", Size::Grow(1.0))
@@ -400,16 +410,20 @@ impl App {
         )
     }
 
+    fn rail_rect(&self) -> Rect {
+        Rect::new(0.0, 0.0, RAIL, self.size.1 as f32)
+    }
+
     fn sidebar_rect(&self) -> Rect {
-        Rect::new(0.0, 0.0, SIDEBAR, self.size.1 as f32)
+        Rect::new(RAIL, 0.0, SIDEBAR, self.size.1 as f32)
     }
 
     /// Everything right of the sidebar, thread pane included.
     fn column_rect(&self) -> Rect {
         Rect::new(
-            SIDEBAR,
+            RAIL + SIDEBAR,
             0.0,
-            (self.size.0 as f32 - SIDEBAR).max(0.0),
+            (self.size.0 as f32 - RAIL - SIDEBAR).max(0.0),
             self.size.1 as f32,
         )
     }
@@ -1036,6 +1050,20 @@ impl App {
         }
     }
 
+    /// The first conversation a team holds, in the order the sidebar lists it.
+    fn first_channel_in(&self, team_id: &str) -> Option<String> {
+        let store = self.store.as_ref()?;
+        self.sidebar.entries.iter().find_map(|entry| match entry {
+            matterless_view::sidebar::Entry::Channel { id, .. } => store
+                .channel(id)
+                .ok()
+                .flatten()
+                .filter(|channel| channel.team_id == team_id)
+                .map(|channel| channel.id),
+            _ => None,
+        })
+    }
+
     /// The reader's own name, as the store knows it.
     fn my_name(&self) -> String {
         self.store
@@ -1151,6 +1179,34 @@ impl App {
     /// scrolled: a list that jumps to the top every time a count changes is
     /// worse than one showing a stale number.
     fn rebuild_sidebar(&mut self) {
+        // The teams beside it, from the same store and at the same moment: a
+        // rail naming a team the sidebar no longer lists is worse than either
+        // being a little stale.
+        self.rail.teams = self
+            .store
+            .as_ref()
+            .map(|store| {
+                store
+                    .teams()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|team| matterless_view::rail::Tile {
+                        id: team.id,
+                        name: if team.display_name.is_empty() {
+                            team.name
+                        } else {
+                            team.display_name
+                        },
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        self.rail.chosen = self
+            .sidebar
+            .selected
+            .as_ref()
+            .and_then(|id| self.store.as_ref()?.channel(id).ok().flatten())
+            .map(|channel| channel.team_id);
         let open = self.sidebar.selected.clone();
         let scroll = self.sidebar.scroll;
         let name = self.my_name();
@@ -1588,6 +1644,7 @@ impl App {
     /// the two come to disagree about what is under the pointer.
     fn targets(&self) -> Vec<Placed> {
         let mut boxes = self.shell();
+        boxes.extend(self.rail.boxes(self.rail_rect()));
         boxes.extend(self.sidebar.boxes(self.sidebar_rect()));
         // The hovered row is what decides whether a toolbar exists, and it is
         // read from the frame just gone: a toolbar the pointer is already on
@@ -2049,6 +2106,18 @@ impl App {
         let sidebar = self.sidebar_rect();
         let strip = header::strip(self.column_rect());
         let stream = self.stream_rect();
+
+        let rail = self.rail_rect();
+        scene.clip_to(rail.x, rail.y, rail.width, rail.height);
+        {
+            let mut canvas = Canvas {
+                scene: &mut scene,
+                painter: &mut self.painter,
+                fonts: &mut self.fonts,
+                palette: &self.palette,
+            };
+            self.rail.draw(&mut canvas, rail, &self.input);
+        }
 
         scene.clip_to(sidebar.x, sidebar.y, sidebar.width, sidebar.height);
         let boxes = self.sidebar.boxes(sidebar);
@@ -2606,6 +2675,15 @@ impl ApplicationHandler<Update> for App {
                     UiEvent::PointerReleased
                 };
                 self.input.apply(event, &boxes);
+                // A team on the rail takes the reader to the first
+                // conversation it holds: a team is not itself somewhere to be,
+                // and landing on nothing would be a press that did nothing.
+                if let Some(team) = self.rail.react(&self.input)
+                    && let Some(first) = self.first_channel_in(&team)
+                {
+                    self.sidebar.selected = Some(first.clone());
+                    self.open_channel(&first);
+                }
                 let within = self.sidebar_rect();
                 if let Some(channel) = self.sidebar.react(&self.input, &boxes, within) {
                     self.open_channel(&channel);
@@ -2613,13 +2691,21 @@ impl ApplicationHandler<Update> for App {
                 // The strip's own buttons, which are the only visible way to
                 // reach the lists: a keystroke nobody has been told about is
                 // not a feature anybody has.
-                if let Some(act) = self
+                if let Some(pressed) = self
                     .input
                     .clicked()
                     .and_then(|name| name.strip_prefix("header/"))
-                    .and_then(header::Act::from_slug)
+                    .map(str::to_string)
                 {
-                    self.act_on_header(act);
+                    // The field opens the same panel the keystroke does, so
+                    // there is one search rather than two that drift.
+                    if pressed == "find" {
+                        let mut input = std::mem::take(&mut self.input);
+                        self.search.show(&mut self.fonts, &mut input);
+                        self.input = input;
+                    } else if let Some(act) = header::Act::from_slug(&pressed) {
+                        self.act_on_header(act);
+                    }
                 }
                 // A message opens its thread. Taken before the composer reacts,
                 // because opening one narrows the column the composer sits in.
