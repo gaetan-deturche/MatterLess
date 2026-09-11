@@ -14,9 +14,24 @@ use crate::sidebar::Canvas;
 use matterless_ui::input::Input;
 use matterless_ui::{Placed, Rect};
 
-/// How wide the bar is, and how far it sits from the edge.
-const WIDTH: f32 = 8.0;
-const INSET: f32 = 2.0;
+/// The strip a press is caught in, wider than anything drawn in it so the bar
+/// is easy to hit: `.track { width: 12px }`.
+const TRACK: f32 = 12.0;
+/// The groove behind the thumb, and the thumb itself, with the gap each keeps
+/// from the right edge. Straight from the stylesheet: a 4px rail at `right:
+/// 4px` and an 8px thumb at `right: 2px`.
+const GROOVE: f32 = 4.0;
+const GROOVE_INSET: f32 = 4.0;
+const THUMB: f32 = 8.0;
+const THUMB_INSET: f32 = 2.0;
+/// What the ends are kept clear of, so the bar does not run into a corner.
+const EDGE: f32 = 4.0;
+
+/// How solid each part is. The bar is furniture: present enough to find,
+/// quiet enough to ignore, and louder under the hand that is using it.
+const GROOVE_ALPHA: f32 = 0.14;
+const THUMB_ALPHA: f32 = 0.42;
+const HELD_ALPHA: f32 = 0.75;
 
 /// A thumb shorter than this is not worth aiming at.
 ///
@@ -35,13 +50,14 @@ pub struct Scrollbar {
 }
 
 impl Scrollbar {
-    /// The bar's own strip, down the right edge of the panel.
+    /// The strip a press is caught in, which is wider than the thumb drawn in
+    /// it: a four-pixel target is a target nobody hits.
     pub fn track(&self, within: Rect) -> Rect {
         Rect::new(
-            within.right() - WIDTH - INSET,
-            within.y + INSET,
-            WIDTH,
-            (within.height - INSET * 2.0).max(0.0),
+            within.right() - TRACK,
+            within.y + EDGE,
+            TRACK,
+            (within.height - EDGE * 2.0).max(0.0),
         )
     }
 
@@ -65,6 +81,9 @@ impl Scrollbar {
     }
 
     /// Where the thumb sits for a given scroll.
+    ///
+    /// Narrower than the track it travels in, and to the right of it: the
+    /// track is what catches a press, the thumb is what says where you are.
     pub fn thumb(&self, within: Rect, scroll: f32, reach: f32) -> Rect {
         let track = self.track(within);
         let height = self.height(within, reach);
@@ -74,7 +93,12 @@ impl Scrollbar {
         } else {
             0.0
         };
-        Rect::new(track.x, track.y + along, track.width, height)
+        Rect::new(
+            within.right() - THUMB - THUMB_INSET,
+            track.y + along,
+            THUMB,
+            height,
+        )
     }
 
     /// Nothing to show when everything fits: a full-length thumb says only
@@ -140,16 +164,39 @@ impl Scrollbar {
         if !self.needed(reach) {
             return;
         }
+        let track = self.track(within);
         let thumb = self.thumb(within, scroll, reach);
         let Canvas { scene, palette, .. } = into;
-        // No track behind it. A groove down every conversation is a line the
-        // eye has to ignore forever; the thumb alone says the same thing.
-        scene.fill(
+        let quiet = |alpha: f32| {
+            [
+                palette.faint[0],
+                palette.faint[1],
+                palette.faint[2],
+                (alpha * 255.0) as u8,
+            ]
+        };
+        // The groove first. It is what says where the ends are, which is the
+        // reference a thumb needs to mean "near the top" rather than just
+        // "somewhere".
+        scene.rounded(
+            within.right() - GROOVE - GROOVE_INSET,
+            track.y,
+            GROOVE,
+            track.height,
+            quiet(GROOVE_ALPHA),
+            GROOVE / 2.0,
+        );
+        scene.rounded(
             thumb.x,
             thumb.y,
             thumb.width,
             thumb.height,
-            palette.faint_fill(),
+            quiet(if self.held.is_some() {
+                HELD_ALPHA
+            } else {
+                THUMB_ALPHA
+            }),
+            thumb.width / 2.0,
         );
     }
 }

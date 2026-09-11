@@ -764,6 +764,7 @@ pub fn route_for(key: &str) -> Option<String> {
     }
     match kind {
         "avatar" => Some(format!("/users/{id}/image")),
+        "team" => Some(format!("/teams/{id}/image")),
         "emoji" => Some(format!("/emoji/{id}/image")),
         // The thumbnail is what a message list wants: measured at 20 KB against
         // a 474 KB original on this server.
@@ -1199,6 +1200,10 @@ mod routes {
     /// server-generated token, and anything else gets no request made for it.
     #[test]
     fn a_malformed_key_asks_for_nothing() {
+        assert_eq!(
+            route_for("team/abc123").as_deref(),
+            Some("/teams/abc123/image")
+        );
         assert_eq!(route_for("avatar/../../etc/passwd"), None);
         assert_eq!(route_for("avatar/"), None);
         assert_eq!(route_for("avatar"), None);

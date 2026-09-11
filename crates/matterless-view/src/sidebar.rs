@@ -35,9 +35,13 @@ pub enum Entry {
         live: bool,
     },
     /// A team's name, above the groups that belong to it.
-    Team { label: String },
+    Team { id: String, label: String },
     /// A group's name -- "Favourites", "Channels", "Direct messages".
-    Heading { label: String },
+    ///
+    /// `directs` marks the one the rail's envelope points at: it is the only
+    /// group that belongs to no team and so the only one the rail cannot
+    /// reach by a team's id.
+    Heading { label: String, directs: bool },
     Channel {
         id: String,
         label: String,
@@ -91,7 +95,7 @@ impl Sidebar {
     fn name_of(entry: &Entry, index: usize) -> String {
         match entry {
             Entry::Me { .. } => "sidebar/me".to_string(),
-            Entry::Team { .. } => format!("sidebar/team/{index}"),
+            Entry::Team { id, .. } => format!("sidebar/team/{id}"),
             Entry::Heading { .. } => format!("sidebar/heading/{index}"),
             Entry::Channel { id, .. } => format!("sidebar/channel/{id}"),
         }
@@ -128,6 +132,27 @@ impl Sidebar {
             panel.rect = within;
         }
         placed
+    }
+
+    /// Scrolls a team's heading to the top of the panel.
+    ///
+    /// What the rail does: a team is not somewhere to be, it is somewhere in
+    /// the list, and taking the reader there is different from opening a
+    /// conversation they did not ask for.
+    pub fn scroll_to(&mut self, wanted: &str, within: Rect) {
+        let mut above = PADDING;
+        for entry in &self.entries {
+            let hit = match entry {
+                Entry::Team { id, .. } => id == wanted,
+                Entry::Heading { directs, .. } => *directs && wanted == crate::rail::DIRECTS,
+                _ => false,
+            };
+            if hit {
+                self.scroll = above.clamp(0.0, self.reach(within));
+                return;
+            }
+            above += height_of(entry);
+        }
     }
 
     /// How far the list can be scrolled before it runs out.
@@ -189,6 +214,15 @@ impl Sidebar {
             within.height,
             palette.surface,
         );
+        // The rule between the sidebar and the conversation, which is what the
+        // app draws and what says they are two surfaces rather than one.
+        scene.fill(
+            within.right() - 1.0,
+            within.y,
+            1.0,
+            within.height,
+            palette.rule,
+        );
         for (index, entry) in self.entries.iter().enumerate() {
             let name = Self::name_of(entry, index);
             let Some(row) = placed.iter().find(|item| item.name == name) else {
@@ -244,7 +278,7 @@ impl Sidebar {
                 // "Favorites" and a "Channels", and unqualified they read as
                 // duplicates -- but qualifying each one says the team four
                 // times over.
-                Entry::Team { label } => {
+                Entry::Team { label, .. } => {
                     let glyphs = painter.run(
                         fonts,
                         label,
@@ -259,7 +293,7 @@ impl Sidebar {
                     );
                     scene.glyphs(glyphs, palette.ink, palette.faint);
                 }
-                Entry::Heading { label } => {
+                Entry::Heading { label, .. } => {
                     let glyphs = painter.run(
                         fonts,
                         &small_caps(label),
@@ -343,11 +377,15 @@ impl Sidebar {
                     let count = if *mentions > 0 { *mentions } else { *unread };
                     if count > 0 && !*muted {
                         // Behind the number, so a long name is cut by the
-                        // count rather than running under it.
+                        // count rather than running under it. All the way to
+                        // the panel's edge rather than just the count's own
+                        // width: the rows are inset by the column's padding
+                        // and the name is clipped by the panel, so a strip of
+                        // it showed through in the gap between the two.
                         scene.fill(
                             row.rect.right() - 30.0,
                             row.rect.y,
-                            30.0,
+                            within.right() - row.rect.right() + 30.0,
                             row.rect.height,
                             if chosen || input.hovered() == Some(name.as_str()) {
                                 palette.ground
@@ -450,6 +488,7 @@ mod tests {
         Sidebar::new(vec![
             Entry::Heading {
                 label: "Channels".into(),
+                directs: false,
             },
             Entry::Channel {
                 id: "one".into(),
@@ -527,6 +566,69 @@ mod tests {
         sidebar.react(&input, &placed, within);
         assert_eq!(sidebar.scroll, 0.0);
         assert_eq!(sidebar.reach(within), 0.0);
+    }
+
+    /// The rail takes the reader to a team, which means scrolling the list to
+    /// where that team starts -- not opening a conversation they did not ask
+    /// for.
+    #[test]
+    fn the_rail_scrolls_the_list_to_a_team() {
+        let mut sidebar = Sidebar::new(vec![
+            Entry::Team {
+                id: "t1".into(),
+                label: "Curiosity".into(),
+            },
+            Entry::Heading {
+                label: "Channels".into(),
+                directs: false,
+            },
+            Entry::Channel {
+                id: "c1".into(),
+                label: "dev".into(),
+                unread: 0,
+                mentions: 0,
+                muted: false,
+                direct: false,
+                private: false,
+                counterpart: None,
+            },
+            Entry::Team {
+                id: "t2".into(),
+                label: "Sloclap".into(),
+            },
+            Entry::Heading {
+                label: "Direct messages".into(),
+                directs: true,
+            },
+        ]);
+        // Short enough that there is somewhere to scroll to.
+        let panel = Rect::new(0.0, 0.0, 260.0, 60.0);
+        // Where a named row ended up, which is the thing being claimed: the
+        // scroll offset on its own is an implementation detail and the panel
+        // has padding of its own above the first row.
+        let top_of = |sidebar: &Sidebar, name: &str| {
+            sidebar
+                .boxes(panel)
+                .into_iter()
+                .find(|placed| placed.name == name)
+                .map(|placed| placed.rect.y)
+        };
+
+        sidebar.scroll_to("t1", panel);
+        assert_eq!(top_of(&sidebar, "sidebar/team/t1"), Some(panel.y));
+
+        sidebar.scroll_to("t2", panel);
+        let second = sidebar.scroll;
+        assert!(second > 0.0, "the second team is below the first");
+
+        // The envelope reaches the one group that belongs to no team.
+        sidebar.scroll_to(crate::rail::DIRECTS, panel);
+        assert!(sidebar.scroll >= second);
+
+        // A team the list does not hold leaves the reader where they were.
+        let before = sidebar.scroll;
+        sidebar.scroll_to("nowhere", panel);
+        assert_eq!(sidebar.scroll, before);
     }
 
     /// Three states need three inks. Muted was drawn in the same colour as
