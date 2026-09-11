@@ -54,6 +54,11 @@ pub struct Theme {
     pub preview_lines: usize,
     /// The reader's own offset, so a timestamp says what their clock says.
     pub utc_offset_minutes: i32,
+    /// Today, in the same days-since-epoch the separators count in.
+    ///
+    /// Only so a date in this year can leave the year off. Zero means nobody
+    /// said, and every date then carries its year -- wordier, but never wrong.
+    pub today: i64,
 }
 
 impl Default for Theme {
@@ -82,6 +87,7 @@ impl Default for Theme {
             quote_bar: 3.0,
             preview_lines: 3,
             utc_offset_minutes: 0,
+            today: 0,
         }
     }
 }
@@ -470,7 +476,7 @@ pub fn lay_out(fonts: &mut Fonts, row: &Row, theme: &Theme) -> RowLayout {
     }
 
     let (nodes, post, header) = match row {
-        Row::DateSeparator { .. } | Row::UnreadDivider => {
+        Row::DateSeparator { epoch_day } => {
             return RowLayout {
                 height: theme.separator_height,
                 blocks: vec![Block {
@@ -479,7 +485,24 @@ pub fn lay_out(fonts: &mut Fonts, row: &Row, theme: &Theme) -> RowLayout {
                     height: theme.separator_height,
                     lines: 1,
                     kind: Kind::Separator,
-                    spans: Vec::new(),
+                    // The words go in the block, so both shells draw the same
+                    // line rather than each deciding what a day is called.
+                    spans: vec![plain(day_name(*epoch_day, theme.today))],
+                    size: theme.body_size,
+                    wrap: theme.text_width(),
+                }],
+            };
+        }
+        Row::UnreadDivider => {
+            return RowLayout {
+                height: theme.separator_height,
+                blocks: vec![Block {
+                    y: 0.0,
+                    x: 0.0,
+                    height: theme.separator_height,
+                    lines: 1,
+                    kind: Kind::Separator,
+                    spans: vec![plain("New messages".to_string())],
                     size: theme.body_size,
                     wrap: theme.text_width(),
                 }],
@@ -848,6 +871,80 @@ pub fn lay_out(fonts: &mut Fonts, row: &Row, theme: &Theme) -> RowLayout {
     }
 }
 
+/// What a date separator says: "Tuesday 4 September", and the year when it is
+/// not the one the reader is in.
+///
+/// The year appears once the date stops being unambiguous. Scrolling back far
+/// enough that "Tuesday 4 September" could be any of several years is exactly
+/// when it matters, and repeating it on every separator would be noise the
+/// rest of the time.
+fn day_name(epoch_day: i64, today: i64) -> String {
+    let (year, month, day) = civil_from_days(epoch_day);
+    // 1970-01-01 was a Thursday, which is where the offset of 4 comes from.
+    let weekday = WEEKDAYS[(epoch_day + 4).rem_euclid(7) as usize];
+    let month = MONTHS[(month - 1) as usize];
+    let same_year = today != 0 && civil_from_days(today).0 == year;
+    if same_year {
+        format!("{weekday} {day} {month}")
+    } else {
+        format!("{weekday} {day} {month} {year}")
+    }
+}
+
+const WEEKDAYS: [&str; 7] = [
+    "Sunday",
+    "Monday",
+    "Tuesday",
+    "Wednesday",
+    "Thursday",
+    "Friday",
+    "Saturday",
+];
+
+const MONTHS: [&str; 12] = [
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
+];
+
+/// Days since 1970-01-01 to a proleptic Gregorian date.
+///
+/// Hinnant's algorithm, which shifts the epoch to 0000-03-01 so leap days fall
+/// at the end of a year and the month lengths become a single linear formula.
+/// Written out rather than pulled in: this is the only date arithmetic in the
+/// whole window, and a calendar crate would be a dependency for one function.
+fn civil_from_days(days: i64) -> (i64, i64, i64) {
+    let shifted = days + 719_468;
+    let era = if shifted >= 0 {
+        shifted
+    } else {
+        shifted - 146_096
+    } / 146_097;
+    let day_of_era = shifted - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let shifted_month = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * shifted_month + 2) / 5 + 1;
+    // March is month 0 in the shifted calendar, so the last two wrap round.
+    let month = if shifted_month < 10 {
+        shifted_month + 3
+    } else {
+        shifted_month - 9
+    };
+    (if month <= 2 { year + 1 } else { year }, month, day)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -886,6 +983,35 @@ mod tests {
                 value: value.into(),
             }],
         }
+    }
+
+    /// The dates a calendar has to agree with, including the awkward ones.
+    #[test]
+    fn a_day_number_names_the_right_date() {
+        // 1970-01-01 was a Thursday.
+        assert_eq!(civil_from_days(0), (1970, 1, 1));
+        assert_eq!(day_name(0, 0), "Thursday 1 January 1970");
+        // A leap day, and the day after it.
+        assert_eq!(civil_from_days(19_782), (2024, 2, 29));
+        assert_eq!(civil_from_days(19_783), (2024, 3, 1));
+        // 2000 is a leap year and 2100 is not, which is the whole of the
+        // century rule: February runs straight into March there.
+        assert_eq!(civil_from_days(11_016), (2000, 2, 29));
+        assert_eq!(civil_from_days(47_540), (2100, 2, 28));
+        assert_eq!(civil_from_days(47_541), (2100, 3, 1));
+        // Before the epoch, which a page of old history reaches.
+        assert_eq!(civil_from_days(-1), (1969, 12, 31));
+    }
+
+    /// The year appears once the date stops being unambiguous, and not before.
+    #[test]
+    fn the_year_is_left_off_only_inside_this_one() {
+        let in_2024 = 19_782;
+        let also_2024 = 19_800;
+        assert_eq!(day_name(in_2024, also_2024), "Thursday 29 February");
+        // A different year, so it has to say which.
+        assert!(day_name(in_2024, 0).ends_with("2024"));
+        assert!(day_name(in_2024, 11_016).ends_with("2024"));
     }
 
     /// What a run of words points at, and what it refuses to.

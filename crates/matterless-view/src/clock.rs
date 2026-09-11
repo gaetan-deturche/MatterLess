@@ -42,9 +42,29 @@ fn offset() -> Option<i32> {
     None
 }
 
+/// Today, in days since the epoch, in the reader's own time.
+///
+/// The same count a date separator carries, so the two can be compared to
+/// decide whether a date still needs its year.
+pub fn today() -> i64 {
+    let since = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| since.as_secs() as i64)
+        .unwrap_or(0);
+    (since + i64::from(utc_offset_minutes()) * 60).div_euclid(86_400)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Today has to be a day this program could be running on, or every date
+    /// separator is wrong by the same amount and nothing says so.
+    #[test]
+    fn today_is_a_day_in_this_century() {
+        // 2020-01-01 and 2100-01-01, in days since the epoch.
+        assert!((18_262..47_482).contains(&today()));
+    }
 
     /// Whatever the machine says, it has to be a real offset: the extremes in
     /// use are UTC-12 and UTC+14, and a nonsense value here would silently move

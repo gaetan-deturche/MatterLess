@@ -83,6 +83,8 @@ impl Stream {
     pub fn lay_out(&mut self, fonts: &mut Fonts, width: f32) {
         self.theme = Theme {
             width,
+            // So a date in this year can leave the year off.
+            today: crate::clock::today(),
             // The clock on every row, in the reader's own time rather than
             // UTC. Read here rather than held, so a machine that crosses a
             // daylight-saving boundary while running is right afterwards.

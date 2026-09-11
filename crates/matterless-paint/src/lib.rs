@@ -332,13 +332,59 @@ impl Painter {
             let x = theme.gutter + block.x;
             let y = top + block.y;
             match block.kind {
-                Kind::Separator => pieces.push(Piece::Fill {
-                    x: 0.0,
-                    y: y + block.height / 2.0,
-                    width: theme.width,
-                    height: 1.0,
-                    colour: [palette.faint[0], palette.faint[1], palette.faint[2], 255],
-                }),
+                Kind::Separator => {
+                    // The words first, so their width decides where the two
+                    // rules stop: a rule drawn under the label would strike
+                    // through it.
+                    let (glyphs, _, _) = self.glyphs_of(fonts, block, 0.0, y, theme);
+                    let middle = y + block.height / 2.0;
+                    let said = glyphs
+                        .iter()
+                        .map(|glyph| glyph.x)
+                        .max()
+                        .map(|right| right as f32 + 8.0)
+                        .unwrap_or(0.0);
+                    let rule = palette.faint_fill();
+                    let gap = 14.0;
+                    if said > 0.0 {
+                        // Centred, with a rule either side of it.
+                        let left = ((theme.width - said) / 2.0).max(0.0);
+                        pieces.push(Piece::Fill {
+                            x: 0.0,
+                            y: middle,
+                            width: (left - gap).max(0.0),
+                            height: 1.0,
+                            colour: rule,
+                        });
+                        pieces.push(Piece::Fill {
+                            x: left + said + gap,
+                            y: middle,
+                            width: (theme.width - left - said - gap).max(0.0),
+                            height: 1.0,
+                            colour: rule,
+                        });
+                        let (glyphs, _, _) = self.glyphs_of(
+                            fonts,
+                            block,
+                            left,
+                            y + (block.height - theme.line_height) / 2.0,
+                            theme,
+                        );
+                        pieces.push(Piece::Text {
+                            glyphs,
+                            ink: palette.faint,
+                            faint: palette.faint,
+                        });
+                    } else {
+                        pieces.push(Piece::Fill {
+                            x: 0.0,
+                            y: middle,
+                            width: theme.width,
+                            height: 1.0,
+                            colour: rule,
+                        });
+                    }
+                }
                 Kind::Header => {
                     // The avatar's square, until faces are drawn.
                     pieces.push(Piece::Fill {
