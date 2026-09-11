@@ -63,6 +63,9 @@ pub struct Theme {
     pub indent: f32,
     /// The bar beside a preview card, and the gap between it and the text.
     pub quote_bar: f32,
+    /// `max-width: 520px` on a preview, and the `8px 10px` inside it.
+    pub preview_width: f32,
+    pub card_padding: f32,
     /// What a webhook's attachment is set at: `font-size: 13.5px`.
     pub attached_size: f32,
     /// How many lines of a description or a quoted message are kept. Past this
@@ -108,6 +111,8 @@ impl Default for Theme {
             footer_height: 26.0,
             indent: 22.0,
             quote_bar: 3.0,
+            preview_width: 520.0,
+            card_padding: 10.0,
             attached_size: 13.5,
             preview_lines: 3,
             utc_offset_minutes: 0,
@@ -808,7 +813,12 @@ pub fn lay_out(fonts: &mut Fonts, row: &Row, theme: &Theme) -> RowLayout {
     // between them, so the bar drawn beside the run reads as a single card.
     for preview in post.map(|post| post.previews.as_slice()).unwrap_or(&[]) {
         let x = theme.quote_bar + theme.indent / 2.0;
-        let wrap = (theme.text_width() - x).max(40.0);
+        // `max-width: 520px` on the card, less the padding inside it: a
+        // preview that ran the full width of the column read as part of the
+        // message rather than as something attached to it.
+        let wrap = (theme.text_width() - x)
+            .min(theme.preview_width - theme.card_padding * 2.0)
+            .max(40.0);
         let mut push = |text: &str, bold: bool, faint: bool, cap: usize, fonts: &mut Fonts| {
             if text.is_empty() {
                 return;
