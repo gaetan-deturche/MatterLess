@@ -468,8 +468,10 @@ impl Painter {
                         y,
                         width: theme.text_width(),
                         height: block.height,
-                        colour: palette.surface,
-                        radius: 0.0,
+                        // Raised, not surface: a code block sits on top of the
+                        // panel it is in, as the stylesheet has it.
+                        colour: palette.raised,
+                        radius: CODE,
                     });
                     pieces.push(Piece::Text {
                         glyphs: self.glyphs_of(fonts, block, x + 8.0, y + 8.0, theme).0,
@@ -779,6 +781,9 @@ pub struct PressBox {
 
 /// The press boxes one block produced, in the order they were shaped.
 type Presses = Vec<PressBox>;
+
+/// What the stylesheet cuts a code block's corners by.
+const CODE: f32 = 6.0;
 
 /// What a glyph remembers about the span it came from.
 ///

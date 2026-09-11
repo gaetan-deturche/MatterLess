@@ -527,7 +527,9 @@ impl Stream {
                 width: block.wrap,
                 height: block.height,
                 key: picture_key(file),
-                radius: 0.0,
+                // An attachment is a card like any other, and the stylesheet
+                // rounds it to match the one a file without a preview gets.
+                radius: CARD,
             })
             .collect()
     }
@@ -570,16 +572,19 @@ impl Stream {
         for (block, reaction) in self.pills(index) {
             let x = left + self.theme.gutter + block.x;
             let y = top + block.y;
-            scene.fill(
+            // The stylesheet's own shape: a 10px capsule on the raised
+            // surface, signalled when it is the reader's own.
+            scene.rounded(
                 x,
                 y,
                 block.wrap,
                 block.height - 3.0,
                 if reaction.mine {
-                    [palette.ink[0], palette.ink[1], palette.ink[2], 40]
+                    palette.signal_soft
                 } else {
-                    palette.surface
+                    palette.raised
                 },
+                PILL,
             );
             let mut text_at = x + self.theme.pill_padding;
             // A custom emoji has no character to shape, so the square the
@@ -609,7 +614,15 @@ impl Stream {
                 y + 3.0,
                 Run::label(f32::MAX),
             );
-            scene.glyphs(label, palette.ink, palette.faint);
+            scene.glyphs(
+                label,
+                if reaction.mine {
+                    palette.signal
+                } else {
+                    palette.soft
+                },
+                palette.faint,
+            );
         }
     }
 
@@ -750,7 +763,7 @@ impl Stream {
             let x = left + self.theme.gutter;
             let y = top + block.y;
             let width = (self.theme.text_width() * 0.6).min(320.0);
-            scene.fill(x, y, width, block.height, palette.surface);
+            scene.rounded(x, y, width, block.height, palette.raised, CARD);
             let name = painter.run(
                 fonts,
                 &file.name,
@@ -826,7 +839,22 @@ impl Stream {
                         press,
                     } = piece
                     {
-                        presses.push((press.clone(), Rect::new(*x, *y, *width, *height)));
+                        let box_of = Rect::new(*x, *y, *width, *height);
+                        // A mention and a channel link sit on a signalled
+                        // ground, as they do in the stylesheet. Drawn before
+                        // the words rather than after, or the background would
+                        // cover what it is meant to be behind.
+                        if !matches!(press, matterless_layout::row::Press::Link(_)) {
+                            scene.rounded(
+                                box_of.x - 2.0,
+                                box_of.y + 1.0,
+                                box_of.width + 4.0,
+                                box_of.height - 2.0,
+                                palette.signal_soft,
+                                MENTION,
+                            );
+                        }
+                        presses.push((press.clone(), box_of));
                     }
                 }
                 scene.extend(pieces);
@@ -834,13 +862,19 @@ impl Stream {
                 // colour a link with and text that is pressable has to say so.
                 // Drawn from the boxes the shaping just reported, so it sits
                 // under exactly the words it belongs to.
-                for (_, rect) in presses.iter().skip(marked) {
+                // Only a link is underlined. A mention and a channel link say
+                // what they are with their own ground, and a rule under them
+                // as well would be saying it twice.
+                for (press, rect) in presses.iter().skip(marked) {
+                    if !matches!(press, matterless_layout::row::Press::Link(_)) {
+                        continue;
+                    }
                     scene.fill(
                         rect.x,
                         rect.bottom() - 2.0,
                         rect.width,
                         1.0,
-                        palette.faint_fill(),
+                        [palette.signal[0], palette.signal[1], palette.signal[2], 255],
                     );
                 }
                 marked = presses.len();
@@ -898,6 +932,12 @@ impl Stream {
 
 /// The size a face is drawn at, and the room the gutter already leaves for it.
 pub const AVATAR: f32 = 28.0;
+
+/// The corners the stylesheet cuts: a capsule on a reaction, a softer one on
+/// a card or a code block.
+const PILL: f32 = 10.0;
+const CARD: f32 = 6.0;
+const MENTION: f32 = 3.0;
 
 /// A face on a thread footer, and how many of them are shown.
 const FACE: f32 = 18.0;

@@ -23,6 +23,8 @@ const HITS: u32 = 40;
 const ROW: f32 = 46.0;
 const PADDING: f32 = 10.0;
 const WIDTH: f32 = 620.0;
+/// What the stylesheet cuts a floating panel's corners by.
+const PANEL: f32 = 8.0;
 
 /// One message that matched.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -178,7 +180,14 @@ impl Search {
             fonts,
             palette,
         } = into;
-        scene.fill(panel.x, panel.y, panel.width, panel.height, palette.surface);
+        scene.rounded(
+            panel.x,
+            panel.y,
+            panel.width,
+            panel.height,
+            palette.surface,
+            PANEL,
+        );
         for (at, hit) in self.found.iter().enumerate() {
             let y = panel.y + PADDING + self.query.height() + at as f32 * ROW;
             // Only what fits: the panel is capped so a thousand hits do not

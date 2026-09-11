@@ -23,6 +23,8 @@ const COLUMNS: usize = 8;
 const ROWS: usize = 4;
 const CELL: f32 = 34.0;
 const PADDING: f32 = 8.0;
+/// What the stylesheet cuts a floating panel's corners by.
+const PANEL: f32 = 8.0;
 
 /// One offered emoji.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -271,7 +273,14 @@ impl Picker {
             fonts,
             palette,
         } = into;
-        scene.fill(panel.x, panel.y, panel.width, panel.height, palette.surface);
+        scene.rounded(
+            panel.x,
+            panel.y,
+            panel.width,
+            panel.height,
+            palette.surface,
+            PANEL,
+        );
         for (at, rect) in cells {
             let Some(choice) = self.found.get(at) else {
                 continue;

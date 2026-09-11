@@ -45,6 +45,8 @@ const MARGIN: f32 = 12.0;
 /// lines is a long message; past that the composer would be eating the
 /// conversation it is a reply to.
 const MAX_LINES: usize = 8;
+/// What the stylesheet cuts the box's corners by.
+const BOX: f32 = 8.0;
 
 impl Default for Composer {
     fn default() -> Self {
@@ -315,23 +317,26 @@ impl Composer {
         let inner = outer.inset(PADDING);
 
         scene.fill(strip.x, strip.y, strip.width, strip.height, palette.ground);
-        scene.fill(outer.x, outer.y, outer.width, outer.height, palette.surface);
-        // A border rather than a shadow: one rectangle behind another is the
-        // only outline this renderer can draw, and a focused box has to be
+        // A border rather than a shadow: one rectangle behind another, which is
+        // the only outline this renderer draws -- and a focused box has to be
         // visibly different from an unfocused one.
+        //
+        // Behind rather than four bars along the edges: a bar has square ends,
+        // so four of them around a rounded box leave the corners open.
         let edge: [u8; 4] = if focused {
-            [palette.ink[0], palette.ink[1], palette.ink[2], 120]
+            [palette.signal[0], palette.signal[1], palette.signal[2], 200]
         } else {
-            [palette.faint[0], palette.faint[1], palette.faint[2], 60]
+            palette.rule
         };
-        for (x, y, width, height) in [
-            (outer.x, outer.y, outer.width, 1.0),
-            (outer.x, outer.bottom() - 1.0, outer.width, 1.0),
-            (outer.x, outer.y, 1.0, outer.height),
-            (outer.right() - 1.0, outer.y, 1.0, outer.height),
-        ] {
-            scene.fill(x, y, width, height, edge);
-        }
+        scene.rounded(outer.x, outer.y, outer.width, outer.height, edge, BOX);
+        scene.rounded(
+            outer.x + 1.0,
+            outer.y + 1.0,
+            outer.width - 2.0,
+            outer.height - 2.0,
+            palette.surface,
+            BOX - 1.0,
+        );
 
         if self.is_empty() {
             let glyphs = painter.run(
