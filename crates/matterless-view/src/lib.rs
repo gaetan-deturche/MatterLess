@@ -23,6 +23,7 @@ pub mod live;
 pub mod open;
 pub mod picker;
 pub mod profile;
+pub mod scrollbar;
 pub mod search;
 pub mod sidebar;
 pub mod sidebar_feed;
