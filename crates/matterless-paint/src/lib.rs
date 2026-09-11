@@ -418,11 +418,13 @@ impl Painter {
                         faint: palette.faint,
                     });
                 }
-                // Drawn by whoever owns the row rather than here: a pill is a
-                // box with a picture and a count in it, not a run of text, and
-                // only the caller knows which emoji is which.
-                Kind::Reactions => {}
-                Kind::Attachment | Kind::Footer => {
+                // Drawn by whoever owns the row rather than here. A pill is a
+                // box with a picture and a count in it and only the caller
+                // knows which emoji is which; a thread footer is faces and a
+                // count and only the caller has the faces. Neither is a run of
+                // text, which is all this can draw.
+                Kind::Reactions | Kind::Footer => {}
+                Kind::Attachment => {
                     if block.height >= 1.0 {
                         pieces.push(Piece::Fill {
                             x,

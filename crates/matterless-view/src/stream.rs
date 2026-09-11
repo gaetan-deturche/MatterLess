@@ -343,7 +343,13 @@ impl Stream {
         {
             return Some(Chose::Retry(post.post_id.clone()));
         }
-        self.root_of(index).map(Chose::Thread)
+        // Only the footer opens a thread. A message is not a button: the whole
+        // row being one swallowed every click on a mention or a link inside
+        // it, and gave no hint that pressing a sentence would do anything.
+        match self.rows.get(index) {
+            Some(Row::ThreadFooter { root_id, .. }) => Some(Chose::Thread(root_id.clone())),
+            _ => None,
+        }
     }
 
     /// The actions offered on a row, and where each button sits.
@@ -446,6 +452,17 @@ impl Stream {
                         AVATAR as u32,
                         AVATAR as u32,
                     ));
+                }
+                // The faces on a thread footer, which are smaller than a
+                // message's and so are a different picture in the atlas.
+                if let Some(Row::ThreadFooter { participants, .. }) = self.rows.get(index) {
+                    for face in participants.iter().take(FACES) {
+                        wanted.push((
+                            avatar_key(&face.user_id, face.avatar_at),
+                            FACE as u32,
+                            FACE as u32,
+                        ));
+                    }
                 }
                 // Attachments hang off a continuation as readily as off a post.
                 if let Some(Row::Post { post } | Row::Continuation { post }) = self.rows.get(index)
@@ -629,6 +646,68 @@ impl Stream {
     /// A name and a size on a panel, which is all a message list can honestly
     /// say about a document -- and considerably more than the blank space the
     /// reserved height would otherwise be.
+    /// The line under a message that has replies: who is in it, and how many.
+    ///
+    /// The only way to open a thread. Faces rather than names because three
+    /// names is a sentence and three faces is a glance, and the count is what
+    /// says whether the thread is worth opening at all.
+    fn footer(&self, into: &mut Canvas<'_>, index: usize, top: f32, left: f32, hot: bool) {
+        let Some(Row::ThreadFooter {
+            reply_count,
+            participants,
+            unread_replies,
+            ..
+        }) = self.rows.get(index)
+        else {
+            return;
+        };
+        let Canvas {
+            scene,
+            painter,
+            fonts,
+            palette,
+        } = into;
+        let y = top + (self.theme.footer_height - FACE) / 2.0;
+        let mut x = left + self.theme.gutter;
+        // The first three, which is what the app shows: past that the faces
+        // stop identifying anybody and become a texture.
+        for face in participants.iter().take(FACES) {
+            scene.extend([matterless_paint::Piece::Image {
+                x,
+                y,
+                width: FACE,
+                height: FACE,
+                key: avatar_key(&face.user_id, face.avatar_at),
+            }]);
+            x += FACE + 3.0;
+        }
+        let plural = if *reply_count == 1 {
+            "reply"
+        } else {
+            "replies"
+        };
+        let said = if *unread_replies > 0 {
+            format!("{reply_count} {plural}, {unread_replies} new")
+        } else {
+            format!("{reply_count} {plural}")
+        };
+        let glyphs = painter.run(
+            fonts,
+            &said,
+            x + 5.0,
+            top + (self.theme.footer_height - self.theme.line_height) / 2.0,
+            Run::label(f32::MAX),
+        );
+        // Unread replies are the reason to open it, so they read at full
+        // strength while a thread with nothing new recedes.
+        let ink = if *unread_replies > 0 || hot {
+            palette.ink
+        } else {
+            palette.faint
+        };
+        scene.glyphs(glyphs, ink, palette.faint);
+    }
+
     fn cards(&self, into: &mut Canvas<'_>, index: usize, top: f32, left: f32) {
         let Some(Row::Post { post } | Row::Continuation { post }) = self.rows.get(index) else {
             return;
@@ -776,6 +855,7 @@ impl Stream {
                     palette,
                 };
                 self.cards(&mut canvas, index, top, within.x);
+                self.footer(&mut canvas, index, top, within.x, hovered == Some(index));
                 self.quote_bars(&mut canvas, index, top, within.x);
             }
             top = bottom;
@@ -786,6 +866,10 @@ impl Stream {
 
 /// The size a face is drawn at, and the room the gutter already leaves for it.
 pub const AVATAR: f32 = 28.0;
+
+/// A face on a thread footer, and how many of them are shown.
+const FACE: f32 = 18.0;
+const FACES: usize = 3;
 
 /// What a user's picture is called, versioned so a new picture is a new name.
 ///
