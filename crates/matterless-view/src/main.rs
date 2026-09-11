@@ -329,7 +329,8 @@ impl App {
             composer: Composer::new(composer::NAME),
             thread_composer: {
                 let mut reply = Composer::new(THREAD_COMPOSER);
-                reply.placeholder = "Reply".to_string();
+                reply.placeholder =
+                    "Reply... (Enter to send, Shift+Enter for a new line)".to_string();
                 reply
             },
             clipboard: String::new(),
@@ -1007,6 +1008,34 @@ impl App {
         header::offered(direct)
     }
 
+    /// Does what a button inside a composer says.
+    ///
+    /// Attach asks the platform for a file, which this window cannot do yet --
+    /// so it says what it would need rather than doing nothing and leaving the
+    /// reader to wonder whether the press registered.
+    fn pressed_in_composer(&mut self, button: composer::Button, root_id: &str) {
+        match button {
+            composer::Button::Send => {
+                let box_of = if root_id.is_empty() {
+                    &mut self.composer
+                } else {
+                    &mut self.thread_composer
+                };
+                let text = box_of.text().trim().to_string();
+                if text.is_empty() {
+                    return;
+                }
+                box_of.clear(&mut self.fonts);
+                if let Some(channel) = self.sidebar.selected.clone() {
+                    self.post_message(&channel, root_id, text);
+                }
+            }
+            composer::Button::Attach => {
+                println!("drop a file on the window to send it");
+            }
+        }
+    }
+
     /// The reader's own name, as the store knows it.
     fn my_name(&self) -> String {
         self.store
@@ -1571,6 +1600,10 @@ impl App {
             boxes.extend(thread.boxes(rect, thread.hovered(&self.input)));
         }
         boxes.extend(header::boxes(self.column_rect(), &self.header_offers()));
+        boxes.extend(self.composer.boxes_in(header::below(self.channel_rect())));
+        if let Some(body) = self.thread_body() {
+            boxes.extend(self.thread_composer.boxes_in(body));
+        }
         boxes.extend(self.picker.boxes(self.picked_near, self.stream_rect()));
         boxes.extend(self.listing.boxes(self.stream_rect()));
         boxes.extend(self.profile.boxes(self.stream_rect()));
@@ -1908,6 +1941,19 @@ impl App {
         } else {
             None
         };
+
+        // The two buttons in each box. Send does what return does, and attach
+        // does what a drop does -- both exist for a reader who has not been
+        // told about either.
+        if let Some(button) = self.composer.pressed(&self.input) {
+            self.pressed_in_composer(button, "");
+        }
+        if self.thread_body().is_some()
+            && let Some(button) = self.thread_composer.pressed(&self.input)
+        {
+            let root = self.open_root().unwrap_or_default();
+            self.pressed_in_composer(button, &root);
+        }
 
         // A keystroke in either box is this reader typing, which the other
         // clients want to know. Which box says whether it is the channel or

@@ -62,6 +62,9 @@ pub struct Sidebar {
     pub selected: Option<String>,
     /// How far down the list has been scrolled, in pixels.
     pub scroll: f32,
+    /// Its own bar. A hundred and fourteen channels is a scroll, and a list
+    /// that scrolls with nothing to say how far is a list you get lost in.
+    pub bar: crate::scrollbar::Scrollbar,
 }
 
 /// A row's height, and a heading's. Fixed, because a channel name is one line
@@ -80,6 +83,7 @@ impl Sidebar {
             entries,
             selected: None,
             scroll: 0.0,
+            bar: crate::scrollbar::Scrollbar::default(),
         }
     }
 
@@ -117,6 +121,7 @@ impl Sidebar {
             within.height + self.scroll,
         );
         let mut placed = matterless_ui::solve::solve(&column, scrolled);
+        placed.extend(self.bar.boxes("sidebar", within, self.reach(within)));
         // The panel itself keeps its real rectangle: it is what the wheel is
         // tested against, and a scrolled one would stop matching the pointer.
         if let Some(panel) = placed.first_mut() {
@@ -135,6 +140,14 @@ impl Sidebar {
     ///
     /// Answers the channel the reader chose, if they chose one.
     pub fn react(&mut self, input: &Input, placed: &[Placed], within: Rect) -> Option<String> {
+        // The bar first: while it is held nothing else may write the scroll.
+        if let Some(scroll) =
+            self.bar
+                .react("sidebar", input, within, self.scroll, self.reach(within))
+        {
+            self.scroll = scroll.clamp(0.0, self.reach(within));
+            return None;
+        }
         if let Some((_, y)) = input.wheel_over(placed, |name| name == "sidebar") {
             self.scroll = (self.scroll - y).clamp(0.0, self.reach(within));
         }
@@ -354,6 +367,14 @@ impl Sidebar {
                 }
             }
         }
+        let mut canvas = Canvas {
+            scene,
+            painter,
+            fonts,
+            palette,
+        };
+        self.bar
+            .draw(&mut canvas, within, self.scroll, self.reach(within));
     }
 }
 
