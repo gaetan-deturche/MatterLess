@@ -577,6 +577,14 @@ impl App {
     fn signed_in(&mut self, id: &str) {
         self.me = id.to_string();
         self.rebuild_sidebar();
+        // The counts were read from a store that may be a whole session old,
+        // and nothing about them follows from the posts held here: they are
+        // the server's arithmetic. Asked for before the channel is opened, so
+        // the answer lands on a sidebar that is already drawn.
+        if let Some(link) = self.link.as_ref() {
+            link.send(matterless_view::live::Ask::Membership);
+        }
+
         // Opened properly now that there is a reader and a connection. The
         // window draws a channel before either exists, so the one on screen at
         // startup had never been through `open_channel` -- and every single
@@ -647,6 +655,7 @@ impl App {
                     self.listing.fill(found);
                 }
             }
+            Update::Membership => self.rebuild_sidebar(),
             Update::Statuses(found) => {
                 for (user_id, status) in found {
                     self.presence.insert(user_id, status);

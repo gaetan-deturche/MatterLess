@@ -50,6 +50,8 @@ pub enum Update {
     Older { channel_id: String, more: bool },
     /// Who is around, by user id.
     Statuses(Vec<(String, String)>),
+    /// The sidebar's channels and counts have been refreshed in the store.
+    Membership,
     /// A titled list of messages, for the panel that asked for it.
     Listed {
         title: String,
@@ -91,6 +93,14 @@ pub enum Ask {
         emoji: String,
         on: bool,
     },
+    /// Every channel and membership, from the server into the store.
+    ///
+    /// The unread counts are arithmetic on two numbers the server keeps -- a
+    /// channel's total and this reader's seen count -- and neither has
+    /// anything to do with which posts are held locally. A cached sidebar can
+    /// be a whole session old, so those numbers have to be reconciled or the
+    /// badges describe a conversation nobody is having any more.
+    Membership,
     /// The messages this reader has saved, across every conversation.
     Saved,
     /// The messages pinned in one channel, for everyone.
@@ -372,6 +382,13 @@ async fn run(
                             Err(error) => eprintln!("{} on {post_id}: {error}", action.slug()),
                         }
                     }
+                    Ask::Membership => match membership(&rest, engine.store()).await {
+                        Ok(counted) => {
+                            println!("{counted} channels and their counts refreshed");
+                            wake.wake(Update::Membership);
+                        }
+                        Err(error) => eprintln!("refreshing the sidebar: {error}"),
+                    },
                     Ask::Saved => {
                         // From the server rather than the store: a message
                         // saved from another client was never seen here, and a
@@ -1128,4 +1145,36 @@ fn listed(title: &str, store: &Store, list: PostList, me_id: &str) -> Update {
         title: title.to_string(),
         found: crate::listing::found_for(store, posts, me_id),
     }
+}
+
+/// Pulls every channel and membership this reader has, into the store.
+///
+/// Teams first, because a channel is asked for per team and a direct message
+/// comes back under every one of them -- so they are deduplicated by id or the
+/// same conversation is stored several times over.
+async fn membership(
+    rest: &matterless_core::rest::RestClient,
+    store: &Store,
+) -> matterless_core::Result<usize> {
+    let teams = rest.my_teams().await?;
+    let mut channels = Vec::new();
+    let mut members = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for team in &teams {
+        for channel in rest.my_channels(&team.id).await? {
+            if channel.delete_at == 0 && seen.insert(channel.id.clone()) {
+                channels.push(channel);
+            }
+        }
+        members.extend(rest.my_channel_members(&team.id).await?);
+    }
+    let counted = channels.len();
+    if let Err(error) = store
+        .upsert_teams(&teams)
+        .and_then(|()| store.upsert_channels(&channels))
+        .and_then(|()| store.upsert_channel_members(&members))
+    {
+        eprintln!("storing the sidebar: {error}");
+    }
+    Ok(counted)
 }
