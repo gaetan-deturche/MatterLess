@@ -81,7 +81,7 @@ impl Taskbar {
 pub type RawWindow = isize;
 
 #[cfg(windows)]
-mod platform {
+pub(crate) mod platform {
     use super::RawWindow;
     use crate::badge::Overlay;
     use windows::Win32::Foundation::HWND;
@@ -129,7 +129,7 @@ mod platform {
             return;
         };
         let hwnd = HWND(window as *mut _);
-        let icon = overlay.and_then(icon_from);
+        let icon = overlay.and_then(|overlay| icon_from(overlay.size, &overlay.pixels));
         let told = HSTRING::from(description);
         unsafe {
             // A null icon is how the overlay is taken off again, which is why
@@ -148,8 +148,10 @@ mod platform {
     /// nowhere to keep an alpha channel, and an icon without one has square
     /// corners over whatever the taskbar is painted with. The colour has to be
     /// premultiplied and in BGRA order, which is what the loop does.
-    fn icon_from(overlay: &Overlay) -> Option<HICON> {
-        let side = overlay.size as i32;
+    ///
+    /// Shared with the tray, which has the same job and a different picture.
+    pub(crate) fn icon_from(size: u32, pixels: &[u8]) -> Option<HICON> {
+        let side = size as i32;
         let header = BITMAPINFO {
             bmiHeader: BITMAPINFOHEADER {
                 biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
@@ -178,8 +180,8 @@ mod platform {
                 let _ = DeleteObject(colour.into());
                 return None;
             }
-            let into = std::slice::from_raw_parts_mut(bits as *mut u8, overlay.pixels.len());
-            for (out, pixel) in into.chunks_exact_mut(4).zip(overlay.pixels.chunks_exact(4)) {
+            let into = std::slice::from_raw_parts_mut(bits as *mut u8, pixels.len());
+            for (out, pixel) in into.chunks_exact_mut(4).zip(pixels.chunks_exact(4)) {
                 let alpha = u32::from(pixel[3]);
                 let premultiplied = |channel: u8| ((u32::from(channel) * alpha) / 255) as u8;
                 out[0] = premultiplied(pixel[2]);

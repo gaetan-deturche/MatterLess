@@ -61,4 +61,9 @@ windows = { version = "0.61.3", features = [
     "Win32_Graphics_Gdi",
     # ITaskbarList3 is a COM object, so it has to be created like one.
     "Win32_System_Com",
+    # The tray's own message-only window has to name the module it belongs to.
+    "Win32_System_LibraryLoader",
+    # Starting with Windows is a value under `Run`, which is where the app's
+    # autostart plugin put it -- so a reader who had it on still has it on.
+    "Win32_System_Registry",
 ] }
