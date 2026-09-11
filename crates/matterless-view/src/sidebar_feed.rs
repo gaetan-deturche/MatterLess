@@ -13,7 +13,17 @@ use std::collections::HashMap;
 /// What this cannot do is ask the server about somebody it has never met: an
 /// unresolved direct-message counterpart falls back to their id rather than the
 /// `<id>__<id>` slug, and the next sync fills the name in.
-pub fn groups(store: &Store, me_id: &str) -> Vec<Group> {
+pub fn groups(
+    store: &Store,
+    me_id: &str,
+    threads: matterless_core::model::ThreadMode,
+) -> Vec<Group> {
+    // Under collapsed threads a reply is not a message in the channel at all:
+    // it belongs to its thread, and the server keeps a second pair of counts
+    // that say so. Counting every message instead put a badge on six channels
+    // the official client showed as read -- five unread in Cutscenes, none of
+    // them a root.
+    let roots_only = threads == matterless_core::model::ThreadMode::Collapsed;
     let channels = store.channels_with_unread(me_id).unwrap_or_default();
 
     // A direct message is labelled by the other person, so those users have to
@@ -46,8 +56,16 @@ pub fn groups(store: &Store, me_id: &str) -> Vec<Group> {
             team_id: channel.team_id,
             channel_type: channel.channel_type,
             last_post_at: channel.last_post_at,
-            unread: unread.messages,
-            mentions: unread.mentions,
+            unread: if roots_only {
+                unread.messages_root
+            } else {
+                unread.messages
+            },
+            mentions: if roots_only {
+                unread.mentions_root
+            } else {
+                unread.mentions
+            },
             muted: unread.muted,
         })
         .collect();

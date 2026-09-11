@@ -50,8 +50,9 @@ pub enum Update {
     Older { channel_id: String, more: bool },
     /// Who is around, by user id.
     Statuses(Vec<(String, String)>),
-    /// The sidebar's channels and counts have been refreshed in the store.
-    Membership,
+    /// The sidebar's channels and counts have been refreshed in the store,
+    /// and here is how this reader reads threads.
+    Membership(matterless_core::model::ThreadMode),
     /// A titled list of messages, for the panel that asked for it.
     Listed {
         title: String,
@@ -382,10 +383,11 @@ async fn run(
                             Err(error) => eprintln!("{} on {post_id}: {error}", action.slug()),
                         }
                     }
-                    Ask::Membership => match membership(&rest, engine.store()).await {
-                        Ok(counted) => {
-                            println!("{counted} channels and their counts refreshed");
-                            wake.wake(Update::Membership);
+                    Ask::Membership => match membership(&rest, engine.store(), &me_id).await {
+                        Ok((counted, mode)) => {
+                            println!("{counted} channels refreshed, threads are {mode:?}");
+                            context.thread_mode = mode;
+                            wake.wake(Update::Membership(mode));
                         }
                         Err(error) => eprintln!("refreshing the sidebar: {error}"),
                     },
@@ -1155,7 +1157,8 @@ fn listed(title: &str, store: &Store, list: PostList, me_id: &str) -> Update {
 async fn membership(
     rest: &matterless_core::rest::RestClient,
     store: &Store,
-) -> matterless_core::Result<usize> {
+    me_id: &str,
+) -> matterless_core::Result<(usize, ThreadMode)> {
     let teams = rest.my_teams().await?;
     let mut channels = Vec::new();
     let mut members = Vec::new();
@@ -1176,5 +1179,14 @@ async fn membership(
     {
         eprintln!("storing the sidebar: {error}");
     }
-    Ok(counted)
+    // Both halves, because neither answers it alone: the server said
+    // `default_off` here while the account said `on`, and the account wins.
+    // With `resolve`, a missing server setting means threads are off entirely
+    // -- so this has to be asked for rather than assumed.
+    let config = rest.client_config().await.unwrap_or_default();
+    let preferences = rest.preferences(me_id).await.unwrap_or_default();
+    Ok((
+        counted,
+        matterless_core::resolve_thread_mode(&config, &preferences),
+    ))
 }
