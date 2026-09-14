@@ -27,6 +27,7 @@ pub mod open;
 pub mod picker;
 pub mod profile;
 pub mod rail;
+pub mod rest;
 pub mod scrollbar;
 pub mod search;
 pub mod sidebar;

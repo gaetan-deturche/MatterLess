@@ -235,6 +235,9 @@ struct App {
     /// conversation, and the divider would be placed below everything and so
     /// never drawn.
     viewed_at: i64,
+    /// How long the divider has left before it goes, once the reader has had
+    /// a chance to look at what it marks.
+    rest: matterless_view::rest::Rest,
     /// Which channel `viewed_at` was read for, so re-opening the one already
     /// open leaves it alone.
     ///
@@ -422,6 +425,7 @@ impl App {
             threads: matterless_core::model::ThreadMode::Collapsed,
             viewed_at: 0,
             viewed_in: String::new(),
+            rest: matterless_view::rest::Rest::default(),
             depth: matterless_view::feed::PAGE,
             loading_older: false,
             more_history: true,
@@ -2577,6 +2581,7 @@ impl App {
                 self.stream.me = self.me.clone();
                 self.stream.custom = matterless_view::feed::custom_emoji(&store, &rows);
                 self.stream.rows = rows;
+                self.watch_divider();
                 self.relayout();
                 if was_at_end {
                     let within = self.stream_rect();
@@ -2600,6 +2605,42 @@ impl App {
         let held = (self.viewed_in == channel).then_some(self.viewed_at);
         self.viewed_in = channel.to_string();
         self.viewed_at = matterless_view::feed::watermark(held, seen);
+        // A watermark that moved back is the reader marking a message unread,
+        // and the divider they asked for is not on a clock.
+        if held.is_some_and(|held| self.viewed_at < held) {
+            self.rest.stop();
+        }
+    }
+
+    /// Starts the clock on a divider that has just been planned.
+    ///
+    /// Asked after every plan rather than only on the way in: a channel is
+    /// replanned while it is open -- a reply arrives, the membership refreshes
+    /// -- and a clock that was only ever started once would be left running
+    /// against a divider that had gone, or never started for one that stayed.
+    fn watch_divider(&mut self) {
+        let shown = self
+            .stream
+            .rows
+            .iter()
+            .any(|row| matches!(row, Row::UnreadDivider));
+        match (shown, self.rest.wakes().is_some()) {
+            (true, false) => self.rest.begin(std::time::Instant::now(), self.focused),
+            (false, _) => self.rest.stop(),
+            (true, true) => {}
+        }
+    }
+
+    /// Takes the divider away, the reader having seen it.
+    ///
+    /// Zero is the planner's word for "no divider", and `watermark` keeps it:
+    /// nothing short of leaving the channel brings it back.
+    fn forget_divider(&mut self) {
+        self.viewed_at = 0;
+        if let Some(channel) = self.sidebar.selected.clone() {
+            self.reread_channel(&channel);
+            self.redraw();
+        }
     }
 
     /// Re-reads the open thread the same way.
@@ -3191,6 +3232,7 @@ impl App {
                 self.stream.me = self.me.clone();
                 self.stream.custom = matterless_view::feed::custom_emoji(&store, &rows);
                 self.stream.rows = rows;
+                self.watch_divider();
                 self.report_blank_pills();
                 self.report_hole(channel, &store);
                 // A thread from the channel just left has nothing to do with
@@ -3732,10 +3774,16 @@ impl ApplicationHandler<Update> for App {
         if self.tooltip.ripened() {
             self.redraw();
         }
-        let next = match (next, self.tooltip.wakes()) {
-            (Some(typing), Some(tip)) => Some(typing.min(tip)),
-            (typing, tip) => typing.or(tip),
-        };
+        // The same trick for the unread divider: it goes with nothing having
+        // happened, so the window has to be woken to draw the frame without
+        // it.
+        if self.rest.ripened(std::time::Instant::now()) {
+            self.forget_divider();
+        }
+        let next = [next, self.tooltip.wakes(), self.rest.wakes()]
+            .into_iter()
+            .flatten()
+            .min();
         events.set_control_flow(match next {
             Some(expires) => ControlFlow::WaitUntil(expires),
             None => ControlFlow::Wait,
@@ -3969,6 +4017,8 @@ impl ApplicationHandler<Update> for App {
             }
             WindowEvent::Focused(focused) => {
                 self.focused = focused;
+                // A channel left open behind an editor is not being read.
+                self.rest.focus(std::time::Instant::now(), focused);
                 if focused {
                     // Looked at, so it has been answered: the flashing stops
                     // even though whatever caused it may still be unread. The
