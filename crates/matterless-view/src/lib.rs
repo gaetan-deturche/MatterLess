@@ -41,6 +41,7 @@ pub mod tooltip;
 pub mod tray;
 pub mod typing;
 pub mod update;
+pub mod viewer;
 pub mod updater_bar;
 
 use atlas::{Atlas, SIDE};
@@ -148,6 +149,10 @@ pub fn vertices_of(
             // Nothing to draw: a press box is where a pointer may land, and
             // its words are already in the text piece beside it.
             Piece::Press { .. } => {}
+            // Drawn, but not from here: it samples a texture of its own rather
+            // than the atlas, so it needs its own bind group and therefore its
+            // own draw. `draw_scene` picks these out.
+            Piece::Shown { .. } => {}
             Piece::Fill {
                 x,
                 y,
@@ -317,6 +322,18 @@ pub struct View {
     capacity: usize,
     pub atlas: Atlas,
     cache: SwashCache,
+    /// What the pipeline binds against, kept so a second bind group can be
+    /// built for the picture being looked at.
+    layout: wgpu::BindGroupLayout,
+    sampler: wgpu::Sampler,
+    smooth: wgpu::Sampler,
+    /// The picture a reader has opened, in a texture of its own.
+    ///
+    /// One at a time, replaced when another is opened and dropped when the
+    /// viewer shuts. Not in the atlas: that sheet is shared by every glyph and
+    /// thumbnail on screen and has no eviction, so one photograph would push
+    /// out the faces around it and never give the room back.
+    shown: Option<wgpu::BindGroup>,
 }
 
 impl View {
@@ -461,7 +478,88 @@ impl View {
             capacity: 4096,
             atlas,
             cache: SwashCache::new(),
+            layout,
+            sampler,
+            smooth,
+            shown: None,
         }
+    }
+
+    /// Puts the picture a reader has opened into a texture of its own.
+    ///
+    /// Replaces whatever was there: only one is ever looked at, so the last
+    /// one's texture is dropped here rather than accumulating. `rgba` is
+    /// `width * height * 4` bytes, already scaled to something the window can
+    /// draw -- the decoder does that, because the window knows how big it is
+    /// and the GPU has a limit this must stay under either way.
+    pub fn show(&mut self, width: u32, height: u32, rgba: &[u8]) {
+        let side = self.device.limits().max_texture_dimension_2d;
+        if width == 0 || height == 0 || width > side || height > side {
+            eprintln!("a {width}x{height} picture is not one this device can hold");
+            self.shown = None;
+            return;
+        }
+        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("shown"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        self.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            rgba,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(width * 4),
+                rows_per_image: Some(height),
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        self.shown = Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("shown"),
+            layout: &self.layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: self.uniform.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::Sampler(&self.smooth),
+                },
+            ],
+        }));
+    }
+
+    /// Lets go of it. The texture is freed with the bind group holding it.
+    pub fn stop_showing(&mut self) {
+        self.shown = None;
     }
 
     /// Draws a whole frame: every panel, each clipped to its own rectangle.
@@ -491,6 +589,11 @@ impl View {
         // One buffer for the frame, with each layer's span remembered.
         let mut quads: Vec<Vertex> = Vec::new();
         let mut spans: Vec<Span> = Vec::new();
+        // And the one picture that samples its own texture, kept apart because
+        // it needs the other bind group. Last in the buffer and last in the
+        // pass: it is an overlay over the whole window, so there is nothing it
+        // should be drawn under.
+        let mut shown: Vec<Span> = Vec::new();
         for layer in &scene.layers {
             let from = quads.len() as u32;
             vertices_of(
@@ -504,6 +607,31 @@ impl View {
             let to = quads.len() as u32;
             if to > from {
                 spans.push((from..to, layer.clip));
+            }
+            for piece in &layer.pieces {
+                let Piece::Shown {
+                    x,
+                    y,
+                    width,
+                    height,
+                } = piece
+                else {
+                    continue;
+                };
+                let from = quads.len() as u32;
+                quad(
+                    &mut quads,
+                    [*x, *y, *x + *width, *y + *height],
+                    [0.0, 0.0, 1.0, 1.0],
+                    // White, so the picture keeps its own colours.
+                    [1.0, 1.0, 1.0, 1.0],
+                    // Filtered: this is a photograph scaled to fit a window,
+                    // and point sampling one drops whole rows of pixels.
+                    1.0,
+                    0.0,
+                    1.0,
+                );
+                shown.push((from..quads.len() as u32, layer.clip));
             }
         }
 
@@ -554,6 +682,26 @@ impl View {
                 for (range, clip) in spans {
                     // Clamped to the surface: a scissor outside it is a
                     // validation error, and a panel can be dragged past the edge.
+                    let x = clip.0.max(0.0).min(size.0 as f32) as u32;
+                    let y = clip.1.max(0.0).min(size.1 as f32) as u32;
+                    let width = (clip.2.min(size.0 as f32 - x as f32)).max(0.0) as u32;
+                    let height = (clip.3.min(size.1 as f32 - y as f32)).max(0.0) as u32;
+                    if width == 0 || height == 0 {
+                        continue;
+                    }
+                    pass.set_scissor_rect(x, y, width, height);
+                    pass.draw(range, 0..1);
+                }
+            }
+            // The opened picture, from its own texture. A second bind group
+            // and so a second draw; nothing else in the frame samples it.
+            if let Some(bindings) = self.shown.as_ref()
+                && !shown.is_empty()
+            {
+                pass.set_pipeline(&self.pipeline);
+                pass.set_bind_group(0, bindings, &[]);
+                pass.set_vertex_buffer(0, self.vertices.slice(..));
+                for (range, clip) in shown {
                     let x = clip.0.max(0.0).min(size.0 as f32) as u32;
                     let y = clip.1.max(0.0).min(size.1 as f32) as u32;
                     let width = (clip.2.min(size.0 as f32 - x as f32)).max(0.0) as u32;
