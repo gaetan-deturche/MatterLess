@@ -2642,12 +2642,22 @@ impl App {
 
     /// Takes the divider away, the reader having seen it.
     ///
+    /// The row is lifted out rather than the channel replanned: it is one line
+    /// of text, and rereading costs the whole conversation its shaping -- two
+    /// and a half seconds in a channel of crash reports, four seconds after
+    /// opening it, which is a worse fault than the one this fixes.
+    ///
     /// Zero is the planner's word for "no divider", and `watermark` keeps it:
     /// nothing short of leaving the channel brings it back.
     fn forget_divider(&mut self) {
         self.viewed_at = 0;
-        if let Some(channel) = self.sidebar.selected.clone() {
-            self.reread_channel(&channel);
+        let at = self
+            .stream
+            .rows
+            .iter()
+            .position(|row| matches!(row, Row::UnreadDivider));
+        if let Some(at) = at {
+            self.stream.forget_row(at);
             self.redraw();
         }
     }
