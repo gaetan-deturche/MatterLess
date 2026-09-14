@@ -633,7 +633,12 @@ impl View {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            // Plain, exactly as the sheets are: these bytes are already sRGB
+            // and the frame is written without a second encoding, so sampling
+            // must not decode. Declaring this one sRGB decoded it on the way
+            // out and the same picture came back paler full size than it was
+            // in the message it was opened from.
+            format: wgpu::TextureFormat::Rgba8Unorm,
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });

@@ -445,6 +445,12 @@ pub struct Run {
     /// Where it wraps. Interface text is usually given more room than it needs
     /// and clipped by its box instead.
     pub wrap: f32,
+    /// The bundled icon family rather than the reader's text font.
+    ///
+    /// Its own flag rather than a family name threaded through every call: the
+    /// only non-text face this draws with is the marks', and naming it in
+    /// twenty places is twenty chances to misspell it.
+    pub icon: bool,
     /// Rasterise at twice the size and draw it down.
     ///
     /// For a mark rather than for words. A pictogram at the size an interface
@@ -466,7 +472,24 @@ impl Run {
             bold: false,
             mono: false,
             wrap,
+            icon: false,
             smooth: false,
+        }
+    }
+
+    /// One of the interface's own marks, from the bundled icon family.
+    ///
+    /// Drawn down from twice its size, because that is what a mark wants and
+    /// asking for both separately would only ever be done wrong once.
+    pub fn mark(size: f32) -> Self {
+        Self {
+            size,
+            line_height: size * 1.4,
+            bold: false,
+            mono: false,
+            wrap: f32::MAX,
+            icon: true,
+            smooth: true,
         }
     }
 
@@ -889,7 +912,9 @@ impl Painter {
         let mut shaped = buffer.borrow_with(fonts.system_mut());
         shaped.set_size(Some(run.wrap), None);
         let mut attrs = Attrs::new();
-        if run.mono {
+        if run.icon {
+            attrs = attrs.family(Family::Name(matterless_layout::marks::FAMILY));
+        } else if run.mono {
             attrs = attrs.family(Family::Monospace);
         }
         if run.bold {

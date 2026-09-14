@@ -9,6 +9,7 @@
 //! been told about is not a feature anybody has.
 
 use crate::sidebar::Canvas;
+use matterless_layout::marks;
 use matterless_paint::Run;
 use matterless_ui::{Placed, Rect};
 
@@ -33,11 +34,9 @@ pub struct Header {
 pub const HEIGHT: f32 = 44.0;
 /// What a button's mark is set at.
 ///
-/// Bigger than the strip's words. These are pictograms with detail inside
-/// them, and the font rasterises one at about two thirds of the size asked
-/// for: at the body's own size a bell is twelve pixels across, which is not
-/// enough for a bell.
-const MARK: f32 = 24.0;
+/// Bigger than the strip's words: these are pictograms on a 24-pixel grid, and
+/// the font draws one at about two thirds of the size asked for.
+const MARK: f32 = 22.0;
 
 /// Where the sigil starts, and how far past it the name does.
 const LEFT: f32 = 14.0;
@@ -87,35 +86,29 @@ impl Act {
     /// can be in has to read differently, or pressing it twice looks like
     /// nothing happened.
     ///
-    /// Every one of these is a character the fonts here draw as line art, and
-    /// none of them is the obvious emoji for the job. A control is not
-    /// content: a row of little coloured pictures across the top of the strip
-    /// competes with the conversation for the eye, and reads as something
-    /// somebody sent rather than as something to press.
+    /// From the bundled icon family, not from whatever the system's symbol
+    /// font has at a given codepoint. A control is not content: a row of
+    /// little coloured pictures across the top of the strip competes with the
+    /// conversation for the eye and reads as something somebody sent.
     ///
-    /// Chosen by measuring rather than by guessing. U+FE0E, the text
-    /// presentation selector, is the proper way to ask for the monochrome form
-    /// and this font stack ignores it -- so the mark has to be a character
-    /// with no coloured form at all, and which those are is what
-    /// `--example what_marks` answers: it rasterises each candidate and says
-    /// whether what came back was a mask or a bitmap.
-    ///
-    /// Threads gets the three lines its sidebar row uses, because they are the
-    /// same place. Muting has no crossed bell in line art anywhere, so the
-    /// pair is a bell and a struck-out circle -- two shapes rather than one
-    /// shape twice, which is what a toggle needs.
+    /// One family is also what makes them read as a set. The marks before
+    /// these were scavenged from Segoe UI Symbol by measuring which characters
+    /// came back as line art at all, and a pushpin drawn as a picture next to
+    /// a solid flag next to three lines is not an icon set. Muting now has a
+    /// crossed bell, which no symbol font had -- so the toggle is one shape
+    /// with and without a stroke through it rather than two unrelated ones.
     pub fn label(self, on: bool) -> &'static str {
         match (self, on) {
-            (Act::Pinned, _) => "🖈",
-            (Act::Saved, _) => "⚑",
-            (Act::Threads, _) => "☰",
-            (Act::Add, _) => "⊕",
-            (Act::Mute, false) => "🕭",
-            (Act::Mute, true) => "⊘",
-            (Act::Leave, _) => "⎋",
+            (Act::Pinned, _) => marks::PINNED,
+            (Act::Saved, _) => marks::SAVED,
+            (Act::Threads, _) => marks::THREADS,
+            (Act::Add, _) => marks::ADD_PEOPLE,
+            (Act::Mute, false) => marks::BELL,
+            (Act::Mute, true) => marks::BELL_OFF,
+            (Act::Leave, _) => marks::LEAVE,
             (Act::Follow, false) => "follow",
             (Act::Follow, true) => "following",
-            (Act::Close, _) => "×",
+            (Act::Close, _) => marks::CLOSE,
         }
     }
 
@@ -288,6 +281,7 @@ impl Header {
                 bold: false,
                 mono: false,
                 wrap: f32::MAX,
+                icon: false,
                 smooth: false,
             },
         );
@@ -323,6 +317,7 @@ impl Header {
                 bold: true,
                 mono: false,
                 wrap: f32::MAX,
+                icon: false,
                 smooth: false,
             },
         );
@@ -361,14 +356,7 @@ impl Header {
                 act.label(self.muted),
                 rect.x + 6.0,
                 rect.y - 1.0,
-                Run {
-                    size: MARK,
-                    line_height: 26.0,
-                    bold: false,
-                    mono: false,
-                    wrap: f32::MAX,
-                    smooth: true,
-                },
+                Run::mark(MARK),
             );
             scene.glyphs(
                 glyphs,

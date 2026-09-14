@@ -88,10 +88,10 @@ pub fn draw_close(into: &mut Canvas<'_>, pane: Rect) {
     } = into;
     let glyphs = painter.run(
         fonts,
-        "\u{00d7}",
+        matterless_layout::marks::CLOSE,
         at.x + 7.0,
         at.y + 2.0,
-        Run::label(f32::MAX).sized(15.0),
+        Run::mark(14.0),
     );
     scene.glyphs(glyphs, palette.soft, palette.faint);
 }

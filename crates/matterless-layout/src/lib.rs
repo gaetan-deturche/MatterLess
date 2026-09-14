@@ -16,6 +16,7 @@
 //! and where does each glyph sit", which a GPU renderer draws and which tests
 //! can check without a GPU at all.
 
+pub mod marks;
 pub mod row;
 
 use cosmic_text::{Attrs, Buffer, Family, FontSystem, Metrics, Shaping, Weight};
@@ -44,9 +45,15 @@ impl Fonts {
     }
 
     pub fn new() -> Self {
-        Self {
-            system: FontSystem::new(),
-        }
+        let mut system = FontSystem::new();
+        // The interface's own marks, bundled rather than hoped for: a system
+        // symbol font has *a* glyph for most of these and they do not belong
+        // to one another. Loaded into the same `FontSystem` everything else
+        // shapes against, so a mark resolves the same way a letter does.
+        system
+            .db_mut()
+            .load_font_data(include_bytes!("../resources/fonts/lucide.ttf").to_vec());
+        Self { system }
     }
 }
 

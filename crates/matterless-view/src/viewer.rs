@@ -347,8 +347,8 @@ impl Viewer {
             );
             let said = match name {
                 "save" => "Save",
-                "back" => "\u{2039}",
-                _ => "\u{203a}",
+                "back" => matterless_layout::marks::BACK,
+                _ => matterless_layout::marks::NEXT,
             };
             let wide = matterless_layout::extent_of(
                 fonts,

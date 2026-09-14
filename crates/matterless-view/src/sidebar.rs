@@ -383,6 +383,7 @@ impl Sidebar {
                             bold: true,
                             mono: false,
                             wrap: f32::MAX,
+                            icon: false,
                             smooth: false,
                         },
                     );
@@ -400,6 +401,7 @@ impl Sidebar {
                             bold: true,
                             mono: false,
                             wrap: f32::MAX,
+                            icon: false,
                             smooth: false,
                         },
                     );
@@ -412,13 +414,13 @@ impl Sidebar {
                         let lit = input.hovered() == Some(NEW);
                         let glyphs = painter.run(
                             fonts,
-                            "\u{ff0b}",
+                            matterless_layout::marks::NEW,
                             at.x + 3.0,
                             at.y + 1.0,
                             // Drawn down from twice its size: a mark is a
                             // picture, and at the size of a word the font
                             // hints its detail into hard stems.
-                            Run::label(f32::MAX).sized(15.0).smooth(),
+                            Run::mark(14.0),
                         );
                         scene.glyphs(
                             glyphs,
@@ -588,10 +590,10 @@ impl Sidebar {
                         fonts,
                         // The app's own mark for it: three lines, which reads
                         // as a list rather than as a conversation.
-                        "\u{2630}",
+                        matterless_layout::marks::THREADS,
                         row.rect.x + ICON_LEFT,
                         row.rect.y + 5.0,
-                        Run::label(f32::MAX).sized(12.0),
+                        Run::mark(13.0),
                     );
                     scene.glyphs(glyph, ink, palette.faint);
                     let pill = pill_for(fonts, *unread, *mentions, row.rect, within);
@@ -726,6 +728,7 @@ fn draw_pill(
             bold: loud,
             mono: true,
             wrap: f32::MAX,
+            icon: false,
             smooth: false,
         },
     );

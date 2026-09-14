@@ -53,9 +53,9 @@ impl Tool {
     /// What is drawn on it. One glyph each, the app's own.
     pub fn mark(self) -> &'static str {
         match self {
-            Tool::React => "\u{263b}",
-            Tool::Reply => "\u{21a9}",
-            Tool::More => "\u{22ef}",
+            Tool::React => matterless_layout::marks::REACT,
+            Tool::Reply => matterless_layout::marks::REPLY,
+            Tool::More => matterless_layout::marks::MORE,
         }
     }
 }
