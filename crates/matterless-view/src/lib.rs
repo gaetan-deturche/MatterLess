@@ -715,6 +715,10 @@ impl View {
             }
         }
         self.queue.submit(Some(encoder.finish()));
+        // A frame has been drawn, which is what the atlas ages its pictures by:
+        // everything on screen was just asked for, so anything that was not is
+        // a frame older than the things it is competing with for room.
+        self.atlas.drew();
     }
 }
 
