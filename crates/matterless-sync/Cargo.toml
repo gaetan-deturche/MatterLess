@@ -8,6 +8,11 @@ license.workspace = true
 [dependencies]
 matterless-core = { version = "0.1.0", path = "../matterless-core" }
 matterless-store = { version = "0.1.0", path = "../matterless-store" }
+# For what to call a conversation. One answer to that question, not two: the
+# sidebar and a notification naming the same group differently is the sort of
+# thing nobody notices until they are looking for the conversation a toast
+# came from.
+matterless-sidebar = { version = "0.1.0", path = "../matterless-sidebar" }
 serde = "1.0.229"
 serde_json = "1.0.151"
 thiserror = "2.0.20"

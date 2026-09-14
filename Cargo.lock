@@ -3062,6 +3062,7 @@ name = "matterless-sync"
 version = "0.1.0"
 dependencies = [
  "matterless-core",
+ "matterless-sidebar",
  "matterless-store",
  "serde",
  "serde_json",

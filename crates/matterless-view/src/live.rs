@@ -864,12 +864,32 @@ async fn run(
                         // hide the unread divider for good on a machine whose
                         // clock runs fast.
                         let watermark = engine.store().newest_post_at(&channel_id).unwrap_or(0);
-                        if let Err(error) =
-                            engine
-                                .store()
-                                .mark_channel_viewed(&channel_id, &me_id, watermark)
+                        match engine
+                            .store()
+                            .mark_channel_viewed(&channel_id, &me_id, watermark)
                         {
-                            eprintln!("recording that {channel_id} was read: {error}");
+                            // Said out loud, because the window rebuilds its
+                            // sidebar from a delta and nothing else. The store
+                            // was right and the badge stayed on screen: opening
+                            // a channel cleared its counters here a moment
+                            // after the sidebar had already been rebuilt from
+                            // the old ones, and nothing asked again.
+                            Ok(true) => {
+                                let unread = engine
+                                    .store()
+                                    .unread(&channel_id, &me_id)
+                                    .ok()
+                                    .flatten()
+                                    .unwrap_or_default();
+                                wake.wake(Update::Changed(vec![Delta::UnreadChanged {
+                                    channel_id,
+                                    unread,
+                                }]));
+                            }
+                            Ok(false) => {}
+                            Err(error) => {
+                                eprintln!("recording that {channel_id} was read: {error}")
+                            }
                         }
                     }
                     Ask::LoadOlder { channel_id } => {

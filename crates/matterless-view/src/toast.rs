@@ -62,8 +62,12 @@ pub fn raise(
 /// person and naming it twice wastes the only line a toast has. A channel is
 /// titled by itself with the author in the body, which is the question a reader
 /// actually has: where, and then who.
+///
+/// A group is a channel for this purpose, not a direct message. It has several
+/// people in it, so the author alone does not say which one it was -- and with
+/// nine groups of overlapping membership, that is the whole question.
 pub fn wording(announcement: &matterless_sync::notify::Announcement) -> (String, String) {
-    if announcement.direct {
+    if announcement.kind == matterless_sync::notify::Kind::Direct {
         (announcement.author.clone(), announcement.preview.clone())
     } else {
         let title = if announcement.channel.is_empty() {
@@ -81,16 +85,16 @@ pub fn wording(announcement: &matterless_sync::notify::Announcement) -> (String,
 #[cfg(test)]
 mod tests {
     use super::wording;
-    use matterless_sync::notify::Announcement;
+    use matterless_sync::notify::{Announcement, Kind};
 
-    fn from(channel: &str, direct: bool) -> Announcement {
+    fn from(channel: &str, kind: Kind) -> Announcement {
         Announcement {
             resolved: true,
             author: "ada".into(),
             author_id: "u1".into(),
             channel: channel.into(),
             preview: "the build is green".into(),
-            direct,
+            kind,
         }
     }
 
@@ -99,16 +103,32 @@ mod tests {
     #[test]
     fn a_direct_message_is_titled_by_the_person() {
         assert_eq!(
-            wording(&from("Direct Message", true)),
+            wording(&from("ada", Kind::Direct)),
             ("ada".to_string(), "the build is green".to_string())
         );
     }
 
     /// A channel answers where first and who second.
+    /// A group is titled by who is in it, with the author in the body.
+    ///
+    /// It used to be announced as a direct message: the title was one person's
+    /// name and nothing said which group, which is no use to somebody in nine
+    /// of them with overlapping membership.
+    #[test]
+    fn a_group_is_titled_by_the_group_and_says_who_spoke() {
+        assert_eq!(
+            wording(&from("florine, leo-paul", Kind::Group)),
+            (
+                "florine, leo-paul".to_string(),
+                "ada: the build is green".to_string()
+            )
+        );
+    }
+
     #[test]
     fn a_channel_is_titled_by_itself() {
         assert_eq!(
-            wording(&from("Dev", false)),
+            wording(&from("Dev", Kind::Channel)),
             ("Dev".to_string(), "ada: the build is green".to_string())
         );
     }
@@ -117,7 +137,7 @@ mod tests {
     /// better than an empty title.
     #[test]
     fn an_unknown_channel_falls_back_to_the_author() {
-        let (title, _) = wording(&from("", false));
+        let (title, _) = wording(&from("", Kind::Channel));
         assert_eq!(title, "ada");
     }
 }
