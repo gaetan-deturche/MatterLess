@@ -181,6 +181,13 @@ pub struct PlacedGlyph {
     /// line mixes them: an author's name, the time beside it and a link in the
     /// sentence after are all one shaped run.
     pub shade: Shade,
+    /// How much of its rasterised size it is drawn at. One for a letter.
+    ///
+    /// Below one means it was rasterised larger than it is drawn and is to be
+    /// filtered down -- which is supersampling, and is what makes a pictogram
+    /// legible at the size an interface wants one. A letter is hinted for the
+    /// size it is drawn at and wants none of it.
+    pub scale: f32,
 }
 
 /// Where the glyphs of an already-shaped buffer land.
@@ -200,6 +207,8 @@ pub fn placed_glyphs(buffer: &Buffer, x: f32, y: f32) -> Vec<PlacedGlyph> {
                 x: physical.x,
                 y: physical.y,
                 shade: Shade::Ink,
+                // Text, rasterised at the size it is drawn.
+                scale: 1.0,
             });
         }
     }
@@ -436,6 +445,17 @@ pub struct Run {
     /// Where it wraps. Interface text is usually given more room than it needs
     /// and clipped by its box instead.
     pub wrap: f32,
+    /// Rasterise at twice the size and draw it down.
+    ///
+    /// For a mark rather than for words. A pictogram at the size an interface
+    /// wants one is a dozen pixels across with detail inside it, and a font
+    /// hints that detail into hard stems: the bell loses its clapper and the
+    /// pushpin becomes a smudge. Rasterised at twice and filtered down, the
+    /// detail survives as shades.
+    ///
+    /// Never for text. A letter is hinted for the size it is drawn at, and
+    /// halving a bitmap of one is how text gets blurry.
+    pub smooth: bool,
 }
 
 impl Run {
@@ -446,7 +466,14 @@ impl Run {
             bold: false,
             mono: false,
             wrap,
+            smooth: false,
         }
+    }
+
+    /// A mark rather than words: rasterised at twice and filtered down.
+    pub fn smooth(mut self) -> Self {
+        self.smooth = true;
+        self
     }
 
     pub fn bold(mut self) -> Self {
@@ -851,7 +878,14 @@ impl Painter {
         if text.is_empty() {
             return Vec::new();
         }
-        let mut buffer = Buffer::new(fonts.system_mut(), Metrics::new(run.size, run.line_height));
+        // Twice the size when it is a mark, and drawn back down below. The
+        // shaping is what carries the size into the glyph's cache key, so this
+        // is the only place it can be asked for.
+        let over = if run.smooth { 2.0 } else { 1.0 };
+        let mut buffer = Buffer::new(
+            fonts.system_mut(),
+            Metrics::new(run.size * over, run.line_height * over),
+        );
         let mut shaped = buffer.borrow_with(fonts.system_mut());
         shaped.set_size(Some(run.wrap), None);
         let mut attrs = Attrs::new();
@@ -867,12 +901,16 @@ impl Painter {
         let mut placed = Vec::new();
         for line in shaped.layout_runs() {
             for glyph in line.glyphs {
-                let physical = glyph.physical((x, y + line.line_y), 1.0);
+                // Laid out at the size it was shaped and then brought back to
+                // where it belongs: the pen is the caller's, and only the
+                // distance from it is doubled.
+                let physical = glyph.physical((0.0, line.line_y), 1.0);
                 placed.push(PlacedGlyph {
                     key: physical.cache_key,
-                    x: physical.x,
-                    y: physical.y,
+                    x: x as i32 + (physical.x as f32 / over) as i32,
+                    y: y as i32 + (physical.y as f32 / over) as i32,
                     shade: Shade::Ink,
+                    scale: 1.0 / over,
                 });
             }
         }
@@ -986,6 +1024,9 @@ impl Painter {
                     } else {
                         Shade::Ink
                     },
+                    // A message's own words, rasterised at the size they are
+                    // drawn.
+                    scale: 1.0,
                 });
             }
         }

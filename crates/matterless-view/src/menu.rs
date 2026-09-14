@@ -563,12 +563,16 @@ impl Menu {
             let glyphs = into.painter.run(
                 into.fonts,
                 &item.glyph,
-                rect.x + style.pad_x + 2.0,
-                middle,
-                Run::label(f32::MAX).sized(12.0),
+                rect.x + style.pad_x,
+                middle - 3.0,
+                // Bigger than the words beside it, and drawn down from twice
+                // its size: a mark is a picture with detail inside it, and at
+                // the size of a word the font hints that detail into stems
+                // too hard to read.
+                Run::label(f32::MAX).sized(17.0).smooth(),
             );
             into.scene
-                .glyphs(glyphs, into.palette.faint, into.palette.faint);
+                .glyphs(glyphs, into.palette.soft, into.palette.faint);
         }
         let ink = match item.tint {
             Tint::Ink => into.palette.ink,

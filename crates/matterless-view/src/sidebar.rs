@@ -383,6 +383,7 @@ impl Sidebar {
                             bold: true,
                             mono: false,
                             wrap: f32::MAX,
+                            smooth: false,
                         },
                     );
                     scene.glyphs(glyphs, palette.ink, palette.faint);
@@ -399,6 +400,7 @@ impl Sidebar {
                             bold: true,
                             mono: false,
                             wrap: f32::MAX,
+                            smooth: false,
                         },
                     );
                     scene.glyphs(glyphs, palette.faint, palette.faint);
@@ -413,11 +415,14 @@ impl Sidebar {
                             "\u{ff0b}",
                             at.x + 3.0,
                             at.y + 1.0,
-                            Run::label(f32::MAX).sized(12.0),
+                            // Drawn down from twice its size: a mark is a
+                            // picture, and at the size of a word the font
+                            // hints its detail into hard stems.
+                            Run::label(f32::MAX).sized(15.0).smooth(),
                         );
                         scene.glyphs(
                             glyphs,
-                            if lit { palette.ink } else { palette.faint },
+                            if lit { palette.ink } else { palette.soft },
                             palette.faint,
                         );
                     }
@@ -721,6 +726,7 @@ fn draw_pill(
             bold: loud,
             mono: true,
             wrap: f32::MAX,
+            smooth: false,
         },
     );
     scene.glyphs(glyphs, over, palette.faint);

@@ -458,6 +458,7 @@ impl Composer {
                     bold: false,
                     mono: false,
                     wrap: f32::MAX,
+                    smooth: false,
                 },
             );
             scene.glyphs(glyphs, palette.faint, palette.faint);
@@ -511,9 +512,11 @@ impl Composer {
         let clip = painter.run(
             fonts,
             CLIP,
-            attach.x + 6.0,
-            attach.y + 4.0,
-            Run::label(f32::MAX),
+            attach.x + 5.0,
+            attach.y + 2.0,
+            // Larger than the words: a mark is a picture, and the font
+            // rasterises one at about two thirds of the size asked for.
+            Run::label(f32::MAX).sized(22.0).smooth(),
         );
         scene.glyphs(clip, palette.soft, palette.faint);
 

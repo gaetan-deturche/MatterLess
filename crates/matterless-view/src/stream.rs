@@ -1209,9 +1209,12 @@ impl Stream {
             let glyphs = painter.run(
                 fonts,
                 tool.mark(),
-                rect.x + 6.0,
-                rect.y + 4.0,
-                Run::label(f32::MAX).sized(14.0),
+                rect.x + 5.0,
+                rect.y + 2.0,
+                // Drawn down from twice its size: a mark is a picture, and at
+                // the size of a word the font hints its detail into stems too
+                // hard to read.
+                Run::label(f32::MAX).sized(16.0).smooth(),
             );
             scene.glyphs(
                 glyphs,
@@ -1435,6 +1438,7 @@ impl Stream {
                     // Cut by the panel's clip rather than wrapped: a card is a
                     // fixed height and a wrapped name would run out of it.
                     wrap: f32::MAX,
+                    smooth: false,
                 },
             );
             scene.glyphs(name, palette.ink, palette.faint);

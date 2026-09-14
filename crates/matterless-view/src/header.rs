@@ -31,6 +31,14 @@ pub struct Header {
 
 /// The strip's height. Fixed: it is one line of text and a rule.
 pub const HEIGHT: f32 = 44.0;
+/// What a button's mark is set at.
+///
+/// Bigger than the strip's words. These are pictograms with detail inside
+/// them, and the font rasterises one at about two thirds of the size asked
+/// for: at the body's own size a bell is twelve pixels across, which is not
+/// enough for a bell.
+const MARK: f32 = 24.0;
+
 /// Where the sigil starts, and how far past it the name does.
 const LEFT: f32 = 14.0;
 const SIGIL: f32 = 14.0;
@@ -280,6 +288,7 @@ impl Header {
                 bold: false,
                 mono: false,
                 wrap: f32::MAX,
+                smooth: false,
             },
         );
         scene.glyphs(sigil, palette.faint, palette.faint);
@@ -314,6 +323,7 @@ impl Header {
                 bold: true,
                 mono: false,
                 wrap: f32::MAX,
+                smooth: false,
             },
         );
         scene.glyphs(name, palette.ink, palette.faint);
@@ -339,23 +349,31 @@ impl Header {
             if lit {
                 scene.fill(rect.x, rect.y, rect.width, rect.height, palette.ground);
             }
+            // Larger than the words around it, and in the softer ink rather
+            // than the faintest. A mark is a picture, not a letter: a bell
+            // rasterised at fifteen pixels is twelve across with three lines
+            // inside it, and in the faintest ink those lines are a smudge. The
+            // sampler is not what makes it one -- a glyph is rasterised at the
+            // size it is drawn and sampled one texel to one pixel, so there is
+            // nothing to filter. There are simply not enough pixels.
             let glyphs = painter.run(
                 fonts,
                 act.label(self.muted),
-                rect.x + 7.0,
-                rect.y + 1.0,
+                rect.x + 6.0,
+                rect.y - 1.0,
                 Run {
-                    size: 15.0,
-                    line_height: 20.0,
+                    size: MARK,
+                    line_height: 26.0,
                     bold: false,
                     mono: false,
                     wrap: f32::MAX,
+                    smooth: true,
                 },
             );
             scene.glyphs(
                 glyphs,
-                if lit { palette.ink } else { palette.faint },
-                palette.faint,
+                if lit { palette.ink } else { palette.soft },
+                palette.soft,
             );
         }
     }

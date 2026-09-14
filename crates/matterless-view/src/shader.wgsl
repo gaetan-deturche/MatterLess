@@ -108,8 +108,14 @@ fn fragment(in: Out) -> @location(0) vec4<f32> {
         texel = textureSampleLevel(faces, smooth_sampler, in.uv, 0.0);
     } else if in.sheet == 2u {
         texel = textureSampleLevel(pictures, smooth_sampler, in.uv, 0.0);
-    } else {
+    } else if in.sheet == 3u {
         texel = textureSampleLevel(shown, smooth_sampler, in.uv, 0.0);
+    } else {
+        // The letters sheet again, filtered: a mark is rasterised at twice the
+        // size it is drawn so that its detail survives as shades rather than
+        // being hinted into hard stems, and drawing it down is what asks for
+        // the other sampler.
+        texel = textureSampleLevel(letters, smooth_sampler, in.uv, 0.0);
     }
     // A corner is cut here rather than by building the shape out of quads: the
     // rectangle is already a quad, and this costs one distance per pixel of it
