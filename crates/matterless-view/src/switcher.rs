@@ -62,7 +62,21 @@ pub enum Asking {
     Forward(String),
     /// Who should be in this channel.
     Add(String),
+    /// Who this conversation should be with.
+    ///
+    /// The only question answered by more than one name: one person is a
+    /// direct message and several are a group, and a reader choosing is not
+    /// picking between two features -- they are picking who to talk to, and
+    /// the number decides which kind of conversation that is.
+    Start,
 }
+
+/// Mattermost holds a group conversation to eight people including the reader,
+/// so seven others is the ceiling.
+///
+/// Held here rather than left to the server, whose refusal would arrive after
+/// the reader had chosen.
+pub const OTHERS: usize = 7;
 
 impl Asking {
     /// What the box says, which is the only thing telling a reader which of
@@ -72,15 +86,32 @@ impl Asking {
             Asking::Jump => "Jump to…",
             Asking::Forward(_) => "Forward to…",
             Asking::Add(_) => "Add who…",
+            Asking::Start => "Talk to who…",
         }
     }
 
     /// Whether a conversation the reader is already in is an answer.
     ///
-    /// It is not, when the question is who to add: a channel is not somebody.
+    /// It is not, when the question is who to add or who to talk to: a channel
+    /// is not somebody.
     fn wants_channels(&self) -> bool {
-        !matches!(self, Asking::Add(_))
+        !matches!(self, Asking::Add(_) | Asking::Start)
     }
+
+    /// Whether the answer is more than one name.
+    fn wants_several(&self) -> bool {
+        matches!(self, Asking::Start)
+    }
+}
+
+/// What the reader settled on.
+///
+/// Two shapes because one question takes several names and the rest take one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Chose {
+    One(Match),
+    /// Everybody picked, for a conversation that has not been started yet.
+    These(Vec<Match>),
 }
 
 /// One match: what it names, how to say it, and what to do with it.
@@ -104,6 +135,9 @@ pub struct Switcher {
     /// get wrong.
     pub query: Composer,
     found: Vec<Match>,
+    /// Who has been picked, for the one question that takes more than one
+    /// name. Empty for every other.
+    picked: Vec<Match>,
     /// What the server suggested for the query last asked, which the reader is
     /// not already in. Kept apart from `found` so a slow answer never reorders
     /// the rows under a reader who is mid-keystroke.
@@ -130,6 +164,7 @@ impl Switcher {
             asking: Asking::Jump,
             query,
             found: Vec::new(),
+            picked: Vec::new(),
             offered: Vec::new(),
             asked: String::new(),
             chosen: 0,
@@ -149,7 +184,13 @@ impl Switcher {
         self.query.clear(fonts);
         self.chosen = 0;
         self.found.clear();
+        self.picked.clear();
         input.focus_on(NAME);
+    }
+
+    /// Who has been picked so far, in the order they were.
+    pub fn picked(&self) -> &[Match] {
+        &self.picked
     }
 
     /// Turns an open switcher onto a different question.
@@ -161,14 +202,23 @@ impl Switcher {
     pub fn hide(&mut self, input: &mut Input) {
         self.open = false;
         self.asking = Asking::Jump;
+        self.picked.clear();
         if input.focus() == Some(NAME) {
             input.focus_on(crate::composer::NAME);
         }
     }
 
+    /// The line naming who has been picked, when there is one.
+    fn picked_height(&self) -> f32 {
+        if self.picked.is_empty() { 0.0 } else { ROW }
+    }
+
     /// The panel, centred across the top where the eye already is.
     pub fn rect(&self, within: Rect) -> Rect {
-        let height = PADDING * 2.0 + self.query.height() + self.found.len() as f32 * ROW;
+        let height = PADDING * 2.0
+            + self.query.height()
+            + self.picked_height()
+            + self.found.len() as f32 * ROW;
         let width = WIDTH.min(within.width - 40.0);
         Rect::new(
             within.x + (within.width - width) / 2.0,
@@ -237,6 +287,21 @@ impl Switcher {
             .cloned()
             .collect();
         self.found.extend(extra);
+        // Nothing typed, nothing to pick. The other questions list what the
+        // reader is already in, which needs no query; this one lists people,
+        // which only the server can find -- so an empty field here would show
+        // whoever the *last* query turned up. It also makes return mean one
+        // thing: with a name under the cursor it adds, and with none it opens.
+        if self.asking.wants_several() && query.is_empty() {
+            self.found.clear();
+        }
+        // Somebody already picked is not somebody to pick. Offering them again
+        // is a row that does nothing, and it is the row under the cursor:
+        // return would land on it rather than on the next name.
+        if !self.picked.is_empty() {
+            self.found
+                .retain(|one| !self.picked.iter().any(|held| held.id == one.id));
+        }
         self.chosen = self.chosen.min(self.found.len().saturating_sub(1));
     }
 
@@ -248,9 +313,18 @@ impl Switcher {
         within: Rect,
         clipboard: &mut String,
         entries: &[Entry],
-    ) -> Option<Match> {
+    ) -> Option<Chose> {
         if !self.open {
             return None;
+        }
+        // A name already picked comes off with the same key that would have
+        // deleted a letter, which is what a reader expects of a field full of
+        // names and is what the app's chips do.
+        if self.asking.wants_several()
+            && input.struck(Key::Backspace)
+            && self.query.text().is_empty()
+        {
+            self.picked.pop();
         }
         // Moving the highlight before the field sees the keys: on one line a
         // caret has nowhere to go up or down to, so nothing is taken away.
@@ -262,6 +336,10 @@ impl Switcher {
         }
         let panel = self.rect(within);
         let field = Rect::new(panel.x, panel.y, panel.width, self.query.height());
+        // What the cursor is on, read before the field is given the frame:
+        // return is how the field reports, and reporting clears it -- so by
+        // the time it has, the list has already narrowed to nothing typed.
+        let aiming = self.found.get(self.chosen).cloned();
         // Return arrives as the field reporting a message, which is the same
         // key meaning the same thing: this is the one I want.
         let entered = self
@@ -270,10 +348,34 @@ impl Switcher {
             .is_some_and(|text| !text.is_empty());
         self.query.lay_out(fonts, panel.width);
         self.narrow(entries);
-        if entered {
-            return self.found.get(self.chosen).cloned();
+        if !self.asking.wants_several() {
+            return entered.then_some(aiming).flatten().map(Chose::One);
         }
-        None
+        // The key itself rather than the field's report of it. A field with
+        // nothing typed in it reports nothing -- there is no message to send --
+        // and on this question an empty field is exactly where return means
+        // something: "these are all of them".
+        if !input.struck(Key::Enter) {
+            return None;
+        }
+        // Return on an empty field is "these are all of them". On a name it is
+        // "and this one too", so the same key both adds and finishes -- which
+        // it can, because the field says which it will do: there is nothing
+        // typed to add.
+        match aiming {
+            Some(one) if self.picked.len() < OTHERS => {
+                if !self.picked.iter().any(|held| held.id == one.id) {
+                    self.picked.push(one);
+                }
+                self.query.clear(fonts);
+                self.asked.clear();
+                self.offered.clear();
+                self.chosen = 0;
+                None
+            }
+            _ if !self.picked.is_empty() => Some(Chose::These(self.picked.clone())),
+            _ => None,
+        }
     }
 
     /// What the server has not been asked about yet.
@@ -330,8 +432,29 @@ impl Switcher {
             PANEL,
             12.0,
         );
+        // Who is already in it, above the list they were picked from, so the
+        // reader can see what Return will open.
+        if !self.picked.is_empty() {
+            let names: Vec<&str> = self.picked.iter().map(|one| one.label.as_str()).collect();
+            let said = format!(
+                "{} \u{2014} return to open, backspace to take one off",
+                names.join(", ")
+            );
+            let glyphs = painter.run(
+                fonts,
+                &said,
+                panel.x + PADDING + 4.0,
+                panel.y + self.query.height() + 4.0,
+                Run::label(panel.width - PADDING * 2.0),
+            );
+            scene.glyphs(glyphs, palette.signal, palette.faint);
+        }
         for (at, one) in self.found.iter().enumerate() {
-            let y = panel.y + PADDING + self.query.height() + at as f32 * ROW;
+            let y = panel.y
+                + PADDING
+                + self.query.height()
+                + self.picked_height()
+                + at as f32 * ROW;
             if at == self.chosen {
                 scene.fill(panel.x, y, panel.width, ROW, palette.ground);
             }
@@ -543,5 +666,147 @@ mod tests {
         switcher.query = Composer::new(NAME);
         switcher.narrow(&[]);
         assert_eq!(switcher.chosen, 0);
+    }
+}
+
+#[cfg(test)]
+mod starting {
+    use super::*;
+    use matterless_ui::input::Event;
+
+    fn people(count: usize) -> Vec<Match> {
+        (0..count)
+            .map(|at| Match {
+                id: format!("u{at}"),
+                label: format!("person{at}"),
+                direct: true,
+                reach: Reach::Direct,
+            })
+            .collect()
+    }
+
+    fn panel() -> Rect {
+        Rect::new(0.0, 0.0, 900.0, 600.0)
+    }
+
+    /// One frame: type nothing, press return, and see what the switcher makes
+    /// of it. Driven through `react` rather than around it, because what is
+    /// being tested is exactly what `react` decides.
+    fn returned(switcher: &mut Switcher, fonts: &mut Fonts, typed: &str) -> Option<Chose> {
+        // The people to pick from are offered by the server, not the sidebar,
+        // so the entries this narrows against are empty.
+        switcher.offered = people(3);
+        // Typing and returning are two frames, as they are at a keyboard: the
+        // field reads what was typed and what was struck from the same
+        // snapshot, so a return in the frame that typed the name arrives
+        // before the name does.
+        if !typed.is_empty() {
+            let mut typing = Input::default();
+            typing.focus_on(NAME);
+            typing.apply(Event::Typed(typed.to_string()), &[]);
+            switcher.react(fonts, &typing, panel(), &mut String::new(), &[]);
+        }
+        let mut input = Input::default();
+        input.focus_on(NAME);
+        input.apply(
+            Event::Key {
+                key: Key::Enter,
+                down: true,
+            },
+            &[],
+        );
+        switcher.react(fonts, &input, panel(), &mut String::new(), &[])
+    }
+
+    /// One person is a direct message and several are a group, and the reader
+    /// is choosing who to talk to rather than between two features.
+    ///
+    /// Return both adds and finishes, which it can because the field says
+    /// which it will do: with something typed there is a name to add, and with
+    /// nothing typed there is not.
+    #[test]
+    fn several_people_can_be_picked_before_anything_opens() {
+        let mut fonts = Fonts::new();
+        let mut switcher = Switcher::new();
+        switcher.show(&mut fonts, &mut Input::default());
+        switcher.instead(Asking::Start);
+
+        assert!(returned(&mut switcher, &mut fonts, "person").is_none());
+        assert_eq!(switcher.picked().len(), 1, "the first name was taken");
+        assert!(
+            switcher.query.text().is_empty(),
+            "the field is cleared for the next name"
+        );
+
+        assert!(returned(&mut switcher, &mut fonts, "person").is_none());
+        assert_eq!(switcher.picked().len(), 2);
+
+        // A field with nothing in it reports nothing, which is why the key is
+        // read here rather than the field's account of it.
+        let done = returned(&mut switcher, &mut fonts, "");
+        match done {
+            Some(Chose::These(these)) => assert_eq!(these.len(), 2),
+            other => panic!("return on an empty field answered {other:?}"),
+        }
+    }
+
+    /// Mattermost holds a group to eight including the reader, and the ceiling
+    /// is held here rather than left to the server -- whose refusal would
+    /// arrive after the reader had chosen.
+    #[test]
+    fn the_eighth_person_is_refused_here_rather_than_by_the_server() {
+        let mut fonts = Fonts::new();
+        let mut switcher = Switcher::new();
+        switcher.show(&mut fonts, &mut Input::default());
+        switcher.instead(Asking::Start);
+        switcher.picked = people(OTHERS);
+
+        let done = returned(&mut switcher, &mut fonts, "person");
+        assert_eq!(switcher.picked().len(), OTHERS, "an eighth got in");
+        assert!(
+            matches!(done, Some(Chose::These(these)) if these.len() == OTHERS),
+            "a full list should open rather than sit there refusing"
+        );
+    }
+
+    /// Shutting it forgets who was picked: the next conversation started is a
+    /// different one.
+    #[test]
+    fn closing_forgets_who_was_picked() {
+        let mut fonts = Fonts::new();
+        let mut input = Input::default();
+        let mut switcher = Switcher::new();
+        switcher.show(&mut fonts, &mut input);
+        switcher.instead(Asking::Start);
+        returned(&mut switcher, &mut fonts, "person");
+        assert_eq!(switcher.picked().len(), 1);
+        switcher.hide(&mut input);
+        assert!(switcher.picked().is_empty());
+        assert_eq!(switcher.asking, Asking::Jump);
+    }
+
+    /// A question that takes one name still answers with exactly one, and
+    /// never collects.
+    #[test]
+    fn the_other_questions_answer_with_one_name() {
+        let mut fonts = Fonts::new();
+        let mut switcher = Switcher::new();
+        switcher.show(&mut fonts, &mut Input::default());
+        switcher.instead(Asking::Add("c1".into()));
+        let done = returned(&mut switcher, &mut fonts, "person");
+        assert!(
+            matches!(done, Some(Chose::One(_))),
+            "adding somebody answered {done:?}"
+        );
+        assert!(switcher.picked().is_empty());
+    }
+
+    /// Somewhere the reader already is, is not somebody to talk to.
+    #[test]
+    fn a_conversation_is_not_an_answer_to_who_to_talk_to() {
+        assert!(!Asking::Start.wants_channels());
+        assert!(Asking::Start.wants_several());
+        assert!(!Asking::Jump.wants_several());
+        assert!(!Asking::Add(String::new()).wants_several());
     }
 }

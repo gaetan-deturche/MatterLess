@@ -1739,6 +1739,30 @@ impl App {
         }
     }
 
+    /// Opens the conversation with these people, starting it if there is not
+    /// one yet.
+    ///
+    /// One other person is a direct message and several are a group, which is
+    /// the only difference between them: the reader picked who to talk to, and
+    /// the number decides what kind of conversation that is. Both need the
+    /// server before there is anything to open, so the window hears back
+    /// rather than guessing an id.
+    fn talk_to(&mut self, user_ids: Vec<String>) {
+        let Some(link) = self.link.as_ref() else {
+            return;
+        };
+        let sent = match user_ids.len() {
+            0 => return,
+            1 => link.send(matterless_view::live::Ask::Direct {
+                user_id: user_ids[0].clone(),
+            }),
+            _ => link.send(matterless_view::live::Ask::Group { user_ids }),
+        };
+        if !sent {
+            eprintln!("the socket is not up, so there is nobody to ask");
+        }
+    }
+
     /// Opens one of a message's pictures, full size.
     ///
     /// Every picture on the message goes to the viewer, not just the one
@@ -2944,14 +2968,23 @@ impl App {
             }
             let within = self.stream_rect();
             let entries = self.sidebar.entries.clone();
-            let chosen = self.switcher.react(
+            let picked = self.switcher.react(
                 &mut self.fonts,
                 &input,
                 within,
                 &mut self.clipboard,
                 &entries,
             );
-            if let Some(reached) = chosen {
+            // Everybody picked, for the one question that takes more than one
+            // name. Nothing else can answer with several, so nothing else has
+            // to be consulted about which question this was.
+            if let Some(matterless_view::switcher::Chose::These(these)) = picked {
+                self.switcher.hide(&mut input);
+                self.input = input;
+                self.talk_to(these.iter().map(|one| one.id.clone()).collect());
+                return;
+            }
+            if let Some(matterless_view::switcher::Chose::One(reached)) = picked {
                 use matterless_view::switcher::{Asking, Reach};
                 // Which of the three questions this was is remembered on the
                 // switcher rather than guessed here.
@@ -2996,6 +3029,10 @@ impl App {
                             });
                         }
                     }
+                    // One name, for the question that wanted several: a
+                    // conversation with one other person is a direct message.
+                    (Asking::Start, Reach::Direct) => self.talk_to(vec![reached.id]),
+                    (Asking::Start, _) => eprintln!("that is not somebody to talk to"),
                 }
                 return;
             }
@@ -4044,6 +4081,17 @@ impl ApplicationHandler<Update> for App {
                 if let Some(team) = self.rail.react(&self.input) {
                     let within = self.sidebar_rect();
                     self.sidebar.scroll_to(&team, within);
+                }
+                // The one button in the list, before the rows: a press on it
+                // is not a press on the heading behind it.
+                if self.input.clicked_on(matterless_view::sidebar::NEW) {
+                    let mut input = std::mem::take(&mut self.input);
+                    self.switcher.show(&mut self.fonts, &mut input);
+                    self.switcher
+                        .instead(matterless_view::switcher::Asking::Start);
+                    self.input = input;
+                    self.redraw();
+                    return;
                 }
                 let within = self.sidebar_rect();
                 if let Some(channel) = self.sidebar.react(&self.input, &boxes, within) {

@@ -149,6 +149,22 @@ impl Sidebar {
             within.height + self.scroll,
         );
         let mut placed = matterless_ui::solve::solve(&column, scrolled);
+        // The one button in the list, on the heading the conversations with
+        // people sit under.
+        for (index, entry) in self.entries.iter().enumerate() {
+            if !matches!(entry, Entry::Heading { directs: true, .. }) {
+                continue;
+            }
+            let name = Self::name_of(entry, index);
+            if let Some(row) = placed.iter().find(|item| item.name == name) {
+                let at = plus_rect(row.rect, within);
+                placed.push(Placed {
+                    name: NEW.to_string(),
+                    rect: at,
+                    depth: 3,
+                });
+            }
+        }
         placed.extend(self.bar.boxes("sidebar", within, self.reach(within)));
         // The panel itself keeps its real rectangle: it is what the wheel is
         // tested against, and a scrolled one would stop matching the pointer.
@@ -371,7 +387,7 @@ impl Sidebar {
                     );
                     scene.glyphs(glyphs, palette.ink, palette.faint);
                 }
-                Entry::Heading { label, .. } => {
+                Entry::Heading { label, directs } => {
                     let glyphs = painter.run(
                         fonts,
                         &small_caps(label),
@@ -386,6 +402,25 @@ impl Sidebar {
                         },
                     );
                     scene.glyphs(glyphs, palette.faint, palette.faint);
+                    // Starting a conversation belongs beside the
+                    // conversations, which is where the app puts it: on the
+                    // one group that is people rather than channels.
+                    if *directs {
+                        let at = plus_rect(row.rect, within);
+                        let lit = input.hovered() == Some(NEW);
+                        let glyphs = painter.run(
+                            fonts,
+                            "\u{ff0b}",
+                            at.x + 3.0,
+                            at.y + 1.0,
+                            Run::label(f32::MAX).sized(12.0),
+                        );
+                        scene.glyphs(
+                            glyphs,
+                            if lit { palette.ink } else { palette.faint },
+                            palette.faint,
+                        );
+                    }
                 }
                 Entry::Channel {
                     id,
@@ -689,6 +724,21 @@ fn draw_pill(
         },
     );
     scene.glyphs(glyphs, over, palette.faint);
+}
+
+/// What the button for a new conversation answers to.
+pub const NEW: &str = "sidebar/new";
+
+/// Where it sits: the right end of the direct messages heading, clear of the
+/// scrollbar that floats over the rows.
+fn plus_rect(row: Rect, within: Rect) -> Rect {
+    let side = 18.0;
+    Rect::new(
+        (row.right() - side).min(within.right() - TRACK - side),
+        row.y + (row.height - side) / 2.0,
+        side,
+        side,
+    )
 }
 
 /// The presence dot, and the room kept for it at the start of every row.
@@ -1054,6 +1104,43 @@ mod tests {
             Some(THREADS)
         );
         assert_eq!(sidebar.selected.as_deref(), Some(THREADS));
+    }
+
+    /// Starting a conversation is offered beside the conversations, on the one
+    /// group that is people rather than channels.
+    ///
+    /// Where the app puts it, and the only place it can go: the other headings
+    /// are teams' channel groups, and a team is not somebody to talk to.
+    #[test]
+    fn the_direct_messages_heading_offers_a_new_conversation() {
+        let sidebar = Sidebar::new(vec![
+            Entry::Heading {
+                label: "Channels".into(),
+                directs: false,
+            },
+            Entry::Heading {
+                label: "Direct messages".into(),
+                directs: true,
+            },
+        ]);
+        let within = Rect::new(0.0, 0.0, 240.0, 400.0);
+        let placed = sidebar.boxes(within);
+        let plus: Vec<&Placed> = placed.iter().filter(|one| one.name == NEW).collect();
+        assert_eq!(plus.len(), 1, "one button, on the one heading that gets it");
+        let at = plus[0].rect;
+        assert!(at.x >= within.x && at.right() <= within.right());
+        // Clear of the bar, which floats over the rows rather than taking room
+        // from them.
+        assert!(
+            at.right() <= within.right() - TRACK,
+            "the button sits under the scrollbar"
+        );
+        // On the heading it belongs to, not the one above it.
+        let heading = placed
+            .iter()
+            .find(|one| one.name == "sidebar/heading/1")
+            .expect("the heading is placed");
+        assert!(at.y >= heading.rect.y && at.bottom() <= heading.rect.bottom());
     }
 
     /// A muted channel never reads as unread, however much arrives in it.
