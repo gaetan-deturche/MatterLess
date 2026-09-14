@@ -226,6 +226,25 @@ struct App {
     /// How this reader reads threads, which decides both what the sidebar
     /// counts and whether a reply is a row in the channel.
     threads: matterless_core::model::ThreadMode,
+    /// Where the reader had got to in the open channel *before* they opened
+    /// it, which is where the "New messages" divider goes.
+    ///
+    /// Held rather than read each time the channel is replanned: opening a
+    /// channel marks it read, which moves the watermark in the store to the
+    /// newest post. Read afresh it would always be the end of the
+    /// conversation, and the divider would be placed below everything and so
+    /// never drawn.
+    viewed_at: i64,
+    /// Which channel `viewed_at` was read for, so re-opening the one already
+    /// open leaves it alone.
+    ///
+    /// A channel is opened again for reasons that have nothing to do with the
+    /// reader: the socket signing in refreshes the membership, which replans
+    /// the conversation because a thread mode decides what is a row in it.
+    /// Without this the divider appeared for a second and then went, every
+    /// time -- read once when the watermark was still the reader's, read again
+    /// a moment later when it was the newest post.
+    viewed_in: String,
     /// How far back the open channel is read. Grows as older pages arrive.
     depth: u32,
     /// True while a page of history is in flight, so the same page is not asked
@@ -401,6 +420,8 @@ impl App {
             // uses and what every other part of the window assumed outright,
             // so it is the assumption made once and in the open.
             threads: matterless_core::model::ThreadMode::Collapsed,
+            viewed_at: 0,
+            viewed_in: String::new(),
             depth: matterless_view::feed::PAGE,
             loading_older: false,
             more_history: true,
@@ -2399,7 +2420,14 @@ impl App {
         };
         let before = self.stream.total();
         let outstanding = self.outstanding.for_channel(&channel);
-        match matterless_view::feed::rows_of(&store, &channel, &self.me, &outstanding, self.depth) {
+        match matterless_view::feed::rows_of(
+            &store,
+            &channel,
+            &self.me,
+            &outstanding,
+            self.depth,
+            self.viewed_at,
+        ) {
             Ok(rows) => {
                 self.stream.me = self.me.clone();
                 self.stream.custom = matterless_view::feed::custom_emoji(&store, &rows);
@@ -2534,6 +2562,7 @@ impl App {
         let Some(store) = self.store.clone() else {
             return;
         };
+        self.recall_watermark(channel, &store);
         let within = self.stream_rect();
         let was_at_end = self.stream.scroll >= self.stream.reach(within) - 1.0;
         match matterless_view::feed::rows_of(
@@ -2542,6 +2571,7 @@ impl App {
             &self.me,
             &self.outstanding.for_channel(channel),
             self.depth,
+            self.viewed_at,
         ) {
             Ok(rows) => {
                 self.stream.me = self.me.clone();
@@ -2555,6 +2585,21 @@ impl App {
             }
             Err(why) => eprintln!("{channel}: {why}"),
         }
+    }
+
+    /// Where the "New messages" divider goes in `channel`.
+    ///
+    /// The rule itself is `feed::watermark`; this is the part that has to
+    /// touch the store.
+    fn recall_watermark(&mut self, channel: &str, store: &matterless_store::Store) {
+        let seen = store
+            .last_viewed_at(channel, &self.me)
+            .ok()
+            .flatten()
+            .unwrap_or(0);
+        let held = (self.viewed_in == channel).then_some(self.viewed_at);
+        self.viewed_in = channel.to_string();
+        self.viewed_at = matterless_view::feed::watermark(held, seen);
     }
 
     /// Re-reads the open thread the same way.
@@ -3132,12 +3177,15 @@ impl App {
             return;
         }
         self.followed.hide();
+        // Before anything marks it read, which is what this is for.
+        self.recall_watermark(channel, &store);
         match matterless_view::feed::rows_of(
             &store,
             channel,
             &self.me,
             &self.outstanding.for_channel(channel),
             self.depth,
+            self.viewed_at,
         ) {
             Ok(rows) => {
                 self.stream.me = self.me.clone();
