@@ -896,7 +896,13 @@ impl Stream {
     ///
     /// Paired by order: the nth attachment block belongs to the nth file, which
     /// is how the layout built them.
-    fn pictures(&self, index: usize, top: f32, left: f32) -> Vec<matterless_paint::Piece> {
+    fn pictures(
+        &self,
+        index: usize,
+        top: f32,
+        left: f32,
+        ground: [u8; 4],
+    ) -> Vec<matterless_paint::Piece> {
         let Some(Row::Post { post } | Row::Continuation { post }) = self.rows.get(index) else {
             return Vec::new();
         };
@@ -908,17 +914,84 @@ impl Stream {
             .filter(|block| block.kind == matterless_layout::row::Kind::Attachment)
             .zip(post.files.iter())
             .filter(|(_, file)| file.image || file.video)
-            .map(|(block, file)| matterless_paint::Piece::Image {
-                x: left + self.theme.gutter,
-                y: top + block.y,
-                width: block.wrap,
-                height: block.height,
-                key: picture_key(file),
-                // An attachment is a card like any other, and the stylesheet
-                // rounds it to match the one a file without a preview gets.
-                radius: CARD,
+            .flat_map(|(block, file)| {
+                let at = Rect::new(
+                    left + self.theme.gutter,
+                    top + block.y,
+                    block.wrap,
+                    block.height,
+                );
+                // `background-color: var(--ground)` under the picture: the box
+                // is drawn from the moment the row is, and an empty one is a
+                // hole in the conversation rather than a picture on its way.
+                let mut pieces = vec![matterless_paint::Piece::Fill {
+                    x: at.x,
+                    y: at.y,
+                    width: at.width,
+                    height: at.height,
+                    colour: ground,
+                    // An attachment is a card like any other, and the
+                    // stylesheet rounds it to match the one a file without a
+                    // preview gets.
+                    radius: CARD,
+                    softness: 1.0,
+                }];
+                // `background-size: cover` on the mini preview the post
+                // already carries -- a kilobyte of JPEG that costs no request,
+                // so the box holds the right picture, blurred, while the real
+                // bytes are on their way.
+                //
+                // Under the real one rather than instead of it: when the real
+                // one lands it is simply drawn on top, and nothing has to
+                // notice that it did.
+                if file.mini_preview.is_some() {
+                    pieces.push(matterless_paint::Piece::Image {
+                        x: at.x,
+                        y: at.y,
+                        width: at.width,
+                        height: at.height,
+                        key: mini_key(&file.id),
+                        radius: CARD,
+                    });
+                }
+                pieces.push(matterless_paint::Piece::Image {
+                    x: at.x,
+                    y: at.y,
+                    width: at.width,
+                    height: at.height,
+                    key: picture_key(file),
+                    radius: CARD,
+                });
+                pieces
             })
             .collect()
+    }
+
+    /// The mini previews the rows on screen carry, by the name each is drawn
+    /// under.
+    ///
+    /// Apart from `faces`, which lists what has to be *fetched*: these are
+    /// already here, in the message, and want decoding rather than asking for.
+    pub fn minis(&self, within: Rect) -> Vec<(String, String)> {
+        let mut wanted = Vec::new();
+        let mut top = within.y + self.theme.pad_top - self.scroll;
+        for (index, laid) in self.laid.iter().enumerate() {
+            let bottom = top + laid.height;
+            if bottom >= within.y
+                && top <= within.bottom()
+                && let Some(Row::Post { post } | Row::Continuation { post }) = self.rows.get(index)
+            {
+                for file in &post.files {
+                    if (file.image || file.video)
+                        && let Some(encoded) = file.mini_preview.as_ref()
+                    {
+                        wanted.push((mini_key(&file.id), encoded.clone()));
+                    }
+                }
+            }
+            top = bottom + self.theme.row_gap;
+        }
+        wanted
     }
 
     /// A row's reaction blocks, paired with the reactions they were built from.
@@ -1442,7 +1515,7 @@ impl Stream {
                         radius: AVATAR / 2.0,
                     }]);
                 }
-                scene.extend(self.pictures(index, top, inner.x));
+                scene.extend(self.pictures(index, top, inner.x, palette.ground));
                 // The toolbar last of the row's own drawing, so it sits over
                 // the message rather than under the first word of it.
                 if hovered == Some(index) {
@@ -1530,6 +1603,15 @@ const FACES: usize = 3;
 /// hand when somebody changes their photograph.
 pub fn avatar_key(user_id: &str, version: i64) -> String {
     format!("avatar/{user_id}?v={version}")
+}
+
+/// What an attachment's mini preview is called.
+///
+/// Its own name rather than the picture's, because both are drawn: the real
+/// one goes over it when it arrives. No route answers to `mini`, which is what
+/// keeps anything from trying to fetch one -- the bytes are in the message.
+pub fn mini_key(file_id: &str) -> String {
+    format!("mini/{file_id}")
 }
 
 /// What an attachment's picture is called.

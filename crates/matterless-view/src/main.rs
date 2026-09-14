@@ -2244,6 +2244,29 @@ impl App {
                 link.send(matterless_view::live::Ask::Fetch { key, width, height });
             }
         }
+        self.want_minis();
+    }
+
+    /// The mini previews on screen, decoded straight into the atlas.
+    ///
+    /// No request and no socket: the bytes came with the message. They go
+    /// through the same `arrived` queue a fetched picture does, because the
+    /// thread that owns the GPU is the only one that may touch the atlas.
+    ///
+    /// Counted in the same `asked` set, which is what keeps a kilobyte of JPEG
+    /// from being decoded again on every frame it is visible.
+    fn want_minis(&mut self) {
+        let mut wanted = self.stream.minis(self.stream_rect());
+        if let (Some(thread), Some(within)) = (&self.thread, self.thread_stream_rect()) {
+            wanted.extend(thread.minis(within));
+        }
+        for (key, encoded) in wanted {
+            if self.asked.insert(key.clone())
+                && let Some((width, height, rgba)) = matterless_view::live::mini(&encoded)
+            {
+                self.arrived.push((key, width, height, rgba));
+            }
+        }
     }
 
     /// Sends a failed message again, keeping its pending id.
