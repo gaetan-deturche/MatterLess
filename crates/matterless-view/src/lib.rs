@@ -68,10 +68,15 @@ pub struct Vertex {
     pub position: [f32; 2],
     pub uv: [f32; 2],
     pub colour: [f32; 4],
-    /// Which sampler this quad wants: 0 for a glyph, 1 for a picture. Carried
-    /// per vertex because both kinds are in one draw call, and splitting the
-    /// call by sampler would cost more state changes than a float does.
-    pub filtered: f32,
+    /// Which sheet this quad samples, in the order `Sheet` lists them, with
+    /// the opened picture's own texture after them.
+    ///
+    /// Carried per vertex because all four are bound at once: binding them in
+    /// turn meant a draw call per switch, and a message row switches four
+    /// times. It decides the sampler too -- the letters sheet is glyphs and
+    /// the white texel, which want point sampling, and everything else is a
+    /// picture scaled to a box, which wants linear.
+    pub sheet: u32,
     /// Where this corner sits relative to the quad's middle, and half the
     /// quad's size. The fragment needs both to know where it is inside the
     /// rectangle, and per-vertex is how it gets there without a second buffer.
@@ -90,7 +95,7 @@ impl Vertex {
         array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
         step_mode: wgpu::VertexStepMode::Vertex,
         attributes: &wgpu::vertex_attr_array![
-            0 => Float32x2, 1 => Float32x2, 2 => Float32x4, 3 => Float32,
+            0 => Float32x2, 1 => Float32x2, 2 => Float32x4, 3 => Uint32,
             4 => Float32x2, 5 => Float32x2, 6 => Float32, 7 => Float32,
         ],
     };
@@ -98,11 +103,11 @@ impl Vertex {
 
 /// Casts the vertices to bytes for upload.
 ///
-/// Hand-rolled rather than pulling in `bytemuck`: `Vertex` is plain floats with
-/// no padding, so its layout is exactly what the shader declares.
+/// Hand-rolled rather than pulling in `bytemuck`: `Vertex` is four-byte fields
+/// with no padding, so its layout is exactly what the shader declares.
 fn as_bytes(vertices: &[Vertex]) -> &[u8] {
-    // SAFETY: `Vertex` is `repr(C)` and contains only `f32`, so it has no
-    // padding and no invalid bit patterns.
+    // SAFETY: `Vertex` is `repr(C)` and contains only `f32` and `u32`, so it
+    // has no padding and no invalid bit patterns.
     unsafe {
         std::slice::from_raw_parts(
             vertices.as_ptr() as *const u8,
@@ -133,13 +138,6 @@ fn viewport_bytes(viewport: &Viewport) -> &[u8] {
 ///
 /// Two triangles per quad, and a solid fill points at the atlas's opaque corner
 /// texel so it goes through the same pipeline as a glyph.
-/// One stretch of quads that all sample the same sheet.
-///
-/// Runs rather than three buckets, and never sorted: the scene is painted in
-/// the order it is built, so grouping by texture would put an avatar over the
-/// message written after it.
-pub type Run = (std::ops::Range<u32>, Sheet);
-
 pub fn vertices_of(
     pieces: &[Piece],
     queue: &wgpu::Queue,
@@ -147,29 +145,7 @@ pub fn vertices_of(
     cache: &mut SwashCache,
     atlas: &mut Atlas,
     into: &mut Vec<Vertex>,
-    runs: &mut Vec<Run>,
 ) {
-    /// Takes the quads pushed since the last run into a run of `sheet`.
-    ///
-    /// Extends the run in progress when it is the same sheet, and opens a new
-    /// one when it is not -- which is the only thing that decides how many
-    /// draws a frame costs.
-    fn opened(into: &[Vertex], runs: &mut Vec<Run>, started: u32, sheet: Sheet) {
-        let to = into.len() as u32;
-        match runs.last_mut() {
-            Some((range, held)) if *held == sheet => range.end = to,
-            _ => {
-                // Where this layer's quads begin when it has opened no run
-                // yet. One buffer holds the whole frame, so these are indices
-                // into that and not into the layer.
-                let from = runs.last().map(|(range, _)| range.end).unwrap_or(started);
-                if to > from {
-                    runs.push((from..to, sheet));
-                }
-            }
-        }
-    }
-    let started = into.len() as u32;
     let letters = Sheet::Letters.size();
     let (wide, tall) = (letters.0 as f32, letters.1 as f32);
     // Half a texel into the opaque corner, so no neighbour bleeds in.
@@ -203,12 +179,11 @@ pub fn vertices_of(
                     [*x, *y, *x + *width, *y + *height],
                     [solid_uv[0], solid_uv[1], solid_uv[0], solid_uv[1]],
                     rgba,
-                    0.0,
+                    // The white texel it samples is on the letters sheet.
+                    Sheet::Letters as u32,
                     *radius,
                     *softness,
                 );
-                // The white texel it samples is on the letters sheet.
-                opened(into, runs, started, Sheet::Letters);
             }
             Piece::Image {
                 x,
@@ -240,11 +215,10 @@ pub fn vertices_of(
                     ],
                     // White, so the picture keeps its own colours.
                     [1.0, 1.0, 1.0, 1.0],
-                    1.0,
+                    sheet as u32,
                     *radius,
                     1.0,
                 );
-                opened(into, runs, started, sheet);
             }
             Piece::Text {
                 glyphs,
@@ -292,7 +266,6 @@ pub fn vertices_of(
                         rgba,
                     );
                 }
-                opened(into, runs, started, Sheet::Letters);
             }
         }
     }
@@ -300,7 +273,7 @@ pub fn vertices_of(
 
 /// A quad sampled point-for-point, which is what a glyph and a fill want.
 fn push_quad(into: &mut Vec<Vertex>, rect: [f32; 4], uv: [f32; 4], colour: [f32; 4]) {
-    quad(into, rect, uv, colour, 0.0, 0.0, 1.0);
+    quad(into, rect, uv, colour, Sheet::Letters as u32, 0.0, 1.0);
 }
 
 /// Six vertices for one rectangle.
@@ -314,7 +287,7 @@ fn quad(
     rect: [f32; 4],
     uv: [f32; 4],
     colour: [f32; 4],
-    filtered: f32,
+    sheet: u32,
     radius: f32,
     softness: f32,
 ) {
@@ -328,7 +301,7 @@ fn quad(
         position: [x, y],
         uv: [u, v],
         colour,
-        filtered,
+        sheet,
         local: [x - (x0 + half_size[0]), y - (y0 + half_size[1])],
         half_size,
         radius,
@@ -347,23 +320,75 @@ fn quad(
 /// The rectangle a run is clipped to.
 type Clip = (f32, f32, f32, f32);
 
-/// One run of vertices, the sheet it samples, and the rectangle it is clipped
-/// to.
-type Span = (std::ops::Range<u32>, Sheet, Clip);
+/// Where the opened picture's own texture sits, after the three sheets.
+const SHOWN: u32 = 3;
 
-/// The same, for the opened picture, which has a texture of its own and so
-/// needs no sheet to name.
-type Overlay = (std::ops::Range<u32>, Clip);
+/// Binds everything the pipeline samples: the two samplers, the three sheets,
+/// and whatever is open.
+///
+/// One function because it is called three times -- at startup, when a picture
+/// is opened, and when it is closed -- and three copies of a seven-entry
+/// descriptor is three places for an entry to go to the wrong binding.
+#[allow(clippy::too_many_arguments)]
+fn bind_all(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    uniform: &wgpu::Buffer,
+    sampler: &wgpu::Sampler,
+    smooth: &wgpu::Sampler,
+    atlas: &Atlas,
+    shown: &wgpu::TextureView,
+) -> wgpu::BindGroup {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("list"),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: uniform.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::Sampler(sampler),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: wgpu::BindingResource::Sampler(smooth),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: wgpu::BindingResource::TextureView(atlas.view(Sheet::Letters)),
+            },
+            wgpu::BindGroupEntry {
+                binding: 4,
+                resource: wgpu::BindingResource::TextureView(atlas.view(Sheet::Faces)),
+            },
+            wgpu::BindGroupEntry {
+                binding: 5,
+                resource: wgpu::BindingResource::TextureView(atlas.view(Sheet::Pictures)),
+            },
+            wgpu::BindGroupEntry {
+                binding: 6,
+                resource: wgpu::BindingResource::TextureView(shown),
+            },
+        ],
+    })
+}
+
+/// One layer's vertices and the rectangle they are clipped to.
+///
+/// A layer is one draw. Every sheet is bound at once and each quad names the
+/// one it samples, so nothing inside a layer needs splitting -- only the
+/// scissor changes, and that is what a layer is.
+type Span = (std::ops::Range<u32>, Clip);
 
 /// The GPU side of the list: a device, a pipeline, an atlas and a vertex buffer.
 pub struct View {
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
     pipeline: wgpu::RenderPipeline,
-    /// One per sheet, in the order `Sheet` lists them. The pipeline binds one
-    /// texture at a time, so a frame is drawn as runs and this is what each
-    /// run switches to.
-    bindings: [wgpu::BindGroup; 3],
+    /// Every texture at once. Bound once a frame, whatever is on screen.
+    bindings: wgpu::BindGroup,
     uniform: wgpu::Buffer,
     vertices: wgpu::Buffer,
     capacity: usize,
@@ -377,10 +402,11 @@ pub struct View {
     /// The picture a reader has opened, in a texture of its own.
     ///
     /// One at a time, replaced when another is opened and dropped when the
-    /// viewer shuts. Not in the atlas: that sheet is shared by every glyph and
-    /// thumbnail on screen and has no eviction, so one photograph would push
-    /// out the faces around it and never give the room back.
-    shown: Option<wgpu::BindGroup>,
+    /// viewer shuts. Not in a sheet: they are packed for things drawn at the
+    /// size they were fetched, and a picture opened full size is neither.
+    shown: Option<wgpu::TextureView>,
+    /// What stands in the fourth binding while nothing is open.
+    nothing: wgpu::TextureView,
 }
 
 impl View {
@@ -434,11 +460,7 @@ impl View {
                 wgpu::BindGroupLayoutEntry {
                     binding: 1,
                     visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
                 wgpu::BindGroupLayoutEntry {
@@ -447,43 +469,71 @@ impl View {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                // The three sheets and the opened picture, all bound at once:
+                // four textures is well inside any device's limit, and a quad
+                // that names the one it wants costs nothing where binding them
+                // in turn cost a draw call per switch.
                 wgpu::BindGroupLayoutEntry {
                     binding: 3,
                     visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 6,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
                     count: None,
                 },
             ],
         });
-        let bind = |sheet: Sheet| {
-            device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("list"),
-                layout: &layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: uniform.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::TextureView(atlas.view(sheet)),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: wgpu::BindingResource::Sampler(&sampler),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 3,
-                        resource: wgpu::BindingResource::Sampler(&smooth),
-                    },
-                ],
-            })
-        };
-        let bindings = [
-            bind(Sheet::Letters),
-            bind(Sheet::Faces),
-            bind(Sheet::Pictures),
-        ];
+        // Something for the fourth texture to be while nothing is open. A
+        // binding cannot be left empty, and one texel is cheaper to keep than
+        // a second pipeline for the frames with no picture in them.
+        let nothing = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("nothing shown"),
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let nothing = nothing.create_view(&wgpu::TextureViewDescriptor::default());
+        let bindings = bind_all(&device, &layout, &uniform, &sampler, &smooth, &atlas, &nothing);
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("list"),
             bind_group_layouts: &[&layout],
@@ -536,6 +586,7 @@ impl View {
             sampler,
             smooth,
             shown: None,
+            nothing,
         }
     }
 
@@ -586,34 +637,29 @@ impl View {
                 depth_or_array_layers: 1,
             },
         );
-        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        self.shown = Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("shown"),
-            layout: &self.layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: self.uniform.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::Sampler(&self.sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: wgpu::BindingResource::Sampler(&self.smooth),
-                },
-            ],
-        }));
+        self.shown = Some(texture.create_view(&wgpu::TextureViewDescriptor::default()));
+        self.rebind();
+    }
+
+    /// Binds everything again, which is what a new or dropped picture needs:
+    /// the fourth texture is part of the same group as the three sheets.
+    fn rebind(&mut self) {
+        let shown = self.shown.as_ref().unwrap_or(&self.nothing);
+        self.bindings = bind_all(
+            &self.device,
+            &self.layout,
+            &self.uniform,
+            &self.sampler,
+            &self.smooth,
+            &self.atlas,
+            shown,
+        );
     }
 
     /// Lets go of it. The texture is freed with the bind group holding it.
     pub fn stop_showing(&mut self) {
         self.shown = None;
+        self.rebind();
     }
 
     /// Draws a whole frame: every panel, each clipped to its own rectangle.
@@ -647,9 +693,9 @@ impl View {
         // it needs the other bind group. Last in the buffer and last in the
         // pass: it is an overlay over the whole window, so there is nothing it
         // should be drawn under.
-        let mut shown: Vec<Overlay> = Vec::new();
+        let mut shown: Vec<Span> = Vec::new();
         for layer in &scene.layers {
-            let mut runs: Vec<Run> = Vec::new();
+            let from = quads.len() as u32;
             vertices_of(
                 &layer.pieces,
                 &self.queue,
@@ -657,12 +703,11 @@ impl View {
                 &mut self.cache,
                 &mut self.atlas,
                 &mut quads,
-                &mut runs,
             );
-            spans.extend(
-                runs.into_iter()
-                    .map(|(range, sheet)| (range, sheet, layer.clip)),
-            );
+            let to = quads.len() as u32;
+            if to > from {
+                spans.push((from..to, layer.clip));
+            }
             for piece in &layer.pieces {
                 let Piece::Shown {
                     x,
@@ -680,9 +725,9 @@ impl View {
                     [0.0, 0.0, 1.0, 1.0],
                     // White, so the picture keeps its own colours.
                     [1.0, 1.0, 1.0, 1.0],
-                    // Filtered: this is a photograph scaled to fit a window,
-                    // and point sampling one drops whole rows of pixels.
-                    1.0,
+                    // Its own texture, after the three sheets: a picture
+                    // opened full size is far too large to share one.
+                    SHOWN,
                     0.0,
                     1.0,
                 );
@@ -732,12 +777,12 @@ impl View {
             });
             if !quads.is_empty() {
                 pass.set_pipeline(&self.pipeline);
+                // Once for the frame. Every texture is in this group and each
+                // quad names the one it samples, so the only thing left that
+                // splits a frame into draws is the scissor.
+                pass.set_bind_group(0, &self.bindings, &[]);
                 pass.set_vertex_buffer(0, self.vertices.slice(..));
-                // Bound only when it changes: a message row is a fill, its
-                // words, a face and its words again, and rebinding the same
-                // sheet four times is four state changes for nothing.
-                let mut bound: Option<Sheet> = None;
-                for (range, sheet, clip) in spans {
+                for (range, clip) in spans {
                     // Clamped to the surface: a scissor outside it is a
                     // validation error, and a panel can be dragged past the edge.
                     let x = clip.0.max(0.0).min(size.0 as f32) as u32;
@@ -747,21 +792,16 @@ impl View {
                     if width == 0 || height == 0 {
                         continue;
                     }
-                    if bound != Some(sheet) {
-                        pass.set_bind_group(0, &self.bindings[sheet as usize], &[]);
-                        bound = Some(sheet);
-                    }
                     pass.set_scissor_rect(x, y, width, height);
                     pass.draw(range, 0..1);
                 }
             }
-            // The opened picture, from its own texture. A second bind group
-            // and so a second draw; nothing else in the frame samples it.
-            if let Some(bindings) = self.shown.as_ref()
-                && !shown.is_empty()
-            {
+            // The opened picture. Its own draw only because it is built after
+            // the rest of the frame, not because it needs a different binding:
+            // it names the fourth texture like anything else names a sheet.
+            if self.shown.is_some() && !shown.is_empty() {
                 pass.set_pipeline(&self.pipeline);
-                pass.set_bind_group(0, bindings, &[]);
+                pass.set_bind_group(0, &self.bindings, &[]);
                 pass.set_vertex_buffer(0, self.vertices.slice(..));
                 for (range, clip) in shown {
                     let x = clip.0.max(0.0).min(size.0 as f32) as u32;
