@@ -451,6 +451,70 @@ fn the_wheel_scrolls_the_panel_it_is_over_and_stops_at_the_end() {
 }
 
 /// Opening a conversation shows its newest message, not its oldest.
+/// A picture's box is filled, then the mini preview, then the picture -- in
+/// that order, because the scene is painted in the order it is built.
+///
+/// Drawn one on top of the other rather than one instead of the other: nothing
+/// has to notice the moment the real bytes land, and nothing has to be taken
+/// away when they do. Get the order wrong and the blurred kilobyte covers the
+/// picture it was standing in for -- which is the same mistake this file has
+/// now made in five other places.
+#[test]
+fn a_picture_is_drawn_over_its_own_placeholder() {
+    use matterless_paint::{Painter, Palette, Piece, Scene};
+
+    let mut fonts = Fonts::new();
+    let mut painter = Painter::new();
+    let mut scene = Scene::default();
+    let mut shown = post("p1", "");
+    shown.files = vec![matterless_render::FileRef {
+        id: "f1".into(),
+        name: "shot.png".into(),
+        extension: "png".into(),
+        size: 4096,
+        mime_type: "image/png".into(),
+        width: 1280,
+        height: 720,
+        image: true,
+        video: false,
+        variant: matterless_render::ImageVariant::Preview,
+        mini_preview: Some("/9j/pretend".into()),
+        box_width: 320,
+        box_height: 180,
+        archived: false,
+    }];
+    let mut stream = Stream::new("stream");
+    stream.rows = vec![Row::Post { post: shown }];
+    stream.lay_out(&mut fonts, panel().width);
+    stream.draw(
+        &mut crate::sidebar::Canvas {
+            scene: &mut scene,
+            painter: &mut painter,
+            fonts: &mut fonts,
+            palette: &Palette::default(),
+        },
+        panel(),
+        &Input::default(),
+    );
+
+    let pieces: Vec<&Piece> = scene
+        .layers
+        .iter()
+        .flat_map(|layer| layer.pieces.iter())
+        .collect();
+    let at = |wanted: &str| {
+        pieces
+            .iter()
+            .position(|piece| matches!(piece, Piece::Image { key, .. } if key == wanted))
+    };
+    let mini = at("mini/f1").expect("the placeholder is drawn");
+    let real = at("preview/f1").expect("the picture is drawn");
+    assert!(
+        mini < real,
+        "the placeholder is painted at {mini}, over the picture at {real}"
+    );
+}
+
 #[test]
 fn a_conversation_opens_at_the_bottom() {
     let mut fonts = Fonts::new();

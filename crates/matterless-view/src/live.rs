@@ -1302,6 +1302,52 @@ fn decode(bytes: &[u8], width: u32, height: u32) -> Option<(u32, u32, Vec<u8>)> 
     Some((rgba.width(), rgba.height(), rgba.into_raw()))
 }
 
+/// The mini preview a post carries, decoded.
+///
+/// Base64 in the message metadata rather than a file to fetch: the server puts
+/// about a kilobyte of JPEG on every image attachment precisely so a client can
+/// show something before it asks for anything. Drawn at whatever size the box
+/// is, which is why nothing is resized here -- it is sixteen pixels across and
+/// meant to be stretched.
+pub fn mini(encoded: &str) -> Option<(u32, u32, Vec<u8>)> {
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .ok()?;
+    let rgba = image::load_from_memory(&bytes).ok()?.to_rgba8();
+    Some((rgba.width(), rgba.height(), rgba.into_raw()))
+}
+
+#[cfg(test)]
+mod minis {
+    /// A 2x2 JPEG, the shape a mini preview arrives in.
+    const TINY: &str = concat!(
+        "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAA0JCgsKCA0LCgsODg0PEyAVExISEyccHhcgLikxMC4pLS",
+        "wzOko+MzZGNywtQFdBRkxOUlNSMj5aYVpQYEpRUk//2wBDAQ4ODhMREyYVFSZPNS01T09PT09PT09P",
+        "T09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT0//wAARCAACAAIDASIAAhEBAx",
+        "EB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQID",
+        "AAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRk",
+        "dISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2",
+        "t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQ",
+        "AAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEI",
+        "FEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2",
+        "hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU",
+        "1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwDm3dg7YZup70UUV2Q+FHoT+Jn/2Q",
+        "==",
+    );
+
+    /// A mini preview is read from the message rather than fetched, so a
+    /// broken one has to fail quietly -- there is no request to report.
+    #[test]
+    fn a_mini_preview_decodes_and_rubbish_does_not() {
+        let (width, height, rgba) = super::mini(TINY).expect("a tiny jpeg decodes");
+        assert_eq!((width, height), (2, 2));
+        assert_eq!(rgba.len(), 2 * 2 * 4);
+        assert!(super::mini("not base64 at all !!").is_none());
+        assert!(super::mini("").is_none());
+    }
+}
+
 /// What a downloaded picture actually is, by its first bytes.
 ///
 /// Only for saying so in a message: the decoder sniffs for itself.
