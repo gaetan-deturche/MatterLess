@@ -51,6 +51,8 @@ pub struct Theme {
     pub card_height: f32,
     /// The words on a pill and on a separator, both set small.
     pub small_size: f32,
+    /// A join, a leave, or a deleted root: `.system { font-size: 12.5px }`.
+    pub system_size: f32,
     /// Inside a reaction pill, and between two of them.
     pub pill_padding: f32,
     pub pill_gap: f32,
@@ -105,6 +107,7 @@ impl Default for Theme {
             pill_padding: 7.0,
             pill_gap: 5.0,
             small_size: 11.5,
+            system_size: 12.5,
             emoji_size: 16.0,
             reaction_height: 25.0,
             separator_height: 34.0,
@@ -591,7 +594,20 @@ pub fn lay_out(fonts: &mut Fonts, row: &Row, theme: &Theme) -> RowLayout {
                 }],
             };
         }
+        // `.system { font-size: 12.5px; color: var(--ink-faint); font-style:
+        // italic }`, and the sentence itself, which used to be missing.
+        //
+        // The row reserved its height and carried no words, so a channel whose
+        // recent history is all joins and leaves drew as a column of date
+        // separators with nothing under them -- which reads as messages having
+        // gone missing rather than as nobody having said anything since 2024.
         Row::System { .. } | Row::DeletedRoot { .. } => {
+            let text = match row {
+                Row::System { text, .. } => text.clone(),
+                // The app's own words for a root that is gone but still
+                // anchors its replies.
+                _ => "Message deleted — its replies remain.".to_string(),
+            };
             return RowLayout {
                 height: theme.line_height + theme.row_padding * 2.0,
                 blocks: vec![Block {
@@ -600,8 +616,12 @@ pub fn lay_out(fonts: &mut Fonts, row: &Row, theme: &Theme) -> RowLayout {
                     height: theme.line_height,
                     lines: 1,
                     kind: Kind::Text,
-                    spans: Vec::new(),
-                    size: theme.body_size,
+                    spans: vec![TextSpan {
+                        italic: true,
+                        faint: true,
+                        ..plain(text)
+                    }],
+                    size: theme.system_size,
                     wrap: theme.text_width(),
                 }],
             };
@@ -1503,6 +1523,46 @@ mod tests {
         let laid = lay_out(&mut fonts, &Row::DateSeparator { epoch_day: 20137 }, &theme);
         assert_eq!(laid.height, theme.separator_height);
         assert_eq!(laid.blocks.len(), 1);
+    }
+
+    /// A system row says what happened, rather than reserving room for silence.
+    ///
+    /// It used to be laid out with no spans at all: the height was right and
+    /// the words were missing, so a channel whose last two years are joins and
+    /// leaves drew as a stack of date separators with gaps under them. The
+    /// sentence is already built for the shell -- this only has to draw it.
+    #[test]
+    fn a_system_row_carries_the_sentence_it_was_given() {
+        let mut fonts = Fonts::new();
+        let theme = Theme::default();
+        let laid = lay_out(
+            &mut fonts,
+            &Row::System {
+                post_id: "p1".into(),
+                post_type: "system_join_channel".into(),
+                nodes: Vec::new(),
+                text: "ada joined the channel".into(),
+            },
+            &theme,
+        );
+        let span = laid.blocks[0].spans.first().expect("words on the row");
+        assert_eq!(span.text, "ada joined the channel");
+        // `.system { color: var(--ink-faint); font-style: italic }`.
+        assert!(span.faint && span.italic, "set apart from what people said");
+        assert_eq!(laid.blocks[0].size, theme.system_size);
+
+        // And a deleted root says why it is still there.
+        let gone = lay_out(
+            &mut fonts,
+            &Row::DeletedRoot {
+                post_id: "p2".into(),
+            },
+            &theme,
+        );
+        assert_eq!(
+            gone.blocks[0].spans.first().map(|span| span.text.as_str()),
+            Some("Message deleted \u{2014} its replies remain.")
+        );
     }
 
     fn picture(id: &str, width: i32, height: i32) -> matterless_render::FileRef {
