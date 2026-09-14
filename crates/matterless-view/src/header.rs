@@ -21,6 +21,12 @@ pub struct Header {
     /// Whether this conversation is muted, which is the one button whose word
     /// changes with the state it is in.
     pub muted: bool,
+    /// The mark before the name, saying what kind of place this is.
+    ///
+    /// A hash for a channel, which is nearly always right -- and not for the
+    /// followed threads, which are every conversation at once and read as a
+    /// channel called "Threads" with one on them.
+    pub sigil: &'static str,
 }
 
 /// The strip's height. Fixed: it is one line of text and a rule.
@@ -215,6 +221,7 @@ impl Header {
             title: title.into(),
             offered: offered(false),
             muted: false,
+            sigil: "#",
         }
     }
 
@@ -246,7 +253,7 @@ impl Header {
         // The sigil is faint and the name is not, so the eye lands on the name.
         let sigil = painter.run(
             fonts,
-            "#",
+            self.sigil,
             within.x + LEFT,
             within.y + 13.0,
             Run {
@@ -259,10 +266,27 @@ impl Header {
         );
         scene.glyphs(sigil, palette.faint, palette.faint);
 
+        // Past the mark, whichever it is. A hash is narrower than the column
+        // kept for it; three lines are wider, and at a fixed offset the name
+        // lands on top of them.
+        let past = matterless_layout::extent_of(
+            fonts,
+            self.sigil,
+            f32::MAX,
+            matterless_layout::Style {
+                size: 15.0,
+                line_height: 20.0,
+                bold: false,
+                italic: false,
+                mono: false,
+            },
+        )
+        .width
+            + 4.0;
         let name = painter.run(
             fonts,
             &self.title,
-            within.x + LEFT + SIGIL,
+            within.x + LEFT + SIGIL.max(past),
             within.y + 13.0,
             // Never wrapped: the strip is one line tall, and the panel's clip
             // cuts a long name as it does in the sidebar.

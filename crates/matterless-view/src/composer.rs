@@ -32,6 +32,13 @@ pub struct Composer {
     /// True once anything has been typed, so an empty buffer can be told from
     /// one the reader has emptied on purpose.
     pub touched: bool,
+    /// A field, not a message box: no paperclip, no Send, and none of the
+    /// height they take.
+    ///
+    /// The query boxes -- search, the switcher, the emoji picker -- are all
+    /// this. They were message composers, which meant each of them offered to
+    /// attach a file to a search and reserved 34 pixels to do it in.
+    pub plain: bool,
 }
 
 /// A button inside the box.
@@ -49,6 +56,10 @@ pub const NAME: &str = "composer";
 const SIZE: f32 = 14.0;
 const LINE: f32 = 20.0;
 const PADDING: f32 = 10.0;
+/// The same two on a field, which the app sets tighter: `input { padding: 6px
+/// 8px }` inside a `header { padding: 8px 10px }`, which is a 46px strip.
+const FIELD_PADDING: f32 = 6.0;
+const FIELD_MARGIN: f32 = 7.0;
 /// The margin outside the box, matching the stream's own gutter.
 const MARGIN: f32 = 12.0;
 /// How tall it is allowed to grow before the text scrolls inside it. Eight
@@ -80,7 +91,14 @@ impl Composer {
             placeholder: "Write a message... (Enter to send, Shift+Enter for a new line)"
                 .to_string(),
             touched: false,
+            plain: false,
         }
+    }
+
+    /// The same box as a field: no paperclip, no Send, and none of their room.
+    pub fn plain(mut self) -> Self {
+        self.plain = true;
+        self
     }
 
     /// The text as it stands.
@@ -103,7 +121,7 @@ impl Composer {
     /// Shapes the text for this width. Must run before the height is asked for
     /// or the box is drawn, because both are answers about the shaping.
     pub fn lay_out(&mut self, fonts: &mut Fonts, width: f32) {
-        let inner = (width - MARGIN * 2.0 - PADDING * 2.0).max(1.0);
+        let inner = (width - self.margin() * 2.0 - self.padding() * 2.0).max(1.0);
         self.editor.with_buffer_mut(|buffer| {
             buffer.set_size(Some(inner), None);
         });
@@ -119,7 +137,17 @@ impl Composer {
 
     /// The height the strip needs, which grows with the message.
     pub fn height(&self) -> f32 {
-        self.lines() as f32 * LINE + PADDING * 2.0 + MARGIN * 2.0 + TOOLS
+        let tools = if self.plain { 0.0 } else { TOOLS };
+        self.lines() as f32 * LINE + self.padding() * 2.0 + self.margin() * 2.0 + tools
+    }
+
+    /// Inside the box, and around it. Tighter on a field than on a message.
+    fn padding(&self) -> f32 {
+        if self.plain { FIELD_PADDING } else { PADDING }
+    }
+
+    fn margin(&self) -> f32 {
+        if self.plain { FIELD_MARGIN } else { MARGIN }
     }
 
     /// The row of buttons along the bottom of the box, and the room it takes.
@@ -147,6 +175,9 @@ impl Composer {
 
     /// The two buttons, so a pointer can land on them.
     pub fn boxes_in(&self, within: Rect) -> Vec<Placed> {
+        if self.plain {
+            return Vec::new();
+        }
         vec![
             Placed {
                 name: format!("{}/attach", self.name),
@@ -190,10 +221,10 @@ impl Composer {
     fn box_of(&self, within: Rect) -> Rect {
         let strip = self.strip(within);
         Rect::new(
-            strip.x + MARGIN,
-            strip.y + MARGIN,
-            (strip.width - MARGIN * 2.0).max(0.0),
-            (strip.height - MARGIN * 2.0).max(0.0),
+            strip.x + self.margin(),
+            strip.y + self.margin(),
+            (strip.width - self.margin() * 2.0).max(0.0),
+            (strip.height - self.margin() * 2.0).max(0.0),
         )
     }
 
@@ -219,7 +250,7 @@ impl Composer {
         within: Rect,
         clipboard: &mut String,
     ) -> Option<String> {
-        let inner = self.box_of(within).inset(PADDING);
+        let inner = self.box_of(within).inset(self.padding());
         let focused = input.focus() == Some(self.name.as_str());
 
         // The pointer puts the caret where it was clicked, and dragging from
@@ -381,9 +412,15 @@ impl Composer {
         } = into;
         let strip = self.strip(within);
         let outer = self.box_of(within);
-        let inner = outer.inset(PADDING);
+        let inner = outer.inset(self.padding());
 
-        scene.fill(strip.x, strip.y, strip.width, strip.height, palette.ground);
+        // The strip a message box sits on, which is the foot of the panel and
+        // its own surface. A field has none: the app's `header` carries no
+        // background of its own, and filling one here draws a band across the
+        // pane that stops short of the button beside it.
+        if !self.plain {
+            scene.fill(strip.x, strip.y, strip.width, strip.height, palette.ground);
+        }
         // A border rather than a shadow: one rectangle behind another, which is
         // the only outline this renderer draws -- and a focused box has to be
         // visibly different from an unfocused one.
@@ -460,6 +497,12 @@ impl Composer {
         // A paperclip and a Send, for the readers who would rather press a
         // button than learn that Enter sends and a drop attaches. Nothing here
         // can be reached any other way than by the keyboard otherwise.
+        //
+        // Not on a field: there is nothing to attach to a query, and a Send
+        // beside one says the wrong thing about what return does.
+        if self.plain {
+            return;
+        }
         let attach = self.attach(within);
         let clip = painter.run(
             fonts,

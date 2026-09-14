@@ -16,7 +16,7 @@ use matterless_ui::{Placed, Rect};
 
 /// The strip a press is caught in, wider than anything drawn in it so the bar
 /// is easy to hit: `.track { width: 12px }`.
-const TRACK: f32 = 12.0;
+pub const TRACK: f32 = 12.0;
 /// The groove behind the thumb, and the thumb itself, with the gap each keeps
 /// from the right edge. Straight from the stylesheet: a 4px rail at `right:
 /// 4px` and an 8px thumb at `right: 2px`.

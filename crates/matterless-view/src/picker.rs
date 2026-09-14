@@ -57,7 +57,7 @@ impl Default for Picker {
 
 impl Picker {
     pub fn new() -> Self {
-        let mut query = Composer::new(NAME);
+        let mut query = Composer::new(NAME).plain();
         query.placeholder = "React with…".to_string();
         Self {
             for_post: None,

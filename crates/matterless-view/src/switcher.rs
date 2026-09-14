@@ -123,7 +123,7 @@ impl Default for Switcher {
 
 impl Switcher {
     pub fn new() -> Self {
-        let mut query = Composer::new(NAME);
+        let mut query = Composer::new(NAME).plain();
         query.placeholder = "Jump to…".to_string();
         Self {
             open: false,
@@ -212,7 +212,11 @@ impl Switcher {
                 }
                 // Only a conversation is somewhere to go. A heading, a team
                 // and the reader's own name are not.
-                Entry::Heading { .. } | Entry::Team { .. } | Entry::Me { .. } => None,
+                Entry::Heading { .. }
+                | Entry::Team { .. }
+                | Entry::Me { .. }
+                // Not a conversation to jump to: it is every conversation at once.
+                | Entry::Threads { .. } => None,
             })
             .collect();
         // Stable, so equal scores keep the sidebar's order rather than
