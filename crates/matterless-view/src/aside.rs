@@ -91,7 +91,7 @@ pub fn draw_close(into: &mut Canvas<'_>, pane: Rect) {
         matterless_layout::marks::CLOSE,
         at.x + 7.0,
         at.y + 2.0,
-        Run::mark(14.0),
+        Run::mark(13.0),
     );
     scene.glyphs(glyphs, palette.soft, palette.faint);
 }

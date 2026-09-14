@@ -350,25 +350,37 @@ impl Viewer {
                 "back" => matterless_layout::marks::BACK,
                 _ => matterless_layout::marks::NEXT,
             };
-            let wide = matterless_layout::extent_of(
-                fonts,
-                said,
-                f32::MAX,
-                matterless_layout::Style {
-                    size: 13.0,
-                    line_height: 18.0,
-                    bold: false,
-                    italic: false,
-                    mono: false,
-                },
-            )
-            .width;
+            // The arrows are marks and "Save" is a word, so they are neither
+            // the same size nor from the same family, and only the word can be
+            // measured with the text metrics.
+            let mark = name != "save";
+            let wide = if mark {
+                15.0
+            } else {
+                matterless_layout::extent_of(
+                    fonts,
+                    said,
+                    f32::MAX,
+                    matterless_layout::Style {
+                        size: 13.0,
+                        line_height: 18.0,
+                        bold: false,
+                        italic: false,
+                        mono: false,
+                    },
+                )
+                .width
+            };
             let glyphs = painter.run(
                 fonts,
                 said,
                 rect.x + (rect.width - wide) / 2.0,
                 rect.y + (rect.height - 18.0) / 2.0,
-                Run::label(f32::MAX),
+                if mark {
+                    Run::mark(16.0)
+                } else {
+                    Run::label(f32::MAX)
+                },
             );
             scene.glyphs(glyphs, palette.ink, palette.faint);
         }
