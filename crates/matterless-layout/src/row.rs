@@ -7,7 +7,7 @@
 //! disagree, because there is only one of them.
 
 use crate::Fonts;
-use cosmic_text::{Attrs, Buffer, Family, Metrics, Shaping, Weight};
+use cosmic_text::{Attrs, Buffer, Metrics, Shaping, Weight};
 use matterless_render::Row;
 use matterless_render::markdown::Node;
 
@@ -481,7 +481,7 @@ fn inline(
 fn attrs_for(bold: bool, italic: bool, mono: bool) -> Attrs<'static> {
     let mut attrs = Attrs::new();
     if mono {
-        attrs = attrs.family(Family::Monospace);
+        attrs = attrs.family(crate::mono_family());
     }
     if bold {
         attrs = attrs.weight(Weight::BOLD);
