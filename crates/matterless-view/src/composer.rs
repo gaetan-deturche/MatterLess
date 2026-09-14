@@ -73,9 +73,13 @@ const BUTTON: f32 = 26.0;
 const SEND: f32 = 52.0;
 /// The row they sit on, along the bottom of the box.
 const TOOLS: f32 = 34.0;
-/// What the attach button shows. A paperclip, which is what every client uses
-/// and what a reader will look for.
-const CLIP: &str = "📎";
+/// What the attach button shows.
+///
+/// A sheet of paper rather than the paperclip every client uses, because there
+/// is no paperclip in line art: the fonts here have one glyph for it and it is
+/// a coloured bitmap. A control is not content, and a coloured one reads as
+/// something somebody sent rather than as something to press.
+const CLIP: &str = "🗎";
 
 impl Default for Composer {
     fn default() -> Self {

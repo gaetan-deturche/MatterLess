@@ -663,7 +663,7 @@ mod tests {
     fn items() -> Vec<Item> {
         vec![
             Item::new("unread", "Mark as Unread").marked("\u{2630}"),
-            Item::new("mute", "Mute Channel").marked("\u{1f514}"),
+            Item::new("mute", "Mute Channel").marked("\u{1f56d}"),
             Item::rule(),
             Item::new("leave", "Leave Channel").tinted(Tint::Flag),
         ]
