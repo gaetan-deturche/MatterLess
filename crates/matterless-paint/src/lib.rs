@@ -249,6 +249,21 @@ pub enum Piece {
         /// what a face is drawn as.
         radius: f32,
     },
+    /// The picture a reader has opened, drawn from a texture of its own.
+    ///
+    /// Not the atlas, deliberately. The atlas is a fixed sheet shared by every
+    /// glyph and every thumbnail on screen, with no eviction: putting a
+    /// two-thousand-pixel photograph in it would push out the faces around it
+    /// and never give the room back. This is one picture at a time, in its own
+    /// texture, replaced when another is opened and dropped when none is.
+    ///
+    /// No key, for the same reason: there is only ever one.
+    Shown {
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+    },
     /// Where a pressable run of words ended up. Nothing is drawn for it.
     ///
     /// A piece all the same, because only the shaping knows where the words
@@ -773,6 +788,12 @@ impl Painter {
                     width,
                     height,
                     ..
+                }
+                | Piece::Shown {
+                    x,
+                    y,
+                    width,
+                    height,
                 } => canvas.fill(
                     *x as i32,
                     *y as i32,

@@ -89,6 +89,20 @@ pub enum Update {
         height: u32,
         rgba: Vec<u8>,
     },
+    /// The picture a reader opened, full size, for a texture of its own.
+    ///
+    /// Apart from `Picture` because it does not go into the atlas: one of
+    /// these is two thousand pixels across and the atlas is a shared sheet
+    /// with no eviction.
+    Looked {
+        file_id: String,
+        width: u32,
+        height: u32,
+        rgba: Vec<u8>,
+    },
+    /// And the picture could not be had, so the viewer can say so rather than
+    /// showing an empty window.
+    LookFailed { file_id: String, why: String },
 }
 
 /// What the window asks the socket thread to do.
@@ -116,6 +130,18 @@ pub enum Ask {
     },
     /// Keep a file somebody attached, next to the reader's other downloads.
     Download { file_id: String, name: String },
+    /// Fetch one attachment at full size, to be looked at.
+    ///
+    /// `within` is how big the window is: the picture is scaled down to fit it
+    /// on the way in, because a photograph from a phone is four thousand
+    /// pixels across and nothing on screen is.
+    Look {
+        file_id: String,
+        /// The original rather than the server's re-encoded preview, which is
+        /// right for anything it does not re-encode -- a GIF, an SVG.
+        original: bool,
+        within: (u32, u32),
+    },
     /// Send a file that was dropped on the window.
     ///
     /// The path rather than the bytes: reading a hundred and fifty megabytes
@@ -846,6 +872,45 @@ async fn run(
                             Err(error) => eprintln!("older history for {channel_id}: {error}"),
                         }
                     }
+                    Ask::Look {
+                        file_id,
+                        original,
+                        within,
+                    } => {
+                        let route = if original {
+                            format!("/files/{file_id}")
+                        } else {
+                            format!("/files/{file_id}/preview")
+                        };
+                        match rest.fetch_bytes(&route).await {
+                            Ok(Some((bytes, _))) => {
+                                match fit(&bytes, within.0.max(1), within.1.max(1)) {
+                                    Some((width, height, rgba)) => wake.wake(Update::Looked {
+                                        file_id,
+                                        width,
+                                        height,
+                                        rgba,
+                                    }),
+                                    None => wake.wake(Update::LookFailed {
+                                        file_id,
+                                        why: format!(
+                                            "{} bytes of {} could not be decoded",
+                                            bytes.len(),
+                                            kind_of(&bytes)
+                                        ),
+                                    }),
+                                }
+                            }
+                            Ok(None) => wake.wake(Update::LookFailed {
+                                file_id,
+                                why: "the server has no such file".to_string(),
+                            }),
+                            Err(error) => wake.wake(Update::LookFailed {
+                                file_id,
+                                why: error.to_string(),
+                            }),
+                        }
+                    }
                     Ask::Fetch { key, width, height } => {
                         let Some(route) = route_for(&key) else {
                             continue;
@@ -1300,6 +1365,53 @@ fn decode(bytes: &[u8], width: u32, height: u32) -> Option<(u32, u32, Vec<u8>)> 
         rgba = image::imageops::thumbnail(&rgba, wanted.0, wanted.1);
     }
     Some((rgba.width(), rgba.height(), rgba.into_raw()))
+}
+
+/// One picture, decoded and scaled down to fit a box of `width` by `height`.
+///
+/// Aspect kept, and never enlarged: a picture smaller than the window stays
+/// its own size rather than being blown up into a soft one. Unlike `decode`
+/// there is no small ceiling, because this is the picture a reader has asked
+/// to look at -- the window's own size is the ceiling, and the device's texture
+/// limit is checked where it is uploaded.
+fn fit(bytes: &[u8], width: u32, height: u32) -> Option<(u32, u32, Vec<u8>)> {
+    let decoded = image::load_from_memory(bytes).ok()?;
+    let rgba = decoded.to_rgba8();
+    let (was, tall) = (rgba.width().max(1), rgba.height().max(1));
+    let scale = (width as f32 / was as f32)
+        .min(height as f32 / tall as f32)
+        .min(1.0);
+    if scale >= 1.0 {
+        return Some((rgba.width(), rgba.height(), rgba.into_raw()));
+    }
+    let wanted = (
+        ((was as f32 * scale) as u32).max(1),
+        ((tall as f32 * scale) as u32).max(1),
+    );
+    let smaller = image::imageops::thumbnail(&rgba, wanted.0, wanted.1);
+    Some((smaller.width(), smaller.height(), smaller.into_raw()))
+}
+
+#[cfg(test)]
+mod fitting {
+    /// A picture larger than the window comes back smaller, with its shape
+    /// kept; one smaller than the window is left alone rather than blown up.
+    #[test]
+    fn a_picture_is_scaled_to_fit_and_never_past_its_own_size() {
+        let wide = image::RgbaImage::from_pixel(400, 100, image::Rgba([255, 0, 0, 255]));
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(wide)
+            .write_to(&mut bytes, image::ImageFormat::Png)
+            .expect("encodes");
+        let bytes = bytes.into_inner();
+
+        let (width, height, rgba) = super::fit(&bytes, 200, 200).expect("decodes");
+        assert_eq!((width, height), (200, 50), "the shape is kept");
+        assert_eq!(rgba.len() as u32, width * height * 4);
+
+        let (width, height, _) = super::fit(&bytes, 4000, 4000).expect("decodes");
+        assert_eq!((width, height), (400, 100), "never enlarged");
+    }
 }
 
 /// The mini preview a post carries, decoded.

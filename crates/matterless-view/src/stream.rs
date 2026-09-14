@@ -36,6 +36,12 @@ pub enum Chose {
     Press(matterless_layout::row::Press),
     /// Keep a file somebody attached.
     Save { file_id: String, name: String },
+    /// Look at one of a message's pictures properly.
+    ///
+    /// The whole message, not just the one pressed, so the viewer can step
+    /// through them without asking the stream again -- and because which
+    /// others there are is what decides whether it offers to.
+    Look { file_id: String, post_id: String },
     /// Add or remove this reaction.
     React {
         post_id: String,
@@ -225,6 +231,18 @@ impl Stream {
                         });
                     }
                 }
+                // A picture is pressable: that is how it is opened, and it is
+                // also the only way one can be kept, since Save lives on a
+                // card and a picture is never drawn as one.
+                for ordinal in 0..self.pictured(index).len() {
+                    if let Some(rect) = self.picture_rect(index, ordinal, top, inner.x) {
+                        placed.push(Placed {
+                            name: format!("{}/row/{index}/look/{ordinal}", self.name),
+                            rect,
+                            depth: 3,
+                        });
+                    }
+                }
                 for (ordinal, (_, file)) in self.filed(index).into_iter().enumerate() {
                     let _ = file;
                     let card = self.card_rect(index, ordinal, top, inner.x);
@@ -334,6 +352,38 @@ impl Stream {
             .zip(post.files.iter())
             .filter(|(_, file)| !file.image && !file.video)
             .collect()
+    }
+
+    /// A row's pictures, paired with the blocks they were drawn in.
+    ///
+    /// The mirror of `filed`, which pairs the ones drawn as cards: together
+    /// they are every attachment, split by how it is shown.
+    fn pictured(
+        &self,
+        index: usize,
+    ) -> Vec<(&matterless_layout::row::Block, &matterless_render::FileRef)> {
+        let (Some(Row::Post { post } | Row::Continuation { post }), Some(laid)) =
+            (self.rows.get(index), self.laid.get(index))
+        else {
+            return Vec::new();
+        };
+        laid.blocks
+            .iter()
+            .filter(|block| block.kind == matterless_layout::row::Kind::Attachment)
+            .zip(post.files.iter())
+            .filter(|(_, file)| file.image || file.video)
+            .collect()
+    }
+
+    /// Where one picture sits on screen, so a press can land on it.
+    fn picture_rect(&self, index: usize, ordinal: usize, top: f32, left: f32) -> Option<Rect> {
+        let (block, _) = self.pictured(index).into_iter().nth(ordinal)?;
+        Some(Rect::new(
+            left + self.theme.gutter,
+            top + block.y,
+            block.wrap,
+            block.height,
+        ))
     }
 
     /// Where one file card sits on screen.
@@ -693,6 +743,17 @@ impl Stream {
             return Some(Chose::Save {
                 file_id: file.id.clone(),
                 name: file.name.clone(),
+            });
+        }
+        if let Some(rest) = clicked.strip_prefix(&format!("{}/row/", self.name))
+            && let Some((index, ordinal)) = rest.split_once("/look/")
+            && let (Ok(index), Ok(ordinal)) = (index.parse::<usize>(), ordinal.parse::<usize>())
+            && let Some((_, file)) = self.pictured(index).into_iter().nth(ordinal)
+            && let Some(Row::Post { post } | Row::Continuation { post }) = self.rows.get(index)
+        {
+            return Some(Chose::Look {
+                file_id: file.id.clone(),
+                post_id: post.post_id.clone(),
             });
         }
         if clicked == format!("{}/newest", self.name) {
@@ -1605,6 +1666,25 @@ pub fn avatar_key(user_id: &str, version: i64) -> String {
     format!("avatar/{user_id}?v={version}")
 }
 
+/// Every picture on one message, in the order they were attached.
+///
+/// A file card is not among them: there is nothing to magnify about one, so
+/// stepping never lands on it. The same rule the app follows.
+pub fn looking_at(post: &matterless_render::PostRow) -> Vec<crate::viewer::Looking> {
+    post.files
+        .iter()
+        .filter(|file| (file.image || file.video) && !file.archived)
+        .map(|file| crate::viewer::Looking {
+            file_id: file.id.clone(),
+            name: file.name.clone(),
+            // The original for anything the server does not re-encode -- a
+            // GIF, an SVG, a video -- and its preview for a photograph, which
+            // it caps at 1920 wide and which is the right answer for one.
+            original: file.variant == matterless_render::ImageVariant::Original,
+        })
+        .collect()
+}
+
 /// What an attachment's mini preview is called.
 ///
 /// Its own name rather than the picture's, because both are drawn: the real
@@ -1634,6 +1714,9 @@ pub fn picture_key(file: &matterless_render::FileRef) -> String {
 fn shift(piece: matterless_paint::Piece, by: f32) -> matterless_paint::Piece {
     use matterless_paint::Piece;
     match piece {
+        // Never in a stream: the picture being looked at covers the whole
+        // window and belongs to no panel, so nothing shifts it into one.
+        Piece::Shown { .. } => piece,
         Piece::Fill {
             x,
             y,

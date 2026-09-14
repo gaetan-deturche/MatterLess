@@ -248,6 +248,8 @@ struct App {
     focused: bool,
     /// What the button under the pointer is for, once it has been rested on.
     tooltip: matterless_view::tooltip::Tooltip,
+    /// The picture a reader has opened, over everything else.
+    viewer: matterless_view::viewer::Viewer,
     /// The menu currently open, whichever of the two it is.
     ///
     /// One at a time and one field: a right-click on the sidebar while the
@@ -390,6 +392,7 @@ impl App {
             presence: std::collections::HashMap::new(),
             asked_about: Vec::new(),
             listing: matterless_view::listing::Listing::default(),
+            viewer: matterless_view::viewer::Viewer::default(),
             followed: matterless_view::listing::Listing::new("followed"),
             profile: matterless_view::profile::Profile::default(),
             rail: matterless_view::rail::Rail::default(),
@@ -916,6 +919,29 @@ impl App {
                 height,
                 rgba,
             } => self.arrived.push((key, width, height, rgba)),
+            // Straight to a texture of its own rather than into the atlas --
+            // and only if it is still the one being looked at, since a reader
+            // flicking through outruns the network.
+            Update::Looked {
+                file_id,
+                width,
+                height,
+                rgba,
+            } => {
+                if self
+                    .viewer
+                    .current()
+                    .is_some_and(|one| one.file_id == file_id)
+                    && let Some(view) = self.view.as_mut()
+                {
+                    view.show(width, height, &rgba);
+                    self.viewer.arrived(&file_id, (width, height));
+                }
+            }
+            Update::LookFailed { file_id, why } => {
+                eprintln!("looking at {file_id}: {why}");
+                self.viewer.gave_up(&file_id, &why);
+            }
             Update::SendSettled {
                 pending_post_id,
                 channel_id,
@@ -1708,8 +1734,45 @@ impl App {
                 }
             }
             Some(Chose::More { post_id, under }) => self.offer_message_menu(&post_id, under),
+            Some(Chose::Look { file_id, post_id }) => self.look_at(&post_id, &file_id),
             None => {}
         }
+    }
+
+    /// Opens one of a message's pictures, full size.
+    ///
+    /// Every picture on the message goes to the viewer, not just the one
+    /// pressed: stepping through them must not need the stream again, and
+    /// whether there are others is what decides if it offers to.
+    fn look_at(&mut self, post_id: &str, file_id: &str) {
+        let all = self
+            .stream
+            .rows
+            .iter()
+            .chain(self.thread.iter().flat_map(|thread| thread.rows.iter()))
+            .find_map(|row| match row {
+                Row::Post { post } | Row::Continuation { post } if post.post_id == post_id => {
+                    Some(matterless_view::stream::looking_at(post))
+                }
+                _ => None,
+            })
+            .unwrap_or_default();
+        if let Some(one) = self.viewer.show(all, file_id) {
+            self.fetch_looked(&one);
+        }
+    }
+
+    /// Asks for the picture the viewer is showing, at the size this window can
+    /// actually draw.
+    fn fetch_looked(&self, one: &matterless_view::viewer::Looking) {
+        let Some(link) = self.link.as_ref() else {
+            return;
+        };
+        link.send(matterless_view::live::Ask::Look {
+            file_id: one.file_id.clone(),
+            original: one.original,
+            within: self.size,
+        });
     }
 
     /// What the box under the pointer is for.
@@ -2530,6 +2593,8 @@ impl App {
         if let Some(row) = self.edited_row() {
             boxes.extend(self.edit.boxes(row, self.stream_rect()));
         }
+        // Over everything, including a menu: it is the whole window.
+        boxes.extend(self.viewer.boxes(self.window_rect()));
         // Last and deepest: a menu is over everything, and its catcher covers
         // the window so a click beside it shuts it rather than reaching what
         // it is covering.
@@ -2643,6 +2708,39 @@ impl App {
                 None => {}
             }
         }
+        // The viewer first of all and alone: it covers the window, so nothing
+        // behind it may take the same press or the same key.
+        if self.viewer.open() {
+            let mut input = std::mem::take(&mut self.input);
+            let did = self.viewer.react(&input);
+            match did {
+                Some(matterless_view::viewer::Did::Close) => {
+                    self.viewer.hide();
+                    if let Some(view) = self.view.as_mut() {
+                        view.stop_showing();
+                    }
+                    input.focus_on(composer::NAME);
+                }
+                Some(matterless_view::viewer::Did::Show(one)) => {
+                    // The last one's texture goes now rather than when the next
+                    // arrives: holding it would leave the old picture on screen
+                    // under a name that is no longer its own.
+                    if let Some(view) = self.view.as_mut() {
+                        view.stop_showing();
+                    }
+                    self.fetch_looked(&one);
+                }
+                Some(matterless_view::viewer::Did::Save { file_id, name }) => {
+                    if let Some(link) = self.link.as_ref() {
+                        link.send(matterless_view::live::Ask::Download { file_id, name });
+                    }
+                }
+                None => {}
+            }
+            self.input = input;
+            return;
+        }
+
         // The editor first of all: it is the only panel that is part of a
         // message rather than in front of one, and while it is open the keys
         // belong to it rather than to the composer at the bottom.
@@ -3320,6 +3418,20 @@ impl App {
                 palette: &self.palette,
             };
             self.offered.draw(&mut canvas, &self.input);
+        }
+        // The picture a reader opened, over the window and everything in it.
+        // Under only the menu and the tooltip, which are the two things that
+        // are always over whatever they are about.
+        if self.viewer.open() {
+            let window = self.window_rect();
+            scene.clip_to(0.0, 0.0, self.size.0 as f32, self.size.1 as f32);
+            let mut canvas = Canvas {
+                scene: &mut scene,
+                painter: &mut self.painter,
+                fonts: &mut self.fonts,
+                palette: &self.palette,
+            };
+            self.viewer.draw(&mut canvas, &self.input, window);
         }
         // The menu over even that: it is the thing the reader just asked for.
         if self.menu.open() {
