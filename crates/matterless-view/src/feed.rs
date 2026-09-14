@@ -299,15 +299,30 @@ fn named_in(nodes: &[matterless_render::markdown::Node]) -> Vec<String> {
     for node in nodes {
         match node {
             Node::Emoji { name, unicode } if unicode.is_none() => found.push(name.clone()),
+            // Every wrapper, including the two that were missing: a link,
+            // because an emoji is a perfectly ordinary thing to make the label
+            // of one, and a table, because nothing stops a cell holding one.
+            //
+            // A name this misses is not drawn at all. The span still reserves
+            // the room, so what a reader sees is the blank the picture should
+            // have filled -- and under a link, the underline across that blank,
+            // which is how this surfaced: a message ending in an emoji linking
+            // to a video read as two stray underscores.
             Node::Paragraph { children }
             | Node::Heading { children, .. }
             | Node::Blockquote { children }
             | Node::Strong { children }
             | Node::Emphasis { children }
-            | Node::Strike { children } => found.extend(named_in(children)),
+            | Node::Strike { children }
+            | Node::Link { children, .. } => found.extend(named_in(children)),
             Node::List { items, .. } => {
                 for item in items {
                     found.extend(named_in(item));
+                }
+            }
+            Node::Table { head, rows } => {
+                for cell in head.iter().chain(rows.iter().flatten()) {
+                    found.extend(named_in(cell));
                 }
             }
             _ => {}
@@ -446,5 +461,47 @@ mod tests {
         let known = custom_emoji(&store, &rows);
         assert_eq!(known.get("bongo").map(String::as_str), Some("abc123"));
         assert!(!known.contains_key("53"));
+    }
+
+    /// A custom emoji is found wherever it is written, not only in a bare
+    /// paragraph.
+    ///
+    /// The walk knew about every wrapper except a link and a table, so an
+    /// emoji used as a link's label was never asked about and never drawn: the
+    /// reader got the underline under the room reserved for it and nothing
+    /// else. Written as a whole message, because the shape that broke it is
+    /// one somebody actually posts.
+    #[test]
+    fn an_emoji_is_found_inside_a_link_and_inside_a_table() {
+        let store = Store::open_in_memory().expect("a store");
+        store.remember_emoji("blobmorning", "3f5a").expect("custom");
+        store.remember_emoji("bongo", "abc123").expect("custom");
+
+        for body in [
+            "##### Thread du Vendredi~[:blobmorning:](https://youtu.be/7SUHh)",
+            "| who | mood |\n| --- | --- |\n| ada | :blobmorning: |",
+            "> quoting [a **:blobmorning:** of sorts](https://example.invalid/x)",
+        ] {
+            let rows = wrote(body);
+            assert_eq!(
+                custom_emoji(&store, &rows).get("blobmorning").map(String::as_str),
+                Some("3f5a"),
+                "no picture for the emoji in {body:?}"
+            );
+        }
+
+        // And a name nobody knows yet is still asked about from in there.
+        let rows = wrote("[:bongo: :notyet:](https://example.invalid/x)");
+        assert_eq!(unknown_emoji(&store, &rows), vec!["notyet".to_string()]);
+    }
+
+    /// One post whose body is `body`, parsed the way the app parses it.
+    fn wrote(body: &str) -> Vec<Row> {
+        let mut rows = reacted_with(&[]);
+        let Some(Row::Post { post }) = rows.first_mut() else {
+            unreachable!("reacted_with makes a post")
+        };
+        post.nodes = Arc::new(matterless_render::markdown::parse(body));
+        rows
     }
 }

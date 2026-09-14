@@ -1370,6 +1370,46 @@ mod routes {
     }
 }
 
+#[cfg(test)]
+mod pictures {
+    use super::{decode, kind_of};
+
+    /// A 2x2 lossless WebP.
+    ///
+    /// Inline rather than a file, because what it is testing is which decoders
+    /// this binary was *built* with -- and that is a line in `Cargo.toml`, not
+    /// anything a fixture on disk would notice.
+    const WEBP: &[u8] = &[
+        0x52, 0x49, 0x46, 0x46, 0x20, 0x00, 0x00, 0x00, 0x57, 0x45, 0x42, 0x50, 0x56, 0x50, 0x38,
+        0x4C, 0x13, 0x00, 0x00, 0x00, 0x2F, 0x01, 0x40, 0x00, 0x10, 0x0F, 0x10, 0xFB, 0x3F, 0xFF,
+        0x0F, 0xFC, 0x8F, 0x0A, 0x23, 0x10, 0xD1, 0xFF, 0x10, 0x00,
+    ];
+
+    /// WebP is a format this server actually serves, so it has to be one this
+    /// build can read.
+    ///
+    /// Every custom emoji on it comes back as WebP, and `image` was built
+    /// without that decoder: the picture was fetched, refused, and the reader
+    /// saw the blank room reserved for it. Nothing failed loudly -- the name
+    /// resolved, the row was the right height, and the emoji was simply not
+    /// there.
+    #[test]
+    fn a_webp_picture_can_be_read() {
+        assert_eq!(kind_of(WEBP), "webp", "the fixture is what it claims to be");
+        let (width, height, rgba) = decode(WEBP, 64, 64).expect("webp decodes");
+        // Never enlarged: 2x2 asked for at 64 stays 2x2.
+        assert_eq!((width, height), (2, 2));
+        assert_eq!(rgba.len(), 2 * 2 * 4);
+    }
+
+    /// And a picture that is really an error page is still refused.
+    #[test]
+    fn markup_is_not_a_picture() {
+        assert_eq!(kind_of(b"<html>"), "markup, not a picture");
+        assert!(decode(b"<html><body>no</body></html>", 16, 16).is_none());
+    }
+}
+
 /// How this window reads, for the notification rules.
 ///
 /// Collapsed, matching how the channel is actually planned and drawn. Flat was

@@ -16,7 +16,16 @@ matterless-sidebar = { path = "../matterless-sidebar" }
 matterless-ui = { path = "../matterless-ui" }
 matterless-store = { path = "../matterless-store" }
 matterless-sync = { path = "../matterless-sync" }
-image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif"] }
+# WebP is not optional on this server: its custom emoji come back as WebP, and
+# without a decoder for them the picture simply never arrives -- the name is
+# resolved, the room is reserved, and what a reader sees is the blank where the
+# emoji should be. Animation is not decoded; the first frame is what is drawn.
+image = { version = "0.25", default-features = false, features = [
+    "png",
+    "jpeg",
+    "gif",
+    "webp",
+] }
 # The socket runs on a thread of its own, so the window never blocks on it.
 tokio = { version = "1", features = ["rt", "macros", "sync", "time"] }
 serde_json = "1"
