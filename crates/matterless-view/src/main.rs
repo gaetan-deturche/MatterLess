@@ -1496,7 +1496,7 @@ impl App {
                     "Mute Channel"
                 },
             )
-            .marked("\u{1f514}"),
+            .marked("\u{1f56d}"),
         );
         // Everywhere it could go, minus wherever it already is.
         let targets: Vec<Item> = categories
@@ -1522,9 +1522,9 @@ impl App {
             );
         }
         items.push(Item::rule());
-        items.push(Item::new("channel.link", "Copy Link").marked("\u{1f517}"));
+        items.push(Item::new("channel.link", "Copy Link").marked("\u{29c9}"));
         if !conversation {
-            items.push(Item::new("channel.add", "Add Members").marked("\u{1f464}"));
+            items.push(Item::new("channel.add", "Add Members").marked("\u{2295}"));
             items.push(Item::rule());
             items.push(
                 Item::new("channel.leave", "Leave Channel")

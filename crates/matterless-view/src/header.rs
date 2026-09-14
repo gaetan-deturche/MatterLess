@@ -78,15 +78,33 @@ impl Act {
     /// `on` only means anything to the one that is a toggle: a state a button
     /// can be in has to read differently, or pressing it twice looks like
     /// nothing happened.
+    ///
+    /// Every one of these is a character the fonts here draw as line art, and
+    /// none of them is the obvious emoji for the job. A control is not
+    /// content: a row of little coloured pictures across the top of the strip
+    /// competes with the conversation for the eye, and reads as something
+    /// somebody sent rather than as something to press.
+    ///
+    /// Chosen by measuring rather than by guessing. U+FE0E, the text
+    /// presentation selector, is the proper way to ask for the monochrome form
+    /// and this font stack ignores it -- so the mark has to be a character
+    /// with no coloured form at all, and which those are is what
+    /// `--example what_marks` answers: it rasterises each candidate and says
+    /// whether what came back was a mask or a bitmap.
+    ///
+    /// Threads gets the three lines its sidebar row uses, because they are the
+    /// same place. Muting has no crossed bell in line art anywhere, so the
+    /// pair is a bell and a struck-out circle -- two shapes rather than one
+    /// shape twice, which is what a toggle needs.
     pub fn label(self, on: bool) -> &'static str {
         match (self, on) {
-            (Act::Pinned, _) => "📌",
-            (Act::Saved, _) => "🔖",
-            (Act::Threads, _) => "🧵",
-            (Act::Add, _) => "👤",
-            (Act::Mute, false) => "🔔",
-            (Act::Mute, true) => "🔕",
-            (Act::Leave, _) => "🚪",
+            (Act::Pinned, _) => "🖈",
+            (Act::Saved, _) => "⚑",
+            (Act::Threads, _) => "☰",
+            (Act::Add, _) => "⊕",
+            (Act::Mute, false) => "🕭",
+            (Act::Mute, true) => "⊘",
+            (Act::Leave, _) => "⎋",
             (Act::Follow, false) => "follow",
             (Act::Follow, true) => "following",
             (Act::Close, _) => "×",
