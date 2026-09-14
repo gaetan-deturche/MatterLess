@@ -517,7 +517,7 @@ impl Composer {
             attach.y + 2.0,
             // Larger than the words: a mark is a picture, and the font
             // rasterises one at about two thirds of the size asked for.
-            Run::mark(20.0),
+            Run::mark(16.0),
         );
         scene.glyphs(clip, palette.soft, palette.faint);
 

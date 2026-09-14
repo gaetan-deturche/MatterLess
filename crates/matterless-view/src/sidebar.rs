@@ -420,7 +420,7 @@ impl Sidebar {
                             // Drawn down from twice its size: a mark is a
                             // picture, and at the size of a word the font
                             // hints its detail into hard stems.
-                            Run::mark(14.0),
+                            Run::mark(12.0),
                         );
                         scene.glyphs(
                             glyphs,

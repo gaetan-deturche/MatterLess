@@ -1214,7 +1214,7 @@ impl Stream {
                 // Drawn down from twice its size: a mark is a picture, and at
                 // the size of a word the font hints its detail into stems too
                 // hard to read.
-                Run::mark(15.0),
+                Run::mark(14.0),
             );
             scene.glyphs(
                 glyphs,

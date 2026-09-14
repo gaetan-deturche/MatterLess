@@ -3225,6 +3225,7 @@ impl App {
             // same place rather than as a channel that happens to be called
             // Threads.
             header.sigil = matterless_layout::marks::THREADS;
+            header.sigil_is_mark = true;
         }
         scene.clip_to(strip.x, strip.y, strip.width, strip.height);
         let mut canvas = Canvas {

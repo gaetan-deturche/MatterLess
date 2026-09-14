@@ -492,7 +492,7 @@ impl Menu {
                     matterless_layout::marks::NEXT,
                     rect.right() - self.style.pad_x - 6.0,
                     rect.y + (rect.height - self.style.size * 1.4) / 2.0,
-                    Run::label(f32::MAX).sized(self.style.size),
+                    Run::mark(self.style.size - 1.0),
                 );
                 into.scene
                     .glyphs(glyphs, into.palette.faint, into.palette.faint);
@@ -569,7 +569,7 @@ impl Menu {
                 // its size: a mark is a picture with detail inside it, and at
                 // the size of a word the font hints that detail into stems
                 // too hard to read.
-                Run::mark(16.0),
+                Run::mark(14.0),
             );
             into.scene
                 .glyphs(glyphs, into.palette.soft, into.palette.faint);

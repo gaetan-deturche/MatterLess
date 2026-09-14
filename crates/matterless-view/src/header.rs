@@ -22,6 +22,9 @@ pub struct Header {
     /// Whether this conversation is muted, which is the one button whose word
     /// changes with the state it is in.
     pub muted: bool,
+    /// Whether the sigil is one of the interface's own marks rather than a
+    /// character. A mark comes from the icon family and has to be asked for.
+    pub sigil_is_mark: bool,
     /// The mark before the name, saying what kind of place this is.
     ///
     /// A hash for a channel, which is nearly always right -- and not for the
@@ -34,9 +37,11 @@ pub struct Header {
 pub const HEIGHT: f32 = 44.0;
 /// What a button's mark is set at.
 ///
-/// Bigger than the strip's words: these are pictograms on a 24-pixel grid, and
-/// the font draws one at about two thirds of the size asked for.
-const MARK: f32 = 22.0;
+/// An icon family fills the size it is asked for, near enough: a mark at 18
+/// measures sixteen pixels across. The symbol font it replaced drew at about
+/// two thirds of that, which is why every one of these numbers came down when
+/// the family changed and the marks all arrived a size too big.
+const MARK: f32 = 18.0;
 
 /// Where the sigil starts, and how far past it the name does.
 const LEFT: f32 = 14.0;
@@ -241,6 +246,7 @@ impl Header {
             offered: offered(false),
             muted: false,
             sigil: "#",
+            sigil_is_mark: false,
         }
     }
 
@@ -270,11 +276,9 @@ impl Header {
         );
 
         // The sigil is faint and the name is not, so the eye lands on the name.
-        let sigil = painter.run(
-            fonts,
-            self.sigil,
-            within.x + LEFT,
-            within.y + 13.0,
+        let set_in = if self.sigil_is_mark {
+            Run::mark(15.0)
+        } else {
             Run {
                 size: 15.0,
                 line_height: 20.0,
@@ -283,7 +287,14 @@ impl Header {
                 wrap: f32::MAX,
                 icon: false,
                 smooth: false,
-            },
+            }
+        };
+        let sigil = painter.run(
+            fonts,
+            self.sigil,
+            within.x + LEFT,
+            within.y + if self.sigil_is_mark { 14.0 } else { 13.0 },
+            set_in,
         );
         scene.glyphs(sigil, palette.faint, palette.faint);
 
@@ -292,7 +303,7 @@ impl Header {
         // lands on top of them.
         let past = matterless_layout::extent_of(
             fonts,
-            self.sigil,
+            if self.sigil_is_mark { "#" } else { self.sigil },
             f32::MAX,
             matterless_layout::Style {
                 size: 15.0,
