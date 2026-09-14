@@ -37,6 +37,7 @@ pub mod stream;
 mod stream_tests;
 pub mod switcher;
 pub mod taskbar;
+pub mod timing;
 pub mod toast;
 pub mod tooltip;
 pub mod tray;
