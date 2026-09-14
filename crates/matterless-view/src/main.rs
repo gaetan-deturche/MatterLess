@@ -899,12 +899,20 @@ impl App {
                 self.open_channel(&channel_id);
             }
             Update::Membership(mode) => {
+                // Only when it actually moved. This arrives once per sign-in
+                // carrying the mode the window is already in, and replanning
+                // on it shaped the open channel a second time for nothing --
+                // a whole second, in a channel of crash reports, a second
+                // after the first one.
+                let moved = self.threads != mode;
                 self.threads = mode;
                 self.rebuild_sidebar();
                 // The counts are not the only thing the mode decides: a reply
                 // is a row in the channel under one and not under the other,
-                // so the conversation is replanned too.
-                if let Some(channel) = self.sidebar.selected.clone() {
+                // so the conversation is replanned when it does change.
+                if moved
+                    && let Some(channel) = self.sidebar.selected.clone()
+                {
                     self.open_channel(&channel);
                 }
             }
