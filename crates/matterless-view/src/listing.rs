@@ -4,6 +4,9 @@
 //! lists of posts drawn the same way. One panel rather than three, for the
 //! reason the app gives for sharing its own -- three copies would be three
 //! places for a channel label or an author name to be resolved differently.
+//!
+//! Drawn down the right-hand column rather than over the conversation. See
+//! `aside`, which holds that decision and the shape the three share.
 
 use crate::sidebar::Canvas;
 use matterless_paint::Run;
@@ -13,12 +16,19 @@ use matterless_ui::{Placed, Rect};
 
 pub const NAME: &str = "listing";
 
-const ROW: f32 = 52.0;
-const PADDING: f32 = 10.0;
-const TITLE: f32 = 26.0;
-const WIDTH: f32 = 620.0;
-/// What the stylesheet cuts a floating panel's corners by.
-const PANEL: f32 = 8.0;
+use crate::aside;
+
+const ROW: f32 = aside::ROW;
+const PADDING: f32 = aside::PADDING;
+
+/// What a frame of input did to the list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Did {
+    /// Go to this message.
+    Open(Box<Found>),
+    /// Shut the pane.
+    Close,
+}
 
 /// One message in a list, resolved to what a row needs.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -89,6 +99,19 @@ pub fn found_for(store: &Store, posts: Vec<matterless_core::Post>, me: &str) -> 
         .collect()
 }
 
+/// What a row's two lines are set in, for measuring where to cut one.
+///
+/// Shared with search, whose results are the same two lines.
+pub fn label(bold: bool) -> matterless_layout::Style {
+    matterless_layout::Style {
+        size: 13.0,
+        line_height: 18.0,
+        bold,
+        italic: false,
+        mono: false,
+    }
+}
+
 /// The threads this reader follows, newest reply first.
 ///
 /// From the local store rather than the server: the sync engine already keeps
@@ -157,8 +180,14 @@ fn note_for(replies: i64, unread: i64) -> String {
 }
 
 /// A titled list, open or shut.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Listing {
+    /// What this one answers to, so a press can tell two of them apart.
+    ///
+    /// Two are on screen at once: the followed threads, which are a place to
+    /// go and so fill the conversation's own column, and saved or pinned,
+    /// which are asides read against whatever is open.
+    pub name: String,
     /// What it is a list of -- "Saved", "Pinned". Empty when it is shut.
     pub title: String,
     pub found: Vec<Found>,
@@ -166,9 +195,29 @@ pub struct Listing {
     /// True while the answer is still on its way, so an empty list can be told
     /// from one that came back empty.
     pub waiting: bool,
+    scroll: f32,
+    bar: crate::scrollbar::Scrollbar,
+}
+
+impl Default for Listing {
+    fn default() -> Self {
+        Self::new(NAME)
+    }
 }
 
 impl Listing {
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            title: String::new(),
+            found: Vec::new(),
+            chosen: 0,
+            waiting: false,
+            scroll: 0.0,
+            bar: crate::scrollbar::Scrollbar::default(),
+        }
+    }
+
     pub fn open(&self) -> bool {
         !self.title.is_empty()
     }
@@ -185,102 +234,165 @@ impl Listing {
         self.found = found;
         self.chosen = 0;
         self.waiting = false;
+        self.scroll = 0.0;
     }
 
     pub fn hide(&mut self) {
         self.title.clear();
         self.found.clear();
         self.waiting = false;
+        self.scroll = 0.0;
     }
 
-    pub fn rect(&self, within: Rect) -> Rect {
-        let height = PADDING * 2.0 + TITLE + self.found.len() as f32 * ROW;
-        let width = WIDTH.min(within.width - 40.0);
+    /// How far the list can travel: what it would occupy, less the room it has.
+    fn reach(&self, body: Rect) -> f32 {
+        let wanted = self.found.len() as f32 * ROW + PADDING * 2.0;
+        (wanted - body.height).max(0.0)
+    }
+
+    /// Where one row sits, wherever the list has been scrolled to.
+    fn row_rect(&self, body: Rect, at: usize) -> Rect {
         Rect::new(
-            within.x + (within.width - width) / 2.0,
-            within.y + 60.0,
-            width,
-            height.min(within.height - 120.0).max(TITLE + PADDING * 2.0),
+            body.x,
+            body.y + PADDING + at as f32 * ROW - self.scroll,
+            body.width,
+            ROW,
         )
     }
 
-    /// Applies a frame's input. Answers the message a reader chose.
-    pub fn react(&mut self, input: &Input) -> Option<Found> {
+    /// Applies a frame's input to a list drawn as an aside.
+    pub fn react(&mut self, input: &Input, placed: &[Placed], pane: Rect) -> Option<Did> {
+        self.react_in(input, placed, aside::body(pane))
+    }
+
+    /// The same, for a list that fills a column of its own.
+    pub fn react_in(&mut self, input: &Input, placed: &[Placed], body: Rect) -> Option<Did> {
         if !self.open() {
             return None;
         }
+        let reach = self.reach(body);
+        // The bar first: while it is held nothing else may write the scroll.
+        if let Some(scroll) = self.bar.react(&self.name, input, body, self.scroll, reach) {
+            self.scroll = scroll.clamp(0.0, reach);
+            return None;
+        }
+        if let Some((_, y)) = input.wheel_over(placed, |name| name == self.name) {
+            self.scroll = (self.scroll - y).clamp(0.0, reach);
+        }
+        // A list that shrank under a reader who had scrolled down would
+        // otherwise leave them below the end of it, looking at nothing.
+        self.scroll = self.scroll.clamp(0.0, reach);
         if input.struck(Key::Down) && !self.found.is_empty() {
             self.chosen = (self.chosen + 1).min(self.found.len() - 1);
         }
         if input.struck(Key::Up) {
             self.chosen = self.chosen.saturating_sub(1);
         }
-        if let Some(clicked) = input.clicked()
-            && let Some(at) = clicked
-                .strip_prefix(&format!("{NAME}/"))
+        if let Some(clicked) = input.clicked() {
+            if clicked == format!("{}/close", self.name) {
+                return Some(Did::Close);
+            }
+            if let Some(at) = clicked
+                .strip_prefix(&format!("{}/", self.name))
                 .and_then(|at| at.parse::<usize>().ok())
-        {
-            return self.found.get(at).cloned();
+            {
+                return self.found.get(at).cloned().map(Box::new).map(Did::Open);
+            }
         }
         if input.struck(Key::Enter) {
-            return self.found.get(self.chosen).cloned();
+            return self
+                .found
+                .get(self.chosen)
+                .cloned()
+                .map(Box::new)
+                .map(Did::Open);
         }
         None
     }
 
-    /// Where each row sits, so a click can land on one.
-    pub fn boxes(&self, within: Rect) -> Vec<Placed> {
+    /// Where each row sits when it is drawn as an aside.
+    pub fn boxes(&self, pane: Rect) -> Vec<Placed> {
         if !self.open() {
             return Vec::new();
         }
-        let panel = self.rect(within);
+        let mut placed = vec![
+            Placed {
+                name: self.name.clone(),
+                rect: pane,
+                depth: 8,
+            },
+            aside::close_box(pane, &self.name),
+        ];
+        placed.extend(self.boxes_in(aside::body(pane), 9));
+        placed
+    }
+
+    /// The rows themselves, at whatever depth the caller draws them.
+    ///
+    /// A column of its own is behind the panels that float over it, and an
+    /// aside is in front of the conversation, so the depth is the caller's.
+    pub fn boxes_in(&self, body: Rect, depth: usize) -> Vec<Placed> {
+        if !self.open() {
+            return Vec::new();
+        }
         let mut placed = vec![Placed {
-            name: NAME.to_string(),
-            rect: panel,
-            depth: 8,
+            name: self.name.clone(),
+            rect: body,
+            depth: depth.saturating_sub(1),
         }];
+        placed.extend(self.bar.boxes(&self.name, body, self.reach(body)));
         for at in 0..self.found.len() {
-            let y = panel.y + PADDING + TITLE + at as f32 * ROW;
-            if y + ROW > panel.bottom() {
-                break;
+            let row = self.row_rect(body, at);
+            // Only what is on screen. A row scrolled above the top or past the
+            // foot is still in the list, and a click where it would have been
+            // must not choose it.
+            if row.bottom() <= body.y || row.y >= body.bottom() {
+                continue;
             }
             placed.push(Placed {
-                name: format!("{NAME}/{at}"),
-                rect: Rect::new(panel.x, y, panel.width, ROW),
-                depth: 9,
+                name: format!("{}/{at}", self.name),
+                rect: row,
+                depth,
             });
         }
         placed
     }
 
-    pub fn draw(&self, into: &mut Canvas<'_>, within: Rect) {
+    /// Drawn as an aside: its own ground, a title, and a way out.
+    pub fn draw(&self, into: &mut Canvas<'_>, input: &Input, pane: Rect) {
         if !self.open() {
             return;
         }
-        let panel = self.rect(within);
+        let head = aside::header(pane);
+        aside::ground(into, pane);
+        aside::draw_close(into, pane);
+        let heading = into.painter.run(
+            into.fonts,
+            &self.title,
+            head.x + PADDING,
+            head.y + (aside::HEADER - 18.0) / 2.0,
+            Run::label(f32::MAX).bold(),
+        );
+        into.scene
+            .glyphs(heading, into.palette.ink, into.palette.faint);
+        self.draw_in(into, input, aside::body(pane));
+    }
+
+    /// The list itself, filling whatever it is given.
+    ///
+    /// No ground of its own and no title: a column carries the conversation's
+    /// own, and an aside has drawn both already.
+    pub fn draw_in(&self, into: &mut Canvas<'_>, input: &Input, body: Rect) {
+        if !self.open() {
+            return;
+        }
+        let reach = self.reach(body);
         let Canvas {
             scene,
             painter,
             fonts,
             palette,
         } = into;
-        scene.floating(
-            panel.x,
-            panel.y,
-            panel.width,
-            panel.height,
-            palette.surface,
-            PANEL,
-            10.0,
-        );
-        let heading = painter.run(
-            fonts,
-            &self.title,
-            panel.x + PADDING + 4.0,
-            panel.y + PADDING,
-            Run::label(f32::MAX).bold(),
-        );
-        scene.glyphs(heading, palette.ink, palette.faint);
 
         // An empty list has to say which kind of empty it is, or a slow request
         // and a genuinely empty list look identical.
@@ -295,47 +407,65 @@ impl Listing {
             let glyphs = painter.run(
                 fonts,
                 said,
-                panel.x + PADDING + 4.0,
-                panel.y + PADDING + TITLE,
+                body.x + PADDING,
+                body.y + PADDING,
                 Run::label(f32::MAX),
             );
             scene.glyphs(glyphs, palette.faint, palette.faint);
             return;
         }
 
+        // Clipped to the body, so a row scrolled halfway off the top is cut at
+        // the header rather than drawn across it.
+        scene.clip_to(body.x, body.y, body.width, body.height);
+        // The room one line gets: the pane less its padding both sides and the
+        // bar that floats over the right of it.
+        let room = body.width - PADDING * 2.0 - crate::scrollbar::TRACK;
         for (at, found) in self.found.iter().enumerate() {
-            let y = panel.y + PADDING + TITLE + at as f32 * ROW;
-            // Only what fits: the panel is capped so a long list does not make
-            // a box taller than the window.
-            if y + ROW > panel.bottom() {
-                break;
+            let row = self.row_rect(body, at);
+            if row.bottom() <= body.y || row.y >= body.bottom() {
+                continue;
             }
             if at == self.chosen {
-                scene.fill(panel.x, y, panel.width, ROW, palette.ground);
+                scene.fill(row.x, row.y, row.width, row.height, palette.ground);
             }
             let said = match found.note.as_str() {
                 "" => format!("{} in {}", found.author, found.channel),
-                note => format!("{} in {} -- {note}", found.author, found.channel),
+                note => format!("{} in {} \u{2014} {note}", found.author, found.channel),
             };
+            // Cut with an ellipsis rather than by the clip: a name that ends
+            // mid-letter gives a reader no way to tell a long one from one
+            // that happens to end there.
+            let said = matterless_layout::elided(fonts, &said, room, label(true));
             let who = painter.run(
                 fonts,
                 &said,
-                panel.x + PADDING + 4.0,
-                y + 4.0,
+                row.x + PADDING,
+                row.y + 6.0,
                 Run::label(f32::MAX).bold(),
             );
             scene.glyphs(who, palette.ink, palette.faint);
+            let preview = matterless_layout::elided(fonts, &found.preview, room, label(false));
             let what = painter.run(
                 fonts,
-                &found.preview,
-                panel.x + PADDING + 4.0,
-                y + 24.0,
-                // Cut by the panel rather than wrapped: a row is one line, and
-                // a wrapped one would run into the row beneath it.
+                &preview,
+                row.x + PADDING,
+                row.y + 26.0,
                 Run::label(f32::MAX),
             );
             scene.glyphs(what, palette.faint, palette.faint);
         }
+        let mut canvas = Canvas {
+            scene,
+            painter,
+            fonts,
+            palette,
+        };
+        self.bar
+            .draw(&mut canvas, &self.name, input, body, self.scroll, reach);
+        // Back to the whole window, so whatever is drawn after this is not
+        // clipped to a pane it has nothing to do with.
+        canvas.scene.clip_to(0.0, 0.0, f32::MAX, f32::MAX);
     }
 }
 
@@ -367,25 +497,46 @@ mod tests {
         assert_eq!(note_for(1, 1), "1 new of 1 reply");
     }
 
-    /// The panel never grows past the window, however long the list.
-    #[test]
-    fn the_panel_stays_inside_the_window() {
-        let mut listing = Listing::default();
-        listing.expect("Saved");
-        listing.fill(found(500));
-        let window = Rect::new(0.0, 0.0, 1000.0, 700.0);
-        let panel = listing.rect(window);
-        assert!(panel.height <= window.height - 120.0);
-        assert!(panel.bottom() <= window.bottom());
+    fn pane() -> Rect {
+        aside::rect(Rect::new(300.0, 0.0, 1000.0, 700.0))
     }
 
     /// A shut panel answers nothing and places nothing, whatever is pressed.
     #[test]
     fn a_shut_listing_answers_nothing() {
         let mut listing = Listing::default();
-        let window = Rect::new(0.0, 0.0, 800.0, 600.0);
-        assert!(listing.react(&Input::default()).is_none());
-        assert!(listing.boxes(window).is_empty());
+        assert!(listing.react(&Input::default(), &[], pane()).is_none());
+        assert!(listing.boxes(pane()).is_empty());
+    }
+
+    /// A long list can be reached: it scrolls rather than stopping at whatever
+    /// happened to fit.
+    ///
+    /// The floating panel it used to be simply cut the list off at the foot of
+    /// the window, so the fortieth saved message was in the list and on no
+    /// screen. A column is full height and still not tall enough for five
+    /// hundred.
+    #[test]
+    fn a_list_longer_than_the_column_can_be_scrolled_to_its_end() {
+        let mut listing = Listing::default();
+        listing.expect("Saved");
+        listing.fill(found(500));
+        let body = aside::body(pane());
+        assert!(listing.reach(body) > 0.0, "500 rows do not fit in one column");
+
+        // At the top, the first row is inside the body and the last is far
+        // below it.
+        assert!(listing.row_rect(body, 0).y >= body.y);
+        assert!(listing.row_rect(body, 499).y > body.bottom());
+
+        // Scrolled to the end, the last row is the one on screen.
+        listing.scroll = listing.reach(body);
+        let last = listing.row_rect(body, 499);
+        assert!(
+            last.bottom() <= body.bottom() + 0.5 && last.y >= body.y,
+            "the last row sits at {last:?} in a body ending at {}",
+            body.bottom()
+        );
     }
 
     /// Waiting for an answer and having none are different things: one is a
@@ -401,17 +552,49 @@ mod tests {
         assert!(!listing.waiting);
     }
 
-    /// Only the rows that fit are placed, or a click below the panel would
-    /// land on a row drawn outside it.
+    /// Only the rows on screen are placed, or a click would land on a row
+    /// scrolled out of sight.
     #[test]
-    fn no_row_is_placed_outside_the_panel() {
+    fn no_row_is_placed_outside_the_column() {
         let mut listing = Listing::default();
         listing.expect("Saved");
         listing.fill(found(500));
-        let window = Rect::new(0.0, 0.0, 1000.0, 700.0);
-        let panel = listing.rect(window);
-        for placed in listing.boxes(window).iter().skip(1) {
-            assert!(placed.rect.bottom() <= panel.bottom());
+        let pane = pane();
+        let body = aside::body(pane);
+        let rows: Vec<Placed> = listing
+            .boxes(pane)
+            .into_iter()
+            .filter(|placed| {
+                placed
+                    .name
+                    .strip_prefix(&format!("{NAME}/"))
+                    .is_some_and(|rest| rest.parse::<usize>().is_ok())
+            })
+            .collect();
+        assert!(!rows.is_empty(), "some rows are reachable");
+        for row in rows {
+            assert!(
+                row.rect.bottom() > body.y && row.rect.y < body.bottom(),
+                "{} is placed at {:?}, outside the body {body:?}",
+                row.name,
+                row.rect
+            );
         }
+    }
+
+    /// The way out is a button, not only a key nobody has been told about.
+    #[test]
+    fn the_column_offers_a_way_out() {
+        let mut listing = Listing::default();
+        listing.expect("Saved");
+        listing.fill(found(3));
+        let pane = pane();
+        assert!(
+            listing
+                .boxes(pane)
+                .iter()
+                .any(|placed| placed.name == format!("{NAME}/close")),
+            "no close button"
+        );
     }
 }

@@ -42,6 +42,14 @@ pub enum Entry {
     /// group that belongs to no team and so the only one the rail cannot
     /// reach by a team's id.
     Heading { label: String, directs: bool },
+    /// The threads this reader follows, as a row of the list.
+    ///
+    /// First, and shaped like a channel, because that is what it is: a place
+    /// to go and read, chosen the same way and opening in the same column. It
+    /// is also the only row that can say a thread is waiting -- under collapsed
+    /// threads a reply never touches its channel's counters, so without this
+    /// the sidebar stays silent while the badge counts it.
+    Threads { unread: i64, mentions: i64 },
     Channel {
         id: String,
         label: String,
@@ -77,6 +85,15 @@ pub struct Sidebar {
     pub bar: crate::scrollbar::Scrollbar,
 }
 
+/// What the threads row is selected as.
+///
+/// Not a channel id and never mistakable for one: the server's ids are twenty-
+/// six characters of base-32, so no channel can ever be called this. Holding it
+/// in the same `selected` as a channel is deliberate -- it is chosen the same
+/// way, drawn the same way, and opens in the same column, so it should not need
+/// a second piece of state saying which kind of thing is open.
+pub const THREADS: &str = "threads";
+
 /// A row's height, and a heading's. Fixed, because a channel name is one line
 /// and a list of five hundred of them must not need measuring to be scrolled.
 const ROW: f32 = 26.0;
@@ -103,6 +120,7 @@ impl Sidebar {
             Entry::Me { .. } => "sidebar/me".to_string(),
             Entry::Team { id, .. } => format!("sidebar/team/{id}"),
             Entry::Heading { .. } => format!("sidebar/heading/{index}"),
+            Entry::Threads { .. } => format!("sidebar/channel/{THREADS}"),
             Entry::Channel { id, .. } => format!("sidebar/channel/{id}"),
         }
     }
@@ -476,26 +494,7 @@ impl Sidebar {
                     // The count first, because it decides how much room the
                     // name has. Muted channels keep theirs: muting is "do not
                     // interrupt me", not "hide this from me".
-                    let count = if *mentions > 0 { *mentions } else { *unread };
-                    let pill = (count > 0).then(|| {
-                        let said = count.to_string();
-                        let wide =
-                            matterless_layout::extent_of(fonts, &said, f32::MAX, count_style())
-                                .width;
-                        let width = wide + COUNT_PADDING * 2.0;
-                        (
-                            said,
-                            Rect::new(
-                                // Clear of the scrollbar, which floats over
-                                // the rows rather than taking room from them.
-                                (row.rect.right() - width)
-                                    .min(within.right() - TRACK - width - 2.0),
-                                row.rect.y + (row.rect.height - COUNT_HEIGHT) / 2.0,
-                                width,
-                                COUNT_HEIGHT,
-                            ),
-                        )
-                    });
+                    let pill = pill_for(fonts, *unread, *mentions, row.rect, within);
 
                     // Cut to what is left, with an ellipsis where it was cut.
                     // A clipped name ends mid-letter and says nothing about
@@ -523,47 +522,64 @@ impl Sidebar {
                     scene.glyphs(glyphs, ink, palette.faint);
 
                     if let Some((said, rect)) = pill {
-                        // A mention is the one count worth colouring: it is
-                        // the difference between "there is more here" and "you
-                        // are being asked". Not in a muted channel, where it
-                        // was still asked for quietly.
-                        let asked = *mentions > 0 && !*muted;
-                        let (behind, over) = if asked {
-                            (
-                                [palette.signal[0], palette.signal[1], palette.signal[2], 255],
-                                [palette.surface[0], palette.surface[1], palette.surface[2]],
-                            )
-                        } else if *muted {
-                            let dim = palette.dimmed(
-                                [palette.raised[0], palette.raised[1], palette.raised[2]],
-                                MUTED,
-                            );
-                            ([dim[0], dim[1], dim[2], 255], ink)
+                        draw_pill(
+                            scene, painter, fonts, palette, &said, rect, *mentions, *muted, loud,
+                            ink,
+                        );
+                    }
+                }
+                // Shaped like a channel because it is one kind of place to go,
+                // and drawn through the same two helpers so it cannot drift
+                // from the rows under it.
+                Entry::Threads { unread, mentions } => {
+                    let chosen = self.selected.as_deref() == Some(THREADS);
+                    if chosen || input.hovered() == Some(name.as_str()) {
+                        scene.fill(
+                            row.rect.x,
+                            row.rect.y,
+                            row.rect.width,
+                            row.rect.height,
+                            palette.ground,
+                        );
+                    }
+                    let loud = asking(*unread, *mentions, false);
+                    let ink = ink_of(palette, chosen, loud, false);
+                    let glyph = painter.run(
+                        fonts,
+                        // The app's own mark for it: three lines, which reads
+                        // as a list rather than as a conversation.
+                        "\u{2630}",
+                        row.rect.x + ICON_LEFT,
+                        row.rect.y + 5.0,
+                        Run::label(f32::MAX).sized(12.0),
+                    );
+                    scene.glyphs(glyph, ink, palette.faint);
+                    let pill = pill_for(fonts, *unread, *mentions, row.rect, within);
+                    let left = row.rect.x + GUTTER;
+                    let room = pill
+                        .as_ref()
+                        .map(|(_, rect)| rect.x - GAP)
+                        .unwrap_or(within.right() - TRACK)
+                        - left;
+                    let named =
+                        matterless_layout::elided(fonts, "Threads", room, name_style(loud));
+                    let glyphs = painter.run(
+                        fonts,
+                        &named,
+                        left,
+                        row.rect.y + 4.0,
+                        if loud {
+                            Run::label(f32::MAX).bold()
                         } else {
-                            (palette.raised, ink)
-                        };
-                        scene.rounded(
-                            rect.x,
-                            rect.y,
-                            rect.width,
-                            rect.height,
-                            behind,
-                            COUNT_HEIGHT / 2.0,
+                            Run::label(f32::MAX)
+                        },
+                    );
+                    scene.glyphs(glyphs, ink, palette.faint);
+                    if let Some((said, rect)) = pill {
+                        draw_pill(
+                            scene, painter, fonts, palette, &said, rect, *mentions, false, loud,
+                            ink,
                         );
-                        let glyphs = painter.run(
-                            fonts,
-                            &said,
-                            rect.x + COUNT_PADDING,
-                            rect.y + (rect.height - COUNT_LINE) / 2.0,
-                            Run {
-                                size: COUNT_SIZE,
-                                line_height: COUNT_LINE,
-                                bold: loud,
-                                mono: true,
-                                wrap: f32::MAX,
-                            },
-                        );
-                        scene.glyphs(glyphs, over, palette.faint);
                     }
                 }
             }
@@ -584,6 +600,95 @@ impl Sidebar {
                 self.reach(within),
             );
     }
+}
+
+/// Where a row's count sits, and what it says. `None` when there is nothing to
+/// count.
+///
+/// The rectangle is worked out before the name is, because it decides how much
+/// room the name has left.
+#[allow(clippy::too_many_arguments)]
+fn pill_for(
+    fonts: &mut matterless_layout::Fonts,
+    unread: i64,
+    mentions: i64,
+    row: Rect,
+    within: Rect,
+) -> Option<(String, Rect)> {
+    let count = if mentions > 0 { mentions } else { unread };
+    if count <= 0 {
+        return None;
+    }
+    let said = count.to_string();
+    let wide = matterless_layout::extent_of(fonts, &said, f32::MAX, count_style()).width;
+    let width = wide + COUNT_PADDING * 2.0;
+    Some((
+        said,
+        Rect::new(
+            // Clear of the scrollbar, which floats over the rows rather than
+            // taking room from them.
+            (row.right() - width).min(within.right() - TRACK - width - 2.0),
+            row.y + (row.height - COUNT_HEIGHT) / 2.0,
+            width,
+            COUNT_HEIGHT,
+        ),
+    ))
+}
+
+/// The count itself.
+///
+/// A mention is the one count worth colouring: it is the difference between
+/// "there is more here" and "you are being asked". Not in a muted channel,
+/// where it was still asked for quietly.
+#[allow(clippy::too_many_arguments)]
+fn draw_pill(
+    scene: &mut matterless_paint::Scene,
+    painter: &mut matterless_paint::Painter,
+    fonts: &mut matterless_layout::Fonts,
+    palette: &matterless_paint::Palette,
+    said: &str,
+    rect: Rect,
+    mentions: i64,
+    muted: bool,
+    loud: bool,
+    ink: [u8; 3],
+) {
+    let (behind, over) = if mentions > 0 && !muted {
+        (
+            [palette.signal[0], palette.signal[1], palette.signal[2], 255],
+            [palette.surface[0], palette.surface[1], palette.surface[2]],
+        )
+    } else if muted {
+        let dim = palette.dimmed(
+            [palette.raised[0], palette.raised[1], palette.raised[2]],
+            MUTED,
+        );
+        ([dim[0], dim[1], dim[2], 255], ink)
+    } else {
+        (palette.raised, ink)
+    };
+    scene.rounded(
+        rect.x,
+        rect.y,
+        rect.width,
+        rect.height,
+        behind,
+        COUNT_HEIGHT / 2.0,
+    );
+    let glyphs = painter.run(
+        fonts,
+        said,
+        rect.x + COUNT_PADDING,
+        rect.y + (rect.height - COUNT_LINE) / 2.0,
+        Run {
+            size: COUNT_SIZE,
+            line_height: COUNT_LINE,
+            bold: loud,
+            mono: true,
+            wrap: f32::MAX,
+        },
+    );
+    scene.glyphs(glyphs, over, palette.faint);
 }
 
 /// The presence dot, and the room kept for it at the start of every row.
@@ -787,7 +892,7 @@ fn height_of(entry: &Entry) -> f32 {
         Entry::Me { .. } => ME,
         Entry::Team { .. } => TEAM,
         Entry::Heading { .. } => HEADING,
-        Entry::Channel { .. } => ROW,
+        Entry::Channel { .. } | Entry::Threads { .. } => ROW,
     }
 }
 
@@ -900,6 +1005,55 @@ mod tests {
             mark > face,
             "the dot is painted at {mark}, before the face at {face}, so the face covers it"
         );
+    }
+
+    /// The threads row is chosen the way a channel is.
+    ///
+    /// It is a place to go, so it answers through the same `react` and lands in
+    /// the same `selected` -- which is what lets it draw as the chosen row
+    /// without a second piece of state saying which kind of thing is open. The
+    /// id it uses can never collide with a real one: the server's are twenty-
+    /// six characters.
+    #[test]
+    fn the_threads_row_is_picked_like_a_channel() {
+        let mut sidebar = Sidebar::new(vec![
+            Entry::Threads {
+                unread: 3,
+                mentions: 1,
+            },
+            Entry::Channel {
+                id: "c1".into(),
+                label: "Dev".into(),
+                unread: 0,
+                mentions: 0,
+                muted: false,
+                direct: false,
+                private: false,
+                counterpart: None,
+                counterpart_avatar_at: 0,
+            },
+        ]);
+        let within = Rect::new(0.0, 0.0, 240.0, 400.0);
+        let placed = sidebar.boxes(within);
+        let row = placed
+            .iter()
+            .find(|item| item.name == format!("sidebar/channel/{THREADS}"))
+            .expect("the threads row is placed");
+        let mut input = Input::default();
+        input.apply(
+            matterless_ui::input::Event::PointerMoved {
+                x: row.rect.x + 4.0,
+                y: row.rect.y + 4.0,
+            },
+            &placed,
+        );
+        input.apply(matterless_ui::input::Event::PointerPressed, &placed);
+        input.apply(matterless_ui::input::Event::PointerReleased, &placed);
+        assert_eq!(
+            sidebar.react(&input, &placed, within).as_deref(),
+            Some(THREADS)
+        );
+        assert_eq!(sidebar.selected.as_deref(), Some(THREADS));
     }
 
     /// A muted channel never reads as unread, however much arrives in it.

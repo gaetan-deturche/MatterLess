@@ -10,6 +10,7 @@
 //! DOM list came from.
 
 pub mod actions;
+pub mod aside;
 pub mod atlas;
 pub mod badge;
 pub mod clock;

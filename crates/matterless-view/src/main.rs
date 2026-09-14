@@ -210,8 +210,13 @@ struct App {
     /// Who is around, and the set last asked about.
     presence: std::collections::HashMap<String, String>,
     asked_about: Vec<String>,
-    /// Saved or pinned messages, whichever was last asked for.
+    /// Saved or pinned messages, whichever was last asked for. An aside,
+    /// read against whatever conversation is open.
     listing: matterless_view::listing::Listing,
+    /// The threads this reader follows, which is a place to go rather than an
+    /// aside: it fills the conversation's own column, chosen from the sidebar
+    /// like a channel.
+    followed: matterless_view::listing::Listing,
     /// Who somebody is, when their name has been pressed.
     profile: matterless_view::profile::Profile,
     /// The teams, down the far left.
@@ -385,6 +390,7 @@ impl App {
             presence: std::collections::HashMap::new(),
             asked_about: Vec::new(),
             listing: matterless_view::listing::Listing::default(),
+            followed: matterless_view::listing::Listing::new("followed"),
             profile: matterless_view::profile::Profile::default(),
             rail: matterless_view::rail::Rail::default(),
             server: String::new(),
@@ -472,10 +478,27 @@ impl App {
         )
     }
 
+    /// The column on the right, when one of the lists is open.
+    ///
+    /// Search, saved, pinned and threads all live here; only one at a time,
+    /// because they are all answers to "show me messages from somewhere else"
+    /// and two of them side by side would be two answers to one question.
+    fn aside_rect(&self) -> Option<Rect> {
+        (self.search.open || self.listing.open())
+            .then(|| matterless_view::aside::rect(self.column_rect()))
+    }
+
     /// The thread pane's own column, when a thread is open.
     fn thread_rect(&self) -> Option<Rect> {
         let column = self.column_rect();
         self.thread.as_ref()?;
+        // Both at once is one pane too many for any window this runs in, so
+        // the list wins -- it is the one that was just asked for. The thread
+        // is not closed, only hidden: shutting the list brings it back where
+        // the reader left it.
+        if self.aside_rect().is_some() {
+            return None;
+        }
         // Never more than half: on a narrow window a fixed pane would leave the
         // conversation it belongs to too thin to read.
         let width = THREAD.min(column.width * 0.5);
@@ -487,14 +510,28 @@ impl App {
         ))
     }
 
-    /// The channel's column: everything right of the sidebar that the thread
-    /// pane has not taken.
+    /// The channel's column: everything right of the sidebar that the list or
+    /// the thread pane has not taken.
     fn channel_rect(&self) -> Rect {
         let column = self.column_rect();
-        match self.thread_rect() {
-            Some(thread) => Rect::new(column.x, column.y, thread.x - column.x, column.height),
+        match self.aside_rect().or_else(|| self.thread_rect()) {
+            Some(taken) => Rect::new(column.x, column.y, taken.x - column.x, column.height),
             None => column,
         }
+    }
+
+    /// Whether the conversation's column is showing the followed threads
+    /// rather than a conversation.
+    fn on_threads(&self) -> bool {
+        self.followed.open()
+    }
+
+    /// The threads list's own column: everything under the header.
+    ///
+    /// No room kept for a composer, because there is nothing here to write to
+    /// -- a thread is replied to by opening it.
+    fn followed_rect(&self) -> Rect {
+        header::below(self.channel_rect())
     }
 
     /// The stream, between the header above it and the composer below.
@@ -551,6 +588,9 @@ impl App {
 
     /// The open channel's name, which is what the header says.
     fn title(&self) -> String {
+        if self.on_threads() {
+            return "Threads".to_string();
+        }
         let Some(open) = self.sidebar.selected.as_deref() else {
             return String::new();
         };
@@ -625,6 +665,15 @@ impl App {
             status: status.to_string(),
             live,
         }];
+        // First in the list, because with collapsed threads a reply never
+        // touches its channel's counters: this is the only row in the sidebar
+        // that can say a thread is waiting.
+        if counted {
+            let (unread, mentions) = store
+                .and_then(|store| store.thread_unread_totals().ok())
+                .unwrap_or((0, 0));
+            entries.push(Entry::Threads { unread, mentions });
+        }
         let row = |channel: matterless_sidebar::ChannelSummary| Entry::Channel {
             counterpart_avatar_at: channel
                 .counterpart_id
@@ -1218,12 +1267,11 @@ impl App {
     /// Does what a strip button says.
     fn act_on_header(&mut self, act: header::Act) {
         match act {
+            // The same place the sidebar's own row goes, rather than a second
+            // way of showing the same list somewhere else.
             header::Act::Threads => {
-                self.listing.expect("Threads");
-                if let Some(store) = self.store.clone() {
-                    let found = matterless_view::listing::followed(&store, &self.me, THREADS);
-                    self.listing.fill(found);
-                }
+                self.sidebar.selected = Some(matterless_view::sidebar::THREADS.to_string());
+                self.open_channel(matterless_view::sidebar::THREADS);
             }
             header::Act::Saved => {
                 self.listing.expect("Saved");
@@ -2440,12 +2488,21 @@ impl App {
         if let Some(pane) = self.thread_rect() {
             boxes.extend(header::boxes(pane, &header::for_thread()));
         }
-        boxes.extend(self.composer.boxes_in(header::below(self.channel_rect())));
+        if self.on_threads() {
+            // Deeper than the conversation's own rows, which are not drawn --
+            // and shallower than anything that floats over the column.
+            boxes.extend(self.followed.boxes_in(self.followed_rect(), 3));
+        } else {
+            boxes.extend(self.composer.boxes_in(header::below(self.channel_rect())));
+        }
         if let Some(body) = self.thread_body() {
             boxes.extend(self.thread_composer.boxes_in(body));
         }
         boxes.extend(self.picker.boxes(self.picked_near, self.stream_rect()));
-        boxes.extend(self.listing.boxes(self.stream_rect()));
+        if let Some(pane) = self.aside_rect() {
+            boxes.extend(self.listing.boxes(pane));
+            boxes.extend(self.search.boxes(pane));
+        }
         boxes.extend(self.profile.boxes(self.stream_rect()));
         if let Some(row) = self.edited_row() {
             boxes.extend(self.edit.boxes(row, self.stream_rect()));
@@ -2607,8 +2664,32 @@ impl App {
             self.profile.hide();
         }
 
-        // A list of messages stands in front of the conversation, like the
-        // switcher and search do, so while it is up the keys belong to it.
+        // The followed threads, filling the conversation's own column. Choosing
+        // one goes where it was said and opens it, which is the whole reason
+        // the list exists: under collapsed threads a reply is a row nowhere
+        // else, so this is the only way to reach one.
+        if self.on_threads() {
+            let input = std::mem::take(&mut self.input);
+            let boxes = self.placed.clone();
+            let within = self.followed_rect();
+            let did = self.followed.react_in(&input, &boxes, within);
+            self.input = input;
+            if let Some(matterless_view::listing::Did::Open(found)) = did {
+                let root = found.root_id.clone();
+                self.sidebar.selected = Some(found.channel_id.clone());
+                self.open_channel(&found.channel_id);
+                if !root.is_empty() {
+                    self.open_thread(&root);
+                }
+                return;
+            }
+        }
+
+        // A list of messages sits *beside* the conversation rather than over
+        // it, so unlike the switcher it does not take the frame: a click on the
+        // sidebar, a turn of the wheel over the channel, and typing a reply all
+        // still work while it is open. Its own rows are its own because a click
+        // resolves to one box, which is what the depths are for.
         if self.listing.open() {
             let mut input = std::mem::take(&mut self.input);
             if input.struck(Key::Escape) {
@@ -2617,8 +2698,16 @@ impl App {
                 self.input = input;
                 return;
             }
-            let chosen = self.listing.react(&input);
-            if let Some(found) = chosen {
+            let pane = matterless_view::aside::rect(self.column_rect());
+            let boxes = self.placed.clone();
+            let did = self.listing.react(&input, &boxes, pane);
+            if matches!(did, Some(matterless_view::listing::Did::Close)) {
+                self.listing.hide();
+                input.focus_on(composer::NAME);
+                self.input = input;
+                return;
+            }
+            if let Some(matterless_view::listing::Did::Open(found)) = did {
                 self.listing.hide();
                 input.focus_on(composer::NAME);
                 self.input = input;
@@ -2637,7 +2726,6 @@ impl App {
                 return;
             }
             self.input = input;
-            return;
         }
 
         // The picker first: it is the smallest of the panels and the only one
@@ -2680,8 +2768,10 @@ impl App {
             return;
         }
 
-        // Search first and alone while it is open, for the same reason the
-        // switcher is: it is a thing the reader is doing instead of reading.
+        // Search sits beside the conversation too, and for the better reason:
+        // a result is a line out of context, and the context is the channel it
+        // is read against. It keeps the keyboard while its own field has the
+        // focus, and leaves the rest of the frame alone.
         if self.search.open {
             let mut input = std::mem::take(&mut self.input);
             if input.struck(Key::Escape) {
@@ -2689,19 +2779,26 @@ impl App {
                 self.input = input;
                 return;
             }
-            let within = self.stream_rect();
+            let pane = matterless_view::aside::rect(self.column_rect());
+            let boxes = self.placed.clone();
             let store = self.store.clone();
-            let hit = store.as_ref().and_then(|store| {
+            self.search.scrolled(&input, &boxes, pane);
+            let did = store.as_ref().and_then(|store| {
                 self.search.react(
                     &mut self.fonts,
                     &input,
-                    within,
+                    pane,
                     &mut self.clipboard,
                     store,
                     &self.me,
                 )
             });
-            if let Some(hit) = hit {
+            if matches!(did, Some(matterless_view::search::Did::Close)) {
+                self.search.hide(&mut input);
+                self.input = input;
+                return;
+            }
+            if let Some(matterless_view::search::Did::Open(hit)) = did {
                 self.search.hide(&mut input);
                 self.input = input;
                 // Opened at the channel it was said in. Landing on the message
@@ -2712,7 +2809,6 @@ impl App {
                 return;
             }
             self.input = input;
-            return;
         }
 
         // The switcher first and alone while it is open: it is a thing the
@@ -2867,6 +2963,17 @@ impl App {
         let Some(store) = self.store.clone() else {
             return;
         };
+        // The threads row is a place to go, not a channel to read: it fills
+        // the same column, so opening it is the same gesture, but there is no
+        // conversation to load and nothing to mark read.
+        if channel == matterless_view::sidebar::THREADS {
+            self.followed.expect("Threads");
+            self.followed
+                .fill(matterless_view::listing::followed(&store, &self.me, THREADS));
+            self.thread = None;
+            return;
+        }
+        self.followed.hide();
         match matterless_view::feed::rows_of(
             &store,
             channel,
@@ -2955,6 +3062,12 @@ impl App {
         let mut header = Header::new(self.title());
         header.offered = self.header_offers();
         header.muted = self.muted();
+        if self.on_threads() {
+            // The same mark the sidebar row carries, so the two read as the
+            // same place rather than as a channel that happens to be called
+            // Threads.
+            header.sigil = "\u{2630}";
+        }
         scene.clip_to(strip.x, strip.y, strip.width, strip.height);
         let mut canvas = Canvas {
             scene: &mut scene,
@@ -2964,14 +3077,29 @@ impl App {
         };
         header.draw(&mut canvas, strip, on_strip);
 
-        scene.clip_to(stream.x, stream.y, stream.width, stream.height);
-        let mut canvas = Canvas {
-            scene: &mut scene,
-            painter: &mut self.painter,
-            fonts: &mut self.fonts,
-            palette: &self.palette,
-        };
-        self.stream.draw(&mut canvas, stream, &self.input);
+        if self.on_threads() {
+            // The list instead of the conversation, in the same column: it was
+            // chosen from the sidebar the way a channel is, so it opens where
+            // a channel opens.
+            let within = self.followed_rect();
+            scene.clip_to(within.x, within.y, within.width, within.height);
+            let mut canvas = Canvas {
+                scene: &mut scene,
+                painter: &mut self.painter,
+                fonts: &mut self.fonts,
+                palette: &self.palette,
+            };
+            self.followed.draw_in(&mut canvas, &self.input, within);
+        } else {
+            scene.clip_to(stream.x, stream.y, stream.width, stream.height);
+            let mut canvas = Canvas {
+                scene: &mut scene,
+                painter: &mut self.painter,
+                fonts: &mut self.fonts,
+                palette: &self.palette,
+            };
+            self.stream.draw(&mut canvas, stream, &self.input);
+        }
 
         // The thread pane: its own header and its own clip, so a reply cannot
         // spill into the conversation it came from.
@@ -3069,7 +3197,11 @@ impl App {
         }
 
         // Its own layer last, so the caret and the box sit over the stream
-        // rather than under a message that scrolled into the strip.
+        // rather than under a message that scrolled into the strip. Not at all
+        // while the threads are up: there is nothing there to reply to.
+        if self.on_threads() {
+            return scene;
+        }
         let composer = self.composer_rect();
         scene.clip_to(composer.x, composer.y, composer.width, composer.height);
         let focused = self.input.focus() == Some(composer::NAME);
@@ -3097,8 +3229,7 @@ impl App {
             self.switcher.draw(&mut canvas, stream);
             self.switcher.query.draw(&mut canvas, field, true);
         }
-        if self.listing.open() {
-            let stream = self.stream_rect();
+        if let Some(pane) = self.aside_rect() {
             scene.clip_to(0.0, 0.0, self.size.0 as f32, self.size.1 as f32);
             let mut canvas = Canvas {
                 scene: &mut scene,
@@ -3106,20 +3237,12 @@ impl App {
                 fonts: &mut self.fonts,
                 palette: &self.palette,
             };
-            self.listing.draw(&mut canvas, stream);
-        }
-        if self.search.open {
-            let stream = self.stream_rect();
-            let field = self.search.field(stream);
-            scene.clip_to(0.0, 0.0, self.size.0 as f32, self.size.1 as f32);
-            let mut canvas = Canvas {
-                scene: &mut scene,
-                painter: &mut self.painter,
-                fonts: &mut self.fonts,
-                palette: &self.palette,
-            };
-            self.search.draw(&mut canvas, stream);
-            self.search.query.draw(&mut canvas, field, true);
+            self.listing.draw(&mut canvas, &self.input, pane);
+            let field = self.search.field(pane);
+            self.search.draw(&mut canvas, &self.input, pane);
+            if self.search.open {
+                self.search.query.draw(&mut canvas, field, true);
+            }
         }
         // In the row rather than over the window, so it is clipped to the
         // stream like the message it stands in place of.
@@ -3841,6 +3964,12 @@ impl ApplicationHandler<Update> for App {
                 // does nothing with it.
                 let sidebar = self.sidebar_rect();
                 self.sidebar.react(&self.input, &boxes, sidebar);
+                // The list on the right, and the one filling the column, each
+                // take the turn when the pointer is over them -- the same way
+                // every other panel does.
+                if self.aside_rect().is_some() || self.on_threads() {
+                    self.react();
+                }
                 let stream = self.stream_rect();
                 self.stream.react(&self.input, &boxes, stream);
                 self.want_older();
