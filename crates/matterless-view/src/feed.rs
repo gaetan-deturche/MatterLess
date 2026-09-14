@@ -54,12 +54,41 @@ fn busiest(store: &Store) -> Option<String> {
 /// mentions are theirs; an empty one draws every message as somebody else's,
 /// which is wrong in styling but not in height.
 /// Reads a channel from an already-open store and plans it.
+/// Where the "New messages" divider goes, given what the window is already
+/// holding for this channel and what the store's watermark now says.
+///
+/// `held` is `None` on the way into a channel, and then the watermark is
+/// simply believed. After that it is only ever allowed to move *back*: opening
+/// a channel reads it, which pushes the watermark in the store to the newest
+/// post, and a divider that followed would appear for the frame before the
+/// marking landed and then go. Moving back is the reader marking a message
+/// unread, which is precisely the request to put the divider above it.
+///
+/// A watermark of zero is the store saying it does not know -- a membership
+/// row that has not arrived yet -- and is never allowed to take a divider away
+/// from a channel that has one.
+pub fn watermark(held: Option<i64>, seen: i64) -> i64 {
+    match held {
+        Some(held) if seen > 0 => held.min(seen),
+        Some(held) => held,
+        None => seen,
+    }
+}
+
+/// One channel's rows.
+///
+/// `viewed_at` is where the reader had got to *before* they opened it, which
+/// is what the "New messages" divider is placed against. The caller holds it
+/// rather than reading it here, because opening a channel marks it read and
+/// moves the watermark to the newest post: read afresh, it would always be the
+/// end of the conversation and the divider would never appear.
 pub fn rows_of(
     store: &Store,
     channel_id: &str,
     me_id: &str,
     outstanding: &[PendingPost],
     depth: u32,
+    viewed_at: i64,
 ) -> Result<Vec<Row>, String> {
     let mut posts = store
         .channel_page(channel_id, None, depth)
@@ -69,6 +98,7 @@ pub fn rows_of(
     authors.dedup();
     let people = store.users_by_ids(&authors).unwrap_or_default();
     let mut options = PlanOptions::new(ThreadMode::Collapsed, me_id);
+    options.last_viewed_at = viewed_at;
     // Every timestamp in the store is UTC. Without this the day a message
     // belongs to is decided in UTC too, and a conversation that ran across
     // midnight local time is separated in the wrong place.
@@ -493,6 +523,38 @@ mod tests {
         // And a name nobody knows yet is still asked about from in there.
         let rows = wrote("[:bongo: :notyet:](https://example.invalid/x)");
         assert_eq!(unknown_emoji(&store, &rows), vec!["notyet".to_string()]);
+    }
+
+    /// Opening a channel marks it read, and the window replans it more than
+    /// once while it is open -- on the socket signing in, say. Reading the
+    /// watermark afresh each time put the divider below everything, so it
+    /// flashed up and went.
+    #[test]
+    fn the_watermark_is_not_carried_forward_by_the_reading_of_the_channel() {
+        let before = 1_783_001_649_901;
+        let newest = 1_789_396_342_658;
+        assert_eq!(super::watermark(None, before), before, "on the way in");
+        assert_eq!(
+            super::watermark(Some(before), newest),
+            before,
+            "the divider stays where the reader left off"
+        );
+    }
+
+    /// The one thing that does move it: asking for it.
+    #[test]
+    fn marking_a_message_unread_moves_the_watermark_back() {
+        let before = 1_789_396_342_658;
+        let asked_for = 1_783_001_649_901;
+        assert_eq!(super::watermark(Some(before), asked_for), asked_for);
+    }
+
+    /// A membership row the sync has not fetched yet reads as zero, which is
+    /// "no divider" to the planner. It must not take away one already placed.
+    #[test]
+    fn an_unknown_watermark_leaves_the_divider_alone() {
+        assert_eq!(super::watermark(Some(1_783_001_649_901), 0), 1_783_001_649_901);
+        assert_eq!(super::watermark(None, 0), 0, "but it is honest on the way in");
     }
 
     /// One post whose body is `body`, parsed the way the app parses it.
