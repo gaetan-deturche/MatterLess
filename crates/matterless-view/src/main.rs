@@ -1472,7 +1472,7 @@ impl App {
         let plain = kind("channels");
         let favourite = favourites.is_some_and(|(_, held)| held.contains(&channel_id));
 
-        let mut items = vec![Item::new("channel.unread", "Mark as Unread").marked("\u{2630}")];
+        let mut items = vec![Item::new("channel.unread", "Mark as Unread").marked(matterless_layout::marks::UNREAD)];
         if let (Some((favourites, _)), Some((plain, _))) = (favourites, plain) {
             let into = if favourite { &plain.id } else { &favourites.id };
             items.push(
@@ -1484,7 +1484,7 @@ impl App {
                         "Favorite"
                     },
                 )
-                .marked("\u{2606}"),
+                .marked(matterless_layout::marks::FAVOURITE),
             );
         }
         items.push(
@@ -1496,7 +1496,7 @@ impl App {
                     "Mute Channel"
                 },
             )
-            .marked("\u{1f56d}"),
+            .marked(matterless_layout::marks::BELL_OFF),
         );
         // Everywhere it could go, minus wherever it already is.
         let targets: Vec<Item> = categories
@@ -1517,18 +1517,18 @@ impl App {
             items.push(Item::rule());
             items.push(
                 Item::new("channel.move", "Move to\u{2026}")
-                    .marked("\u{1f5c0}")
+                    .marked(matterless_layout::marks::FOLDER)
                     .nests(targets),
             );
         }
         items.push(Item::rule());
-        items.push(Item::new("channel.link", "Copy Link").marked("\u{29c9}"));
+        items.push(Item::new("channel.link", "Copy Link").marked(matterless_layout::marks::LINK));
         if !conversation {
-            items.push(Item::new("channel.add", "Add Members").marked("\u{2295}"));
+            items.push(Item::new("channel.add", "Add Members").marked(matterless_layout::marks::ADD_PEOPLE));
             items.push(Item::rule());
             items.push(
                 Item::new("channel.leave", "Leave Channel")
-                    .marked("\u{21e5}")
+                    .marked(matterless_layout::marks::LEAVE)
                     .tinted(Tint::Flag),
             );
         }
@@ -3224,7 +3224,7 @@ impl App {
             // The same mark the sidebar row carries, so the two read as the
             // same place rather than as a channel that happens to be called
             // Threads.
-            header.sigil = "\u{2630}";
+            header.sigil = matterless_layout::marks::THREADS;
         }
         scene.clip_to(strip.x, strip.y, strip.width, strip.height);
         let mut canvas = Canvas {
@@ -4277,6 +4277,16 @@ fn snapshot(path: &std::path::Path, width: u32) -> Result<(), String> {
 }
 
 fn main() {
+    // Before anything opens a connection. `reqwest` names its own provider,
+    // but the WebSocket goes through `tokio-tungstenite`, which asks rustls to
+    // pick one -- and rustls panics rather than choose when the binary carries
+    // both. `aws-lc-rs` is the one reqwest already uses.
+    if rustls::crypto::aws_lc_rs::default_provider()
+        .install_default()
+        .is_err()
+    {
+        println!("a rustls crypto provider was already installed");
+    }
     // `--snapshot <file>` instead of a window, for a headless check.
     let args: Vec<String> = std::env::args().collect();
     if let Some(at) = args.iter().position(|arg| arg == "--snapshot") {

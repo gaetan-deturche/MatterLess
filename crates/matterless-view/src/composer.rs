@@ -79,7 +79,7 @@ const TOOLS: f32 = 34.0;
 /// is no paperclip in line art: the fonts here have one glyph for it and it is
 /// a coloured bitmap. A control is not content, and a coloured one reads as
 /// something somebody sent rather than as something to press.
-const CLIP: &str = "🗎";
+const CLIP: &str = matterless_layout::marks::ATTACH;
 
 impl Default for Composer {
     fn default() -> Self {
@@ -458,6 +458,7 @@ impl Composer {
                     bold: false,
                     mono: false,
                     wrap: f32::MAX,
+                    icon: false,
                     smooth: false,
                 },
             );
@@ -516,7 +517,7 @@ impl Composer {
             attach.y + 2.0,
             // Larger than the words: a mark is a picture, and the font
             // rasterises one at about two thirds of the size asked for.
-            Run::label(f32::MAX).sized(22.0).smooth(),
+            Run::mark(20.0),
         );
         scene.glyphs(clip, palette.soft, palette.faint);
 

@@ -47,6 +47,15 @@ semver = "1.0.28"
 base64 = "0.23.1"
 serde = { version = "1.0.229", features = ["derive"] }
 reqwest = { version = "0.13.5", default-features = false, features = ["json", "rustls", "http2", "gzip", "charset"] }
+# Named here only to choose the process-wide TLS provider, exactly as the app
+# does. `reqwest` names its own, but the WebSocket goes through
+# `tokio-tungstenite`, which asks rustls to pick -- and rustls panics rather
+# than guess when the binary carries two. It carries two whenever this is built
+# beside the app, because Cargo unifies features across a workspace and the
+# app's updater plugin brings `ring` in alongside this `aws-lc-rs`. Built alone
+# it happened to work, which is the worst way for this to be wrong: `cargo
+# build -p matterless-view` signed in and `cargo build --workspace` did not.
+rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs"] }
 
 [features]
 # On by default so the standalone window is one command; the app turns it off,

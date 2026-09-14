@@ -1214,7 +1214,7 @@ impl Stream {
                 // Drawn down from twice its size: a mark is a picture, and at
                 // the size of a word the font hints its detail into stems too
                 // hard to read.
-                Run::label(f32::MAX).sized(16.0).smooth(),
+                Run::mark(15.0),
             );
             scene.glyphs(
                 glyphs,
@@ -1438,6 +1438,7 @@ impl Stream {
                     // Cut by the panel's clip rather than wrapped: a card is a
                     // fixed height and a wrapped name would run out of it.
                     wrap: f32::MAX,
+                    icon: false,
                     smooth: false,
                 },
             );

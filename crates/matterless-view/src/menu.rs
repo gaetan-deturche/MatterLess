@@ -489,7 +489,7 @@ impl Menu {
                 // The chevron that says there is more this way.
                 let glyphs = into.painter.run(
                     into.fonts,
-                    "\u{203a}",
+                    matterless_layout::marks::NEXT,
                     rect.right() - self.style.pad_x - 6.0,
                     rect.y + (rect.height - self.style.size * 1.4) / 2.0,
                     Run::label(f32::MAX).sized(self.style.size),
@@ -569,7 +569,7 @@ impl Menu {
                 // its size: a mark is a picture with detail inside it, and at
                 // the size of a word the font hints that detail into stems
                 // too hard to read.
-                Run::label(f32::MAX).sized(17.0).smooth(),
+                Run::mark(16.0),
             );
             into.scene
                 .glyphs(glyphs, into.palette.soft, into.palette.faint);
@@ -666,8 +666,8 @@ mod tests {
 
     fn items() -> Vec<Item> {
         vec![
-            Item::new("unread", "Mark as Unread").marked("\u{2630}"),
-            Item::new("mute", "Mute Channel").marked("\u{1f56d}"),
+            Item::new("unread", "Mark as Unread").marked(matterless_layout::marks::UNREAD),
+            Item::new("mute", "Mute Channel").marked(matterless_layout::marks::BELL_OFF),
             Item::rule(),
             Item::new("leave", "Leave Channel").tinted(Tint::Flag),
         ]
