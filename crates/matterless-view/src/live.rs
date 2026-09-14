@@ -195,6 +195,9 @@ pub enum Ask {
     Join { channel_id: String },
     /// Find or create the conversation with one person, then open it.
     Direct { user_id: String },
+    /// Open the conversation between these people, starting it if it is not
+    /// there. Two or more others; one is a `Direct`.
+    Group { user_ids: Vec<String> },
     /// Every channel and membership, from the server into the store.
     ///
     /// The unread counts are arithmetic on two numbers the server keeps -- a
@@ -686,6 +689,35 @@ async fn run(
                                 wake.wake(Update::Reached { channel_id });
                             }
                             Err(error) => eprintln!("joining {channel_id}: {error}"),
+                        }
+                    }
+                    // Several people at once, which the server keys a channel
+                    // on: the same group asked for twice is the same channel,
+                    // so this both creates and finds.
+                    Ask::Group { mut user_ids } => {
+                        // The reader is part of their own conversation. The
+                        // server keys the channel on its whole membership, so
+                        // leaving oneself out asks for a different one.
+                        if !user_ids.contains(&me_id) {
+                            user_ids.push(me_id.clone());
+                        }
+                        match rest.group_channel(&user_ids).await {
+                            Ok(channel) => {
+                                if let Err(error) =
+                                    engine.store().upsert_channels(std::slice::from_ref(&channel))
+                                {
+                                    eprintln!("storing a new conversation: {error}");
+                                }
+                                if let Ok((_, mode)) =
+                                    membership(&rest, engine.store(), &me_id).await
+                                {
+                                    wake.wake(Update::Membership(mode));
+                                }
+                                wake.wake(Update::Reached {
+                                    channel_id: channel.id,
+                                });
+                            }
+                            Err(error) => eprintln!("starting a conversation: {error}"),
                         }
                     }
                     Ask::Direct { user_id } => match rest.direct_channel(&me_id, &user_id).await {
