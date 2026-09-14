@@ -251,12 +251,18 @@ pub fn vertices_of(
                         }
                     };
                     // `left` and `top` are the bitmap's offset from the pen, and
-                    // ignoring them puts every letter on its own baseline.
-                    let x0 = (glyph.x + slot.left) as f32;
-                    let y0 = (glyph.y - slot.top) as f32;
-                    push_quad(
+                    // ignoring them puts every letter on its own baseline. They
+                    // scale with it: a mark rasterised at twice has twice the
+                    // bearing too.
+                    let x0 = glyph.x as f32 + slot.left as f32 * glyph.scale;
+                    let y0 = glyph.y as f32 - slot.top as f32 * glyph.scale;
+                    let (drawn, tall_as) = (
+                        slot.width as f32 * glyph.scale,
+                        slot.height as f32 * glyph.scale,
+                    );
+                    quad(
                         into,
-                        [x0, y0, x0 + slot.width as f32, y0 + slot.height as f32],
+                        [x0, y0, x0 + drawn, y0 + tall_as],
                         [
                             slot.x as f32 / wide,
                             slot.y as f32 / tall,
@@ -264,6 +270,16 @@ pub fn vertices_of(
                             (slot.y + slot.height) as f32 / tall,
                         ],
                         rgba,
+                        // A letter is one texel to one pixel and wants the
+                        // point sampler; a mark drawn down from twice its size
+                        // is the one thing on this sheet that wants the other.
+                        if glyph.scale < 1.0 {
+                            SMOOTH_LETTERS
+                        } else {
+                            Sheet::Letters as u32
+                        },
+                        0.0,
+                        1.0,
                     );
                 }
             }
@@ -272,10 +288,6 @@ pub fn vertices_of(
 }
 
 /// A quad sampled point-for-point, which is what a glyph and a fill want.
-fn push_quad(into: &mut Vec<Vertex>, rect: [f32; 4], uv: [f32; 4], colour: [f32; 4]) {
-    quad(into, rect, uv, colour, Sheet::Letters as u32, 0.0, 1.0);
-}
-
 /// Six vertices for one rectangle.
 ///
 /// Each corner carries where it sits relative to the middle and how big half
@@ -322,6 +334,13 @@ type Clip = (f32, f32, f32, f32);
 
 /// Where the opened picture's own texture sits, after the three sheets.
 const SHOWN: u32 = 3;
+
+/// The letters sheet again, sampled smooth rather than point.
+///
+/// Not a fourth texture: the same one, read the other way. Everything on it is
+/// one texel to one pixel except a mark that was rasterised at twice its size
+/// so it could be drawn down, and that one wants filtering.
+const SMOOTH_LETTERS: u32 = 4;
 
 /// Binds everything the pipeline samples: the two samplers, the three sheets,
 /// and whatever is open.

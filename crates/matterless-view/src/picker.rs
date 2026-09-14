@@ -304,6 +304,7 @@ impl Picker {
                             bold: false,
                             mono: false,
                             wrap: f32::MAX,
+                            smooth: false,
                         },
                     );
                     scene.glyphs(glyphs, palette.ink, palette.faint);
