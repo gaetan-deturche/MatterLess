@@ -81,6 +81,48 @@ pub struct Stream {
     /// rect is where the button was when it was pressed, which is where the
     /// row of faces stays until it is answered or dismissed.
     picking: Option<(String, Rect)>,
+    /// What was shaped last time, by row identity.
+    ///
+    /// A channel is replanned far more often than it changes: opening it, the
+    /// socket signing in, a reaction landing, the window being resized, a
+    /// reply arriving four hundred messages below the one that changed. Every
+    /// one of those used to shape all four hundred rows again -- a second at a
+    /// time in a channel of crash reports, six times over in the first few
+    /// seconds of the window's life.
+    ///
+    /// Keyed on identity and checked on equality: the key finds the row that
+    /// was in this place last time even if rows have been added above it, and
+    /// the comparison is what says whether it is still the same row. Comparing
+    /// a message costs a string compare; shaping one costs four milliseconds.
+    kept: std::collections::HashMap<String, (Row, RowLayout)>,
+    /// What `kept` was shaped against: the column's width, the day it was,
+    /// and the reader's offset from UTC.
+    ///
+    /// A narrower column wraps differently. And a separator says "Today" --
+    /// a window left open across midnight would keep yesterday's word for it,
+    /// because the row itself is a day number and has not changed.
+    kept_against: (f32, i64, i32),
+    /// How many rows the last layout took from the cache rather than shaping.
+    /// Read by the tests, which is the only way to tell reuse from a very fast
+    /// shaper.
+    reused: usize,
+}
+
+/// What names a row across two plans of the same channel.
+///
+/// Not an index: a page of older history arriving pushes every row down, and a
+/// cache that matched on position would miss all of them. Rows that have no id
+/// of their own are named by what they are, which is enough -- there is one
+/// divider, and one separator per day.
+fn key_of(row: &Row) -> String {
+    match row {
+        Row::Post { post } | Row::Continuation { post } => format!("post/{}", post.post_id),
+        Row::System { post_id, .. } => format!("system/{post_id}"),
+        Row::DeletedRoot { post_id, .. } => format!("gone/{post_id}"),
+        Row::ThreadFooter { root_id, .. } => format!("footer/{root_id}"),
+        Row::DateSeparator { epoch_day } => format!("day/{epoch_day}"),
+        Row::UnreadDivider => "divider".to_string(),
+    }
 }
 
 impl Stream {
@@ -96,6 +138,9 @@ impl Stream {
             presses: Vec::new(),
             bar: crate::scrollbar::Scrollbar::default(),
             picking: None,
+            kept: std::collections::HashMap::new(),
+            kept_against: (f32::NAN, 0, 0),
+            reused: 0,
         }
     }
 
@@ -104,25 +149,64 @@ impl Stream {
     /// Once per width change, never per frame: a row's height does not depend
     /// on the scroll position, which is the property that makes this list
     /// honest and the DOM one not.
+    ///
+    /// The clock is read here rather than held, so a machine that crosses
+    /// midnight or a daylight-saving boundary while running is right
+    /// afterwards.
     pub fn lay_out(&mut self, fonts: &mut Fonts, width: f32) {
+        self.lay_out_on(
+            fonts,
+            width,
+            // So a date in this year can leave the year off.
+            crate::clock::today(),
+            crate::clock::utc_offset_minutes(),
+        );
+    }
+
+    /// The same, as of a given day, so the day can be moved in a test.
+    pub fn lay_out_on(&mut self, fonts: &mut Fonts, width: f32, today: i64, offset: i32) {
         self.theme = Theme {
             // The content's width, not the panel's: the stream keeps a margin
             // clear of its own edges, so a message never starts against the
             // sidebar nor ends against the scrollbar.
             width: width - Theme::default().pad_x * 2.0,
-            // So a date in this year can leave the year off.
-            today: crate::clock::today(),
-            // The clock on every row, in the reader's own time rather than
-            // UTC. Read here rather than held, so a machine that crosses a
-            // daylight-saving boundary while running is right afterwards.
-            utc_offset_minutes: crate::clock::utc_offset_minutes(),
+            today,
+            utc_offset_minutes: offset,
             ..Theme::default()
         };
+        let against = (
+            self.theme.width,
+            self.theme.today,
+            self.theme.utc_offset_minutes,
+        );
+        let reusable = self.kept_against == against;
+        let mut kept = std::collections::HashMap::with_capacity(self.rows.len());
+        let mut reused = 0;
         self.laid = self
             .rows
             .iter()
-            .map(|row| lay_out(fonts, row, &self.theme))
+            .map(|row| {
+                let key = key_of(row);
+                let found = self
+                    .kept
+                    .get(&key)
+                    .filter(|_| reusable)
+                    .filter(|(was, _)| was == row)
+                    .map(|(_, laid)| laid.clone());
+                reused += usize::from(found.is_some());
+                let laid = found.unwrap_or_else(|| lay_out(fonts, row, &self.theme));
+                kept.insert(key, (row.clone(), laid.clone()));
+                laid
+            })
             .collect();
+        self.kept = kept;
+        self.kept_against = against;
+        self.reused = reused;
+    }
+
+    /// How many rows the last layout reused.
+    pub fn reused(&self) -> usize {
+        self.reused
     }
 
     pub fn total(&self) -> f32 {

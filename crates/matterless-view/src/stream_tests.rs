@@ -529,3 +529,71 @@ fn a_conversation_opens_at_the_bottom() {
     assert!(stream.scroll > 0.0);
     assert_eq!(stream.scroll, stream.reach(panel()));
 }
+
+/// Shaping a channel of crash reports costs a second, and the window replans
+/// far more often than the conversation changes: opening it, the socket
+/// signing in, a reaction landing, a resize. Six full passes in the first
+/// seconds of the window's life, measured, before any of this existed.
+#[test]
+fn a_replan_reshapes_only_what_changed() {
+    let mut fonts = Fonts::new();
+    let mut stream = conversation(&mut fonts);
+    let within = panel();
+    let rows = stream.rows.len();
+    assert_eq!(
+        stream.reused(),
+        0,
+        "the first layout has nothing to reuse"
+    );
+
+    // The same plan again -- which is what almost every replan is.
+    stream.lay_out(&mut fonts, within.width);
+    assert_eq!(stream.reused(), rows, "all of it");
+
+    // One message edited: that row and no other.
+    let Some(Row::Post { post }) = stream.rows.get_mut(1) else {
+        unreachable!("the second row is a post")
+    };
+    post.edited = true;
+    post.nodes = Arc::new(vec![Node::Paragraph {
+        children: vec![Node::Text {
+            value: "a much longer line of text than the one that was there before,                     long enough to wrap onto a second line and change the height"
+                .into(),
+        }],
+    }]);
+    stream.lay_out(&mut fonts, within.width);
+    assert_eq!(stream.reused(), rows - 1);
+
+    // A row arriving above the others must not push them out of the cache:
+    // matching on position would miss every row below the new one.
+    stream.rows.insert(0, Row::UnreadDivider);
+    stream.lay_out(&mut fonts, within.width);
+    assert_eq!(stream.reused(), rows, "everything but the new row");
+}
+
+/// A narrower column wraps differently, so nothing shaped for the old one says
+/// anything about the new one.
+#[test]
+fn a_different_width_reuses_nothing() {
+    let mut fonts = Fonts::new();
+    let mut stream = conversation(&mut fonts);
+    stream.lay_out(&mut fonts, panel().width);
+    assert_eq!(stream.reused(), stream.rows.len());
+    stream.lay_out(&mut fonts, 420.0);
+    assert_eq!(stream.reused(), 0);
+}
+
+/// A separator says "Today", and the row behind it is only a day number. A
+/// window left open across midnight would keep yesterday's word for it.
+#[test]
+fn a_new_day_reshapes_the_separators() {
+    let mut fonts = Fonts::new();
+    let mut stream = conversation(&mut fonts);
+    stream.lay_out(&mut fonts, panel().width);
+    assert_eq!(stream.reused(), stream.rows.len());
+    // Midnight: the same rows, a day later.
+    let tomorrow = stream.theme.today + 1;
+    let offset = stream.theme.utc_offset_minutes;
+    stream.lay_out_on(&mut fonts, panel().width, tomorrow, offset);
+    assert_eq!(stream.reused(), 0);
+}
