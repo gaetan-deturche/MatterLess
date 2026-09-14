@@ -542,16 +542,34 @@ pub struct Announcement {
     /// The conversation it came from, for the title.
     pub channel: String,
     pub preview: String,
-    /// A direct or group message, which is named by its kind rather than by a
-    /// channel nobody would recognise.
-    pub direct: bool,
+    /// Which of the three kinds it came from, because each is announced
+    /// differently.
+    pub kind: Kind,
+}
+
+/// What sort of conversation a notification came from.
+///
+/// Three, not a `direct` flag. The flag treated a group as a direct message,
+/// and for a direct message the author *is* the conversation -- so a group's
+/// notification said a name and nothing about which group, which is no use
+/// when you are in nine of them with overlapping membership.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    #[default]
+    Channel,
+    Direct,
+    Group,
 }
 
 /// Reads what a notification for this post should say.
 ///
 /// Falls back to ids rather than failing: a notification with an ugly name
 /// still tells you something happened, where no notification tells you nothing.
-pub fn announce(store: &matterless_store::Store, post_id: &str) -> Announcement {
+pub fn announce(
+    store: &matterless_store::Store,
+    post_id: &str,
+    me_id: &str,
+) -> Announcement {
     let Ok(Some(post)) = store.post(post_id) else {
         return Announcement::default();
     };
@@ -559,28 +577,54 @@ pub fn announce(store: &matterless_store::Store, post_id: &str) -> Announcement 
         .users_by_ids(std::slice::from_ref(&post.user_id))
         .ok()
         .and_then(|found| found.get(&post.user_id).map(|user| user.username.clone()));
-    let (channel, direct) = conversation_label(store.channel(&post.channel_id).ok().flatten());
+    // The reader's own name, so it can be taken out of a group's membership:
+    // a group is called by everybody in it *except* you, and reading your own
+    // name in the title of a notification addressed to you says nothing.
+    let names = store
+        .users_by_ids(std::slice::from_ref(&me_id.to_string()))
+        .map(|found| {
+            found
+                .into_iter()
+                .map(|(id, user)| (id, user.username))
+                .collect()
+        })
+        .unwrap_or_default();
+    let (channel, kind) = conversation_label(
+        store.channel(&post.channel_id).ok().flatten(),
+        me_id,
+        &names,
+    );
     Announcement {
         resolved: known.is_some(),
         author: known.unwrap_or_else(|| post.user_id.clone()),
         author_id: post.user_id,
         channel,
         preview: preview_of(&post.message),
-        direct,
+        kind,
     }
 }
 
 /// What to call the conversation a notification came from.
-pub fn conversation_label(channel: Option<matterless_core::Channel>) -> (String, bool) {
-    match channel {
-        Some(channel) if channel.channel_type == "D" => ("Direct Message".to_string(), true),
-        Some(channel) if channel.channel_type == "G" => ("Group Message".to_string(), true),
-        Some(channel) if !channel.display_name.is_empty() => (channel.display_name, false),
-        // A channel with no display name at all: its name is at least readable.
-        Some(channel) => (channel.name, false),
+///
+/// Through the sidebar's own `label`, which is the one place that knows: a
+/// group is its membership less the reader, a direct message is the other
+/// person, and a channel is its name. A second answer here is how a toast
+/// comes to name a conversation the sidebar calls something else.
+pub fn conversation_label(
+    channel: Option<matterless_core::Channel>,
+    me_id: &str,
+    names: &std::collections::HashMap<String, String>,
+) -> (String, Kind) {
+    let Some(channel) = channel else {
         // Not held locally yet. An empty title leaves the caller to fall back.
-        None => (String::new(), false),
-    }
+        return (String::new(), Kind::Channel);
+    };
+    let kind = match channel.channel_type.as_str() {
+        "D" => Kind::Direct,
+        "G" => Kind::Group,
+        _ => Kind::Channel,
+    };
+    (matterless_sidebar::label(&channel, me_id, names), kind)
 }
 
 /// One line of the message, short enough for a toast.
@@ -600,8 +644,14 @@ pub fn preview_of(message: &str) -> String {
 
 #[cfg(test)]
 mod announcing {
-    use super::{conversation_label, preview_of};
+    use super::{Kind, conversation_label, preview_of};
     use matterless_core::Channel;
+    use std::collections::HashMap;
+
+    /// The reader, by the only name a group's membership is written in.
+    fn me() -> HashMap<String, String> {
+        HashMap::from([("u-me".to_string(), "gaetan".to_string())])
+    }
 
     fn channel(kind: &str, display: &str, name: &str) -> Channel {
         Channel {
@@ -617,23 +667,48 @@ mod announcing {
         }
     }
 
-    /// A direct message is named by its kind: its channel name is an id pair
-    /// that would mean nothing on a toast.
+    /// A channel is named by itself, and knows it is one.
     #[test]
-    fn a_conversation_is_named_by_what_it_is() {
+    fn a_channel_is_named_by_itself() {
         assert_eq!(
-            conversation_label(Some(channel("D", "", "a__b"))),
-            ("Direct Message".to_string(), true)
+            conversation_label(Some(channel("O", "Dev", "dev")), "u-me", &me()),
+            ("Dev".to_string(), Kind::Channel)
         );
+        // No display name at all: its name is at least readable.
         assert_eq!(
-            conversation_label(Some(channel("O", "Dev", "dev"))),
-            ("Dev".to_string(), false)
+            conversation_label(Some(channel("O", "", "dev")), "u-me", &me()),
+            ("dev".to_string(), Kind::Channel)
         );
+        // Not held locally yet, which leaves the caller to fall back.
         assert_eq!(
-            conversation_label(Some(channel("O", "", "dev"))),
-            ("dev".to_string(), false)
+            conversation_label(None, "u-me", &me()),
+            (String::new(), Kind::Channel)
         );
-        assert_eq!(conversation_label(None), (String::new(), false));
+    }
+
+    /// A group is named by everybody in it except the reader.
+    ///
+    /// It used to be named "Group Message" -- the kind, not the group -- and
+    /// announced as though it were a direct message, so a toast said one
+    /// person's name and nothing about which conversation. With nine groups of
+    /// overlapping membership that is the whole question a reader has.
+    #[test]
+    fn a_group_is_named_by_who_is_in_it() {
+        let (label, kind) = conversation_label(
+            Some(channel("G", "alex, florine, gaetan, leo", "hashed")),
+            "u-me",
+            &me(),
+        );
+        assert_eq!(kind, Kind::Group);
+        assert_eq!(label, "alex, florine, leo", "the reader is not in the title");
+    }
+
+    /// A direct message knows what it is, which is what decides that the
+    /// person is the title and not the body.
+    #[test]
+    fn a_direct_message_says_so() {
+        let (_, kind) = conversation_label(Some(channel("D", "", "a__b")), "u-me", &me());
+        assert_eq!(kind, Kind::Direct);
     }
 
     /// A toast is one line, so a message that is many becomes one.

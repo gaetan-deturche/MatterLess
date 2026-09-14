@@ -2278,7 +2278,7 @@ impl App {
             if channel_id == &open {
                 continue;
             }
-            let said = matterless_sync::notify::announce(&store, post_id);
+            let said = matterless_sync::notify::announce(&store, post_id, &self.me);
             let (title, body) = matterless_view::toast::wording(&said);
             // The count, never the words: a notification carries the message
             // and the log must not.

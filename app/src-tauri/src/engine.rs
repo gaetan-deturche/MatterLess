@@ -229,7 +229,13 @@ impl Runner {
     /// still tells you something happened, where no notification tells you
     /// nothing.
     fn notification_text(&self, post_id: &str) -> ToastText {
-        announce(self.engine.store(), post_id)
+        // The reader, so a group can be named by everybody in it but them.
+        let me = self
+            .context
+            .as_ref()
+            .map(|context| context.me.id.clone())
+            .unwrap_or_default();
+        announce(self.engine.store(), post_id, &me)
     }
 
     /// Fetches a stranger's name, then sends the notification.
@@ -270,7 +276,7 @@ impl Runner {
                 author,
                 channel: text.channel,
                 preview: text.preview,
-                direct: text.direct,
+                direct: text.kind == matterless_sync::notify::Kind::Direct,
             };
             if let Err(error) = subscriber.send(delta) {
                 tracing::warn!(%error, "the ui delta channel is gone");
@@ -306,7 +312,8 @@ impl Runner {
                                 author: text.author,
                                 channel: text.channel,
                                 preview: text.preview,
-                                direct: text.direct,
+                                direct: text.kind
+                                    == matterless_sync::notify::Kind::Direct,
                             });
                         } else {
                             self.notify_once_named(channel_id, post_id, text);
@@ -628,45 +635,66 @@ mod tests {
         }
     }
 
-    /// The reported bug: a DM's `name` is `<id>__<id>`, and using it as the
-    /// toast title showed a wall of hex where the conversation should be.
+    /// The reported bug this began with: a DM's `name` is `<id>__<id>`, and
+    /// using it as the toast title showed a wall of hex where the conversation
+    /// should be.
     #[test]
-    fn a_direct_message_is_named_by_its_kind_not_by_its_ids() {
+    fn a_direct_message_is_named_by_the_person_not_by_its_ids() {
         let dm = channel(
             "D",
             "",
             "7gwdwjg1zjf7tb5xxdp6ieazgr__ufwu3fbgutnu5ep8odumg4tzzr",
         );
-        let (label, direct) = matterless_sync::notify::conversation_label(Some(dm));
-        assert_eq!(label, "Direct Message");
-        assert!(direct, "the shell marks the author with @ for these");
+        let names = std::collections::HashMap::from([(
+            "ufwu3fbgutnu5ep8odumg4tzzr".to_string(),
+            "ada".to_string(),
+        )]);
+        let (label, kind) = matterless_sync::notify::conversation_label(
+            Some(dm),
+            "7gwdwjg1zjf7tb5xxdp6ieazgr",
+            &names,
+        );
+        assert_eq!(label, "ada");
+        assert_eq!(kind, matterless_sync::notify::Kind::Direct);
     }
 
+    /// A group is named by who is in it, less the reader.
+    ///
+    /// It used to be named "Group Message" -- the kind rather than the group --
+    /// and announced as a direct message, so a toast carried one person's name
+    /// and nothing about which conversation it came from.
     #[test]
-    fn a_group_message_says_so_too() {
-        let (label, direct) =
-            matterless_sync::notify::conversation_label(Some(channel("G", "", "abc123def456")));
-        assert_eq!(label, "Group Message");
-        assert!(direct);
+    fn a_group_is_named_by_who_is_in_it() {
+        let names =
+            std::collections::HashMap::from([("u-me".to_string(), "gaetan".to_string())]);
+        let (label, kind) = matterless_sync::notify::conversation_label(
+            Some(channel("G", "alex, florine, gaetan, leo", "abc123def456")),
+            "u-me",
+            &names,
+        );
+        assert_eq!(label, "alex, florine, leo");
+        assert_eq!(kind, matterless_sync::notify::Kind::Group);
     }
 
-    /// A normal channel has a name worth showing, and the author is not the
-    /// conversation, so nothing is marked.
+    /// A normal channel has a name worth showing.
     #[test]
     fn a_channel_is_named_by_its_display_name() {
-        let (label, direct) = matterless_sync::notify::conversation_label(Some(channel(
-            "O",
-            "Builds | Alerts",
-            "builds--alerts",
-        )));
+        let (label, kind) = matterless_sync::notify::conversation_label(
+            Some(channel("O", "Builds | Alerts", "builds--alerts")),
+            "u-me",
+            &Default::default(),
+        );
         assert_eq!(label, "Builds | Alerts");
-        assert!(!direct);
+        assert_eq!(kind, matterless_sync::notify::Kind::Channel);
     }
 
     #[test]
     fn a_channel_without_a_display_name_falls_back_to_its_slug() {
-        let (label, _) =
-            matterless_sync::notify::conversation_label(Some(channel("P", "", "secret-project")));
+        let (label, _) = matterless_sync::notify::conversation_label(
+            Some(channel("P", "", "secret-project")),
+            "u-me",
+            &Default::default(),
+        );
         assert_eq!(label, "secret-project");
     }
 
@@ -674,8 +702,9 @@ mod tests {
     /// blank title still says something happened; failing would say nothing.
     #[test]
     fn an_unknown_channel_yields_an_empty_label_rather_than_failing() {
-        let (label, direct) = matterless_sync::notify::conversation_label(None);
+        let (label, kind) =
+            matterless_sync::notify::conversation_label(None, "u-me", &Default::default());
         assert!(label.is_empty());
-        assert!(!direct);
+        assert_eq!(kind, matterless_sync::notify::Kind::Channel);
     }
 }
