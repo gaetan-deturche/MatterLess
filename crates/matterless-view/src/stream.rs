@@ -252,6 +252,29 @@ impl Stream {
         self.scroll = self.scroll.clamp(0.0, self.reach(within));
     }
 
+    /// Takes one row out, and the shaping that goes with it.
+    ///
+    /// Rather than replanning the channel and laying it out again: the other
+    /// four hundred rows have not changed, and reshaping them to remove a
+    /// line of text costs whole seconds in a conversation of crash reports.
+    ///
+    /// The reader stays where they were. A row taken from above the viewport
+    /// pulls everything below it up by its own height, and the scroll has to
+    /// come with it or the words under the eye jump.
+    pub fn forget_row(&mut self, at: usize) {
+        if at >= self.rows.len() || at >= self.laid.len() {
+            return;
+        }
+        let above: f32 = self.laid[..at].iter().map(|row| row.height).sum();
+        let height = self.laid[at].height;
+        self.kept.remove(&key_of(&self.rows[at]));
+        self.rows.remove(at);
+        self.laid.remove(at);
+        if above < self.scroll {
+            self.scroll = (self.scroll - height).max(0.0);
+        }
+    }
+
     /// The thread a row belongs to: its own id when it is a root, and the root
     /// it hangs from when it is a reply.
     ///
