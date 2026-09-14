@@ -915,7 +915,7 @@ impl Painter {
         if run.icon {
             attrs = attrs.family(Family::Name(matterless_layout::marks::FAMILY));
         } else if run.mono {
-            attrs = attrs.family(Family::Monospace);
+            attrs = attrs.family(matterless_layout::mono_family());
         }
         if run.bold {
             attrs = attrs.weight(Weight::BOLD);
@@ -1136,7 +1136,7 @@ fn attrs_of(span: &TextSpan, at: usize) -> Attrs<'static> {
     // or which half of a run is quiet.
     attrs = attrs.metadata(marked(span, at));
     if span.mono {
-        attrs = attrs.family(Family::Monospace);
+        attrs = attrs.family(matterless_layout::mono_family());
     }
     if span.bold {
         attrs = attrs.weight(Weight::BOLD);
