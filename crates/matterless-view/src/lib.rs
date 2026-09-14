@@ -44,7 +44,7 @@ pub mod update;
 pub mod viewer;
 pub mod updater_bar;
 
-use atlas::{Atlas, SIDE};
+use atlas::{Atlas, Sheet};
 use cosmic_text::SwashCache;
 use matterless_layout::Fonts;
 use matterless_paint::Piece;
@@ -133,6 +133,13 @@ fn viewport_bytes(viewport: &Viewport) -> &[u8] {
 ///
 /// Two triangles per quad, and a solid fill points at the atlas's opaque corner
 /// texel so it goes through the same pipeline as a glyph.
+/// One stretch of quads that all sample the same sheet.
+///
+/// Runs rather than three buckets, and never sorted: the scene is painted in
+/// the order it is built, so grouping by texture would put an avatar over the
+/// message written after it.
+pub type Run = (std::ops::Range<u32>, Sheet);
+
 pub fn vertices_of(
     pieces: &[Piece],
     queue: &wgpu::Queue,
@@ -140,10 +147,33 @@ pub fn vertices_of(
     cache: &mut SwashCache,
     atlas: &mut Atlas,
     into: &mut Vec<Vertex>,
+    runs: &mut Vec<Run>,
 ) {
-    let side = SIDE as f32;
+    /// Takes the quads pushed since the last run into a run of `sheet`.
+    ///
+    /// Extends the run in progress when it is the same sheet, and opens a new
+    /// one when it is not -- which is the only thing that decides how many
+    /// draws a frame costs.
+    fn opened(into: &[Vertex], runs: &mut Vec<Run>, started: u32, sheet: Sheet) {
+        let to = into.len() as u32;
+        match runs.last_mut() {
+            Some((range, held)) if *held == sheet => range.end = to,
+            _ => {
+                // Where this layer's quads begin when it has opened no run
+                // yet. One buffer holds the whole frame, so these are indices
+                // into that and not into the layer.
+                let from = runs.last().map(|(range, _)| range.end).unwrap_or(started);
+                if to > from {
+                    runs.push((from..to, sheet));
+                }
+            }
+        }
+    }
+    let started = into.len() as u32;
+    let letters = Sheet::Letters.size();
+    let (wide, tall) = (letters.0 as f32, letters.1 as f32);
     // Half a texel into the opaque corner, so no neighbour bleeds in.
-    let solid_uv = [0.5 / side, 0.5 / side];
+    let solid_uv = [0.5 / wide, 0.5 / tall];
     for piece in pieces {
         match piece {
             // Nothing to draw: a press box is where a pointer may land, and
@@ -177,6 +207,8 @@ pub fn vertices_of(
                     *radius,
                     *softness,
                 );
+                // The white texel it samples is on the letters sheet.
+                opened(into, runs, started, Sheet::Letters);
             }
             Piece::Image {
                 x,
@@ -189,9 +221,11 @@ pub fn vertices_of(
                 // Nothing until the bytes have arrived. The layout already
                 // reserved the room, so an absent picture leaves a gap rather
                 // than a conversation that shifts when it lands.
-                let Some(slot) = atlas.image(key) else {
+                let Some((sheet, slot)) = atlas.image(key) else {
                     continue;
                 };
+                let (wide, tall) = sheet.size();
+                let (wide, tall) = (wide as f32, tall as f32);
                 // Half a texel in on every side. Filtering at the exact edge of
                 // a slot pulls in the gap between slots, which is transparent,
                 // so every picture would be drawn with a faded border.
@@ -199,10 +233,10 @@ pub fn vertices_of(
                     into,
                     [*x, *y, *x + *width, *y + *height],
                     [
-                        (slot.x as f32 + 0.5) / side,
-                        (slot.y as f32 + 0.5) / side,
-                        ((slot.x + slot.width) as f32 - 0.5) / side,
-                        ((slot.y + slot.height) as f32 - 0.5) / side,
+                        (slot.x as f32 + 0.5) / wide,
+                        (slot.y as f32 + 0.5) / tall,
+                        ((slot.x + slot.width) as f32 - 0.5) / wide,
+                        ((slot.y + slot.height) as f32 - 0.5) / tall,
                     ],
                     // White, so the picture keeps its own colours.
                     [1.0, 1.0, 1.0, 1.0],
@@ -210,6 +244,7 @@ pub fn vertices_of(
                     *radius,
                     1.0,
                 );
+                opened(into, runs, started, sheet);
             }
             Piece::Text {
                 glyphs,
@@ -249,14 +284,15 @@ pub fn vertices_of(
                         into,
                         [x0, y0, x0 + slot.width as f32, y0 + slot.height as f32],
                         [
-                            slot.x as f32 / side,
-                            slot.y as f32 / side,
-                            (slot.x + slot.width) as f32 / side,
-                            (slot.y + slot.height) as f32 / side,
+                            slot.x as f32 / wide,
+                            slot.y as f32 / tall,
+                            (slot.x + slot.width) as f32 / wide,
+                            (slot.y + slot.height) as f32 / tall,
                         ],
                         rgba,
                     );
                 }
+                opened(into, runs, started, Sheet::Letters);
             }
         }
     }
@@ -308,15 +344,26 @@ fn quad(
     ]);
 }
 
-/// One layer's vertices and the rectangle they are clipped to.
-type Span = (std::ops::Range<u32>, (f32, f32, f32, f32));
+/// The rectangle a run is clipped to.
+type Clip = (f32, f32, f32, f32);
+
+/// One run of vertices, the sheet it samples, and the rectangle it is clipped
+/// to.
+type Span = (std::ops::Range<u32>, Sheet, Clip);
+
+/// The same, for the opened picture, which has a texture of its own and so
+/// needs no sheet to name.
+type Overlay = (std::ops::Range<u32>, Clip);
 
 /// The GPU side of the list: a device, a pipeline, an atlas and a vertex buffer.
 pub struct View {
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
     pipeline: wgpu::RenderPipeline,
-    bindings: wgpu::BindGroup,
+    /// One per sheet, in the order `Sheet` lists them. The pipeline binds one
+    /// texture at a time, so a frame is drawn as runs and this is what each
+    /// run switches to.
+    bindings: [wgpu::BindGroup; 3],
     uniform: wgpu::Buffer,
     vertices: wgpu::Buffer,
     capacity: usize,
@@ -408,28 +455,35 @@ impl View {
                 },
             ],
         });
-        let bindings = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("list"),
-            layout: &layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: uniform.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&atlas.view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::Sampler(&sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: wgpu::BindingResource::Sampler(&smooth),
-                },
-            ],
-        });
+        let bind = |sheet: Sheet| {
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("list"),
+                layout: &layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: uniform.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(atlas.view(sheet)),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::Sampler(&sampler),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: wgpu::BindingResource::Sampler(&smooth),
+                    },
+                ],
+            })
+        };
+        let bindings = [
+            bind(Sheet::Letters),
+            bind(Sheet::Faces),
+            bind(Sheet::Pictures),
+        ];
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("list"),
             bind_group_layouts: &[&layout],
@@ -593,9 +647,9 @@ impl View {
         // it needs the other bind group. Last in the buffer and last in the
         // pass: it is an overlay over the whole window, so there is nothing it
         // should be drawn under.
-        let mut shown: Vec<Span> = Vec::new();
+        let mut shown: Vec<Overlay> = Vec::new();
         for layer in &scene.layers {
-            let from = quads.len() as u32;
+            let mut runs: Vec<Run> = Vec::new();
             vertices_of(
                 &layer.pieces,
                 &self.queue,
@@ -603,11 +657,12 @@ impl View {
                 &mut self.cache,
                 &mut self.atlas,
                 &mut quads,
+                &mut runs,
             );
-            let to = quads.len() as u32;
-            if to > from {
-                spans.push((from..to, layer.clip));
-            }
+            spans.extend(
+                runs.into_iter()
+                    .map(|(range, sheet)| (range, sheet, layer.clip)),
+            );
             for piece in &layer.pieces {
                 let Piece::Shown {
                     x,
@@ -677,9 +732,12 @@ impl View {
             });
             if !quads.is_empty() {
                 pass.set_pipeline(&self.pipeline);
-                pass.set_bind_group(0, &self.bindings, &[]);
                 pass.set_vertex_buffer(0, self.vertices.slice(..));
-                for (range, clip) in spans {
+                // Bound only when it changes: a message row is a fill, its
+                // words, a face and its words again, and rebinding the same
+                // sheet four times is four state changes for nothing.
+                let mut bound: Option<Sheet> = None;
+                for (range, sheet, clip) in spans {
                     // Clamped to the surface: a scissor outside it is a
                     // validation error, and a panel can be dragged past the edge.
                     let x = clip.0.max(0.0).min(size.0 as f32) as u32;
@@ -688,6 +746,10 @@ impl View {
                     let height = (clip.3.min(size.1 as f32 - y as f32)).max(0.0) as u32;
                     if width == 0 || height == 0 {
                         continue;
+                    }
+                    if bound != Some(sheet) {
+                        pass.set_bind_group(0, &self.bindings[sheet as usize], &[]);
+                        bound = Some(sheet);
                     }
                     pass.set_scissor_rect(x, y, width, height);
                     pass.draw(range, 0..1);
