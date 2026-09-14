@@ -2566,6 +2566,7 @@ impl App {
         let Some(store) = self.store.clone() else {
             return;
         };
+        let _reread = matterless_view::timing::watch("re-reading the open channel", 0, "");
         self.recall_watermark(channel, &store);
         let within = self.stream_rect();
         let was_at_end = self.stream.scroll >= self.stream.reach(within) - 1.0;
@@ -3207,6 +3208,7 @@ impl App {
         let Some(store) = self.store.clone() else {
             return;
         };
+        let _open = matterless_view::timing::watch("opening a channel", 0, "");
         // The threads row is a place to go, not a channel to read: it fills
         // the same column, so opening it is the same gesture, but there is no
         // conversation to load and nothing to mark read.
@@ -3619,7 +3621,11 @@ impl App {
         self.composer.lay_out(&mut self.fonts, width);
 
         let stream = self.stream_rect();
-        self.stream.lay_out(&mut self.fonts, stream.width);
+        {
+            let _shaping =
+                matterless_view::timing::watch("shaping the channel", self.stream.rows.len(), "rows");
+            self.stream.lay_out(&mut self.fonts, stream.width);
+        }
         self.stream.clamp(stream);
 
         if let Some(pane) = self.thread_rect() {
@@ -3628,6 +3634,8 @@ impl App {
         if let Some(within) = self.thread_stream_rect()
             && let Some(thread) = self.thread.as_mut()
         {
+            let _shaping =
+                matterless_view::timing::watch("shaping the thread", thread.rows.len(), "rows");
             thread.lay_out(&mut self.fonts, within.width);
             thread.clamp(within);
         }
