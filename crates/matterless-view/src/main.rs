@@ -4133,13 +4133,21 @@ impl ApplicationHandler<Update> for App {
                             .put_image(&view.queue, &key, &rgba, width, height)
                         {
                             Some(_) => placed += 1,
-                            // The atlas is full. Worth saying, because the
-                            // symptom is faces that stop appearing partway
-                            // through a long scroll and nothing else.
+                            // Bigger than the picture half itself, now that
+                            // the half makes room rather than filling up.
                             None => refused += 1,
                         }
                     }
                     println!("atlas: {placed} pictures in, {refused} refused");
+                }
+                // Anything the atlas threw away is something this window must
+                // be willing to ask for again. Without this the record of
+                // having asked outlives the picture, and a reader scrolling
+                // back up finds a gap that nothing ever fills.
+                if let Some(view) = self.view.as_mut() {
+                    for key in view.atlas.forgotten() {
+                        self.asked.remove(&key);
+                    }
                 }
                 // What is on screen may have changed since the last frame.
                 self.want_faces();
