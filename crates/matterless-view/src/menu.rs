@@ -11,12 +11,22 @@
 //! eight flat buttons across the top of a message was that menu spilled into
 //! the row.
 
-use crate::sidebar::Canvas;
 use matterless_paint::Run;
 use matterless_ui::input::{Input, Key};
 use matterless_ui::{Placed, Rect};
+use matterless_widgets::{Canvas, Named};
 
 pub const NAME: &str = "menu";
+
+/// What this widget's hit boxes are called.
+///
+/// The join and its inverse in one place. Written out longhand, this menu
+/// spelled its own name nine times across four methods that all had to agree
+/// about it -- and the rows carry ids from the caller, so a disagreement would
+/// be a menu entry that draws, highlights, and does nothing.
+fn named() -> Named {
+    Named::new(NAME)
+}
 
 /// The colour a row is written in.
 ///
@@ -327,17 +337,14 @@ impl Menu {
         if !self.open() {
             return Vec::new();
         }
+        let named = named();
         let panel = self.rect(within);
         // The whole window under it, so a click anywhere else shuts the menu
         // rather than reaching what it is covering. `.catcher { inset: 0 }`.
         let mut placed = vec![
+            named.at("elsewhere", within, 40),
             Placed {
-                name: format!("{NAME}/elsewhere"),
-                rect: within,
-                depth: 40,
-            },
-            Placed {
-                name: NAME.to_string(),
+                name: named.whole(),
                 rect: panel,
                 depth: 41,
             },
@@ -346,22 +353,14 @@ impl Menu {
             if !item.pressable() {
                 continue;
             }
-            placed.push(Placed {
-                name: format!("{NAME}/{}", item.id),
-                rect,
-                depth: 42,
-            });
+            placed.push(named.at(&item.id, rect, 42));
             if item.inline && self.armed.as_deref() == Some(item.id.as_str()) {
                 for (child, at) in item
                     .children
                     .iter()
                     .zip(self.inline_rects(rect, &item.children))
                 {
-                    placed.push(Placed {
-                        name: format!("{NAME}/{}", child.id),
-                        rect: at,
-                        depth: 43,
-                    });
+                    placed.push(named.at(&child.id, at, 43));
                 }
             }
             if !item.inline
@@ -370,22 +369,18 @@ impl Menu {
             {
                 let nest = self.nest_rect(rect, item.children.len(), within);
                 let style = self.style.nested();
-                placed.push(Placed {
-                    name: format!("{NAME}/{}/nest", item.id),
-                    rect: nest,
-                    depth: 43,
-                });
+                placed.push(named.at(&format!("{}/nest", item.id), nest, 43));
                 for (at, child) in item.children.iter().enumerate() {
-                    placed.push(Placed {
-                        name: format!("{NAME}/{}", child.id),
-                        rect: Rect::new(
+                    placed.push(named.at(
+                        &child.id,
+                        Rect::new(
                             nest.x + style.padding,
                             nest.y + style.padding + at as f32 * style.item,
                             nest.width - style.padding * 2.0,
                             style.item,
                         ),
-                        depth: 44,
-                    });
+                        44,
+                    ));
                 }
             }
         }
@@ -406,7 +401,7 @@ impl Menu {
         self.nested = self.hovered_nest(input);
 
         let clicked = input.clicked()?.to_string();
-        let Some(rest) = clicked.strip_prefix(&format!("{NAME}/")) else {
+        let Some(rest) = named().slug(&clicked) else {
             // A click on the panel itself but not on a row: it stays open,
             // because the reader is still choosing.
             if clicked != NAME {
@@ -445,7 +440,7 @@ impl Menu {
     /// Which nested list the pointer is keeping open: the parent row, the list
     /// itself, or one of its children.
     fn hovered_nest(&self, input: &Input) -> Option<String> {
-        let over = input.hovered()?.strip_prefix(&format!("{NAME}/"))?;
+        let over = named().hovered(input)?;
         self.items
             .iter()
             .filter(|item| !item.inline && !item.children.is_empty())
@@ -547,7 +542,7 @@ impl Menu {
     }
 
     fn row(&self, into: &mut Canvas<'_>, item: &Item, rect: Rect, style: Style, input: &Input) {
-        if input.hovered() == Some(format!("{NAME}/{}", item.id).as_str()) {
+        if named().under(input, &item.id) {
             into.scene.rounded(
                 rect.x,
                 rect.y,
@@ -608,7 +603,7 @@ impl Menu {
             .iter()
             .zip(self.inline_rects(rect, &item.children))
         {
-            let under = input.hovered() == Some(format!("{NAME}/{}", child.id).as_str());
+            let under = named().under(input, &child.id);
             into.scene.rounded(
                 at.x,
                 at.y,
