@@ -189,7 +189,7 @@ fn following_a_message_leaves_the_conversation_above_it() {
     stream.lay_out(&mut fonts, panel().width);
     let within = panel();
 
-    assert!(stream.to_post("p30", within));
+    assert!(stream.to_post(&mut fonts, "p30", within));
     let rect = stream
         .row_rect("p30", within)
         .expect("it was scrolled into view");
@@ -201,7 +201,7 @@ fn following_a_message_leaves_the_conversation_above_it() {
 
     // A message that is not loaded cannot be scrolled to, and saying so is
     // what lets the caller leave the reader where they were.
-    assert!(!stream.to_post("never-loaded", within));
+    assert!(!stream.to_post(&mut fonts, "never-loaded", within));
 }
 
 /// Clicks the middle of a box while one row is hovered, which is what makes
@@ -710,4 +710,45 @@ fn a_fresh_plan_drops_what_the_last_one_was_still_waiting_on() {
     assert!(stream.waiting() > 0);
     stream.plan(many(40), true);
     assert_eq!(stream.planned().count(), 40);
+}
+
+/// Following a link to a message the window has planned but not yet shaped.
+///
+/// Unshaped rows have no height and so nowhere to scroll to, and the answer
+/// "further back than this channel is loaded" would have been a lie about a
+/// message sitting in memory.
+#[test]
+fn a_message_still_waiting_to_be_shaped_can_still_be_jumped_to() {
+    let mut fonts = Fonts::new();
+    let mut stream = Stream::new("stream");
+    let within = panel();
+    stream.plan(many(200), true);
+    stream.lay_out(&mut fonts, within.width);
+    let waiting = stream.waiting();
+    assert!(waiting > 0);
+
+    assert!(stream.to_post(&mut fonts, "p7", within), "not found");
+    assert!(
+        stream.row_rect("p7", within).is_some(),
+        "found but not brought into view"
+    );
+    // Only as far as it had to go, and no further: the rest of the channel is
+    // still the window's to shape behind the reader.
+    assert!(stream.waiting() < waiting);
+
+    // And a message that really is not here still says so, rather than
+    // shaping the whole channel looking for it twice.
+    assert!(!stream.to_post(&mut fonts, "never-loaded", within));
+}
+
+/// A reaction on a message the reader has not scrolled back to yet still
+/// belongs on the page. Asked over the shaped rows alone, the window would
+/// have skipped the re-read and kept a stale pill there.
+#[test]
+fn a_message_still_waiting_to_be_shaped_is_still_held() {
+    let mut stream = Stream::new("stream");
+    stream.plan(many(200), true);
+    assert!(stream.waiting() > 0);
+    assert!(stream.holds_any(&["p3".to_string()]));
+    assert!(!stream.holds_any(&["p999".to_string()]));
 }
