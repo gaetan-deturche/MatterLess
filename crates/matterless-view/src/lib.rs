@@ -19,6 +19,7 @@ pub mod composer;
 mod composer_tests;
 pub mod edit;
 pub mod feed;
+pub mod filecache;
 pub mod header;
 pub mod identity;
 pub mod listing;
