@@ -25,10 +25,14 @@ pub fn raise(channel_id: &str, title: &str, body: &str, clicked: std::sync::Arc<
     use tauri_winrt_notification::{Duration, Toast};
 
     let target = channel_id.to_string();
-    // The PowerShell id is what an uninstalled build has to borrow: a toast is
-    // refused outright without a registered AppUserModelID, and this window has
-    // no installer to write one. An installed build would use its own.
-    let result = Toast::new(Toast::POWERSHELL_APP_ID)
+    // An installed build says who it is; anything else borrows PowerShell's
+    // id, because a toast is refused outright under an AppUserModelID the
+    // shell does not know and a dev build has nothing registering one.
+    let who = match crate::identity::claimed() {
+        true => crate::identity::AUMID,
+        false => Toast::POWERSHELL_APP_ID,
+    };
+    let result = Toast::new(who)
         .title(title)
         .text1(body)
         // Short: a chat message is worth a glance, not a quarter of a minute of

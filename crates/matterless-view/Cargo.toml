@@ -88,6 +88,12 @@ windows = { version = "0.61.3", features = [
     "Win32_Graphics_Gdi",
     # ITaskbarList3 is a COM object, so it has to be created like one.
     "Win32_System_Com",
+    # An AppUserModelID is a property on a Start-menu shortcut, and a property
+    # on a shortcut is a PROPVARIANT in an IPropertyStore.
+    "Win32_UI_Shell_PropertiesSystem",
+    "Win32_System_Com_StructuredStorage",
+    # PROPVARIANT, which is what a shortcut's property is.
+    "Win32_System_Variant",
     # The tray's own message-only window has to name the module it belongs to.
     "Win32_System_LibraryLoader",
     # Starting with Windows is a value under `Run`, which is where the app's
