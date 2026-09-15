@@ -10,13 +10,18 @@
 //! reappear.
 
 use crate::composer::Composer;
-use crate::sidebar::Canvas;
 use matterless_layout::Fonts;
 use matterless_paint::Run;
 use matterless_ui::input::{Input, Key};
 use matterless_ui::{Placed, Rect};
+use matterless_widgets::{Canvas, Named};
 
 pub const NAME: &str = "edit";
+/// What this widget's hit boxes are called. The join and its inverse in one
+/// place, so the box it registers and the press it answers cannot disagree.
+fn named() -> Named {
+    Named::new(NAME)
+}
 
 /// The line under the box saying how to leave it.
 const HINT: f32 = 18.0;
@@ -85,7 +90,7 @@ impl Edit {
         }
         let panel = self.rect(row, within);
         let mut placed = vec![Placed {
-            name: format!("{NAME}/panel"),
+            name: named().of("panel"),
             rect: panel,
             depth: 8,
         }];

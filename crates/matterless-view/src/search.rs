@@ -13,14 +13,19 @@
 //! the channel it is read against.
 
 use crate::composer::Composer;
-use crate::sidebar::Canvas;
 use matterless_layout::Fonts;
 use matterless_paint::Run;
 use matterless_ui::input::{Input, Key};
 use matterless_ui::{Placed, Rect};
+use matterless_widgets::{Canvas, Named};
 
 /// What the box answers to.
 pub const NAME: &str = "search";
+/// What this widget's hit boxes are called. The join and its inverse in one
+/// place, so the box it registers and the press it answers cannot disagree.
+fn named() -> Named {
+    Named::new(NAME)
+}
 
 /// How many hits are shown. A reader who wants more should say more.
 const HITS: u32 = 40;
@@ -158,11 +163,7 @@ impl Search {
             if row.bottom() <= body.y || row.y >= body.bottom() {
                 continue;
             }
-            placed.push(Placed {
-                name: format!("{NAME}/{at}"),
-                rect: row,
-                depth: 9,
-            });
+            placed.push(named().at(&at.to_string(), row, 9));
         }
         placed
     }
@@ -248,14 +249,11 @@ impl Search {
         // A query that answers with fewer results than the last one would
         // otherwise leave the reader scrolled past the end of the list.
         self.scroll = self.scroll.clamp(0.0, self.reach(pane));
-        if let Some(clicked) = input.clicked() {
-            if clicked == format!("{NAME}/close") {
+        if let Some(slug) = input.clicked().and_then(|name| named().slug(name)) {
+            if slug == "close" {
                 return Some(Did::Close);
             }
-            if let Some(at) = clicked
-                .strip_prefix(&format!("{NAME}/"))
-                .and_then(|at| at.parse::<usize>().ok())
-            {
+            if let Ok(at) = slug.parse::<usize>() {
                 return self.found.get(at).cloned().map(Box::new).map(Did::Open);
             }
         }
