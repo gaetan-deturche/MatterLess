@@ -241,10 +241,8 @@ impl Picker {
             self.chosen = self.chosen.saturating_sub(COLUMNS);
         }
         // A click on a cell, which is the ordinary way to pick a picture.
-        if let Some(clicked) = input.clicked()
-            && let Some(at) = clicked
-                .strip_prefix(&format!("{NAME}/"))
-                .and_then(|at| at.parse::<usize>().ok())
+        if let Some(slug) = input.clicked().and_then(|name| named().slug(name))
+            && let Ok(at) = slug.parse::<usize>()
             && let Some(choice) = self.found.get(at)
         {
             return Some(choice.name.clone());
