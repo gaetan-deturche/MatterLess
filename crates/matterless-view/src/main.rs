@@ -1206,7 +1206,7 @@ impl App {
                     self.open_channel(&channel_id);
                 }
                 let within = self.stream_rect();
-                if !self.stream.to_post(&post_id, within) {
+                if !self.stream.to_post(&mut self.fonts, &post_id, within) {
                     // Older than the pages loaded so far. Saying so beats
                     // leaving the reader somewhere arbitrary and silent.
                     println!("{post_id} is further back than this channel is loaded");
@@ -2728,6 +2728,11 @@ impl App {
                 since.elapsed().as_millis()
             );
             self.behind = None;
+            // The divider can be further back than a screenful of unread
+            // messages, in which case it was still waiting when the plan
+            // asked. Left unasked, its clock would never start and it would
+            // stay on the channel for good.
+            self.watch_divider();
             self.redraw();
             return false;
         }

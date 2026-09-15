@@ -122,6 +122,14 @@ pub struct Stream {
     above: Vec<Row>,
 }
 
+/// Whether this row is that message.
+fn names(row: &Row, post_id: &str) -> bool {
+    matches!(
+        row,
+        Row::Post { post } | Row::Continuation { post } if post.post_id == post_id
+    )
+}
+
 /// What names a row across two plans of the same channel.
 ///
 /// Not an index: a page of older history arriving pushes every row down, and a
@@ -315,14 +323,18 @@ impl Stream {
     /// Answers whether it was found. A message the store has never loaded
     /// cannot be scrolled to, and saying so lets the caller leave the reader
     /// at the newest instead of somewhere arbitrary.
-    pub fn to_post(&mut self, post_id: &str, within: Rect) -> bool {
+    pub fn to_post(&mut self, fonts: &mut Fonts, post_id: &str, within: Rect) -> bool {
+        // It may be one of the rows still waiting to be shaped, which have no
+        // height and so nowhere to scroll to. Following a link to a message
+        // is the one thing that cannot wait for the filling to reach it, so
+        // it is hurried along -- only as far as the message asked for, and the
+        // rest goes on arriving behind the reader as before.
+        while self.above.iter().any(|row| names(row, post_id)) {
+            self.fill(fonts, within.width, 24);
+        }
         let mut top = 0.0;
         for (index, laid) in self.laid.iter().enumerate() {
-            let found = matches!(
-                self.rows.get(index),
-                Some(Row::Post { post } | Row::Continuation { post }) if post.post_id == post_id
-            );
-            if found {
+            if self.rows.get(index).is_some_and(|row| names(row, post_id)) {
                 self.scroll = (top - within.height / 3.0).clamp(0.0, self.reach(within));
                 return true;
             }
@@ -635,7 +647,7 @@ impl Stream {
     /// the fold still belongs on the page, and a reader who scrolls back to it
     /// should not find a stale pill there.
     pub fn holds_any(&self, post_ids: &[String]) -> bool {
-        self.rows.iter().any(|row| match row {
+        self.planned().any(|row| match row {
             Row::Post { post } | Row::Continuation { post } => {
                 post_ids.iter().any(|wanted| wanted == &post.post_id)
             }
