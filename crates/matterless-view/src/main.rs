@@ -4617,6 +4617,27 @@ fn main() {
     {
         println!("a rustls crypto provider was already installed");
     }
+    // Before any notification, and before the window: an AppUserModelID is
+    // what the shell attributes a toast to, and it is a claim about the whole
+    // process rather than about one message. Says what it decided, because
+    // "why does this say PowerShell" is otherwise unanswerable from outside.
+    matterless_view::identity::claimed();
+    // `MATTERLESS_TOAST=<text>` raises one and stops. The notification path is
+    // otherwise only reachable by persuading somebody to send a message, which
+    // is a poor way to check what a notification looks like -- and whose name
+    // is on it is exactly the thing that was wrong.
+    if let Some(text) = std::env::var_os("MATTERLESS_TOAST") {
+        let text = text.to_string_lossy().to_string();
+        let clicked: std::sync::Arc<matterless_view::toast::Clicked> =
+            std::sync::Arc::new(Box::new(|channel| println!("clicked, for {channel}")));
+        let shown = matterless_view::toast::raise("a-channel", "MatterLess", &text, clicked);
+        println!("raised a notification: {shown}");
+        // A toast is handed to the shell and drawn by it, so this process has
+        // to outlive the handover.
+        std::thread::sleep(std::time::Duration::from_secs(6));
+        return;
+    }
+
     // `--snapshot <file>` instead of a window, for a headless check.
     let args: Vec<String> = std::env::args().collect();
     if let Some(at) = args.iter().position(|arg| arg == "--snapshot") {

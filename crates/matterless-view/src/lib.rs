@@ -20,6 +20,7 @@ mod composer_tests;
 pub mod edit;
 pub mod feed;
 pub mod header;
+pub mod identity;
 pub mod listing;
 pub mod live;
 pub mod menu;
