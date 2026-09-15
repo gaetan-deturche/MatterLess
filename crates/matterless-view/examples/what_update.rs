@@ -68,6 +68,18 @@ async fn main() {
         None => println!("this platform has nothing in the manifest"),
     }
 
+    // What the card would show before asking for a restart. A release that
+    // says nothing about itself offers no button, so its absence is worth
+    // seeing here rather than discovering on the day.
+    match manifest.notes.as_deref().map(str::trim).unwrap_or_default() {
+        "" => println!("it says nothing about itself: the card will offer no \"What's new\""),
+        notes => println!(
+            "the change list is {} line(s), beginning {:?}",
+            notes.lines().count(),
+            notes.lines().next().unwrap_or_default()
+        ),
+    }
+
     match update::offered(&manifest, &target, update::running()) {
         Some(offer) => println!("would offer {}", offer.version),
         None => println!("nothing to offer: this build is already the newest"),

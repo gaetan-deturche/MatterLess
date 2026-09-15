@@ -5,8 +5,14 @@
 //!
 //! ```text
 //! matterless-release --installer <path> --tag v0.1.6 --url <where it will be>
-//!                    [--notes <text>] [--out latest.json]
+//!                    [--notes <text> | --notes-file <path>] [--out latest.json]
 //! ```
+//!
+//! A change list is what the app shows the reader before asking them to
+//! restart, so it is usually several lines. `--notes-file` exists because
+//! those lines came from `git log` and putting them through a shell is a way
+//! to lose them: a quoting rule that differs between two shells is not
+//! something a release should depend on.
 //!
 //! The signing key arrives in the environment rather than on the command line,
 //! because a command line is visible to anything on the machine and a CI log
@@ -81,6 +87,7 @@ impl Asked {
         let mut tag = None;
         let mut url = None;
         let mut notes = String::new();
+        let mut notes_file = None;
         let mut out = "latest.json".to_string();
         let mut args = args.peekable();
         while let Some(flag) = args.next() {
@@ -93,9 +100,19 @@ impl Asked {
                 "--tag" => tag = Some(value()?),
                 "--url" => url = Some(value()?),
                 "--notes" => notes = value()?,
+                "--notes-file" => notes_file = Some(value()?),
                 "--out" => out = value()?,
                 other => return Err(format!("{other} is not one of this tool's flags")),
             }
+        }
+        if notes_file.is_some() && !notes.is_empty() {
+            return Err("--notes and --notes-file both given: pick one".to_string());
+        }
+        if let Some(path) = notes_file {
+            notes = std::fs::read_to_string(&path)
+                .map_err(|error| format!("could not read {path}: {error}"))?
+                .trim()
+                .to_string();
         }
         Ok(Self {
             installer: installer.ok_or("--installer is required")?,
@@ -153,6 +170,59 @@ mod tests {
     fn a_flag_with_nothing_after_it_is_refused() {
         let why = asked(&["--installer"]).expect_err("it refuses");
         assert!(why.contains("wants a value"), "{why}");
+    }
+
+    /// A change list comes from `git log` and is several lines. Reading it
+    /// from a file rather than an argument keeps it out of a shell, where the
+    /// quoting rules differ and the newlines are what gets lost.
+    #[test]
+    fn notes_can_come_from_a_file() {
+        let path = std::env::temp_dir().join("matterless-release-notes-test.txt");
+        std::fs::write(
+            &path,
+            "- fixed the thing
+- fixed the other
+
+",
+        )
+        .expect("written");
+        let asked = asked(&[
+            "--installer",
+            "setup.exe",
+            "--tag",
+            "v0.1.6",
+            "--url",
+            "https://example.invalid/setup.exe",
+            "--notes-file",
+            path.to_str().expect("a path"),
+        ])
+        .expect("it parses");
+        assert_eq!(
+            asked.notes,
+            "- fixed the thing
+- fixed the other"
+        );
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// Two sources for one field is a question about which one won, asked on
+    /// a tag. Refused instead.
+    #[test]
+    fn notes_cannot_come_from_both() {
+        let why = asked(&[
+            "--installer",
+            "setup.exe",
+            "--tag",
+            "v0.1.6",
+            "--url",
+            "https://example.invalid/setup.exe",
+            "--notes",
+            "one",
+            "--notes-file",
+            "other.txt",
+        ])
+        .expect_err("it refuses");
+        assert!(why.contains("pick one"), "{why}");
     }
 
     /// A typo must not be read as a positional argument and ignored.
