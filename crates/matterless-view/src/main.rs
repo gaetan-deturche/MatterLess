@@ -206,7 +206,7 @@ struct App {
     edit: matterless_view::edit::Edit,
     /// Who is typing, and when this window last said that it was.
     typing: matterless_view::typing::Typing,
-    said_typing: Option<std::time::Instant>,
+    said_typing: matterless_view::typing::Sending,
     /// Who is around, and the set last asked about.
     presence: std::collections::HashMap<String, String>,
     asked_about: Vec<String>,
@@ -426,7 +426,7 @@ impl App {
             picked_near: matterless_ui::Rect::new(0.0, 0.0, 0.0, 0.0),
             edit: matterless_view::edit::Edit::default(),
             typing: matterless_view::typing::Typing::default(),
-            said_typing: None,
+            said_typing: matterless_view::typing::Sending::default(),
             presence: std::collections::HashMap::new(),
             asked_about: Vec::new(),
             listing: matterless_view::listing::Listing::default(),
@@ -1151,19 +1151,19 @@ impl App {
 
     /// Tells the server this reader is typing, no more than now and then.
     ///
-    /// Every keystroke would be a message per character on the busiest signal
-    /// there is, and the other clients hold what they hear for six seconds --
-    /// so once every three says the same thing for a fraction of the traffic.
+    /// The rule is `typing::Sending`. Asked *after* the conversation is known,
+    /// or a keystroke with no socket to send on would count as having sent.
     fn say_typing(&mut self, root_id: &str) {
-        const EVERY: std::time::Duration = std::time::Duration::from_secs(3);
-        if self.said_typing.is_some_and(|last| last.elapsed() < EVERY) {
-            return;
-        }
         let (Some(channel), Some(link)) = (self.sidebar.selected.clone(), self.link.as_ref())
         else {
             return;
         };
-        self.said_typing = Some(std::time::Instant::now());
+        if !self
+            .said_typing
+            .due(&channel, root_id, std::time::Instant::now())
+        {
+            return;
+        }
         link.send(matterless_view::live::Ask::Typing {
             channel_id: channel,
             root_id: root_id.to_string(),
