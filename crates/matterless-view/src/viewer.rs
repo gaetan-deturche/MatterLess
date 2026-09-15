@@ -17,12 +17,18 @@
 //! pictures and videos are steppable -- there is nothing to magnify about a
 //! file card, so stepping never lands on one.
 
-use crate::sidebar::Canvas;
 use matterless_paint::Run;
 use matterless_ui::input::{Input, Key};
 use matterless_ui::{Placed, Rect};
+use matterless_widgets::{Canvas, Named};
 
 pub const NAME: &str = "viewer";
+
+/// What this widget's hit boxes are called. The join and its inverse in one
+/// place, so the press it answers and the box it registered cannot disagree.
+fn named() -> Named {
+    Named::new(NAME)
+}
 
 /// What the picture keeps clear of the window's edges, so it never reads as
 /// the window itself.
@@ -188,26 +194,19 @@ impl Viewer {
         }
         // The whole window first, so a press beside the picture shuts the
         // viewer rather than reaching the conversation it is covering.
+        let named = named();
         let mut placed = vec![Placed {
-            name: NAME.to_string(),
+            name: named.whole(),
             rect: window,
             depth: 30,
         }];
         for (name, rect) in self.button_rects(window) {
-            placed.push(Placed {
-                name: format!("{NAME}/{name}"),
-                rect,
-                depth: 31,
-            });
+            placed.push(named.at(name, rect, 31));
         }
         // The picture itself catches its own press, so clicking what you are
         // looking at does not shut it.
         if let Some(picture) = self.picture_rect(window) {
-            placed.push(Placed {
-                name: format!("{NAME}/picture"),
-                rect: picture,
-                depth: 31,
-            });
+            placed.push(named.at("picture", picture, 31));
         }
         placed
     }
@@ -227,7 +226,7 @@ impl Viewer {
             return self.step(1).map(Did::Show);
         }
         let clicked = input.clicked()?;
-        match clicked.strip_prefix(&format!("{NAME}/")) {
+        match named().slug(clicked) {
             Some("back") => self.step(-1).map(Did::Show),
             Some("next") => self.step(1).map(Did::Show),
             Some("save") => self.current().map(|one| Did::Save {
@@ -327,7 +326,7 @@ impl Viewer {
         }
 
         for (name, rect) in buttons {
-            let under = input.hovered() == Some(format!("{NAME}/{name}").as_str());
+            let under = named().under(input, name);
             scene.rounded(
                 rect.x,
                 rect.y,

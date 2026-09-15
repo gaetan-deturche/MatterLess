@@ -13,9 +13,14 @@
 use matterless_paint::Run;
 use matterless_ui::input::Input;
 use matterless_ui::{Placed, Rect};
-use matterless_widgets::{Button, Canvas, Laid, Row};
+use matterless_widgets::{Button, Canvas, Laid, Named, Row};
 
 pub const NAME: &str = "whats-new";
+/// What this widget's hit boxes are called. The join and its inverse in one
+/// place, so the box it registers and the press it answers cannot disagree.
+fn named() -> Named {
+    Named::new(NAME)
+}
 
 /// How big the panel is allowed to get, against the window it is over.
 ///
@@ -163,11 +168,7 @@ impl WhatsNew {
                 rect: window,
                 depth: 40,
             },
-            Placed {
-                name: format!("{NAME}/panel"),
-                rect: panel,
-                depth: 41,
-            },
+            named().at("panel", panel, 41),
         ];
         placed.extend(row.boxes());
         placed

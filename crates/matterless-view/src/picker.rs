@@ -9,13 +9,18 @@
 //! `:bongo:` is.
 
 use crate::composer::Composer;
-use crate::sidebar::Canvas;
 use matterless_layout::Fonts;
 use matterless_paint::Run;
 use matterless_ui::input::{Input, Key};
 use matterless_ui::{Placed, Rect};
+use matterless_widgets::{Canvas, Named};
 
 pub const NAME: &str = "picker";
+/// What this widget's hit boxes are called. The join and its inverse in one
+/// place, so the box it registers and the press it answers cannot disagree.
+fn named() -> Named {
+    Named::new(NAME)
+}
 
 /// How many are offered. A grid rather than a column, because an emoji is a
 /// picture and pictures read faster side by side.
@@ -143,11 +148,7 @@ impl Picker {
             depth: 8,
         }];
         for (at, rect) in self.cells(near, within) {
-            placed.push(Placed {
-                name: format!("{NAME}/{at}"),
-                rect,
-                depth: 9,
-            });
+            placed.push(named().at(&at.to_string(), rect, 9));
         }
         placed
     }
