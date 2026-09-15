@@ -12,60 +12,77 @@ network at all.
 
 | | |
 |---|---|
-| Shell | Tauri v2 |
+| Window | winit |
+| Renderer | wgpu on Vulkan |
+| Text | cosmic-text shaping, swash rasterisation |
 | Core | Rust, tokio |
-| View | Svelte 5 (runes) |
 | Local store | SQLite, WAL |
 | Auth | Session login |
 
+There is no web view and no JavaScript. The window is one Vulkan surface, and
+every glyph, avatar, picture and rounded rectangle on it is a quad in a single
+draw call against four texture atlases.
+
 Four decisions do most of the work:
 
-- **Rust builds the row plan, not JavaScript.** Grouping, date separators,
-  markdown parsing and thread footers all happen once in Rust and are cached by
-  `post.id + update_at`. The frontend maps over a flat array of typed rows and
-  makes no decisions of its own, so a row's height is known before it mounts.
-- **One render path.** The UI only ever visualises the store; a command's only
-  job is to populate it. A post arrives twice by design — once as your own
+- **The row plan is built once, in Rust.** Grouping, date separators, markdown
+  parsing and thread footers all happen in `matterless-render`, away from
+  anything that draws.
+- **A row's height is computed, never estimated.** `matterless-layout` shapes the
+  real text with the real font and reports how many lines it occupies, so
+  nothing has to be measured after the fact and corrected. Estimating heights
+  and reconciling them afterwards was the source of every scroll artefact in the
+  shell this replaced.
+- **One render path.** The window only ever visualises the store; a request's
+  only job is to populate it. A post arrives twice by design — once as your own
   optimistic echo, once over the WebSocket — and only one of them draws.
-- **The list is virtualised and the history is unbounded.** Only a screenful is
-  mounted, between two spacers, with per-kind height estimates each channel
-  learns for itself. There is no cap on how far back you can scroll.
-- **Its own scrollbar.** A native thumb is derived from the scroll position, so
-  anything else that writes that position moves it out from under your hand
-  mid-drag. This one is the other way round: while it is held it is drawn where
-  the pointer is, and the list follows.
+- **The history is unbounded.** There is no cap on how far back you can scroll.
+  A channel opens by shaping only enough of its newest end to fill the panel and
+  shaping the rest behind the window, so a conversation of four hundred crash
+  reports opens as fast as a quiet one.
 
 ## Running it
 
-You need [Rust](https://rustup.rs), Node 20+, and the WebView2 runtime (already
-present on Windows 11).
+You need [Rust](https://rustup.rs) and a GPU with a Vulkan driver.
 
 ```bash
-cd app
-npm ci
-npm run dev:app
+cargo run -p matterless-view
 ```
 
 It asks which Mattermost server to talk to on first run; no host is compiled in.
-Your session token goes to the Windows credential store, never to disk or to
-JavaScript.
+Your session token goes to the Windows credential store, never to disk.
 
-## Building an installer
+A channel id can be passed to open it directly, which is how a specific
+conversation gets looked at without clicking:
 
 ```bash
-cd app
-npm run tauri build
+cargo run -p matterless-view -- "%APPDATA%\com.gaetandeturche.matterless.dev\matterless.db" <channel-id>
 ```
 
-NSIS only. An installed build updates itself from this repository's releases.
+## What it says about itself
+
+A dev build times its own hot paths and prints anything slow enough to be felt
+(`matterless-view/src/timing.rs`). A release build reads no clock at all.
+
+```
+slow: shaping the channel took 81ms for 12 rows, 6.79ms each
+ready in 624ms, of which 215ms was Vulkan up to the device
+shaped the rest of the channel behind the window: 251 rows in 1610ms
+```
+
+Two examples answer the same questions without a window:
+
+```bash
+cargo run --release -p matterless-view --example what_opens    # per channel: plan, first screenful, the rest
+cargo run --release -p matterless-layout --example what_shapes # where shaping time goes
+```
 
 ## Tests
 
 ```bash
-cargo test --workspace          # 243 tests
+cargo test --workspace          # 496 tests
 cargo clippy --workspace --all-targets
 cargo fmt --all --check
-cd app && npx svelte-check
 ```
 
 Tests named `live_*` are `#[ignore]`d: they talk to a real server and need
@@ -73,20 +90,17 @@ Tests named `live_*` are `#[ignore]`d: they talk to a real server and need
 
 ## Releasing
 
-Tag a version and CI does the rest:
+**This does not work at the moment.** `.github/workflows/release.yml` still
+builds the retired Tauri shell with `tauri-action`, which produced the
+installer, the minisign signature and the `latest.json` manifest. That shell is
+gone, so the workflow has nothing to build.
 
-```bash
-git tag v0.1.0 && git push origin v0.1.0
-```
-
-The release workflow needs two repository secrets, generated once with
-`npm run tauri signer generate`:
-
-- `TAURI_SIGNING_PRIVATE_KEY`
-- `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`
-
-The public half goes in `app/src-tauri/tauri.conf.json`. Without a signature the
-updater refuses an update, which is the point of it.
+The updater itself is not Tauri's and did not go with it: `update.rs` fetches
+the manifest, checks the minisign signature against `update::PUBKEY` and runs
+the installer. What is missing is the half that *makes* a release — bundling
+`matterless-view.exe` into an NSIS installer, signing it with the private key in
+this repository's secrets, and writing a `latest.json` numbered from
+`matterless-view`'s own `version`.
 
 ## Licence
 
