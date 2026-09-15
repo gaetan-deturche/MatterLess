@@ -33,7 +33,12 @@ jobs:
     env:
       TAG: ${{ github.event.inputs.tag || github.ref_name }}
     steps:
+      # The whole history, because the change list is built from it: a shallow
+      # clone has neither the tag's own message nor the commits since the last
+      # one.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -79,6 +84,29 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "makensis failed" }
           "SETUP=$out" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
+      # What the app shows the reader before asking them to restart. An
+      # annotated tag's message first, because that is somebody saying what
+      # this release is; the commit subjects since the last tag otherwise,
+      # which is at least true. Written to a file rather than passed as an
+      # argument: it is several lines, and a shell is where newlines go to die.
+      - name: What changed
+        shell: pwsh
+        run: |
+          $notes = (git tag -l --format='%(contents)' $env:TAG | Out-String).Trim()
+          if (-not $notes) {
+            $previous = git describe --tags --abbrev=0 "$env:TAG^" 2>$null
+            $range = if ($LASTEXITCODE -eq 0 -and $previous) { "$previous..$env:TAG" } else { $env:TAG }
+            $global:LASTEXITCODE = 0
+            $notes = ((git log --no-merges --format='%s' $range | Select-Object -First 30 |
+              ForEach-Object { "- $_" }) -join "`n").Trim()
+          }
+          if (-not $notes) { $notes = "No notes for this release." }
+          $path = "$env:GITHUB_WORKSPACE\notes.txt"
+          [System.IO.File]::WriteAllText($path, $notes)
+          "NOTES=$path" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "--- what the card will show ---"
+          $notes
+
       # The URL is written before the release exists, because it is knowable:
       # a release asset always hangs off the tag under the same name. The
       # manifest has to carry it, and the manifest is itself an asset.
@@ -101,7 +129,7 @@ jobs:
             --installer "$env:SETUP" `
             --tag "$env:TAG" `
             --url "$url" `
-            --notes "MatterLess $version" `
+            --notes-file "$env:NOTES" `
             --out "$env:GITHUB_WORKSPACE\latest.json"
           if ($LASTEXITCODE -ne 0) { throw "signing failed" }
 
@@ -128,4 +156,4 @@ jobs:
           gh release create "$env:TAG" `
             "$env:SETUP" "$env:GITHUB_WORKSPACE\latest.json" `
             --title "MatterLess $version" `
-            --notes "Installer below. An installed build updates itself from here."
+            --notes-file "$env:NOTES"

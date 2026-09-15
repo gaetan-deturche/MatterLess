@@ -55,6 +55,10 @@ pub struct Offer {
     pub version: String,
     pub url: String,
     pub signature: String,
+    /// What the release said about itself, for the reader deciding whether to
+    /// take it. Empty when it said nothing, which is a release that has not
+    /// earned a restart.
+    pub notes: String,
 }
 
 /// Which entry of the manifest belongs to this build.
@@ -120,6 +124,7 @@ pub fn offered(manifest: &Manifest, target: &str, ours: &str) -> Option<Offer> {
         version: manifest.version.clone(),
         url: platform.url.clone(),
         signature: platform.signature.clone(),
+        notes: manifest.notes.clone().unwrap_or_default(),
     })
 }
 

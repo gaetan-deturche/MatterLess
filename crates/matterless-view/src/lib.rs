@@ -45,6 +45,7 @@ pub mod typing;
 pub mod update;
 pub mod updater_bar;
 pub mod viewer;
+pub mod whats_new;
 
 use atlas::{Atlas, Sheet};
 use cosmic_text::SwashCache;

@@ -260,6 +260,8 @@ struct App {
     more_history: bool,
     /// A newer build, once the release has said there is one.
     offered: matterless_view::updater_bar::Bar,
+    /// What the offered release said about itself, while it is being read.
+    whats_new: matterless_view::whats_new::WhatsNew,
     /// What it is offering, kept so accepting it needs no second look.
     offer: Option<matterless_view::update::Offer>,
     /// The notification area, which is what lets the window be shut.
@@ -449,6 +451,7 @@ impl App {
             menu: matterless_view::menu::Menu::default(),
             tooltip: matterless_view::tooltip::Tooltip::default(),
             offered: matterless_view::updater_bar::Bar::default(),
+            whats_new: matterless_view::whats_new::WhatsNew::default(),
             offer: None,
             tray: matterless_view::tray::Tray::default(),
             waker: None,
@@ -465,8 +468,9 @@ impl App {
         app
     }
 
-    /// The window as boxes: a fixed sidebar, the channel column, and the thread
-    /// pane beside it when one is open.
+    /// The window as boxes: a notice across the top when there is one, then a
+    /// fixed sidebar, the channel column, and the thread pane beside it when
+    /// one is open.
     fn shell(&self) -> Vec<Placed> {
         let mut row = Boxed::new("shell", Size::Grow(1.0))
             .axis(Axis::Row)
@@ -494,9 +498,35 @@ impl App {
                     )),
             );
         }
+        // The notice takes its own room off the top rather than covering
+        // anything: what it is interrupting is the thing the reader came for.
+        let whole = Boxed::new("window", Size::Grow(1.0))
+            .axis(Axis::Column)
+            .with(Boxed::new(
+                matterless_view::updater_bar::NAME,
+                Size::Fixed(self.offered.height()),
+            ))
+            .with(row);
         matterless_ui::solve::solve(
-            &row,
+            &whole,
             Rect::new(0.0, 0.0, self.size.0 as f32, self.size.1 as f32),
+        )
+    }
+
+    /// The strip across the top, which is empty when nothing is offered.
+    fn notice_rect(&self) -> Rect {
+        Rect::new(0.0, 0.0, self.size.0 as f32, self.offered.height())
+    }
+
+    /// Everything under the notice, which is the whole window when there is
+    /// none. What every pane measures itself against.
+    fn below_notice(&self) -> Rect {
+        let taken = self.offered.height();
+        Rect::new(
+            0.0,
+            taken,
+            self.size.0 as f32,
+            (self.size.1 as f32 - taken).max(0.0),
         )
     }
 
@@ -506,20 +536,23 @@ impl App {
     }
 
     fn rail_rect(&self) -> Rect {
-        Rect::new(0.0, 0.0, RAIL, self.size.1 as f32)
+        let under = self.below_notice();
+        Rect::new(under.x, under.y, RAIL, under.height)
     }
 
     fn sidebar_rect(&self) -> Rect {
-        Rect::new(RAIL, 0.0, SIDEBAR, self.size.1 as f32)
+        let under = self.below_notice();
+        Rect::new(under.x + RAIL, under.y, SIDEBAR, under.height)
     }
 
     /// Everything right of the sidebar, thread pane included.
     fn column_rect(&self) -> Rect {
+        let under = self.below_notice();
         Rect::new(
-            RAIL + SIDEBAR,
-            0.0,
-            (self.size.0 as f32 - RAIL - SIDEBAR).max(0.0),
-            self.size.1 as f32,
+            under.x + RAIL + SIDEBAR,
+            under.y,
+            (under.width - RAIL - SIDEBAR).max(0.0),
+            under.height,
         )
     }
 
@@ -884,8 +917,38 @@ impl App {
             link.send(matterless_view::live::Ask::LookForUpdate);
         } else {
             println!("no update check in a dev build");
+            self.pretend_offered();
         }
         self.link = Some(link);
+    }
+
+    /// Puts a made-up offer on screen, in a dev build, when asked.
+    ///
+    /// A dev build never looks for an update, which means the one piece of
+    /// interface nobody can ever see while working on it is the one that asks
+    /// somebody to restart. `MATTERLESS_OFFER=0.1.6` puts the card up, and
+    /// `MATTERLESS_OFFER_NOTES=<file>` gives it a change list to show.
+    ///
+    /// Nothing is installable: the offer has no real url, so accepting it
+    /// fails -- which is the other half of the card worth looking at.
+    fn pretend_offered(&mut self) {
+        let Some(version) = std::env::var("MATTERLESS_OFFER")
+            .ok()
+            .filter(|it| !it.is_empty())
+        else {
+            return;
+        };
+        let notes = std::env::var("MATTERLESS_OFFER_NOTES")
+            .ok()
+            .and_then(|path| std::fs::read_to_string(path).ok())
+            .unwrap_or_default();
+        println!("pretending {version} is available (MATTERLESS_OFFER)");
+        self.apply(Update::Updatable(matterless_view::update::Offer {
+            version,
+            url: String::new(),
+            signature: String::new(),
+            notes,
+        }));
     }
 
     /// Applies what the socket reported.
@@ -1096,14 +1159,17 @@ impl App {
                 }
             }
             Update::Updatable(offer) => {
-                self.offered.offer(&offer.version);
+                self.offered.offer(&offer.version, &offer.notes);
                 self.offer = Some(offer);
-                let window = self.window_rect();
-                self.offered.measure(&mut self.fonts, window);
+                let notice = self.notice_rect();
+                self.offered.measure(&mut self.fonts, notice);
+                // Everything under it is a row shorter now, which is a
+                // question for the layout rather than for this.
+                self.relayout();
             }
             Update::UpdateFailed(why) => {
                 self.offered.failed(&why);
-                let window = self.window_rect();
+                let window = self.notice_rect();
                 self.offered.measure(&mut self.fonts, window);
             }
             // Answered before this, in `user_event`, because it is the one
@@ -2807,9 +2873,14 @@ impl App {
         // the window so a click beside it shuts it rather than reaching what
         // it is covering.
         boxes.extend(self.menu.boxes(self.window_rect()));
-        // Over the conversation but under a menu: the offer floats in the
-        // corner and is not the thing the reader just asked for.
-        boxes.extend(self.offered.boxes());
+        // The strip has its own room off the top of the window rather than
+        // floating over anything, so it sits with the panes rather than above
+        // them -- but its buttons still have to beat whatever the shell put
+        // behind it.
+        boxes.extend(self.offered.boxes(self.notice_rect()));
+        // And the change list over all of it, including a menu: it covers the
+        // window, and a press beside it shuts it.
+        boxes.extend(self.whats_new.boxes(self.window_rect()));
         boxes
     }
 
@@ -2894,9 +2965,19 @@ impl App {
         // Where the offer sits, before anything asks what is under the
         // pointer: it is measured rather than computed per frame because
         // measuring needs the fonts and a hit test does not have them.
-        if self.offered.open() {
+        // The panel over everything, first and alone: it covers the window,
+        // so nothing behind it may take the same press.
+        if self.whats_new.open() {
             let window = self.window_rect();
-            self.offered.measure(&mut self.fonts, window);
+            self.whats_new.measure(&mut self.fonts, window);
+            if self.whats_new.react(&self.input) {
+                self.input = Input::default();
+            }
+            return;
+        }
+        if self.offered.open() {
+            let notice = self.notice_rect();
+            self.offered.measure(&mut self.fonts, notice);
             match self.offered.react(&self.input) {
                 Some(matterless_view::updater_bar::Chose::Install) => {
                     match (self.offer.clone(), self.link.as_ref()) {
@@ -2907,11 +2988,25 @@ impl App {
                         _ => self.offered.failed("there is nothing to install"),
                     }
                     // Measured again: the button says something else now.
-                    self.offered.measure(&mut self.fonts, window);
+                    self.offered.measure(&mut self.fonts, notice);
                 }
                 Some(matterless_view::updater_bar::Chose::Later) => {
                     println!("the update was put off");
                     self.offer = None;
+                    // The strip has given its row back, so everything under it
+                    // is taller than it was.
+                    self.relayout();
+                }
+                Some(matterless_view::updater_bar::Chose::News) => {
+                    let notes = self.offered.notes().to_string();
+                    let version = self
+                        .offer
+                        .as_ref()
+                        .map(|offer| offer.version.clone())
+                        .unwrap_or_default();
+                    self.whats_new.show(&version, &notes);
+                    let window = self.window_rect();
+                    self.whats_new.measure(&mut self.fonts, window);
                 }
                 None => {}
             }
@@ -3642,13 +3737,14 @@ impl App {
         }
         if self.offered.open() {
             scene.clip_to(0.0, 0.0, self.size.0 as f32, self.size.1 as f32);
+            let notice = self.notice_rect();
             let mut canvas = Canvas {
                 scene: &mut scene,
                 painter: &mut self.painter,
                 fonts: &mut self.fonts,
                 palette: &self.palette,
             };
-            self.offered.draw(&mut canvas, &self.input);
+            self.offered.draw(&mut canvas, &self.input, notice);
         }
         // The picture a reader opened, over the window and everything in it.
         // Under only the menu and the tooltip, which are the two things that
@@ -3663,6 +3759,19 @@ impl App {
                 palette: &self.palette,
             };
             self.viewer.draw(&mut canvas, &self.input, window);
+        }
+        // The change list over the picture: it was asked for from a strip that
+        // sits above everything, and it covers the window while it is read.
+        if self.whats_new.open() {
+            let window = self.window_rect();
+            scene.clip_to(0.0, 0.0, self.size.0 as f32, self.size.1 as f32);
+            let mut canvas = Canvas {
+                scene: &mut scene,
+                painter: &mut self.painter,
+                fonts: &mut self.fonts,
+                palette: &self.palette,
+            };
+            self.whats_new.draw(&mut canvas, &self.input, window);
         }
         // The menu over even that: it is the thing the reader just asked for.
         if self.menu.open() {
