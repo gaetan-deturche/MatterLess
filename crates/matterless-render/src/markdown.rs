@@ -18,6 +18,7 @@
 use matterless_core::text::is_username_char;
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "t", rename_all = "snake_case")]
@@ -457,10 +458,107 @@ impl Frame {
     }
 }
 
+/// How far a list line is pushed in, if it is one.
+fn list_indent(line: &str) -> Option<usize> {
+    let indent = line.len() - line.trim_start_matches(' ').len();
+    let rest = &line[indent..];
+    let after = match rest.chars().next()? {
+        '*' | '+' | '-' => 1,
+        '0'..='9' => {
+            let digits = rest.bytes().take(9).take_while(u8::is_ascii_digit).count();
+            match rest[digits..].starts_with(['.', ')']) {
+                true => digits + 1,
+                false => return None,
+            }
+        }
+        _ => return None,
+    };
+    // A marker has to be followed by a space to be one: `-well` is a word.
+    match rest[after..].starts_with(' ') {
+        true => Some(indent),
+        false => None,
+    }
+}
+
+/// Re-indents nested lists to the depth the server shows them at.
+///
+/// CommonMark needs a sub-list to reach the parent item's content column --
+/// two spaces for `* `. This server's markdown nests on *any* extra
+/// indentation, so a message written with a single leading space arrives as a
+/// flat list here and as a nested one everywhere else. That is what a real
+/// message from this team looked like: three bullets in a row, the last of
+/// which belonged under the second.
+///
+/// So each list line's own indent is read as a *rank* -- deeper than the line
+/// above, or back to a level already open -- and written out again at four
+/// spaces per level, which no reading of the spec can take for anything else.
+/// Outside a list four spaces is still indented code, and a fence is copied
+/// through untouched: what is in one is text somebody pasted, not structure.
+fn nest_by_indent(source: &str) -> Cow<'_, str> {
+    if !source.contains('\n') {
+        return Cow::Borrowed(source);
+    }
+    // The indent each open level was written at, shallowest first.
+    let mut levels: Vec<usize> = Vec::new();
+    let mut out = String::new();
+    let mut changed = false;
+    let mut fenced = false;
+    let mut blank = true;
+    for line in source.split_inclusive('\n') {
+        let bare = line.trim_end_matches(['\n', '\r']);
+        let trimmed = bare.trim_start();
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            fenced = !fenced;
+            levels.clear();
+        }
+        let opens = match fenced {
+            true => None,
+            // Four spaces with no list above them is code, not a first item.
+            false => list_indent(bare).filter(|indent| !levels.is_empty() || *indent < 4),
+        };
+        match opens {
+            Some(indent) => {
+                if levels.is_empty() {
+                    levels.push(indent);
+                } else {
+                    while levels.len() > 1 && indent < levels[levels.len() - 1] {
+                        levels.pop();
+                    }
+                    match indent.cmp(&levels[levels.len() - 1]) {
+                        std::cmp::Ordering::Greater => levels.push(indent),
+                        std::cmp::Ordering::Less => levels[0] = indent,
+                        std::cmp::Ordering::Equal => {}
+                    }
+                }
+                let depth = levels.len() - 1;
+                changed |= depth * 4 != indent;
+                out.push_str(&"    ".repeat(depth));
+                out.push_str(&line[indent..]);
+            }
+            None => {
+                // A fresh block at the margin ends whatever list was open. An
+                // indented line, or one carrying on from the item above, does
+                // not -- that is a continuation.
+                if blank && !trimmed.is_empty() && !bare.starts_with([' ', '\t']) {
+                    levels.clear();
+                }
+                out.push_str(line);
+            }
+        }
+        blank = trimmed.is_empty();
+    }
+    match changed {
+        true => Cow::Owned(out),
+        false => Cow::Borrowed(source),
+    }
+}
+
 pub fn parse(source: &str) -> Vec<Node> {
     if source.trim().is_empty() {
         return Vec::new();
     }
+    let nested = nest_by_indent(source);
+    let source = nested.as_ref();
     let mut options = Options::empty();
     options.insert(Options::ENABLE_STRIKETHROUGH);
     options.insert(Options::ENABLE_TABLES);
@@ -902,6 +1000,68 @@ mod tests {
             other => panic!("expected a table, got {other:?}"),
         }
     }
+    /// One leading space is a sub-list here, as it is on the server.
+    ///
+    /// CommonMark wants two, so this shape -- taken from a real message on
+    /// this team -- used to arrive as three bullets in a row, the last of
+    /// which belongs under the second.
+    #[test]
+    fn a_single_space_nests_a_list_the_way_the_server_shows_it() {
+        let nodes = parse("* first\n* second\n * under the second");
+        let Node::List { items, .. } = &nodes[0] else {
+            panic!("expected a list, got {nodes:?}")
+        };
+        assert_eq!(items.len(), 2, "the third bullet is not a sibling");
+        let nested = items[1]
+            .iter()
+            .filter(|node| matches!(node, Node::List { .. }))
+            .count();
+        assert_eq!(nested, 1, "it belongs under the second: {:?}", items[1]);
+    }
+
+    /// Depth is read as a rank, not as a count of spaces, so a list written
+    /// with an odd step still comes back with the levels its author meant.
+    #[test]
+    fn depth_follows_the_order_of_indents_not_their_size() {
+        let nodes = parse("- a\n   - b\n     - c\n   - d\n- e");
+        let Node::List { items, .. } = &nodes[0] else {
+            panic!("expected a list, got {nodes:?}")
+        };
+        assert_eq!(items.len(), 2, "`a` and `e`, with the rest under `a`");
+        let Some(Node::List { items: under, .. }) = items[0]
+            .iter()
+            .find(|node| matches!(node, Node::List { .. }))
+        else {
+            panic!("nothing under `a`: {:?}", items[0])
+        };
+        assert_eq!(under.len(), 2, "`b` and `d`, with `c` under `b`");
+    }
+
+    /// A fence holds text, not structure: re-indenting inside one would edit
+    /// what somebody pasted.
+    #[test]
+    fn a_fence_is_left_exactly_as_it_was_written() {
+        assert_eq!(
+            parse("```\n* one\n * two\n```"),
+            vec![Node::CodeBlock {
+                language: None,
+                value: "* one\n * two".into(),
+            }]
+        );
+    }
+
+    /// Four spaces with no list above them is still indented code.
+    #[test]
+    fn an_indented_block_is_not_read_as_a_first_list_item() {
+        let nodes = parse("text\n\n    - not a bullet\n");
+        assert!(
+            nodes
+                .iter()
+                .any(|node| matches!(node, Node::CodeBlock { .. })),
+            "{nodes:?}"
+        );
+    }
+
     #[test]
     fn a_standard_emoji_carries_its_character_and_a_custom_one_does_not() {
         let nodes = inline("ship it :tada: with :bongo:");
