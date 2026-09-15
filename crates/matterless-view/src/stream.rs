@@ -106,6 +106,20 @@ pub struct Stream {
     /// Read by the tests, which is the only way to tell reuse from a very fast
     /// shaper.
     reused: usize,
+    /// Rows that have been planned but not yet shaped, oldest first, waiting
+    /// above the ones that have.
+    ///
+    /// A conversation opens at its newest message, so the rows under the
+    /// reader's eye are the last handful. Shaping all four hundred before the
+    /// window can draw any of them cost a second and a half in a channel of
+    /// crash reports -- for four hundred messages nobody had scrolled to yet.
+    ///
+    /// They are not estimated. A row waiting here has no height and takes part
+    /// in nothing: it is not in the list, and the list is exactly as tall as
+    /// what has been measured. That is the difference between this and the
+    /// guess-then-correct the layout crate exists to avoid -- nothing on
+    /// screen is ever wrong, there is simply less of it for a moment.
+    above: Vec<Row>,
 }
 
 /// What names a row across two plans of the same channel.
@@ -141,6 +155,7 @@ impl Stream {
             kept: std::collections::HashMap::new(),
             kept_against: (f32::NAN, 0, 0),
             reused: 0,
+            above: Vec::new(),
         }
     }
 
@@ -207,6 +222,74 @@ impl Stream {
     /// How many rows the last layout reused.
     pub fn reused(&self) -> usize {
         self.reused
+    }
+
+    /// Takes a fresh plan.
+    ///
+    /// `lazily` says the reader is at the newest message, which is the only
+    /// time the top of the conversation can be left unshaped: they are looking
+    /// at the other end of it. Anywhere else -- a page of older history
+    /// arriving under somebody reading the top of the channel -- everything
+    /// has to be measured, because what is under their eye could be any of it.
+    pub fn plan(&mut self, rows: Vec<Row>, lazily: bool) {
+        self.above.clear();
+        // A first guess at what covers the panel. `cover` measures whether it
+        // actually did and asks for more until it has.
+        const TAIL: usize = 12;
+        match lazily && rows.len() > TAIL {
+            true => {
+                let mut rows = rows;
+                self.rows = rows.split_off(rows.len() - TAIL);
+                self.above = rows;
+            }
+            false => self.rows = rows,
+        }
+    }
+
+    /// How many planned rows are still waiting to be shaped.
+    pub fn waiting(&self) -> usize {
+        self.above.len()
+    }
+
+    /// Every row of the plan, shaped or not.
+    ///
+    /// For anything asking what is *in* the conversation rather than what is
+    /// on screen -- which emoji it mentions, which pictures it wants. Those
+    /// questions were answered over `rows` alone, and once the top of the
+    /// channel stopped being shaped up front they would have been answered
+    /// about the last dozen messages.
+    pub fn planned(&self) -> impl Iterator<Item = &Row> {
+        self.above.iter().chain(self.rows.iter())
+    }
+
+    /// Shapes some of what is waiting, and answers how much taller the list
+    /// became -- which is what a caller holding the reader's place needs.
+    pub fn fill(&mut self, fonts: &mut Fonts, width: f32, at_most: usize) -> f32 {
+        if self.above.is_empty() || at_most == 0 {
+            return 0.0;
+        }
+        let before = self.total();
+        let at = self.above.len().saturating_sub(at_most);
+        let moved: Vec<Row> = self.above.drain(at..).collect();
+        self.rows.splice(0..0, moved);
+        // Everything already shaped comes back from the cache, so this costs
+        // the slice and not the conversation.
+        self.lay_out(fonts, width);
+        self.total() - before
+    }
+
+    /// Shapes enough of the newest end to fill the panel.
+    ///
+    /// Counted in pixels rather than rows, because a row is anything from one
+    /// line to a screenful of code, and a fixed number of them covers a panel
+    /// in one channel and a third of it in the next.
+    pub fn cover(&mut self, fonts: &mut Fonts, width: f32, within: Rect) {
+        // Half a panel past the bottom edge, so a small scroll has somewhere
+        // to go before the next slice arrives.
+        let want = within.height * 1.5;
+        while !self.above.is_empty() && self.total() < want {
+            self.fill(fonts, width, 12);
+        }
     }
 
     pub fn total(&self) -> f32 {

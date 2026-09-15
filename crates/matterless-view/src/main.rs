@@ -238,6 +238,9 @@ struct App {
     /// How long the divider has left before it goes, once the reader has had
     /// a chance to look at what it marks.
     rest: matterless_view::rest::Rest,
+    /// When the window started shaping the top of the channel behind itself,
+    /// and how much there was of it. For the line it prints when it is done.
+    behind: Option<(std::time::Instant, usize)>,
     /// Which channel `viewed_at` was read for, so re-opening the one already
     /// open leaves it alone.
     ///
@@ -380,7 +383,10 @@ impl App {
                 if let Some(store) = store.as_deref() {
                     stream.custom = matterless_view::feed::custom_emoji(store, &rows);
                 }
-                stream.rows = rows;
+                // The window opens at the newest message, so the rest of the
+                // conversation is shaped behind it rather than before the
+                // window can be drawn at all.
+                stream.plan(rows, true);
                 stream
             },
             thread: None,
@@ -426,6 +432,7 @@ impl App {
             viewed_at: 0,
             viewed_in: String::new(),
             rest: matterless_view::rest::Rest::default(),
+            behind: None,
             depth: matterless_view::feed::PAGE,
             loading_older: false,
             more_history: true,
@@ -2175,8 +2182,7 @@ impl App {
     fn report_blank_pills(&self) {
         let blank: Vec<&str> = self
             .stream
-            .rows
-            .iter()
+            .planned()
             .filter_map(|row| match row {
                 Row::Post { post } | Row::Continuation { post } => Some(post),
                 _ => None,
@@ -2443,7 +2449,10 @@ impl App {
             Ok(rows) => {
                 self.stream.me = self.me.clone();
                 self.stream.custom = matterless_view::feed::custom_emoji(&store, &rows);
-                self.stream.rows = rows;
+                // Never lazily here: this is a page arriving under somebody
+                // reading the top of the channel, and what is under their eye
+                // is the oldest end rather than the newest.
+                self.stream.plan(rows, false);
                 self.relayout();
                 let grew = self.stream.total() - before;
                 let within = self.stream_rect();
@@ -2460,7 +2469,10 @@ impl App {
     /// Guarded so the same page is not asked for once per frame while they sit
     /// there, and stopped for good once the channel has no more to give.
     fn want_older(&mut self) {
-        if self.loading_older || !self.more_history {
+        // Rows already planned and not yet shaped are the top of the channel
+        // arriving: the reader has not reached the end of what is here, the
+        // list is simply still growing towards them.
+        if self.loading_older || !self.more_history || self.stream.waiting() > 0 {
             return;
         }
         let within = self.stream_rect();
@@ -2589,11 +2601,12 @@ impl App {
             Ok(rows) => {
                 self.stream.me = self.me.clone();
                 self.stream.custom = matterless_view::feed::custom_emoji(&store, &rows);
-                self.stream.rows = rows;
+                self.stream.plan(rows, was_at_end);
                 self.watch_divider();
                 self.relayout();
                 if was_at_end {
                     let within = self.stream_rect();
+                    self.stream.cover(&mut self.fonts, within.width, within);
                     self.stream.to_bottom(within);
                 }
             }
@@ -2660,6 +2673,55 @@ impl App {
             self.stream.forget_row(at);
             self.redraw();
         }
+    }
+
+    /// Shapes a slice of whatever the open channel is still waiting on.
+    ///
+    /// Answers whether there is more to do, so the window comes straight back
+    /// for it: nothing else is going to wake it for work it set itself.
+    ///
+    /// A budget rather than a count, because a row is anything from one line
+    /// to a screenful of code. Well under a frame, so a keystroke or a wheel
+    /// turn never waits on more than one slice.
+    fn shape_some(&mut self) -> bool {
+        const BUDGET: std::time::Duration = std::time::Duration::from_millis(8);
+        if self.stream.waiting() == 0 {
+            return false;
+        }
+        let behind = self.behind.get_or_insert_with(|| {
+            (std::time::Instant::now(), self.stream.waiting())
+        });
+        let (since, rows) = (behind.0, behind.1);
+        let within = self.stream_rect();
+        let at_end = self.stream.scroll >= self.stream.reach(within) - 1.0;
+        let began = std::time::Instant::now();
+        let mut grew = 0.0;
+        while self.stream.waiting() > 0 && began.elapsed() < BUDGET {
+            grew += self.stream.fill(&mut self.fonts, within.width, 8);
+        }
+        // Rows appearing above must not push what is being read downwards.
+        // Pinned to the end when that is where they were, and held in place
+        // by the height that arrived when it is not.
+        match at_end {
+            true => self.stream.to_bottom(within),
+            false => {
+                self.stream.scroll =
+                    (self.stream.scroll + grew).clamp(0.0, self.stream.reach(within));
+            }
+        }
+        // The rows on screen have not moved, so the frame is only worth asking
+        // for once there is nothing left to add -- and then for the scrollbar,
+        // which has been growing the whole time.
+        if self.stream.waiting() == 0 {
+            println!(
+                "shaped the rest of the channel behind the window: {rows} rows in {}ms",
+                since.elapsed().as_millis()
+            );
+            self.behind = None;
+            self.redraw();
+            return false;
+        }
+        true
     }
 
     /// Re-reads the open thread the same way.
@@ -3251,7 +3313,9 @@ impl App {
             Ok(rows) => {
                 self.stream.me = self.me.clone();
                 self.stream.custom = matterless_view::feed::custom_emoji(&store, &rows);
-                self.stream.rows = rows;
+                // Lazily: the next thing this does is show the newest message,
+                // so the top of the conversation can be shaped behind it.
+                self.stream.plan(rows, true);
                 self.watch_divider();
                 self.report_blank_pills();
                 self.report_hole(channel, &store);
@@ -3265,6 +3329,7 @@ impl App {
                 self.loading_older = false;
                 self.relayout();
                 let within = self.stream_rect();
+                self.stream.cover(&mut self.fonts, within.width, within);
                 self.stream.to_bottom(within);
                 // Opening a channel is reading it, and a channel that stays
                 // unread however long it is looked at makes the sidebar a lie.
@@ -3806,13 +3871,17 @@ impl ApplicationHandler<Update> for App {
         if self.rest.ripened(std::time::Instant::now()) {
             self.forget_divider();
         }
+        let filling = self.shape_some();
         let next = [next, self.tooltip.wakes(), self.rest.wakes()]
             .into_iter()
             .flatten()
             .min();
-        events.set_control_flow(match next {
-            Some(expires) => ControlFlow::WaitUntil(expires),
-            None => ControlFlow::Wait,
+        events.set_control_flow(match (filling, next) {
+            // Straight back here for the next slice. Nothing else will wake
+            // the window for work it is doing on its own.
+            (true, _) => ControlFlow::Poll,
+            (false, Some(expires)) => ControlFlow::WaitUntil(expires),
+            (false, None) => ControlFlow::Wait,
         });
     }
 
@@ -3921,6 +3990,12 @@ impl ApplicationHandler<Update> for App {
         // Already held, from before the tray was told about it.
         debug_assert!(self.window.is_some());
         self.relayout();
+        // Enough of the newest end to fill the panel, so the first frame is a
+        // conversation rather than a dozen rows in an empty column. The rest
+        // of it is shaped behind the window once it is up.
+        let within = self.stream_rect();
+        self.stream.cover(&mut self.fonts, within.width, within);
+        self.stream.to_bottom(within);
         // What the window waits on before it can be shown, since it now waits
         // on all of it: a swapchain is most of it and belongs to the driver,
         // and the rest is this program's to keep honest.
