@@ -1,0 +1,20 @@
+[package]
+name = "matterless-release"
+# Not the app's version: this tool numbers a release, it is not part of one.
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+[dependencies]
+# Signing. The verifying half lives in `matterless-view::update`, which reads
+# what this writes -- `minisign-verify` there, the whole thing here.
+minisign = "0.9"
+base64 = "0.22"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+# The round trip is the point of the tests: sign with the real signer, verify
+# with the same crate the app verifies with.
+minisign-verify = "0.2.5"
