@@ -340,9 +340,11 @@ impl App {
 
     fn new() -> Self {
         // The store is opened once and kept: switching channel is a read.
+        let opening = matterless_view::timing::watch("opening the store", 0, "");
         let store = matterless_view::feed::default_store()
             .and_then(|path| matterless_view::feed::open(&path).ok())
             .map(Arc::new);
+        drop(opening);
         // Without a reader there is no membership row, and the store answers
         // with each channel's *total* message count -- which looks like an
         // unread badge of four thousand. No reader, no counts.
@@ -357,6 +359,7 @@ impl App {
                  named after the wrong half of its pair until the socket signs in"
             );
         }
+        let listing = matterless_view::timing::watch("building the sidebar", 0, "");
         let entries = Self::entries(
             store.as_deref(),
             &me,
@@ -364,7 +367,10 @@ impl App {
             ("", "", false),
         );
         let sidebar = Sidebar::new(entries);
+        drop(listing);
+        let reading = matterless_view::timing::watch("reading the first channel", 0, "");
         let (channel, rows) = Self::feed();
+        drop(reading);
         let mut app = Self {
             window: None,
             surface: None,
@@ -372,7 +378,11 @@ impl App {
             format: wgpu::TextureFormat::Bgra8UnormSrgb,
             plain: wgpu::TextureFormat::Bgra8Unorm,
             size: (1000, 760),
-            fonts: Fonts::new(),
+            fonts: {
+                // Building this scans the system's font directories.
+                let _loading = matterless_view::timing::watch("loading the fonts", 0, "");
+                Fonts::new()
+            },
             painter: Painter::new(),
             stream: {
                 let mut stream = Stream::new("stream");
