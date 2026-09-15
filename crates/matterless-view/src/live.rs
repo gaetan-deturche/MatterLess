@@ -368,6 +368,11 @@ async fn run(
     };
     rest.set_token(AuthToken::Session(token.clone()));
 
+    // Opened once for the life of the socket thread, which is the only thing
+    // that fetches a picture. `None` when there is nowhere to put it: a cache
+    // that cannot be opened is slow, not broken.
+    let pictures = crate::feed::pictures_dir().map(crate::filecache::FileCache::open);
+
     // Who the reader is, which the notification and unread decisions need and
     // which also proves the token is still good before a socket is opened.
     let me: User = match rest.me().await {
@@ -967,14 +972,37 @@ async fn run(
                         let Some(route) = route_for(&key) else {
                             continue;
                         };
+                        // Asked of the disk first. Nothing here changes under
+                        // its key -- a new avatar is a new key, not new bytes
+                        // at an old one -- so a hit is as good as a fetch and
+                        // costs no round trip.
+                        if let Some((bytes, _)) = pictures.as_ref().and_then(|held| held.read(&key))
+                            && let Some((width, height, rgba)) = decode(&bytes, width, height)
+                        {
+                            wake.wake(Update::Picture {
+                                key,
+                                width,
+                                height,
+                                rgba,
+                            });
+                            continue;
+                        }
                         match rest.fetch_bytes(&route).await {
-                            Ok(Some((bytes, _))) => match decode(&bytes, width, height) {
-                                Some((width, height, rgba)) => wake.wake(Update::Picture {
-                                    key,
-                                    width,
-                                    height,
-                                    rgba,
-                                }),
+                            Ok(Some((bytes, kind))) => match decode(&bytes, width, height) {
+                                Some((width, height, rgba)) => {
+                                    // Kept only once it has decoded: bytes this
+                                    // build cannot read are worth nothing on
+                                    // the next start either.
+                                    if let Some(held) = pictures.as_ref() {
+                                        held.write(&key, &bytes, &kind);
+                                    }
+                                    wake.wake(Update::Picture {
+                                        key,
+                                        width,
+                                        height,
+                                        rgba,
+                                    })
+                                }
                                 // Named by what actually came back: a picture
                                 // this build has no decoder for and a picture
                                 // that is really an error page fail the same

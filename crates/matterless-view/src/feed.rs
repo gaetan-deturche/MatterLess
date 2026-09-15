@@ -29,6 +29,14 @@ pub fn default_store() -> Option<std::path::PathBuf> {
     )
 }
 
+/// Where the pictures fetched for the atlas are kept between runs.
+///
+/// Beside the store, because it is the same kind of thing: what this account
+/// has already been told, held so it does not have to be asked for twice.
+pub fn pictures_dir() -> Option<std::path::PathBuf> {
+    Some(default_store()?.parent()?.join("files"))
+}
+
 /// Opens the store, read-only.
 pub fn open(path: &Path) -> Result<Store, String> {
     if !path.is_file() {
