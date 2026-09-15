@@ -10,10 +10,10 @@
 //! is read as an error; one that waits is only there for somebody who stopped
 //! to ask.
 
-use crate::sidebar::Canvas;
 use matterless_layout::{Style, extent_of};
 use matterless_paint::Run;
 use matterless_ui::Rect;
+use matterless_widgets::{Canvas, Panel};
 use std::time::{Duration, Instant};
 
 /// How long the pointer has to rest before anything is said.
@@ -164,23 +164,10 @@ impl Tooltip {
         // A hairline round it, drawn as the ground inset by one: without an
         // edge a tooltip over a panel of the same colour is a floating
         // sentence.
-        into.scene.floating(
-            rect.x,
-            rect.y,
-            rect.width,
-            rect.height,
-            into.palette.rule,
-            CORNER,
-            4.0,
-        );
-        into.scene.rounded(
-            rect.x + 1.0,
-            rect.y + 1.0,
-            rect.width - 2.0,
-            rect.height - 2.0,
-            into.palette.raised,
-            CORNER - 1.0,
-        );
+        Panel::floating(rect, CORNER, 4.0)
+            .edge(into.palette.rule)
+            .fill(into.palette.raised)
+            .draw(into.scene);
         let glyphs = into.painter.run(
             into.fonts,
             &self.says,

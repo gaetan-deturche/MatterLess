@@ -10,13 +10,13 @@
 //! eventually do -- open a thread, hover an action, select text -- starts with
 //! knowing which message the pointer is over.
 
-use crate::sidebar::Canvas;
 use matterless_layout::Fonts;
 use matterless_layout::row::{RowLayout, Theme, lay_out};
 use matterless_paint::Run;
 use matterless_render::Row;
 use matterless_ui::input::Input;
 use matterless_ui::{Placed, Rect};
+use matterless_widgets::{Canvas, Panel};
 
 /// What a click on a row asked for.
 #[derive(Debug, Clone, PartialEq)]
@@ -1366,23 +1366,10 @@ impl Stream {
         } = into;
         // `border: 1px solid var(--rule)` drawn as a hairline the surface sits
         // inside, which is the only way one quad has an edge.
-        scene.floating(
-            strip.x,
-            strip.y,
-            strip.width,
-            strip.height,
-            palette.rule,
-            crate::actions::CORNER,
-            1.0,
-        );
-        scene.rounded(
-            strip.x + 1.0,
-            strip.y + 1.0,
-            strip.width - 2.0,
-            strip.height - 2.0,
-            palette.surface,
-            crate::actions::CORNER - 1.0,
-        );
+        Panel::floating(strip, crate::actions::CORNER, 1.0)
+            .edge(palette.rule)
+            .fill(palette.surface)
+            .draw(scene);
         for (tool, rect) in placed {
             let under = input.hovered() == Some(self.tool_name(index, tool).as_str());
             // Open counts as hovered: the button that opened a panel must not
@@ -1454,23 +1441,10 @@ impl Stream {
             fonts,
             palette,
         } = into;
-        scene.floating(
-            panel.x,
-            panel.y,
-            panel.width,
-            panel.height,
-            palette.rule,
-            crate::actions::CORNER,
-            4.0,
-        );
-        scene.rounded(
-            panel.x + 1.0,
-            panel.y + 1.0,
-            panel.width - 2.0,
-            panel.height - 2.0,
-            palette.surface,
-            crate::actions::CORNER - 1.0,
-        );
+        Panel::floating(panel, crate::actions::CORNER, 4.0)
+            .edge(palette.rule)
+            .fill(palette.surface)
+            .draw(scene);
         for (at, rect) in crate::actions::faces(panel).into_iter().enumerate() {
             let under = input.hovered() == Some(format!("{name}/faces/{at}").as_str());
             if under {

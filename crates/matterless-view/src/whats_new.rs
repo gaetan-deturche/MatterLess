@@ -13,7 +13,7 @@
 use matterless_paint::Run;
 use matterless_ui::input::Input;
 use matterless_ui::{Placed, Rect};
-use matterless_widgets::{Button, Canvas, Laid, Named, Row};
+use matterless_widgets::{Button, Canvas, Laid, Named, Panel, Row};
 
 pub const NAME: &str = "whats-new";
 /// What this widget's hit boxes are called. The join and its inverse in one
@@ -217,23 +217,10 @@ impl WhatsNew {
             window.height,
             [0, 0, 0, 160],
         );
-        scene.floating(
-            panel.x,
-            panel.y,
-            panel.width,
-            panel.height,
-            palette.rule,
-            CORNER,
-            DROP,
-        );
-        scene.rounded(
-            panel.x + 1.0,
-            panel.y + 1.0,
-            panel.width - 2.0,
-            panel.height - 2.0,
-            palette.surface,
-            CORNER - 1.0,
-        );
+        Panel::floating(panel, CORNER, DROP)
+            .edge(palette.rule)
+            .fill(palette.surface)
+            .draw(scene);
 
         let glyphs = painter.run(
             fonts,

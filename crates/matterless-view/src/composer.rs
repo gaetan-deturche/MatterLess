@@ -11,7 +11,6 @@
 //! Hand-rolling that would mean re-deriving grapheme clusters, word boundaries
 //! and bidirectional runs, all of which it already has right.
 
-use crate::sidebar::Canvas;
 use cosmic_text::{
     Action, Attrs, Buffer, Cursor, Edit, Editor, Metrics, Motion, Selection, Shaping,
 };
@@ -19,6 +18,7 @@ use matterless_layout::Fonts;
 use matterless_paint::Run;
 use matterless_ui::input::{Input, Key};
 use matterless_ui::{Placed, Rect};
+use matterless_widgets::{Canvas, Panel};
 
 /// The text being written, and where the caret is in it.
 pub struct Composer {
@@ -436,15 +436,10 @@ impl Composer {
         } else {
             palette.rule
         };
-        scene.rounded(outer.x, outer.y, outer.width, outer.height, edge, BOX);
-        scene.rounded(
-            outer.x + 1.0,
-            outer.y + 1.0,
-            outer.width - 2.0,
-            outer.height - 2.0,
-            palette.surface,
-            BOX - 1.0,
-        );
+        Panel::flat(outer, BOX)
+            .edge(edge)
+            .fill(palette.surface)
+            .draw(scene);
 
         if self.is_empty() {
             let glyphs = painter.run(

@@ -8,10 +8,10 @@
 //! each, but a team icon is a picture behind the session token like any other,
 //! and initials say which team it is without a fetch.
 
-use crate::sidebar::Canvas;
 use matterless_paint::Run;
 use matterless_ui::input::Input;
 use matterless_ui::{Placed, Rect};
+use matterless_widgets::{Canvas, Panel};
 
 /// A square and the gap between two of them, from the stylesheet: a 30px
 /// button with a 4px gap, in a strip padded `8px 4px`.
@@ -139,15 +139,10 @@ impl Rail {
             } else {
                 palette.ground
             };
-            scene.rounded(rect.x, rect.y, rect.width, rect.height, edge, CORNER);
-            scene.rounded(
-                rect.x + 1.0,
-                rect.y + 1.0,
-                rect.width - 2.0,
-                rect.height - 2.0,
-                palette.ground,
-                CORNER - 1.0,
-            );
+            Panel::flat(rect, CORNER)
+                .edge(edge)
+                .fill(palette.ground)
+                .draw(scene);
 
             // The initials go down first and the icon over them, which is what
             // `z-index: -1` on `.initial` does: a team whose icon the server
