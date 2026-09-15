@@ -259,13 +259,55 @@ struct Line {
     spans: Vec<TextSpan>,
     indent: f32,
     heading: bool,
+    /// The bullet or number in front of it, for the first line of a list item.
+    /// Empty for everything else.
+    marker: String,
+}
+
+/// What goes in front of a list item, by how deep the list is.
+///
+/// The shapes the official client uses, and they have to differ by depth: a
+/// sub-list drawn with the same dot as its parent is a sub-list nobody can see
+/// is one.
+fn marker_for(ordered: bool, at: usize, depth: f32) -> String {
+    if ordered {
+        return format!("{}.", at + 1);
+    }
+    match depth as usize {
+        0 => "\u{2022}".to_string(),
+        1 => "\u{25e6}".to_string(),
+        _ => "\u{25aa}".to_string(),
+    }
+}
+
+/// Ends the run of inline content being gathered, if there is one.
+fn flush(pending: &mut Vec<TextSpan>, indent: f32, into: &mut Vec<Line>) {
+    if pending.is_empty() {
+        return;
+    }
+    into.push(Line {
+        quoted: false,
+        spans: std::mem::take(pending),
+        indent,
+        heading: false,
+        marker: String::new(),
+    });
 }
 
 /// Flattens the markdown into the blocks a reader sees stacked.
+/// Flattens the markdown into the blocks a reader sees stacked.
+///
+/// Inline content is *gathered* rather than taken one node at a time. A
+/// paragraph arrives wrapped and a list item does not: its children are the
+/// text, the mention, the space between two mentions, the closing bracket. One
+/// line per node put every `@name` on a line of its own with a blank line after
+/// it, which is what a real message from this server looked like.
 fn lines_of(nodes: &[Node], indent: f32, into: &mut Vec<Line>, code: &mut Vec<String>) {
+    let mut pending: Vec<TextSpan> = Vec::new();
     for node in nodes {
         match node {
             Node::Paragraph { children } => {
+                flush(&mut pending, indent, into);
                 let mut spans = Vec::new();
                 inline(children, false, false, false, None, &mut spans);
                 into.push(Line {
@@ -273,9 +315,11 @@ fn lines_of(nodes: &[Node], indent: f32, into: &mut Vec<Line>, code: &mut Vec<St
                     spans,
                     indent,
                     heading: false,
+                    marker: String::new(),
                 });
             }
             Node::Heading { children, .. } => {
+                flush(&mut pending, indent, into);
                 let mut spans = Vec::new();
                 inline(children, true, false, false, None, &mut spans);
                 into.push(Line {
@@ -283,6 +327,7 @@ fn lines_of(nodes: &[Node], indent: f32, into: &mut Vec<Line>, code: &mut Vec<St
                     spans,
                     indent,
                     heading: true,
+                    marker: String::new(),
                 });
             }
             // A quote is pushed in like a list item, and marked so whoever
@@ -290,19 +335,31 @@ fn lines_of(nodes: &[Node], indent: f32, into: &mut Vec<Line>, code: &mut Vec<St
             // ink: `blockquote { border-left: 3px solid var(--rule); color:
             // var(--ink-soft) }`.
             Node::Blockquote { children } => {
+                flush(&mut pending, indent, into);
                 let from = into.len();
                 lines_of(children, indent + 1.0, into, code);
                 for line in into.iter_mut().skip(from) {
                     line.quoted = true;
                 }
             }
-            Node::List { items, .. } => {
-                for item in items {
+            Node::List { ordered, items } => {
+                flush(&mut pending, indent, into);
+                for (at, item) in items.iter().enumerate() {
+                    let from = into.len();
                     lines_of(item, indent + 1.0, into, code);
+                    // On the first line of the item only: the rest of a
+                    // wrapped item hangs under the words, not under the dot.
+                    if let Some(first) = into.get_mut(from) {
+                        first.marker = marker_for(*ordered, at, indent);
+                    }
                 }
             }
-            Node::CodeBlock { value, .. } => code.push(value.clone()),
+            Node::CodeBlock { value, .. } => {
+                flush(&mut pending, indent, into);
+                code.push(value.clone())
+            }
             Node::Table { head, rows } => {
+                flush(&mut pending, indent, into);
                 // Not laid out as a table yet: each cell is a line, which is
                 // the same *number* of lines a stacked fallback draws.
                 for cell in head {
@@ -314,34 +371,29 @@ fn lines_of(nodes: &[Node], indent: f32, into: &mut Vec<Line>, code: &mut Vec<St
                     }
                 }
             }
-            Node::Rule => into.push(Line {
-                quoted: false,
-                spans: Vec::new(),
-                indent,
-                heading: false,
-            }),
-            // Anything inline at the top level is a paragraph of its own.
-            other => {
-                let mut spans = Vec::new();
-                inline(
-                    std::slice::from_ref(other),
-                    false,
-                    false,
-                    false,
-                    None,
-                    &mut spans,
-                );
-                if !spans.is_empty() {
-                    into.push(Line {
-                        quoted: false,
-                        spans,
-                        indent,
-                        heading: false,
-                    });
-                }
+            Node::Rule => {
+                flush(&mut pending, indent, into);
+                into.push(Line {
+                    quoted: false,
+                    spans: Vec::new(),
+                    indent,
+                    heading: false,
+                    marker: String::new(),
+                })
             }
+            // Inline: gathered with whatever came before it, and ended by the
+            // next thing that is not.
+            other => inline(
+                std::slice::from_ref(other),
+                false,
+                false,
+                false,
+                None,
+                &mut pending,
+            ),
         }
     }
+    flush(&mut pending, indent, into);
 }
 
 /// The href, if it is one this window would follow.
@@ -688,6 +740,21 @@ pub fn lay_out(fonts: &mut Fonts, row: &Row, theme: &Theme) -> RowLayout {
         let wrap = theme.text_width() - x;
         let count = line_count(fonts, &line, wrap, theme);
         let height = count as f32 * theme.line_height;
+        // In the room the indent already made, at the same height as the first
+        // line of the item -- so the words wrap under themselves rather than
+        // under the dot, which is what a hanging indent is.
+        if !line.marker.is_empty() {
+            blocks.push(Block {
+                y,
+                x: (x - theme.indent).max(0.0),
+                height: theme.line_height,
+                lines: 1,
+                kind: Kind::Text,
+                spans: vec![plain(line.marker.clone())],
+                size: theme.body_size,
+                wrap: theme.indent,
+            });
+        }
         // A heading is not bigger, only heavier: `.heading { font-weight:
         // 600 }` and nothing about size. Scaling it by 1.15 made every `#` in
         // a message louder than the app draws it.
@@ -1474,6 +1541,81 @@ mod tests {
         // a width that only accounted for one of them would run the last
         // letter of a full line out past its own background.
         assert_eq!(code.wrap, theme.text_width() - theme.code_padding * 2.0);
+    }
+
+    /// A list item is a run of inline content, not one block per node.
+    ///
+    /// Unlike a paragraph, a list item's children arrive unwrapped: the text,
+    /// the mention, the space between two mentions, the closing bracket. Each
+    /// one becoming a line of its own is what put every `@name` on a line by
+    /// itself with a blank line after it, against a real message from this
+    /// server.
+    #[test]
+    fn a_list_item_is_one_line_however_many_pieces_it_is_made_of() {
+        let mut fonts = Fonts::new();
+        let theme = Theme::default();
+        let item = vec![
+            Node::Text {
+                value: "decide with the LDs where it appears (poke ".into(),
+            },
+            Node::UserMention {
+                username: "remi.gallet".into(),
+                everyone: false,
+            },
+            Node::Text { value: " ".into() },
+            Node::UserMention {
+                username: "thibaut.machin".into(),
+                everyone: false,
+            },
+            Node::Text { value: ")".into() },
+        ];
+        let laid = lay_out(
+            &mut fonts,
+            &Row::Post {
+                post: post(vec![Node::List {
+                    ordered: false,
+                    items: vec![item],
+                }]),
+            },
+            &theme,
+        );
+        // Two text blocks: the bullet, in the gutter, and the item itself.
+        let text: Vec<&Block> = laid
+            .blocks
+            .iter()
+            .filter(|block| block.kind == Kind::Text)
+            .collect();
+        assert_eq!(text.len(), 2, "the bullet and one line");
+        let bullet = text[0];
+        let text = &text[1..];
+        assert_eq!(bullet.spans.len(), 1);
+        assert_eq!(
+            bullet.spans[0].text, "\u{2022}",
+            "an unordered list gets a dot"
+        );
+        // Beside the words, not above them, and to their left.
+        assert_eq!(bullet.y, text[0].y, "the dot sits on the first line");
+        assert!(bullet.x < text[0].x, "the dot is in the gutter");
+        // And all five pieces are on it, in order, the mentions still their own
+        // spans so they stay pressable.
+        let said: String = text[0]
+            .spans
+            .iter()
+            .map(|span| span.text.as_str())
+            .collect();
+        assert!(said.contains("poke"), "{said:?}");
+        assert!(said.contains("remi.gallet"), "{said:?}");
+        assert!(said.contains("thibaut.machin"), "{said:?}");
+        assert!(said.ends_with(')'), "{said:?}");
+        assert!(
+            text[0]
+                .spans
+                .iter()
+                .filter(|span| span.press.is_some())
+                .count()
+                >= 2,
+            "the mentions stopped being pressable"
+        );
     }
 
     /// Bold is wider, so the same words can need another line -- which a

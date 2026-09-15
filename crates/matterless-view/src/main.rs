@@ -4531,7 +4531,19 @@ impl ApplicationHandler<Update> for App {
                 self.want_faces();
                 self.name_emoji();
                 self.ask_who_is_around();
+                // The two halves of a frame, timed apart. Building the draw
+                // list is this program's work and is the half worth fixing;
+                // handing it to the GPU and waiting for the swapchain is
+                // mostly the driver's, and a slow one there usually means
+                // vsync rather than anything here.
+                let building = matterless_view::timing::watch(
+                    "building the frame",
+                    self.stream.rows.len(),
+                    "rows",
+                );
                 let scene = self.scene();
+                drop(building);
+                let _drawing = matterless_view::timing::watch("drawing the frame", 0, "");
                 let size = self.size;
                 let ground = self.palette.ground;
                 let plain = self.plain;
