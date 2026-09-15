@@ -47,8 +47,9 @@ pub const WINDOWS: &str = "windows-x86_64";
 /// Signs `bytes` with a minisign secret key.
 ///
 /// `key` is the secret key *file's* contents -- the whole thing, comment line
-/// included -- and `password` is what it was encrypted with. Answers the
-/// signature in the form the manifest carries it.
+/// included -- and `password` is what it was encrypted with, empty for a key
+/// generated without one. Answers the signature in the form the manifest
+/// carries it.
 pub fn signature(bytes: &[u8], key: &str, password: &str) -> Result<String, String> {
     use base64::Engine;
     let secret = minisign::SecretKeyBox::from_string(&key_text(key))
@@ -144,13 +145,17 @@ mod tests {
 
     /// A key made for the test, so nothing real is ever in the tree.
     fn keypair() -> (String, String, String) {
-        let password = "a test password".to_string();
-        let pair =
-            minisign::KeyPair::generate_encrypted_keypair(Some(password.clone())).expect("a pair");
+        guarded("a test password")
+    }
+
+    /// The same, with whatever passphrase is asked for -- including none.
+    fn guarded(password: &str) -> (String, String, String) {
+        let pair = minisign::KeyPair::generate_encrypted_keypair(Some(password.to_string()))
+            .expect("a pair");
         (
             pair.sk.to_box(None).expect("a secret key box").to_string(),
             pair.pk.to_box().expect("a public key box").to_string(),
-            password,
+            password.to_string(),
         )
     }
 
@@ -229,6 +234,17 @@ mod tests {
     fn a_key_that_is_neither_says_so() {
         let why = signature(b"anything", "not a key at all", "password").expect_err("it refuses");
         assert!(why.starts_with("the signing key"), "{why}");
+    }
+
+    /// A key generated with no passphrase is still an encrypted key file --
+    /// scrypt over an empty password -- and signs exactly the same. This
+    /// repository's key is one of those, so it is the path that actually runs.
+    #[test]
+    fn a_key_with_no_passphrase_signs() {
+        let (secret, public, _) = guarded("");
+        let installer = b"MZ the installer";
+        let signed = signature(installer, &secret, "").expect("a signature");
+        accepts(&as_the_app_holds_it(&public), &signed, installer).expect("it verifies");
     }
 
     /// The wrong password opens nothing, and says so rather than signing with

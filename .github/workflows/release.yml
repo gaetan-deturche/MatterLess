@@ -86,6 +86,9 @@ jobs:
         shell: pwsh
         env:
           MATTERLESS_SIGNING_KEY: ${{ secrets.MATTERLESS_SIGNING_KEY }}
+          # Optional: a key generated with an empty passphrase is still an
+          # encrypted key file, and this repository's is one. The tool reads
+          # an absent value as empty rather than as missing.
           MATTERLESS_SIGNING_KEY_PASSWORD: ${{ secrets.MATTERLESS_SIGNING_KEY_PASSWORD }}
         run: |
           if (-not $env:MATTERLESS_SIGNING_KEY) {
