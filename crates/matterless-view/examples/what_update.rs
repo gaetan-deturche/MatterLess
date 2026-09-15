@@ -3,35 +3,47 @@
 //! The manifest is written by a pipeline this code does not control, so the
 //! two things most likely to be wrong are its shape and the platform key it is
 //! looked up by -- and neither can be checked by a unit test against a string
-//! somebody typed here. This asks the real endpoint.
+//! somebody typed here.
 //!
-//! Read-only, and it downloads nothing: the installer is never fetched.
+//! Against the real endpoint, read-only, downloading nothing:
 //!
 //!     cargo run -p matterless-view --example what_update
+//!     cargo run -p matterless-view --example what_update -- --verify
+//!
+//! Or against files on disk, which is how a release is rehearsed before it is
+//! published -- the one step a tag cannot be pushed twice to get right:
+//!
+//!     cargo run -p matterless-view --example what_update --
+//!         --manifest latest.json --installer setup.exe [--pubkey <base64>]
+//!
+//! `--pubkey` takes the app's own key when it is left out, so a real release
+//! is checked against the key the app was built with. It is there for
+//! rehearsing with a throwaway key, which is what a test of the pipeline
+//! itself has to use.
 
 use matterless_view::update;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
+    let asked = Asked::read();
     let target = update::target().unwrap_or_else(|| "<none for this platform>".to_string());
     println!("this build is {} and looks for {target}", update::running());
-    println!("asking {}", update::ENDPOINT);
 
-    let client = match reqwest::Client::builder()
-        .user_agent(concat!("MatterLess/", env!("CARGO_PKG_VERSION")))
-        .build()
-    {
-        Ok(client) => client,
-        Err(error) => return eprintln!("no client: {error}"),
-    };
-    let answered = match client.get(update::ENDPOINT).send().await {
-        Ok(answered) => answered,
-        Err(error) => return eprintln!("the endpoint did not answer: {error}"),
-    };
-    println!("the endpoint answered {}", answered.status());
-    let body = match answered.text().await {
-        Ok(body) => body,
-        Err(error) => return eprintln!("no body: {error}"),
+    let body = match &asked.manifest {
+        Some(path) => match std::fs::read_to_string(path) {
+            Ok(body) => {
+                println!("reading {path}");
+                body
+            }
+            Err(error) => return eprintln!("could not read {path}: {error}"),
+        },
+        None => match fetched(update::ENDPOINT).await {
+            Ok(bytes) => match String::from_utf8(bytes) {
+                Ok(body) => body,
+                Err(error) => return eprintln!("the manifest is not text: {error}"),
+            },
+            Err(error) => return eprintln!("{error}"),
+        },
     };
 
     let manifest: update::Manifest = match serde_json::from_str(&body) {
@@ -61,40 +73,86 @@ async fn main() {
         None => println!("nothing to offer: this build is already the newest"),
     }
 
-    // The signature path, against the artefact the release actually signed.
-    // Opt-in because it fetches the whole installer -- and it still runs
-    // nothing: the bytes are checked and dropped.
-    if !std::env::args().any(|arg| arg == "--verify") {
-        println!("pass --verify to check the signature against the real installer");
-        return;
-    }
     let Some(platform) = manifest.platforms.get(&target) else {
         return;
     };
-    println!("fetching {}", platform.url);
-    let bytes = match client.get(&platform.url).send().await {
-        Ok(answered) => match answered.bytes().await {
-            Ok(bytes) => bytes,
-            Err(error) => return eprintln!("no body: {error}"),
+    // The signature path, against the artefact the release actually signed.
+    // Opt-in when it has to be fetched, because that is the whole installer --
+    // and it still runs nothing: the bytes are checked and dropped.
+    let bytes = match &asked.installer {
+        Some(path) => match std::fs::read(path) {
+            Ok(bytes) => {
+                println!("reading {path}");
+                bytes
+            }
+            Err(error) => return eprintln!("could not read {path}: {error}"),
         },
-        Err(error) => return eprintln!("the installer did not come: {error}"),
+        None if !asked.verify => {
+            println!("pass --verify to check the signature against the real installer");
+            return;
+        }
+        None => {
+            println!("fetching {}", platform.url);
+            match fetched(&platform.url).await {
+                Ok(bytes) => bytes,
+                Err(error) => return eprintln!("{error}"),
+            }
+        }
     };
     println!(
         "{} bytes, looks like {:?}",
         bytes.len(),
         update::kind_of(&bytes)
     );
-    match update::verified(&bytes, &platform.signature, update::PUBKEY) {
+    let pubkey = asked.pubkey.as_deref().unwrap_or(update::PUBKEY);
+    match update::verified(&bytes, &platform.signature, pubkey) {
         Ok(()) => println!("SIGNED: the installer is what this key's holder signed"),
         Err(error) => eprintln!("REFUSED: {error}"),
     }
-    // And a tampered copy must fail, or the check above proves nothing.
-    let mut tampered = bytes.to_vec();
-    if let Some(byte) = tampered.last_mut() {
-        *byte = byte.wrapping_add(1);
+}
+
+/// Whatever was asked for on the command line.
+#[derive(Default)]
+struct Asked {
+    manifest: Option<String>,
+    installer: Option<String>,
+    pubkey: Option<String>,
+    verify: bool,
+}
+
+impl Asked {
+    fn read() -> Self {
+        let mut asked = Self::default();
+        let mut args = std::env::args().skip(1);
+        while let Some(flag) = args.next() {
+            match flag.as_str() {
+                "--manifest" => asked.manifest = args.next(),
+                "--installer" => asked.installer = args.next(),
+                "--pubkey" => asked.pubkey = args.next(),
+                "--verify" => asked.verify = true,
+                other => eprintln!("ignoring {other}"),
+            }
+        }
+        asked
     }
-    match update::verified(&tampered, &platform.signature, update::PUBKEY) {
-        Ok(()) => eprintln!("BROKEN: a changed installer passed the check"),
-        Err(_) => println!("and one byte changed is refused, so the check is real"),
-    }
+}
+
+/// One GET, with the app's own user agent.
+async fn fetched(url: &str) -> Result<Vec<u8>, String> {
+    let client = reqwest::Client::builder()
+        .user_agent(concat!("MatterLess/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .map_err(|error| format!("no client: {error}"))?;
+    println!("asking {url}");
+    let answered = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|error| format!("{url} did not answer: {error}"))?;
+    println!("it answered {}", answered.status());
+    answered
+        .bytes()
+        .await
+        .map(|body| body.to_vec())
+        .map_err(|error| format!("no body: {error}"))
 }

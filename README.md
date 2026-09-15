@@ -90,17 +90,51 @@ Tests named `live_*` are `#[ignore]`d: they talk to a real server and need
 
 ## Releasing
 
-**This does not work at the moment.** `.github/workflows/release.yml` still
-builds the retired Tauri shell with `tauri-action`, which produced the
-installer, the minisign signature and the `latest.json` manifest. That shell is
-gone, so the workflow has nothing to build.
+Tag a version and CI does the rest:
 
-The updater itself is not Tauri's and did not go with it: `update.rs` fetches
-the manifest, checks the minisign signature against `update::PUBKEY` and runs
-the installer. What is missing is the half that *makes* a release — bundling
-`matterless-view.exe` into an NSIS installer, signing it with the private key in
-this repository's secrets, and writing a `latest.json` numbered from
-`matterless-view`'s own `version`.
+```bash
+git tag v0.1.6 && git push origin v0.1.6
+```
+
+The tag has to match `matterless-view`'s own `version`, and the workflow
+refuses the build if it does not: the manifest is numbered from the tag and the
+app compares it against the crate, so a drift means clients either never update
+or are offered the build they are already running.
+
+Two repository secrets, from one minisign keypair:
+
+- `MATTERLESS_SIGNING_KEY` — the secret key file's contents (base64'd onto one
+  line is fine too; it is read either way)
+- `MATTERLESS_SIGNING_KEY_PASSWORD`
+
+The public half is compiled into `update::PUBKEY`. Without a signature the
+updater refuses an update, which is the point of it.
+
+The installer is [`packaging/matterless.nsi`](packaging/matterless.nsi),
+per-user under `%LOCALAPPDATA%` — deliberately, because an update has to
+install without a UAC prompt: the thing asking for it is a chat window that has
+just been told "yes" by somebody who wanted to keep reading. It reads `/P`,
+`/UPDATE`, `/R` and `/ARGS`, which are not NSIS switches but what the updater
+sends, waits for the build it is replacing to let go of its own file, and
+leaves the message store alone on uninstall.
+
+### Rehearsing one
+
+A tag cannot be pushed twice to get right, so the whole pipeline runs locally
+against a throwaway key:
+
+```bash
+cargo run -p matterless-release --example a_throwaway_key
+makensis -DVERSION=0.1.6 "-DPAYLOAD=<abs>\target\release\matterless-view.exe" "-DOUTFILE=<abs>\setup.exe" packaging/matterless.nsi
+MATTERLESS_SIGNING_KEY=... cargo run -p matterless-release -- --installer setup.exe --tag v0.1.6 --url <where it will be>
+cargo run -p matterless-view --example what_update -- --manifest latest.json --installer setup.exe --pubkey <the throwaway public half>
+```
+
+The last line is the app's own reader checking what the release is about to
+publish, and it is the same step the workflow runs before it publishes
+anything. Backslashes in the NSIS paths are not a style choice: NSIS reads a
+leading `/` as the start of an option, so a forward-slash payload is "no files
+found".
 
 ## Licence
 

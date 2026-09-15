@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/matterless-core", "crates/matterless-layout", "crates/matterless-paint", "crates/matterless-view", "crates/matterless-probe", "crates/matterless-render", "crates/matterless-sidebar", "crates/matterless-store", "crates/matterless-ui", "crates/matterless-sync"]
+members = ["crates/matterless-core", "crates/matterless-layout", "crates/matterless-paint", "crates/matterless-view", "crates/matterless-probe", "crates/matterless-release", "crates/matterless-render", "crates/matterless-sidebar", "crates/matterless-store", "crates/matterless-ui", "crates/matterless-sync"]
 resolver = "2"
 
 [workspace.package]

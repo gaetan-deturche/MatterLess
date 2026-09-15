@@ -1,23 +1,37 @@
-# Tag a version, get an installer and an update the running app can find.
+# Tag a version, get an installer the running app can find and trust.
 #
-# The updater is the reason this is more than "build and attach": Tauri's
-# updater checks a JSON endpoint, and the signature in it is what stops an
-# update being anything the network feels like handing over. The private half
-# of that key lives only in this repository's secrets and must never be in the
-# tree.
+# The signature is the reason this is more than "build and attach": the app
+# refuses an update it cannot check against the key in `update::PUBKEY`, and
+# the private half of that key lives only in this repository's secrets and must
+# never be in the tree.
+#
+# Four artefacts, in order, each checked before the next:
+#
+#   matterless-view.exe          the app
+#   MatterLess-<version>-setup.exe   the installer, from packaging/matterless.nsi
+#   latest.json                  the manifest, signed, from matterless-release
+#   the release itself           published, because a draft is invisible to the
+#                                updater and every install would silently stay
+#                                on the build it has
 name: Release
 
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      tag:
+        description: "The tag to build, for a re-run of one that already exists"
+        required: true
 
 jobs:
   release:
     runs-on: windows-latest
     permissions:
-      # `tauri-action` creates the release and uploads to it.
+      # `gh release create` writes to this repository.
       contents: write
+    env:
+      TAG: ${{ github.event.inputs.tag || github.ref_name }}
     steps:
       - uses: actions/checkout@v4
 
@@ -29,34 +43,86 @@ jobs:
         with:
           shared-key: matterless-windows
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          cache: npm
-          cache-dependency-path: app/package-lock.json
+      # The one release-specific check, and it replaces a test that used to
+      # hold two version numbers together. The manifest is numbered from the
+      # tag and the app compares it against its own crate version: let those
+      # drift and the client either never updates, or is offered the build it
+      # is already running, for as long as nobody notices.
+      - name: The tag and the crate agree
+        shell: pwsh
+        run: |
+          $crate = (cargo metadata --format-version 1 --no-deps | ConvertFrom-Json).packages |
+            Where-Object { $_.name -eq "matterless-view" }
+          $tagged = $env:TAG -replace '^v', ''
+          "the crate is $($crate.version), the tag is $tagged"
+          if ($crate.version -ne $tagged) {
+            throw "matterless-view is $($crate.version) but the tag says $tagged -- bump the crate, or tag the version it is"
+          }
 
-      - name: Install frontend dependencies
-        working-directory: app
-        run: npm ci
+      - name: Build the app
+        run: cargo build --release -p matterless-view --bin matterless-view
 
-      - uses: tauri-apps/tauri-action@v0
+      - name: Install NSIS
+        run: choco install nsis -y --no-progress
+
+      # Backslashes, deliberately: NSIS reads a leading `/` in `File` as the
+      # start of an option, so a forward-slash path is "no files found".
+      - name: Build the installer
+        shell: pwsh
+        run: |
+          $version = $env:TAG -replace '^v', ''
+          $payload = "$env:GITHUB_WORKSPACE\target\release\matterless-view.exe"
+          $out = "$env:GITHUB_WORKSPACE\MatterLess-$version-setup.exe"
+          & "C:\Program Files (x86)\NSIS\makensis.exe" `
+            "/DVERSION=$version" "/DPAYLOAD=$payload" "/DOUTFILE=$out" `
+            "$env:GITHUB_WORKSPACE\packaging\matterless.nsi"
+          if ($LASTEXITCODE -ne 0) { throw "makensis failed" }
+          "SETUP=$out" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      # The URL is written before the release exists, because it is knowable:
+      # a release asset always hangs off the tag under the same name. The
+      # manifest has to carry it, and the manifest is itself an asset.
+      - name: Sign it and write the manifest
+        shell: pwsh
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Generated once with `npm run tauri signer generate`; the public half
-          # is in `tauri.conf.json` and the private half is only ever here.
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        with:
-          projectPath: app
-          tagName: ${{ github.ref_name }}
-          releaseName: MatterLess ${{ github.ref_name }}
-          releaseBody: |
-            Installer below. An installed build updates itself from here.
-          # Published, not left as a draft: the updater reads the release's
-          # `latest.json`, and a draft is invisible to it -- an unreleased
-          # release means every client silently stays on the old version.
-          releaseDraft: false
-          prerelease: false
-          # NSIS only. The lesson is from Auger: the MSI target needs WiX and
-          # buys nothing here, and the updater is wired for NSIS.
-          args: --bundles nsis,updater
+          MATTERLESS_SIGNING_KEY: ${{ secrets.MATTERLESS_SIGNING_KEY }}
+          MATTERLESS_SIGNING_KEY_PASSWORD: ${{ secrets.MATTERLESS_SIGNING_KEY_PASSWORD }}
+        run: |
+          if (-not $env:MATTERLESS_SIGNING_KEY) {
+            throw "MATTERLESS_SIGNING_KEY is not set: add it to this repository's secrets"
+          }
+          $version = $env:TAG -replace '^v', ''
+          $name = Split-Path $env:SETUP -Leaf
+          $url = "https://github.com/${{ github.repository }}/releases/download/$env:TAG/$name"
+          cargo run --release -p matterless-release -- `
+            --installer "$env:SETUP" `
+            --tag "$env:TAG" `
+            --url "$url" `
+            --notes "MatterLess $version" `
+            --out "$env:GITHUB_WORKSPACE\latest.json"
+          if ($LASTEXITCODE -ne 0) { throw "signing failed" }
+
+      # The app's own reader, against the files about to be published. It is
+      # the only check that runs both halves against each other -- and the one
+      # step a tag cannot be pushed twice to get right.
+      - name: The app accepts what is about to be published
+        shell: pwsh
+        run: |
+          $said = cargo run --release -p matterless-view --example what_update -- `
+            --manifest "$env:GITHUB_WORKSPACE\latest.json" `
+            --installer "$env:SETUP" 2>&1 | Out-String
+          $said
+          if ($said -notmatch "SIGNED") {
+            throw "the app would refuse this release"
+          }
+
+      - name: Publish
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $version = $env:TAG -replace '^v', ''
+          gh release create "$env:TAG" `
+            "$env:SETUP" "$env:GITHUB_WORKSPACE\latest.json" `
+            --title "MatterLess $version" `
+            --notes "Installer below. An installed build updates itself from here."
