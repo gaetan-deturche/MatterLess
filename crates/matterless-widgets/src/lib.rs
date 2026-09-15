@@ -34,6 +34,68 @@ pub struct Canvas<'a> {
     pub palette: &'a Palette,
 }
 
+/// What a widget's hit boxes are called.
+///
+/// A hit box's name is the widget's name and the control's slug, joined. That
+/// join is spelled once here, because a widget otherwise writes it out again
+/// in its hit test, again in its hover check, again where it answers a press
+/// and again where it draws -- and a spelling that differs by one character is
+/// a box nobody can press, with nothing to say so.
+///
+/// Not just a `format!` in a nicer coat: `slug` is the inverse, and it is the
+/// half that was being written out longhand everywhere.
+#[derive(Debug, Clone)]
+pub struct Named {
+    name: String,
+}
+
+impl Named {
+    pub fn new(name: impl Into<String>) -> Self {
+        Self { name: name.into() }
+    }
+
+    /// The widget's own name, for the box that catches everything else.
+    pub fn whole(&self) -> String {
+        self.name.clone()
+    }
+
+    /// What the box for `slug` is called.
+    pub fn of(&self, slug: &str) -> String {
+        format!("{}/{}", self.name, slug)
+    }
+
+    /// One placed box, named.
+    pub fn at(&self, slug: &str, rect: Rect, depth: usize) -> Placed {
+        Placed {
+            name: self.of(slug),
+            rect,
+            depth,
+        }
+    }
+
+    /// The slug inside one of this widget's names, if it is one of this
+    /// widget's names at all.
+    pub fn slug<'a>(&self, name: &'a str) -> Option<&'a str> {
+        name.strip_prefix(&self.name)?.strip_prefix('/')
+    }
+
+    /// Which of this widget's controls the pointer is on.
+    pub fn hovered<'a>(&self, input: &'a Input) -> Option<&'a str> {
+        self.slug(input.hovered()?)
+    }
+
+    /// Which of this widget's controls was pressed.
+    pub fn clicked<'a>(&self, input: &'a Input) -> Option<&'a str> {
+        self.slug(input.clicked()?)
+    }
+
+    /// Whether the pointer is on this one in particular, which is what a draw
+    /// pass asks once per row.
+    pub fn under(&self, input: &Input, slug: &str) -> bool {
+        self.hovered(input) == Some(slug)
+    }
+}
+
 /// How a control is drawn, and so what it claims about itself.
 ///
 /// One `Primary` to a row, or the row is saying two things are the one thing
@@ -107,7 +169,7 @@ pub enum Against {
 
 /// A row of controls waiting to be measured.
 pub struct Row {
-    name: String,
+    name: Named,
     within: Rect,
     against: Against,
     buttons: Vec<Button>,
@@ -122,7 +184,7 @@ impl Row {
     /// A row inside `within`, belonging to the widget called `name`.
     pub fn new(name: impl Into<String>, within: Rect) -> Self {
         Self {
-            name: name.into(),
+            name: Named::new(name),
             within,
             against: Against::Right,
             buttons: Vec::new(),
@@ -238,7 +300,7 @@ impl Row {
 /// A row that knows where it is.
 #[derive(Debug, Clone)]
 pub struct Laid {
-    name: String,
+    name: Named,
     buttons: Vec<Button>,
     rects: Vec<Rect>,
     metrics: Metrics,
@@ -267,11 +329,7 @@ impl Laid {
         self.buttons
             .iter()
             .zip(&self.rects)
-            .map(|(button, rect)| Placed {
-                name: format!("{}/{}", self.name, button.slug),
-                rect: *rect,
-                depth: self.depth,
-            })
+            .map(|(button, rect)| self.name.at(button.slug, *rect, self.depth))
             .collect()
     }
 
@@ -281,17 +339,16 @@ impl Laid {
         if !self.enabled {
             return None;
         }
-        let clicked = input.clicked()?;
+        let clicked = self.name.clicked(input)?;
         self.buttons
             .iter()
-            .find(|button| clicked == format!("{}/{}", self.name, button.slug))
+            .find(|button| button.slug == clicked)
             .map(|button| button.slug)
     }
 
     pub fn draw(&self, into: &mut Canvas<'_>, input: &Input) {
         for (button, rect) in self.buttons.iter().zip(&self.rects) {
-            let under = self.enabled
-                && input.hovered() == Some(format!("{}/{}", self.name, button.slug).as_str());
+            let under = self.enabled && self.name.under(input, button.slug);
             self.one(into, button, *rect, under);
         }
     }
@@ -387,6 +444,23 @@ mod tests {
             .button(Button::plain("news", "What's new"))
             .button(Button::primary("install", "Install and restart"))
             .button(Button::plain("later", "Not now"))
+    }
+
+    /// The join, and its inverse. The inverse is the half that was being
+    /// written out longhand in every widget that answers a press.
+    #[test]
+    fn a_name_joins_and_comes_apart_again() {
+        let named = Named::new("menu");
+        assert_eq!(named.of("save"), "menu/save");
+        assert_eq!(named.slug("menu/save"), Some("save"));
+        // An id with a slash of its own survives, which the message menu needs
+        // for its nested rows.
+        assert_eq!(named.slug("menu/remind/nest"), Some("remind/nest"));
+        // Somebody else's box is not ours, and neither is the bare name.
+        assert_eq!(named.slug("sidebar/save"), None);
+        assert_eq!(named.slug("menu"), None);
+        // And a widget whose name is a prefix of ours is not ours either.
+        assert_eq!(Named::new("menu").slug("menubar/save"), None);
     }
 
     /// The point of the crate: one declaration, and the hit box, the name and
