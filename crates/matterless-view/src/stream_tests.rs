@@ -597,3 +597,117 @@ fn a_new_day_reshapes_the_separators() {
     stream.lay_out_on(&mut fonts, panel().width, tomorrow, offset);
     assert_eq!(stream.reused(), 0);
 }
+
+/// A conversation long enough that shaping all of it is worth avoiding.
+fn many(count: usize) -> Vec<Row> {
+    (0..count)
+        .map(|n| Row::Post {
+            post: post(&format!("p{n}"), ""),
+        })
+        .collect()
+}
+
+/// Shaping four hundred messages before the window can draw any of them cost a
+/// second and a half in a channel of crash reports -- for messages nobody had
+/// scrolled to. A conversation opens at its newest end, so that is the end
+/// that has to be measured.
+#[test]
+fn opening_shapes_the_newest_end_and_leaves_the_rest_waiting() {
+    let mut fonts = Fonts::new();
+    let mut stream = Stream::new("stream");
+    let within = panel();
+    stream.plan(many(200), true);
+    stream.lay_out(&mut fonts, within.width);
+    stream.cover(&mut fonts, within.width, within);
+
+    assert!(stream.waiting() > 0, "all of it was shaped anyway");
+    assert_eq!(
+        stream.waiting() + stream.rows.len(),
+        200,
+        "no row was lost between the two halves"
+    );
+    // Enough to fill the panel, which is the whole requirement: the reader
+    // must never see the end of what has been measured.
+    assert!(
+        stream.total() >= within.height,
+        "{} for a panel of {}",
+        stream.total(),
+        within.height
+    );
+    let Some(Row::Post { post }) = stream.rows.last() else {
+        unreachable!("the last row is a post")
+    };
+    assert_eq!(post.post_id, "p199", "shaped from the wrong end");
+}
+
+/// The rest arrives in order, oldest last, and says how much taller it made
+/// the list -- which is what the window needs to hold the reader's place.
+#[test]
+fn what_is_waiting_arrives_in_order_and_says_how_much_it_added() {
+    let mut fonts = Fonts::new();
+    let mut stream = Stream::new("stream");
+    let within = panel();
+    stream.plan(many(200), true);
+    stream.lay_out(&mut fonts, within.width);
+    let shaped = stream.rows.len();
+    let before = stream.total();
+
+    let grew = stream.fill(&mut fonts, within.width, 10);
+    assert_eq!(stream.rows.len(), shaped + 10);
+    assert_eq!(stream.waiting(), 200 - shaped - 10);
+    assert!(grew > 0.0);
+    assert!((stream.total() - before - grew).abs() < 0.5, "{grew}");
+
+    let Some(Row::Post { post }) = stream.rows.first() else {
+        unreachable!("the first row is a post")
+    };
+    assert_eq!(
+        post.post_id,
+        format!("p{}", 200 - shaped - 10),
+        "the slice went on the wrong end"
+    );
+}
+
+/// A page of older history arriving under somebody reading the top of the
+/// channel: what is under their eye could be any of it, so all of it is
+/// measured.
+#[test]
+fn a_reader_away_from_the_newest_message_gets_all_of_it_shaped() {
+    let mut fonts = Fonts::new();
+    let mut stream = Stream::new("stream");
+    stream.plan(many(200), false);
+    assert_eq!(stream.waiting(), 0);
+    stream.lay_out(&mut fonts, panel().width);
+    assert_eq!(stream.rows.len(), 200);
+}
+
+/// What the conversation *mentions* is not a question about what is on
+/// screen. Asked over the shaped rows alone, it would have been answered about
+/// the last dozen messages.
+#[test]
+fn the_plan_is_whole_even_while_part_of_it_is_unshaped() {
+    let mut stream = Stream::new("stream");
+    stream.plan(many(200), true);
+    assert!(stream.waiting() > 0);
+    assert_eq!(stream.planned().count(), 200);
+}
+
+/// A plan arriving while the last one still has rows waiting must not leave
+/// them behind it -- least of all the plan that asks for all of it to be
+/// shaped, which would otherwise hold a second copy of a channel it had just
+/// been told to measure whole.
+#[test]
+fn a_fresh_plan_drops_what_the_last_one_was_still_waiting_on() {
+    let mut stream = Stream::new("stream");
+    stream.plan(many(200), true);
+    assert!(stream.waiting() > 0);
+
+    stream.plan(many(30), false);
+    assert_eq!(stream.waiting(), 0);
+    assert_eq!(stream.planned().count(), 30);
+
+    stream.plan(many(200), true);
+    assert!(stream.waiting() > 0);
+    stream.plan(many(40), true);
+    assert_eq!(stream.planned().count(), 40);
+}
