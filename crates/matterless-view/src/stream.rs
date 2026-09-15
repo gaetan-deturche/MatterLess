@@ -461,8 +461,10 @@ impl Stream {
                         });
                     }
                 }
-                for (ordinal, rect) in
-                    self.preview_runs(index, top, inner.x).into_iter().enumerate()
+                for (ordinal, rect) in self
+                    .preview_runs(index, top, inner.x)
+                    .into_iter()
+                    .enumerate()
                 {
                     // Only when it leads somewhere: a card whose link this
                     // window will not open must not look pressable.
@@ -746,11 +748,7 @@ impl Stream {
     ///
     /// A page card is its link and a quoted card is the message it quotes,
     /// which is the difference between leaving the app and moving inside it.
-    fn preview_press(
-        &self,
-        index: usize,
-        ordinal: usize,
-    ) -> Option<matterless_layout::row::Press> {
+    fn preview_press(&self, index: usize, ordinal: usize) -> Option<matterless_layout::row::Press> {
         let (Row::Post { post } | Row::Continuation { post }) = self.rows.get(index)? else {
             return None;
         };
@@ -775,14 +773,7 @@ impl Stream {
     }
 
     /// Draws each preview card: its own ground, and the bar down its left.
-    fn quote_bars(
-        &self,
-        into: &mut Canvas<'_>,
-        index: usize,
-        top: f32,
-        left: f32,
-        input: &Input,
-    ) {
+    fn quote_bars(&self, into: &mut Canvas<'_>, index: usize, top: f32, left: f32, input: &Input) {
         for (ordinal, rect) in self.preview_runs(index, top, left).into_iter().enumerate() {
             let under = input.hovered() == Some(self.preview_name(index, ordinal).as_str());
             // Corners cut on the right only: `border-radius: 0 5px 5px 0`.
@@ -889,7 +880,11 @@ impl Stream {
             }
             match chosen.and_then(|rest| rest.strip_prefix('/')) {
                 // A face: the reaction it stands for.
-                Some(at) if at.parse::<usize>().is_ok_and(|at| at < crate::actions::QUICK.len()) => {
+                Some(at)
+                    if at
+                        .parse::<usize>()
+                        .is_ok_and(|at| at < crate::actions::QUICK.len()) =>
+                {
                     self.picking = None;
                     let (name, _) = crate::actions::QUICK[at.parse::<usize>().expect("checked")];
                     return Some(Chose::React {
@@ -931,9 +926,7 @@ impl Stream {
                     self.picking = Some((post_id, under));
                     None
                 }
-                crate::actions::Tool::Reply => {
-                    self.root_of(index).map(Chose::Thread)
-                }
+                crate::actions::Tool::Reply => self.root_of(index).map(Chose::Thread),
                 crate::actions::Tool::More => Some(Chose::More { post_id, under }),
             };
         }
@@ -1832,15 +1825,14 @@ impl Stream {
             fonts,
             palette,
         };
-        self.bar
-            .draw(
-                &mut canvas,
-                &self.name,
-                input,
-                within,
-                self.scroll,
-                self.reach(within),
-            );
+        self.bar.draw(
+            &mut canvas,
+            &self.name,
+            input,
+            within,
+            self.scroll,
+            self.reach(within),
+        );
         // Over everything, including the bar: the faces hang outside the row
         // that opened them and belong in front of whatever they overlap.
         self.quick(&mut canvas, within, input);

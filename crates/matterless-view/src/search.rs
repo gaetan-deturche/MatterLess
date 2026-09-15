@@ -346,7 +346,8 @@ impl Search {
             fonts,
             palette,
         };
-        self.bar.draw(&mut canvas, NAME, input, body, self.scroll, reach);
+        self.bar
+            .draw(&mut canvas, NAME, input, body, self.scroll, reach);
         // Back to the whole window, so what is drawn after this is not clipped
         // to a pane it has nothing to do with.
         canvas.scene.clip_to(0.0, 0.0, f32::MAX, f32::MAX);
@@ -395,7 +396,10 @@ mod tests {
         search.open = true;
         search.found = hits(HITS as usize);
         let pane = pane();
-        assert!(search.reach(pane) > 0.0, "forty hits do not fit in a column");
+        assert!(
+            search.reach(pane) > 0.0,
+            "forty hits do not fit in a column"
+        );
         search.scroll = search.reach(pane);
         let last = search.row_rect(pane, HITS as usize - 1);
         assert!(

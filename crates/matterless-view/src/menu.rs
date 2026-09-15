@@ -720,7 +720,10 @@ mod tests {
             .map(|placed| placed.name)
             .collect();
         assert_eq!(
-            names.iter().filter(|name| name.starts_with("menu/")).count(),
+            names
+                .iter()
+                .filter(|name| name.starts_with("menu/"))
+                .count(),
             4,
             "three rows and the catcher, and no rule"
         );

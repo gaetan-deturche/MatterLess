@@ -41,10 +41,38 @@ fn main() {
     let plain = Attrs::new();
     let mono = Attrs::new().family(Family::Monospace);
 
-    fresh("a fresh buffer each time, advanced", &lines, chars, metrics, &plain, Shaping::Advanced);
-    kept("one buffer kept, advanced", &lines, chars, metrics, &plain, Shaping::Advanced);
-    fresh("a fresh buffer each time, basic", &lines, chars, metrics, &plain, Shaping::Basic);
-    fresh("a fresh buffer each time, monospace", &lines, chars, metrics, &mono, Shaping::Advanced);
+    fresh(
+        "a fresh buffer each time, advanced",
+        &lines,
+        chars,
+        metrics,
+        &plain,
+        Shaping::Advanced,
+    );
+    kept(
+        "one buffer kept, advanced",
+        &lines,
+        chars,
+        metrics,
+        &plain,
+        Shaping::Advanced,
+    );
+    fresh(
+        "a fresh buffer each time, basic",
+        &lines,
+        chars,
+        metrics,
+        &plain,
+        Shaping::Basic,
+    );
+    fresh(
+        "a fresh buffer each time, monospace",
+        &lines,
+        chars,
+        metrics,
+        &mono,
+        Shaping::Advanced,
+    );
 
     // The monospace family resolved once, by name, instead of asked for as a
     // generic every time: if this is the difference, the cost is the lookup
@@ -63,7 +91,14 @@ fn main() {
     // The same paragraph over and over, to show what the caches hold.
     let one = vec![lines[0].clone(); lines.len()];
     let over = one.iter().map(|line| line.chars().count()).sum();
-    fresh("one paragraph, repeated", &one, over, metrics, &plain, Shaping::Advanced);
+    fresh(
+        "one paragraph, repeated",
+        &one,
+        over,
+        metrics,
+        &plain,
+        Shaping::Advanced,
+    );
 
     // And the cost of the buffer with no text in it at all, which is the
     // per-paragraph overhead the channel pays four hundred times over.

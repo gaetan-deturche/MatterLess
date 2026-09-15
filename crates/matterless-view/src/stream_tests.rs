@@ -540,11 +540,7 @@ fn a_replan_reshapes_only_what_changed() {
     let mut stream = conversation(&mut fonts);
     let within = panel();
     let rows = stream.rows.len();
-    assert_eq!(
-        stream.reused(),
-        0,
-        "the first layout has nothing to reuse"
-    );
+    assert_eq!(stream.reused(), 0, "the first layout has nothing to reuse");
 
     // The same plan again -- which is what almost every replan is.
     stream.lay_out(&mut fonts, within.width);

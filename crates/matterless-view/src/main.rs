@@ -927,9 +927,7 @@ impl App {
                 // The counts are not the only thing the mode decides: a reply
                 // is a row in the channel under one and not under the other,
                 // so the conversation is replanned when it does change.
-                if moved
-                    && let Some(channel) = self.sidebar.selected.clone()
-                {
+                if moved && let Some(channel) = self.sidebar.selected.clone() {
                     self.open_channel(&channel);
                 }
             }
@@ -1522,7 +1520,9 @@ impl App {
         let plain = kind("channels");
         let favourite = favourites.is_some_and(|(_, held)| held.contains(&channel_id));
 
-        let mut items = vec![Item::new("channel.unread", "Mark as Unread").marked(matterless_layout::marks::UNREAD)];
+        let mut items = vec![
+            Item::new("channel.unread", "Mark as Unread").marked(matterless_layout::marks::UNREAD),
+        ];
         if let (Some((favourites, _)), Some((plain, _))) = (favourites, plain) {
             let into = if favourite { &plain.id } else { &favourites.id };
             items.push(
@@ -1574,7 +1574,10 @@ impl App {
         items.push(Item::rule());
         items.push(Item::new("channel.link", "Copy Link").marked(matterless_layout::marks::LINK));
         if !conversation {
-            items.push(Item::new("channel.add", "Add Members").marked(matterless_layout::marks::ADD_PEOPLE));
+            items.push(
+                Item::new("channel.add", "Add Members")
+                    .marked(matterless_layout::marks::ADD_PEOPLE),
+            );
             items.push(Item::rule());
             items.push(
                 Item::new("channel.leave", "Leave Channel")
@@ -1733,9 +1736,10 @@ impl App {
                 // one way of choosing somebody rather than two that drift.
                 let mut input = std::mem::take(&mut self.input);
                 self.switcher.show(&mut self.fonts, &mut input);
-                self.switcher.instead(
-                    matterless_view::switcher::Asking::Add(channel_id.to_string()),
-                );
+                self.switcher
+                    .instead(matterless_view::switcher::Asking::Add(
+                        channel_id.to_string(),
+                    ));
                 self.input = input;
             }
             "leave" => {
@@ -1770,17 +1774,9 @@ impl App {
                     link.send(matterless_view::live::Ask::Download { file_id, name });
                 }
             }
-            Some(Chose::React {
-                post_id,
-                emoji,
-                on,
-            }) => {
+            Some(Chose::React { post_id, emoji, on }) => {
                 if let Some(link) = self.link.as_ref() {
-                    link.send(matterless_view::live::Ask::React {
-                        post_id,
-                        emoji,
-                        on,
-                    });
+                    link.send(matterless_view::live::Ask::React { post_id, emoji, on });
                 }
             }
             Some(Chose::More { post_id, under }) => self.offer_message_menu(&post_id, under),
@@ -1887,8 +1883,11 @@ impl App {
         if name == "sidebar/me" {
             return Some("Your status".to_string());
         }
-        self.explains_in(&self.stream, name)
-            .or_else(|| self.thread.as_ref().and_then(|thread| self.explains_in(thread, name)))
+        self.explains_in(&self.stream, name).or_else(|| {
+            self.thread
+                .as_ref()
+                .and_then(|thread| self.explains_in(thread, name))
+        })
     }
 
     /// The same question for one conversation, since there can be two on
@@ -1992,7 +1991,10 @@ impl App {
             .taskbar
             .show(raw_window(self.window.as_ref()), overlay, &told)
         {
-            println!("badge: {attention} wanting an answer, unread {}", state.any_unread);
+            println!(
+                "badge: {attention} wanting an answer, unread {}",
+                state.any_unread
+            );
         }
     }
 
@@ -2698,9 +2700,9 @@ impl App {
         if self.stream.waiting() == 0 {
             return false;
         }
-        let behind = self.behind.get_or_insert_with(|| {
-            (std::time::Instant::now(), self.stream.waiting())
-        });
+        let behind = self
+            .behind
+            .get_or_insert_with(|| (std::time::Instant::now(), self.stream.waiting()));
         let (since, rows) = (behind.0, behind.1);
         let within = self.stream_rect();
         let at_end = self.stream.scroll >= self.stream.reach(within) - 1.0;
@@ -3309,8 +3311,9 @@ impl App {
         // conversation to load and nothing to mark read.
         if channel == matterless_view::sidebar::THREADS {
             self.followed.expect("Threads");
-            self.followed
-                .fill(matterless_view::listing::followed(&store, &self.me, THREADS));
+            self.followed.fill(matterless_view::listing::followed(
+                &store, &self.me, THREADS,
+            ));
             self.thread = None;
             return;
         }
@@ -3720,8 +3723,11 @@ impl App {
 
         let stream = self.stream_rect();
         {
-            let _shaping =
-                matterless_view::timing::watch("shaping the channel", self.stream.rows.len(), "rows");
+            let _shaping = matterless_view::timing::watch(
+                "shaping the channel",
+                self.stream.rows.len(),
+                "rows",
+            );
             self.stream.lay_out(&mut self.fonts, stream.width);
         }
         self.stream.clamp(stream);

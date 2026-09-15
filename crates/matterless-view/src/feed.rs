@@ -514,7 +514,9 @@ mod tests {
         ] {
             let rows = wrote(body);
             assert_eq!(
-                custom_emoji(&store, &rows).get("blobmorning").map(String::as_str),
+                custom_emoji(&store, &rows)
+                    .get("blobmorning")
+                    .map(String::as_str),
                 Some("3f5a"),
                 "no picture for the emoji in {body:?}"
             );
@@ -553,8 +555,15 @@ mod tests {
     /// "no divider" to the planner. It must not take away one already placed.
     #[test]
     fn an_unknown_watermark_leaves_the_divider_alone() {
-        assert_eq!(super::watermark(Some(1_783_001_649_901), 0), 1_783_001_649_901);
-        assert_eq!(super::watermark(None, 0), 0, "but it is honest on the way in");
+        assert_eq!(
+            super::watermark(Some(1_783_001_649_901), 0),
+            1_783_001_649_901
+        );
+        assert_eq!(
+            super::watermark(None, 0),
+            0,
+            "but it is honest on the way in"
+        );
     }
 
     /// One post whose body is `body`, parsed the way the app parses it.

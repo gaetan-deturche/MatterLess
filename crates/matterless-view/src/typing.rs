@@ -141,7 +141,10 @@ mod tests {
         // Each conversation keeps its own clock.
         assert!(sending.due("c1", "root9", began), "a thread of its own");
         assert!(!sending.due("c1", "root9", began));
-        assert!(sending.due("c2", "", began), "nor silenced by another channel");
+        assert!(
+            sending.due("c2", "", began),
+            "nor silenced by another channel"
+        );
     }
 
     use super::*;

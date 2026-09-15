@@ -43,8 +43,8 @@ pub mod tooltip;
 pub mod tray;
 pub mod typing;
 pub mod update;
-pub mod viewer;
 pub mod updater_bar;
+pub mod viewer;
 
 use atlas::{Atlas, Sheet};
 use cosmic_text::SwashCache;
@@ -554,7 +554,9 @@ impl View {
             view_formats: &[],
         });
         let nothing = nothing.create_view(&wgpu::TextureViewDescriptor::default());
-        let bindings = bind_all(&device, &layout, &uniform, &sampler, &smooth, &atlas, &nothing);
+        let bindings = bind_all(
+            &device, &layout, &uniform, &sampler, &smooth, &atlas, &nothing,
+        );
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("list"),
             bind_group_layouts: &[&layout],

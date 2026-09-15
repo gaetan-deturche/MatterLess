@@ -336,12 +336,7 @@ impl Viewer {
                 if under {
                     palette.raised
                 } else {
-                    [
-                        palette.raised[0],
-                        palette.raised[1],
-                        palette.raised[2],
-                        160,
-                    ]
+                    [palette.raised[0], palette.raised[1], palette.raised[2], 160]
                 },
                 6.0,
             );
@@ -467,7 +462,10 @@ mod tests {
         viewer.arrived("f0", (4000, 1000));
         let at = viewer.picture_rect(window()).expect("it is drawn");
         assert!(at.width <= window().width - MARGIN * 2.0 + 0.5);
-        assert!((at.width / at.height - 4.0).abs() < 0.01, "the shape is kept");
+        assert!(
+            (at.width / at.height - 4.0).abs() < 0.01,
+            "the shape is kept"
+        );
 
         viewer.arrived("f0", (40, 30));
         let small = viewer.picture_rect(window()).expect("it is drawn");
