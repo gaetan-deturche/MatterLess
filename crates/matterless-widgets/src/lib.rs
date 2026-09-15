@@ -34,6 +34,87 @@ pub struct Canvas<'a> {
     pub palette: &'a Palette,
 }
 
+/// A panel: a hairline, and a fill one pixel inside it.
+///
+/// The hairline is not a stroke, because the scene has no strokes -- it is the
+/// edge colour drawn one pixel bigger than what goes in front of it. Written
+/// out that is two calls whose eight numbers have to agree and whose corner
+/// radius has to agree twice, with the edge and the fill both `[u8; 4]` and
+/// nothing to stop them being handed over the wrong way round.
+///
+/// Seven panels in this window were doing exactly that.
+pub struct Panel {
+    rect: Rect,
+    corner: f32,
+    edge: [u8; 4],
+    fill: [u8; 4],
+    /// How far the shadow under it reaches. `None` for a panel that is part of
+    /// the furniture rather than floating over it.
+    drop: Option<f32>,
+}
+
+impl Panel {
+    /// A bordered box in the layout: a field, a button, a rail's selection.
+    pub fn flat(rect: Rect, corner: f32) -> Self {
+        Self {
+            rect,
+            corner,
+            edge: [0, 0, 0, 0],
+            fill: [0, 0, 0, 0],
+            drop: None,
+        }
+    }
+
+    /// One that floats over the window and casts a shadow to say so: a menu, a
+    /// tooltip, a card.
+    pub fn floating(rect: Rect, corner: f32, drop: f32) -> Self {
+        Self {
+            drop: Some(drop),
+            ..Self::flat(rect, corner)
+        }
+    }
+
+    pub fn edge(mut self, edge: [u8; 4]) -> Self {
+        self.edge = edge;
+        self
+    }
+
+    pub fn fill(mut self, fill: [u8; 4]) -> Self {
+        self.fill = fill;
+        self
+    }
+
+    pub fn draw(self, scene: &mut Scene) {
+        match self.drop {
+            Some(drop) => scene.floating(
+                self.rect.x,
+                self.rect.y,
+                self.rect.width,
+                self.rect.height,
+                self.edge,
+                self.corner,
+                drop,
+            ),
+            None => scene.rounded(
+                self.rect.x,
+                self.rect.y,
+                self.rect.width,
+                self.rect.height,
+                self.edge,
+                self.corner,
+            ),
+        }
+        scene.rounded(
+            self.rect.x + 1.0,
+            self.rect.y + 1.0,
+            self.rect.width - 2.0,
+            self.rect.height - 2.0,
+            self.fill,
+            self.corner - 1.0,
+        );
+    }
+}
+
 /// What a widget's hit boxes are called.
 ///
 /// A hit box's name is the widget's name and the control's slug, joined. That
@@ -371,24 +452,10 @@ impl Laid {
             (false, true) => palette.raised,
             (false, false) => palette.surface,
         };
-        // The hairline is the ground, drawn one pixel bigger than the fill in
-        // front of it -- the same trick every panel in this window uses.
-        scene.rounded(
-            rect.x,
-            rect.y,
-            rect.width,
-            rect.height,
-            edge,
-            self.metrics.corner,
-        );
-        scene.rounded(
-            rect.x + 1.0,
-            rect.y + 1.0,
-            rect.width - 2.0,
-            rect.height - 2.0,
-            ground,
-            self.metrics.corner - 1.0,
-        );
+        Panel::flat(rect, self.metrics.corner)
+            .edge(edge)
+            .fill(ground)
+            .draw(scene);
         let ink = match primary {
             true => [255, 255, 255],
             false => palette.ink,
@@ -430,6 +497,7 @@ pub fn style(size: f32) -> Style {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use matterless_paint::Piece;
 
     fn fonts() -> Fonts {
         Fonts::new()
@@ -444,6 +512,85 @@ mod tests {
             .button(Button::plain("news", "What's new"))
             .button(Button::primary("install", "Install and restart"))
             .button(Button::plain("later", "Not now"))
+    }
+
+    /// What a panel puts in the scene: the edge, then the fill inside it.
+    fn drawn(panel: Panel) -> Vec<Piece> {
+        let mut scene = Scene::default();
+        panel.draw(&mut scene);
+        scene
+            .layers
+            .iter()
+            .flat_map(|layer| layer.pieces.iter())
+            .cloned()
+            .collect()
+    }
+
+    fn box_of(piece: &Piece) -> (f32, f32, f32, f32, [u8; 4], f32, f32) {
+        match piece {
+            Piece::Fill {
+                x,
+                y,
+                width,
+                height,
+                colour,
+                radius,
+                softness,
+            } => (*x, *y, *width, *height, *colour, *radius, *softness),
+            other => panic!("not a box: {other:?}"),
+        }
+    }
+
+    /// The fill goes inside the edge on every side, and its corner follows.
+    /// Written out, this is where a panel comes to have a hairline down one
+    /// side and none down the other.
+    #[test]
+    fn a_panel_is_an_edge_with_a_fill_inside_it() {
+        let rect = Rect::new(10.0, 20.0, 200.0, 60.0);
+        let pieces = drawn(
+            Panel::flat(rect, 8.0)
+                .edge([1, 2, 3, 255])
+                .fill([4, 5, 6, 255]),
+        );
+        assert_eq!(pieces.len(), 2);
+        let (x, y, w, h, colour, radius, _) = box_of(&pieces[0]);
+        assert_eq!((x, y, w, h), (rect.x, rect.y, rect.width, rect.height));
+        assert_eq!(colour, [1, 2, 3, 255]);
+        assert_eq!(radius, 8.0);
+
+        let (x, y, w, h, colour, radius, _) = box_of(&pieces[1]);
+        assert_eq!((x, y), (rect.x + 1.0, rect.y + 1.0));
+        assert_eq!((w, h), (rect.width - 2.0, rect.height - 2.0));
+        assert_eq!(colour, [4, 5, 6, 255]);
+        assert_eq!(radius, 7.0);
+    }
+
+    /// A floating one casts a shadow first and is otherwise the same. The
+    /// shadow is its own shape, under the panel and offset down, which is what
+    /// a shadow is.
+    #[test]
+    fn a_floating_panel_casts_a_shadow_and_a_flat_one_does_not() {
+        let rect = Rect::new(0.0, 0.0, 100.0, 40.0);
+        let flat = drawn(
+            Panel::flat(rect, 6.0)
+                .edge([1, 1, 1, 255])
+                .fill([2, 2, 2, 255]),
+        );
+        let over = drawn(
+            Panel::floating(rect, 6.0, 12.0)
+                .edge([1, 1, 1, 255])
+                .fill([2, 2, 2, 255]),
+        );
+        assert_eq!(flat.len(), 2, "an edge and a fill");
+        assert_eq!(over.len(), 3, "a shadow as well");
+
+        let (_, y, .., soft) = box_of(&over[0]);
+        assert_eq!(y, rect.y + 12.0, "the shadow is offset down");
+        assert!(soft > box_of(&flat[0]).6, "and is softer than an edge");
+
+        // Whatever is in front of it is the same panel either way.
+        assert_eq!(box_of(&flat[0]), box_of(&over[1]));
+        assert_eq!(box_of(&flat[1]), box_of(&over[2]));
     }
 
     /// The join, and its inverse. The inverse is the half that was being

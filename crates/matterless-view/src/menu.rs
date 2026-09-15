@@ -14,7 +14,7 @@
 use matterless_paint::Run;
 use matterless_ui::input::{Input, Key};
 use matterless_ui::{Placed, Rect};
-use matterless_widgets::{Canvas, Named};
+use matterless_widgets::{Canvas, Named, Panel};
 
 pub const NAME: &str = "menu";
 
@@ -520,25 +520,10 @@ impl Menu {
 
     /// The floating ground and the hairline round it.
     fn panel(&self, into: &mut Canvas<'_>, rect: Rect, style: Style) {
-        into.scene.floating(
-            rect.x,
-            rect.y,
-            rect.width,
-            rect.height,
-            into.palette.rule,
-            style.corner,
-            style.drop,
-        );
-        // `border: 1px solid var(--rule)` drawn as the ground inset by one,
-        // which is the only way a single quad has an edge.
-        into.scene.rounded(
-            rect.x + 1.0,
-            rect.y + 1.0,
-            rect.width - 2.0,
-            rect.height - 2.0,
-            into.palette.surface,
-            style.corner - 1.0,
-        );
+        Panel::floating(rect, style.corner, style.drop)
+            .edge(into.palette.rule)
+            .fill(into.palette.surface)
+            .draw(into.scene);
     }
 
     fn row(&self, into: &mut Canvas<'_>, item: &Item, rect: Rect, style: Style, input: &Input) {
