@@ -619,5 +619,48 @@ mod tests {
             let ninety_nine = count(99, 32);
             assert_eq!(big.pixels, ninety_nine.pixels);
         }
+
+        /// Writes the real badges out as raw RGBA so they can be looked at,
+        /// since "does this digit read correctly" is not a thing an assertion
+        /// can answer -- and this one was settled by looking, after three
+        /// attempts that each passed their tests and were unreadable.
+        ///
+        /// Ignored, so it runs only when it is asked for by name. The pixels
+        /// come from the real drawing code and the script that wraps them into
+        /// a PNG only arranges them, so there is no second implementation of
+        /// the font to drift:
+        ///
+        ///     BADGE_DUMP_DIR=<dir> cargo test -p matterless-view -- --ignored dump_previews
+        ///     python Claude/preview_badges.py <dir>
+        #[test]
+        #[ignore = "writes files for a human to look at"]
+        fn dump_previews() {
+            let out = std::env::var("BADGE_DUMP_DIR").expect("set BADGE_DUMP_DIR");
+            let mut manifest = String::new();
+            for (label, edges) in [("smooth", Edges::Smooth), ("hard", Edges::Hard)] {
+                // What Windows asks for at 100%, 150% and 200%.
+                for size in [BASE_SIZE, 24, 32] {
+                    let mut images = vec![(format!("{label}_{size}_dot"), dot(size))];
+                    for value in [1, 7, 12, 99, 347] {
+                        images.push((
+                            format!("{label}_{size}_count_{value}"),
+                            badge(value, size, edges),
+                        ));
+                    }
+                    for (name, image) in images {
+                        std::fs::write(format!("{out}/{name}.rgba"), &image.pixels)
+                            .expect("write preview");
+                        // Square, so the one number is both.
+                        manifest.push_str(&format!(
+                            "{name} {} {}
+",
+                            image.size, image.size
+                        ));
+                    }
+                }
+            }
+            std::fs::write(format!("{out}/manifest.txt"), manifest).expect("write manifest");
+            println!("wrote the badges to {out}");
+        }
     }
 }
