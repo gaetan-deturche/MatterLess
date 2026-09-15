@@ -1757,6 +1757,7 @@ dependencies = [
  "matterless-store",
  "matterless-sync",
  "matterless-ui",
+ "matterless-widgets",
  "minisign-verify",
  "png",
  "pollster",
@@ -1771,6 +1772,15 @@ dependencies = [
  "windows 0.61.3",
  "winit",
  "winresource",
+]
+
+[[package]]
+name = "matterless-widgets"
+version = "0.1.0"
+dependencies = [
+ "matterless-layout",
+ "matterless-paint",
+ "matterless-ui",
 ]
 
 [[package]]

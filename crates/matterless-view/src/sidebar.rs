@@ -8,18 +8,16 @@
 //! It decides nothing about where it sits. The caller hands it a rectangle and
 //! it fills it, so the same widget works beside a thread pane or without one.
 
-use matterless_layout::Fonts;
-use matterless_paint::{Painter, Palette, Run, Scene};
+use matterless_paint::Run;
 use matterless_ui::input::Input;
 use matterless_ui::{Axis, Node, Placed, Rect, Size};
 
 /// What a widget draws with.
-pub struct Canvas<'a> {
-    pub scene: &'a mut Scene,
-    pub painter: &'a mut Painter,
-    pub fonts: &'a mut Fonts,
-    pub palette: &'a Palette,
-}
+///
+/// Lives in `matterless-widgets` now, beside the controls that draw into it.
+/// Re-exported from here because this is where every other widget imports it
+/// from, and moving thirty import lines is a change about nothing.
+pub use matterless_widgets::Canvas;
 
 /// One line in the list: a channel, or the heading of a group.
 #[derive(Debug, Clone)]
