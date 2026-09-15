@@ -565,11 +565,7 @@ pub enum Kind {
 ///
 /// Falls back to ids rather than failing: a notification with an ugly name
 /// still tells you something happened, where no notification tells you nothing.
-pub fn announce(
-    store: &matterless_store::Store,
-    post_id: &str,
-    me_id: &str,
-) -> Announcement {
+pub fn announce(store: &matterless_store::Store, post_id: &str, me_id: &str) -> Announcement {
     let Ok(Some(post)) = store.post(post_id) else {
         return Announcement::default();
     };
@@ -700,7 +696,10 @@ mod announcing {
             &me(),
         );
         assert_eq!(kind, Kind::Group);
-        assert_eq!(label, "alex, florine, leo", "the reader is not in the title");
+        assert_eq!(
+            label, "alex, florine, leo",
+            "the reader is not in the title"
+        );
     }
 
     /// A direct message knows what it is, which is what decides that the

@@ -282,7 +282,12 @@ mod elide_tests {
     fn it_cuts_between_letters_not_inside_them() {
         let mut fonts = Fonts::new();
         for width in [3.0, 9.0, 17.0, 44.0, 90.0] {
-            let cut = elided(&mut fonts, "Curiosite\u{301} | Cymatique\u{301}s", width, style());
+            let cut = elided(
+                &mut fonts,
+                "Curiosite\u{301} | Cymatique\u{301}s",
+                width,
+                style(),
+            );
             assert!(cut.is_char_boundary(cut.len()));
         }
     }

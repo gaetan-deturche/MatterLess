@@ -603,8 +603,7 @@ impl Sidebar {
                         .map(|(_, rect)| rect.x - GAP)
                         .unwrap_or(within.right() - TRACK)
                         - left;
-                    let named =
-                        matterless_layout::elided(fonts, "Threads", room, name_style(loud));
+                    let named = matterless_layout::elided(fonts, "Threads", room, name_style(loud));
                     let glyphs = painter.run(
                         fonts,
                         &named,
@@ -632,15 +631,14 @@ impl Sidebar {
             fonts,
             palette,
         };
-        self.bar
-            .draw(
-                &mut canvas,
-                "sidebar",
-                input,
-                within,
-                self.scroll,
-                self.reach(within),
-            );
+        self.bar.draw(
+            &mut canvas,
+            "sidebar",
+            input,
+            within,
+            self.scroll,
+            self.reach(within),
+        );
     }
 }
 
@@ -887,12 +885,7 @@ fn kind_icon(
 /// different one. Replacing it is how muted and read came to look identical:
 /// both of them were simply the faint ink. `opacity: 0.45`, which a scene of
 /// opaque quads has to mix by hand.
-fn ink_of(
-    palette: &matterless_paint::Palette,
-    chosen: bool,
-    loud: bool,
-    muted: bool,
-) -> [u8; 3] {
+fn ink_of(palette: &matterless_paint::Palette, chosen: bool, loud: bool, muted: bool) -> [u8; 3] {
     let ink = if chosen {
         palette.signal
     } else if loud {
@@ -1047,12 +1040,16 @@ mod tests {
             &presence,
         );
 
-        let pieces: Vec<&Piece> = scene.layers.iter().flat_map(|layer| layer.pieces.iter()).collect();
+        let pieces: Vec<&Piece> = scene
+            .layers
+            .iter()
+            .flat_map(|layer| layer.pieces.iter())
+            .collect();
         let face = pieces
             .iter()
-            .position(|piece| {
-                matches!(piece, Piece::Image { key, .. } if key.starts_with("avatar/u9"))
-            })
+            .position(
+                |piece| matches!(piece, Piece::Image { key, .. } if key.starts_with("avatar/u9")),
+            )
             .expect("the face is drawn");
         // The dot is the only thing in the row painted in the live colour.
         let lit = dot("online", &palette).expect("online has a colour");
@@ -1388,7 +1385,7 @@ mod tests {
                     direct: false,
                     private: false,
                     counterpart: None,
-                counterpart_avatar_at: 0,
+                    counterpart_avatar_at: 0,
                 })
                 .collect(),
         );

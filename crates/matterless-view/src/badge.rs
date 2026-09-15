@@ -505,7 +505,11 @@ mod tests {
     use super::*;
 
     fn opaque_pixels(overlay: &Overlay) -> usize {
-        overlay.pixels.chunks(4).filter(|pixel| pixel[3] > 0).count()
+        overlay
+            .pixels
+            .chunks(4)
+            .filter(|pixel| pixel[3] > 0)
+            .count()
     }
 
     #[test]

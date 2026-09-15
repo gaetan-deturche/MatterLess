@@ -127,10 +127,8 @@ const FACE_PADDING: f32 = 4.0;
 pub fn faces_panel(under: Rect, within: Rect) -> Rect {
     // The seven faces, then the one that opens the search, which is set apart
     // by a rule and so takes a little more room.
-    let width = FACE_PADDING * 2.0
-        + (QUICK.len() + 1) as f32 * FACE
-        + QUICK.len() as f32 * FACE_GAP
-        + 5.0;
+    let width =
+        FACE_PADDING * 2.0 + (QUICK.len() + 1) as f32 * FACE + QUICK.len() as f32 * FACE_GAP + 5.0;
     let height = FACE_PADDING * 2.0 + FACE;
     let below = under.bottom() + 2.0;
     let y = if below + height <= within.bottom() {
@@ -139,7 +137,10 @@ pub fn faces_panel(under: Rect, within: Rect) -> Rect {
         under.y - 2.0 - height
     };
     Rect::new(
-        under.x.min(within.right() - width - 4.0).max(within.x + 4.0),
+        under
+            .x
+            .min(within.right() - width - 4.0)
+            .max(within.x + 4.0),
         y,
         width,
         height,

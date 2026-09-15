@@ -70,9 +70,7 @@ pub fn close(pane: Rect) -> Rect {
 
 /// The ground, and the rule down its left edge.
 pub fn ground(into: &mut Canvas<'_>, pane: Rect) {
-    let Canvas {
-        scene, palette, ..
-    } = into;
+    let Canvas { scene, palette, .. } = into;
     scene.fill(pane.x, pane.y, pane.width, pane.height, palette.surface);
     scene.fill(pane.x, pane.y, RULE, pane.height, palette.rule);
 }

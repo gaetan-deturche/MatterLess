@@ -1800,8 +1800,8 @@ async fn looked() -> Result<Option<crate::update::Offer>, String> {
         .text()
         .await
         .map_err(|error| error.to_string())?;
-    let manifest: crate::update::Manifest =
-        serde_json::from_str(&body).map_err(|error| format!("the manifest will not parse: {error}"))?;
+    let manifest: crate::update::Manifest = serde_json::from_str(&body)
+        .map_err(|error| format!("the manifest will not parse: {error}"))?;
     Ok(crate::update::offered(
         &manifest,
         &target,

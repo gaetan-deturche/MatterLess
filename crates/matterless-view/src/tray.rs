@@ -338,15 +338,7 @@ mod platform {
     pub fn startup_enabled() -> bool {
         unsafe {
             let mut key = HKEY::default();
-            if RegOpenKeyExW(
-                HKEY_CURRENT_USER,
-                RUN_KEY,
-                Some(0),
-                KEY_READ,
-                &raw mut key,
-            )
-            .is_err()
-            {
+            if RegOpenKeyExW(HKEY_CURRENT_USER, RUN_KEY, Some(0), KEY_READ, &raw mut key).is_err() {
                 return false;
             }
             let mut size = 0u32;
@@ -362,14 +354,7 @@ mod platform {
         };
         unsafe {
             let mut key = HKEY::default();
-            if RegOpenKeyExW(
-                HKEY_CURRENT_USER,
-                RUN_KEY,
-                Some(0),
-                KEY_WRITE,
-                &raw mut key,
-            )
-            .is_err()
+            if RegOpenKeyExW(HKEY_CURRENT_USER, RUN_KEY, Some(0), KEY_WRITE, &raw mut key).is_err()
             {
                 return;
             }

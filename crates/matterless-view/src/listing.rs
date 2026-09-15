@@ -522,7 +522,10 @@ mod tests {
         listing.expect("Saved");
         listing.fill(found(500));
         let body = aside::body(pane());
-        assert!(listing.reach(body) > 0.0, "500 rows do not fit in one column");
+        assert!(
+            listing.reach(body) > 0.0,
+            "500 rows do not fit in one column"
+        );
 
         // At the top, the first row is inside the body and the last is far
         // below it.

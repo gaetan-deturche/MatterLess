@@ -79,7 +79,11 @@ async fn main() {
         },
         Err(error) => return eprintln!("the installer did not come: {error}"),
     };
-    println!("{} bytes, looks like {:?}", bytes.len(), update::kind_of(&bytes));
+    println!(
+        "{} bytes, looks like {:?}",
+        bytes.len(),
+        update::kind_of(&bytes)
+    );
     match update::verified(&bytes, &platform.signature, update::PUBKEY) {
         Ok(()) => println!("SIGNED: the installer is what this key's holder signed"),
         Err(error) => eprintln!("REFUSED: {error}"),

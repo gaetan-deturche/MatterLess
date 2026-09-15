@@ -188,7 +188,8 @@ impl Tooltip {
             rect.y + PAD_Y,
             Run::label(WIDEST).sized(SIZE),
         );
-        into.scene.glyphs(glyphs, into.palette.ink, into.palette.faint);
+        into.scene
+            .glyphs(glyphs, into.palette.ink, into.palette.faint);
     }
 }
 

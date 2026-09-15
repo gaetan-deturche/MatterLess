@@ -208,10 +208,7 @@ pub enum Press {
     /// What a quoted permalink card leads to. By ids rather than by its URL:
     /// the message is on this server and in the local store, so following it
     /// is a scroll rather than a browser.
-    Post {
-        channel_id: String,
-        post_id: String,
-    },
+    Post { channel_id: String, post_id: String },
 }
 
 /// A piece of text with the styling that changes its width.

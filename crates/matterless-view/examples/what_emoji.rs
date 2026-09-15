@@ -36,14 +36,8 @@ fn main() {
         if names.is_empty() {
             continue;
         }
-        let pieces = painter.pieces_of(
-            &mut fonts,
-            &laid,
-            0.0,
-            &theme,
-            &Palette::default(),
-            &custom,
-        );
+        let pieces =
+            painter.pieces_of(&mut fonts, &laid, 0.0, &theme, &Palette::default(), &custom);
         let images: Vec<&String> = pieces
             .iter()
             .filter_map(|piece| match piece {

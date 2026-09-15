@@ -222,11 +222,10 @@ pub fn install(bytes: &[u8], version: &str) -> Result<std::convert::Infallible, 
     })?;
     // Named for the version so two of them cannot collide, and left behind:
     // this process is about to end, so there is nobody to clean it up.
-    let path = std::env::temp_dir().join(format!(
-        "MatterLess-{version}-update.{}",
-        kind.extension()
-    ));
-    std::fs::write(&path, bytes).map_err(|error| format!("could not write the installer: {error}"))?;
+    let path =
+        std::env::temp_dir().join(format!("MatterLess-{version}-update.{}", kind.extension()));
+    std::fs::write(&path, bytes)
+        .map_err(|error| format!("could not write the installer: {error}"))?;
 
     let arguments = match kind {
         Installer::Nsis => nsis_arguments().join(" "),

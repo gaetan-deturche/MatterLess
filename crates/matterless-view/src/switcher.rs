@@ -450,11 +450,8 @@ impl Switcher {
             scene.glyphs(glyphs, palette.signal, palette.faint);
         }
         for (at, one) in self.found.iter().enumerate() {
-            let y = panel.y
-                + PADDING
-                + self.query.height()
-                + self.picked_height()
-                + at as f32 * ROW;
+            let y =
+                panel.y + PADDING + self.query.height() + self.picked_height() + at as f32 * ROW;
             if at == self.chosen {
                 scene.fill(panel.x, y, panel.width, ROW, palette.ground);
             }
@@ -500,7 +497,7 @@ mod tests {
             direct: false,
             private: false,
             counterpart: None,
-        counterpart_avatar_at: 0,
+            counterpart_avatar_at: 0,
         }]);
         let order: Vec<&str> = switcher.found.iter().map(|one| one.id.as_str()).collect();
         assert_eq!(order, vec!["near", "far"]);
@@ -581,7 +578,7 @@ mod tests {
             direct: false,
             private: false,
             counterpart: None,
-        counterpart_avatar_at: 0,
+            counterpart_avatar_at: 0,
         }];
         switcher.narrow(&dev);
         assert_eq!(switcher.found.len(), 1);
@@ -606,7 +603,7 @@ mod tests {
                 direct: false,
                 private: false,
                 counterpart: None,
-            counterpart_avatar_at: 0,
+                counterpart_avatar_at: 0,
             })
             .collect()
     }

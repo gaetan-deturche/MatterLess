@@ -85,7 +85,12 @@ mod tests {
     #[test]
     fn a_line_carries_what_it_was_and_what_each_of_it_cost() {
         assert_eq!(
-            says("shaping the channel", 263, "rows", Duration::from_millis(2604)),
+            says(
+                "shaping the channel",
+                263,
+                "rows",
+                Duration::from_millis(2604)
+            ),
             "slow: shaping the channel took 2604ms for 263 rows, 9.90ms each"
         );
     }

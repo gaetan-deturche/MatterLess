@@ -58,14 +58,9 @@ fn main() {
     let mut worst: Vec<(u128, String)> = Vec::new();
     for (id, name) in channels {
         let began = Instant::now();
-        let Ok(rows) = matterless_view::feed::rows_of(
-            &store,
-            &id,
-            &me,
-            &[],
-            matterless_view::feed::PAGE,
-            0,
-        ) else {
+        let Ok(rows) =
+            matterless_view::feed::rows_of(&store, &id, &me, &[], matterless_view::feed::PAGE, 0)
+        else {
             continue;
         };
         let planned = began.elapsed();

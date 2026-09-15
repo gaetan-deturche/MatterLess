@@ -40,7 +40,8 @@ fn main() {
                 .flat_map(|run| run.glyphs.iter())
                 .map(|glyph| glyph.physical((0.0, 0.0), 1.0).cache_key)
                 .next();
-            if let Some(image) = key.and_then(|key| cache.get_image_uncached(fonts.system_mut(), key))
+            if let Some(image) =
+                key.and_then(|key| cache.get_image_uncached(fonts.system_mut(), key))
             {
                 widest = widest.max(image.placement.width);
                 tallest = tallest.max(image.placement.height);
