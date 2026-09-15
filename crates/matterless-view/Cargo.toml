@@ -1,8 +1,8 @@
 [package]
 name = "matterless-view"
-# The version the release numbers, which is what the updater compares
-# against: one pipeline serves both clients, so this tracks the app's
-# `tauri.conf.json` and a test holds the two together.
+# The version the release numbers, which is what the updater compares a
+# manifest against. The only copy of it now the shell that carried a second one
+# is gone.
 version = "0.1.5"
 edition = "2024"
 
@@ -35,8 +35,9 @@ keyring = "3"
 # The Vulkan backend is selected explicitly at instance creation; wgpu is the
 # API on top of it rather than an abstraction over which one to use.
 wgpu = "26"
-# Only the standalone window needs these; the app supplies its own surface from
-# the Tauri window, so they stay out of its dependency tree.
+# Only the window needs these. Kept behind a feature so the crate can still be
+# built for a machine with no display -- which is what `--snapshot` and the
+# examples that measure layout are for.
 winit = { version = "0.30", optional = true }
 pollster = { version = "0.4", optional = true }
 # Headless verification: the same rows written out as an image, for a machine
@@ -58,9 +59,8 @@ reqwest = { version = "0.13.5", default-features = false, features = ["json", "r
 rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs"] }
 
 [features]
-# On by default so the standalone window is one command; the app turns it off,
-# because it supplies its own surface from the Tauri window and has no use for
-# a second windowing library.
+# On by default so the window is one command. Turned off for a build that only
+# needs the layout and the painter, which needs no windowing library at all.
 default = ["window"]
 window = ["winit", "pollster", "png"]
 

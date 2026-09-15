@@ -20,13 +20,11 @@
 
 use serde::Deserialize;
 
-/// Where the manifest lives. The same release the app updates from, so one
-/// pipeline serves both.
+/// Where the manifest lives.
 pub const ENDPOINT: &str =
     "https://github.com/gaetan-deturche/MatterLess/releases/latest/download/latest.json";
 
-/// The key the manifest's signatures are checked against, from the app's own
-/// config.
+/// The key the manifest's signatures are checked against.
 ///
 /// A public key, and it is meant to be public: it proves a download came from
 /// whoever holds the private half, which is not in this repository and should
@@ -90,6 +88,10 @@ pub fn target() -> Option<String> {
 }
 
 /// This build's version, as the release numbers it.
+///
+/// The crate's own number is the only one now. It used to be checked against a
+/// second copy in the retired shell's config, and the release was numbered from
+/// that -- so whatever builds the installer has to take its version from here.
 pub fn running() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
@@ -376,26 +378,6 @@ mod tests {
         );
         assert_eq!(kind_of(b"<html>not an installer"), None);
         assert_eq!(kind_of(b""), None);
-    }
-
-    /// This build is numbered by the release that would replace it.
-    ///
-    /// One pipeline serves both clients, so the version the updater compares
-    /// against has to be the one the release writes into its manifest. Left to
-    /// drift, this client would either never update or offer to update to the
-    /// build it is already running.
-    #[test]
-    fn the_version_is_the_one_the_release_numbers() {
-        const CONFIG: &str = include_str!("../../../app/src-tauri/tauri.conf.json");
-        let config: serde_json::Value =
-            serde_json::from_str(CONFIG).expect("the app's config parses");
-        let released = config["version"].as_str().expect("a version");
-        assert_eq!(
-            running(),
-            released,
-            "this crate is numbered {} and the release is numbered {released}",
-            running()
-        );
     }
 
     /// A dev build never looks: unsigned, versioned by the workspace, and the
