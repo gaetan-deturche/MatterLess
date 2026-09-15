@@ -102,7 +102,9 @@ def main():
     # 16, and still something to work with at 150% and 200%.
     tray = icon.resize((TRAY, TRAY), Image.LANCZOS)
     tray = ImageEnhance.Sharpness(tray).enhance(2.2)
-    tray_path = os.path.join(REPO, "app", "src-tauri", "icons", "tray.png")
+    tray_path = os.path.join(
+        REPO, "crates", "matterless-view", "resources", "icons", "tray.png"
+    )
     tray.save(tray_path)
     print("wrote", tray_path)
 
