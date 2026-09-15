@@ -13,7 +13,9 @@
 //! is visible to anyone:
 //!
 //! * `MATTERLESS_SIGNING_KEY` -- the minisign secret key file's contents.
-//! * `MATTERLESS_SIGNING_KEY_PASSWORD` -- what it was encrypted with.
+//! * `MATTERLESS_SIGNING_KEY_PASSWORD` -- what it was encrypted with, if
+//!   anything. Optional: a key generated with an empty passphrase is still an
+//!   encrypted key file, and this repository's is one.
 
 fn main() {
     if let Err(why) = run() {
@@ -25,7 +27,12 @@ fn main() {
 fn run() -> Result<(), String> {
     let asked = Asked::from(std::env::args().skip(1))?;
     let key = env("MATTERLESS_SIGNING_KEY")?;
-    let password = env("MATTERLESS_SIGNING_KEY_PASSWORD")?;
+    // Absent means empty, which is a real answer rather than a missing one: a
+    // key can be generated with no passphrase, and this repository's was.
+    // Required, it would also have made the pipeline depend on how an unset
+    // secret reaches a step -- which is the kind of thing that is discovered
+    // on a tag.
+    let password = std::env::var("MATTERLESS_SIGNING_KEY_PASSWORD").unwrap_or_default();
 
     let installer = std::fs::read(&asked.installer)
         .map_err(|error| format!("could not read {}: {error}", asked.installer))?;

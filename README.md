@@ -101,11 +101,13 @@ refuses the build if it does not: the manifest is numbered from the tag and the
 app compares it against the crate, so a drift means clients either never update
 or are offered the build they are already running.
 
-Two repository secrets, from one minisign keypair:
+One repository secret, from the minisign keypair:
 
 - `MATTERLESS_SIGNING_KEY` — the secret key file's contents (base64'd onto one
   line is fine too; it is read either way)
-- `MATTERLESS_SIGNING_KEY_PASSWORD`
+- `MATTERLESS_SIGNING_KEY_PASSWORD` — only if the key has a passphrase. A key
+  generated without one is still an encrypted key file, and this repository's
+  is one, so the secret is not set.
 
 The public half is compiled into `update::PUBKEY`. Without a signature the
 updater refuses an update, which is the point of it.
