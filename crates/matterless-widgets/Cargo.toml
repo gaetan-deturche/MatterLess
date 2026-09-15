@@ -1,0 +1,14 @@
+[package]
+name = "matterless-widgets"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[dependencies]
+# Geometry, hit boxes and input. That crate draws nothing on purpose; this one
+# is where a control that knows how to draw itself belongs.
+matterless-ui = { path = "../matterless-ui" }
+# The draw list, and the palette a control takes its colours from.
+matterless-paint = { path = "../matterless-paint" }
+# Text is measured, never guessed: a button is as wide as its own label.
+matterless-layout = { path = "../matterless-layout" }

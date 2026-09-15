@@ -14,6 +14,7 @@ matterless-paint = { path = "../matterless-paint" }
 matterless-render = { path = "../matterless-render" }
 matterless-sidebar = { path = "../matterless-sidebar" }
 matterless-ui = { path = "../matterless-ui" }
+matterless-widgets = { path = "../matterless-widgets" }
 matterless-store = { path = "../matterless-store" }
 matterless-sync = { path = "../matterless-sync" }
 # WebP is not optional on this server: its custom emoji come back as WebP, and

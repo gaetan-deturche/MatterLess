@@ -10,10 +10,10 @@
 //! Modal, in the one sense that matters here: a press anywhere outside it
 //! closes it, so there is no way to leave it open and forget about it.
 
-use crate::sidebar::Canvas;
 use matterless_paint::Run;
 use matterless_ui::input::Input;
 use matterless_ui::{Placed, Rect};
+use matterless_widgets::{Button, Canvas, Laid, Row};
 
 pub const NAME: &str = "whats-new";
 
@@ -30,18 +30,17 @@ const DROP: f32 = 16.0;
 const TITLE_SIZE: f32 = 15.0;
 const NOTES_SIZE: f32 = 12.5;
 const GAP: f32 = 12.0;
-const BUTTON_SIZE: f32 = 12.5;
-const BUTTON_PAD_X: f32 = 12.0;
+/// How tall the row at the bottom is. What the button in it is set in comes
+/// from `matterless_widgets::Metrics`, the same as every other control.
 const BUTTON_HEIGHT: f32 = 26.0;
-const BUTTON_CORNER: f32 = 5.0;
 
 /// The panel, when it is up.
 #[derive(Debug, Default)]
 pub struct WhatsNew {
     version: String,
     notes: String,
-    /// The panel, the words in it and its one button, measured together.
-    placed: Option<(Rect, Rect, Rect)>,
+    /// The panel, the words in it and the row at its foot, measured together.
+    placed: Option<(Rect, Rect, Laid)>,
 }
 
 impl WhatsNew {
@@ -107,12 +106,13 @@ impl WhatsNew {
         self.placed = self.open().then(|| self.place(fonts, window));
     }
 
-    fn laid(&self) -> Option<(Rect, Rect, Rect)> {
-        self.placed
+    fn laid(&self) -> Option<(Rect, Rect, &Laid)> {
+        let (panel, notes, row) = self.placed.as_ref()?;
+        Some((*panel, *notes, row))
     }
 
-    /// The panel, the change list inside it, and the button that shuts it.
-    fn place(&self, fonts: &mut matterless_layout::Fonts, window: Rect) -> (Rect, Rect, Rect) {
+    /// The panel, the change list inside it, and the row that shuts it.
+    fn place(&self, fonts: &mut matterless_layout::Fonts, window: Rect) -> (Rect, Rect, Laid) {
         let width = WIDEST.min(window.width - PAD * 2.0).max(0.0);
         let wrap = (width - PAD * 2.0).max(0.0);
         let title =
@@ -134,22 +134,30 @@ impl WhatsNew {
             height,
         );
         let notes = Rect::new(panel.x + PAD, panel.y + PAD + title + GAP, wrap, list);
-        let close = Rect::new(
-            panel.right() - PAD - (BUTTON_PAD_X * 2.0 + 40.0),
-            panel.bottom() - PAD - BUTTON_HEIGHT,
-            BUTTON_PAD_X * 2.0 + 40.0,
-            BUTTON_HEIGHT,
-        );
-        (panel, notes, close)
+        let row = Row::new(
+            NAME,
+            Rect::new(
+                panel.x,
+                panel.bottom() - PAD - BUTTON_HEIGHT,
+                panel.width,
+                BUTTON_HEIGHT,
+            ),
+        )
+        .pad(PAD)
+        .depth(42)
+        .button(Button::plain("close", "Close"))
+        .measure(fonts);
+        (panel, notes, row)
     }
 
     pub fn boxes(&self, window: Rect) -> Vec<Placed> {
-        let Some((panel, _, close)) = self.laid() else {
+        let Some((panel, _, row)) = self.laid() else {
             return Vec::new();
         };
         // The whole window first, so a press beside the panel shuts it rather
-        // than reaching the conversation it is covering.
-        vec![
+        // than reaching the conversation it is covering; then the panel, which
+        // catches its own presses so reading does not shut it.
+        let mut placed = vec![
             Placed {
                 name: NAME.to_string(),
                 rect: window,
@@ -160,12 +168,9 @@ impl WhatsNew {
                 rect: panel,
                 depth: 41,
             },
-            Placed {
-                name: format!("{NAME}/close"),
-                rect: close,
-                depth: 42,
-            },
-        ]
+        ];
+        placed.extend(row.boxes());
+        placed
     }
 
     /// Whether it was shut. A press on the panel itself is not: reading is
@@ -174,20 +179,22 @@ impl WhatsNew {
         if !self.open() {
             return false;
         }
-        match input.clicked() {
-            Some(name) if name == format!("{NAME}/panel") => false,
-            Some(name) if name == NAME || name == format!("{NAME}/close") => {
-                self.hide();
-                true
-            }
-            _ => false,
+        let closed = self
+            .laid()
+            .and_then(|(_, _, row)| row.clicked(input))
+            .is_some();
+        let beside = input.clicked() == Some(NAME);
+        if closed || beside {
+            self.hide();
         }
+        closed || beside
     }
 
     pub fn draw(&self, into: &mut Canvas<'_>, input: &Input, window: Rect) {
-        let Some((panel, notes, close)) = self.laid() else {
+        let Some((panel, notes, row)) = self.laid() else {
             return;
         };
+        let row = row.clone();
         let title = self.title();
         let shown = {
             let Canvas { fonts, .. } = into;
@@ -245,38 +252,7 @@ impl WhatsNew {
         );
         scene.glyphs(glyphs, palette.soft, palette.faint);
 
-        let under = input.hovered() == Some(format!("{NAME}/close").as_str());
-        scene.rounded(
-            close.x,
-            close.y,
-            close.width,
-            close.height,
-            palette.rule,
-            BUTTON_CORNER,
-        );
-        scene.rounded(
-            close.x + 1.0,
-            close.y + 1.0,
-            close.width - 2.0,
-            close.height - 2.0,
-            if under {
-                palette.raised
-            } else {
-                palette.ground
-            },
-            BUTTON_CORNER - 1.0,
-        );
-        let word = "Close";
-        let wide =
-            matterless_layout::extent_of(fonts, word, f32::MAX, Self::style(BUTTON_SIZE)).width;
-        let glyphs = painter.run(
-            fonts,
-            word,
-            close.x + (close.width - wide) / 2.0,
-            close.y + (close.height - BUTTON_SIZE * 1.5) / 2.0,
-            Run::label(f32::MAX).sized(BUTTON_SIZE),
-        );
-        scene.glyphs(glyphs, palette.ink, palette.faint);
+        row.draw(into, input);
     }
 }
 
@@ -310,7 +286,8 @@ mod tests {
     #[test]
     fn it_sits_in_the_middle_of_the_window() {
         let (panel, _fonts) = shown("- fixed the thing\n- fixed the other thing");
-        let (at, notes, close) = panel.laid().expect("measured");
+        let (at, notes, row) = panel.laid().expect("measured");
+        let close = row.rect("close").expect("placed");
         assert!(at.x >= window().x && at.right() <= window().right());
         assert!(at.y >= window().y && at.bottom() <= window().bottom());
         // Centred, to the pixel the arithmetic gives.
@@ -347,7 +324,7 @@ mod tests {
     fn it_shuts_from_outside_and_stays_from_within() {
         let (mut panel, _fonts) = shown("- fixed the thing");
         let boxes = panel.boxes(window());
-        let (at, _, close) = panel.laid().expect("measured");
+        let (at, _, _) = panel.laid().expect("measured");
 
         let mut input = Input::default();
         press(&mut input, &boxes, at);
@@ -363,6 +340,12 @@ mod tests {
         // And the button, which is the obvious way.
         let (mut panel, _fonts) = shown("- fixed the thing");
         let boxes = panel.boxes(window());
+        let close = panel
+            .laid()
+            .expect("measured")
+            .2
+            .rect("close")
+            .expect("placed");
         let mut input = Input::default();
         press(&mut input, &boxes, close);
         assert!(panel.react(&input));
