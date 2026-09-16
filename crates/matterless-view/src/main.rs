@@ -368,29 +368,14 @@ struct App {
     /// scissor for a panel 1001 wide lands in a target 1000 wide -- which is
     /// not a wrong pixel, it is a validation error and a dead window.
     ///
-    /// Answered once the event queue is empty rather than as each size lands.
-    /// Rebuilding the swapchain costs about a tenth of a second on this
-    /// machine, measured in a release build for a change of one pixel: doing
-    /// it inside the handler left the window blocked in there while the system
+    /// Answered at the top of the next frame rather than as each size lands.
+    /// A drag reports sizes faster than the window can draw them, so the ones
+    /// it passes through between two frames are not worth building for: this
+    /// field holds the latest and the frame takes it. Building inside the
+    /// handler instead left the window blocked in there while the system
     /// queued the next dozen sizes, every one of which was then paid for in
-    /// turn. A drag can report sizes faster than the window can draw them, and
-    /// the only one worth building for is the one it ends up at.
+    /// turn.
     sized: Option<(u32, u32)>,
-    /// When the surface was last built.
-    ///
-    /// Rebuilding it costs about a tenth of a second here -- measured in an
-    /// optimised build, against present mode and frame latency both, and
-    /// neither of them moves it. So the window cannot show itself at a new
-    /// size more than nine or ten times a second however this is arranged,
-    /// and doing it on every frame of a drag is what left the window itself
-    /// trailing the pointer: the system's own resize loop is waiting on this
-    /// handler to come back.
-    ///
-    /// Between rebuilds the frames still go out, into a surface that is the
-    /// size the window used to be; the compositor stretches them. Stale by a
-    /// fraction of a second and stretched a little is what every other window
-    /// on this desktop does while it is being dragged.
-    surfaced: std::time::Instant,
     input: Input,
     placed: Vec<Placed>,
     composer: Composer,
@@ -599,7 +584,6 @@ impl App {
             home: None,
             resizing: None,
             sized: None,
-            surfaced: std::time::Instant::now(),
             window: None,
             view: None,
             size: (1000, 760),
@@ -3919,28 +3903,25 @@ impl App {
     /// go -- so a window that resized itself there simply stopped resizing
     /// while it was being resized.
     ///
-    /// Once per frame is the whole point. A drag reports sizes faster than
-    /// this can draw them and rebuilding the swapchain costs about a tenth of
-    /// a second, so the sizes the window passed through on the way are not
-    /// worth building for: only the one it is in when a frame is about to be
-    /// drawn. `self.size` moves here and nowhere else, beside the surface it
-    /// has to agree with.
+    /// Once per frame and every frame. A drag reports sizes faster than this
+    /// can draw them, so the ones it passed through on the way are not worth
+    /// building for -- but the one it is in when a frame is about to be drawn
+    /// always is. `self.size` moves here and nowhere else, beside the surface
+    /// it has to agree with.
+    ///
+    /// There was a throttle here, and it is what left the contents trailing
+    /// the window's own frame: sized for a rebuild that cost a tenth of a
+    /// second, it answered three of every forty sizes a drag reported. On
+    /// Direct3D the rebuild is 1.00ms and the reshaping 1.37ms, against a
+    /// frame of 11.89ms that is mostly waiting for the screen. There is
+    /// nothing left to spread out.
     fn take_the_size(&mut self) {
-        let Some(size) = self.sized else {
+        let Some(size) = self.sized.take() else {
             return;
         };
-        // Not yet, if one was built a moment ago and the edge is still moving.
-        // The last size always gets one: `resizing` runs out and asks again.
-        if size != self.size && self.surfaced.elapsed() < REBUILD {
-            return;
-        }
-        self.sized = None;
-        self.surfaced = std::time::Instant::now();
         let _resizing = matterless_view::timing::watch("resizing the window", 0, "");
         self.size = size;
         {
-            // Rebuilt by handing the old swapchain over rather than retiring
-            // it -- `vk.rs` says what that is worth and what it is not.
             let _surfacing = matterless_view::timing::watch("  reconfiguring the surface", 0, "");
             if let Some(view) = self.view.as_mut()
                 && let Err(why) = view.resize(size)
@@ -3962,6 +3943,34 @@ impl App {
             thread.relay_seen(&mut self.fonts, pane.width, pane);
         }
         self.resizing = Some(std::time::Instant::now());
+    }
+
+    /// Builds one frame and hands it to the GPU.
+    ///
+    /// The two halves are timed apart. Building the draw list is this
+    /// program's work and is the half worth fixing; handing it over and
+    /// waiting for the swapchain is mostly the driver's, and a slow one there
+    /// usually means vsync rather than anything here.
+    ///
+    /// `waiting` is passed down to the present: false only for the frame drawn
+    /// from inside a resize, which the window is waiting on.
+    fn paint(&mut self, waiting: bool) {
+        let building = matterless_view::timing::watch(
+            "building the frame",
+            self.stream.rows.len(),
+            "rows",
+        );
+        let scene = self.scene();
+        drop(building);
+        let _drawing = matterless_view::timing::watch("drawing the frame", 0, "");
+        let size = self.size;
+        let ground = self.palette.ground;
+        let Some(view) = self.view.as_mut() else {
+            return;
+        };
+        view.draw_scene(&mut self.fonts, &scene, size, ground, waiting);
+        // A frame's worth of input has been acted on.
+        self.input.settle();
     }
 
     /// Everything the frame draws, in one scene.
@@ -4585,12 +4594,6 @@ impl ApplicationHandler<Update> for App {
             && since.elapsed() >= SETTLE
         {
             self.resizing = None;
-            // The size the window came to rest at, if the throttle above was
-            // still holding one back when the edge stopped.
-            if self.sized.is_some() {
-                self.surfaced = std::time::Instant::now() - REBUILD;
-                self.take_the_size();
-            }
             self.relayout();
             self.redraw();
         }
@@ -4752,16 +4755,30 @@ impl ApplicationHandler<Update> for App {
                 }
             }
             WindowEvent::Resized(size) => {
-                // Remembered, not acted on. Rebuilding the swapchain costs
-                // about a tenth of a second on this machine -- measured in a
-                // release build, for a change of one pixel -- and doing it
-                // here meant the window sat blocked inside the handler while
-                // the system queued the next dozen sizes, every one of which
-                // was then paid for in turn. `about_to_wait` runs once the
-                // queue is empty, so only the size the window actually ended
-                // up in is ever built for.
                 self.sized = Some((size.width.max(1), size.height.max(1)));
-                self.redraw();
+                // Drawn here, before this handler comes back, rather than left
+                // for the next frame. The window is already the new size when
+                // this runs, and the compositor will show it at that size with
+                // whatever the swapchain last held -- which, a frame behind,
+                // is a picture too small for it. That is the black strip along
+                // the edge being dragged: not something drawn wrongly but a
+                // frame that has not arrived yet.
+                //
+                // So it arrives now. The cost is the window sitting in here
+                // for the length of a frame -- some six milliseconds, against
+                // the tenth of a second that made this deferred in the first
+                // place -- and the present does not wait for the screen,
+                // because the thing waiting for this frame is the resize.
+                //
+                // Not while the driver is measuring: it asks for the sizes
+                // itself, from inside the frame, and would be re-entered here.
+                match self.driver.is_none() {
+                    true => {
+                        self.take_the_size();
+                        self.paint(false);
+                    }
+                    false => self.redraw(),
+                }
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.point_at(position.x as f32, position.y as f32);
@@ -5067,31 +5084,10 @@ impl ApplicationHandler<Update> for App {
                 self.want_faces();
                 self.name_emoji();
                 self.ask_who_is_around();
-                // The two halves of a frame, timed apart. Building the draw
-                // list is this program's work and is the half worth fixing;
-                // handing it to the GPU and waiting for the swapchain is
-                // mostly the driver's, and a slow one there usually means
-                // vsync rather than anything here.
-                let building = matterless_view::timing::watch(
-                    "building the frame",
-                    self.stream.rows.len(),
-                    "rows",
-                );
-                let scene = self.scene();
-                drop(building);
-                let _drawing = matterless_view::timing::watch("drawing the frame", 0, "");
-                let size = self.size;
-                let ground = self.palette.ground;
-                let Some(view) = self.view.as_mut() else {
-                    return;
-                };
-                view.draw_scene(&mut self.fonts, &scene, size, ground);
-                // A frame's worth of input has been acted on.
-                self.input.settle();
+                self.paint(true);
                 if let Some(driver) = self.driver.as_mut()
                     && let Some((act, did)) = driver.drew()
                 {
-                    drop(_drawing);
                     println!(
                         "\n== {act}, {did} times =={}",
                         matterless_view::timing::table()
@@ -5263,14 +5259,6 @@ fn named(key: &winit::keyboard::Key) -> Option<Key> {
 /// How long after the last size before the rest of the conversation is
 /// shaped. Short enough to feel like part of letting go of the edge.
 const SETTLE: std::time::Duration = std::time::Duration::from_millis(120);
-
-/// The least time between two builds of the surface.
-///
-/// One of them costs about a tenth of a second on this machine, so this is
-/// what decides how often a drag can show itself: often enough to follow the
-/// edge, rarely enough that the window is not sitting inside the graphics
-/// driver while somebody is trying to move it.
-const REBUILD: std::time::Duration = std::time::Duration::from_millis(200);
 
 fn thread_name(root_id: &str) -> String {
     format!("thread/{root_id}")

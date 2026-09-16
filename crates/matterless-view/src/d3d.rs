@@ -26,11 +26,12 @@ use windows::Win32::Graphics::Direct3D11::{
     ID3D11DeviceContext, ID3D11RenderTargetView, ID3D11Texture2D,
 };
 use windows::Win32::Graphics::Dxgi::Common::{
-    DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_MODE_DESC, DXGI_SAMPLE_DESC,
+    DXGI_ALPHA_MODE_IGNORE, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC,
 };
 use windows::Win32::Graphics::Dxgi::{
-    CreateDXGIFactory1, DXGI_SWAP_CHAIN_DESC, DXGI_SWAP_CHAIN_FLAG, DXGI_SWAP_EFFECT_FLIP_DISCARD,
-    DXGI_USAGE_RENDER_TARGET_OUTPUT, IDXGIAdapter, IDXGIFactory1, IDXGISwapChain,
+    CreateDXGIFactory1, DXGI_SCALING_NONE, DXGI_SWAP_CHAIN_DESC1, DXGI_SWAP_CHAIN_FLAG,
+    DXGI_SWAP_EFFECT_FLIP_DISCARD, DXGI_USAGE_RENDER_TARGET_OUTPUT, IDXGIAdapter, IDXGIFactory1,
+    IDXGIFactory2, IDXGISwapChain1,
 };
 
 /// How many buffers the swapchain holds: one on screen, one being drawn.
@@ -40,7 +41,7 @@ const BUFFERS: u32 = 2;
 pub struct Gpu {
     pub device: ID3D11Device,
     pub context: ID3D11DeviceContext,
-    pub chain: IDXGISwapChain,
+    pub chain: IDXGISwapChain1,
     /// The view of whichever buffer is being drawn into, rebuilt with the
     /// swapchain because it names a texture that the resize replaces.
     pub target: Option<ID3D11RenderTargetView>,
@@ -55,7 +56,7 @@ impl Gpu {
     /// waking a discrete GPU to draw a few hundred quads, and on Direct3D that
     /// preference costs nothing -- which was the whole trouble with Vulkan.
     pub fn new(window: HWND, size: (u32, u32)) -> Result<Self, String> {
-        let factory: IDXGIFactory1 =
+        let factory: IDXGIFactory2 =
             unsafe { CreateDXGIFactory1() }.map_err(|why| why.to_string())?;
         let adapter = pick(&factory);
 
@@ -84,35 +85,37 @@ impl Gpu {
             return Err("no Direct3D device".to_string());
         };
 
-        let how = DXGI_SWAP_CHAIN_DESC {
-            BufferDesc: DXGI_MODE_DESC {
-                Width: size.0,
-                Height: size.1,
-                // Straight eight-bit channels, never the sRGB view of them:
-                // the palette is written in the numbers it means and the frame
-                // is written without a second encoding, so a surface that
-                // decodes on the way in is how every colour came out pale.
-                Format: DXGI_FORMAT_B8G8R8A8_UNORM,
-                ..Default::default()
-            },
+        let how = DXGI_SWAP_CHAIN_DESC1 {
+            Width: size.0,
+            Height: size.1,
+            // Straight eight-bit channels, never the sRGB view of them: the
+            // palette is written in the numbers it means and the frame is
+            // written without a second encoding, so a surface that decodes on
+            // the way in is how every colour came out pale.
+            Format: DXGI_FORMAT_B8G8R8A8_UNORM,
             SampleDesc: DXGI_SAMPLE_DESC {
                 Count: 1,
                 Quality: 0,
             },
             BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
             BufferCount: BUFFERS,
-            OutputWindow: window,
-            Windowed: true.into(),
+            // The reason this is the newer call. Between two frames of a drag
+            // the window keeps growing, and the compositor has only the last
+            // buffer to show in it -- which by default it stretches to fit.
+            // The contents swell as the edge runs ahead and snap back at the
+            // next frame, which is a rubber band rather than a resize. `NONE`
+            // leaves them the size they were drawn, in the corner they were
+            // drawn in; the strip the window has gained is simply not covered
+            // yet, for the one frame before it is.
+            Scaling: DXGI_SCALING_NONE,
             // Flip, because the alternative is a blit the compositor has to do
             // again on the way to the screen.
             SwapEffect: DXGI_SWAP_EFFECT_FLIP_DISCARD,
+            AlphaMode: DXGI_ALPHA_MODE_IGNORE,
             ..Default::default()
         };
-        let mut chain: Option<IDXGISwapChain> = None;
-        unsafe { factory.CreateSwapChain(&device, &how, &mut chain) }
-            .ok()
+        let chain = unsafe { factory.CreateSwapChainForHwnd(&device, window, &how, None, None) }
             .map_err(|why| why.to_string())?;
-        let chain = chain.ok_or("no swapchain")?;
 
         let mut gpu = Self {
             device,
