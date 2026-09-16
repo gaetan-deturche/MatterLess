@@ -147,13 +147,29 @@ impl Rail {
             // The initials go down first and the icon over them, which is what
             // `z-index: -1` on `.initial` does: a team whose icon the server
             // has none of still reads as something rather than as a blank.
-            let glyphs = painter.run(
+            //
+            // Measured and centred rather than put at a fixed offset. Nine
+            // pixels in suits the two letters most teams reduce to and nothing
+            // else: a team that reduces to one sat right of centre, and the
+            // envelope on the direct-messages button -- which is not initials
+            // at all and is a different width again -- sat further right still.
+            let label = initials(&team.name);
+            let mark = mark_run();
+            let wide = matterless_layout::extent_of(
                 fonts,
-                &initials(&team.name),
-                rect.x + 9.0,
-                rect.y + 7.0,
-                Run::label(f32::MAX).bold(),
-            );
+                &label,
+                f32::MAX,
+                matterless_layout::Style {
+                    size: mark.size,
+                    line_height: mark.line_height,
+                    bold: mark.bold,
+                    italic: false,
+                    mono: mark.mono,
+                },
+            )
+            .width;
+            let (at_x, at_y) = mark_at(rect, wide, mark.line_height);
+            let glyphs = painter.run(fonts, &label, at_x, at_y, mark);
             scene.glyphs(
                 glyphs,
                 if here || under {
@@ -230,6 +246,24 @@ pub fn icon_key(team_id: &str) -> String {
 /// destination here that is not a team cannot borrow a team's initial.
 pub const ENVELOPE: &str = "✉";
 
+/// Where a tile's mark goes, from how wide it actually is.
+///
+/// Measured rather than offset by a constant. Nine pixels in suited the two
+/// letters most team names reduce to and nothing else: one letter sat right of
+/// centre, and the envelope on the direct-messages button is wider than either
+/// and ran off the edge of its tile.
+fn mark_at(tile: Rect, wide: f32, tall: f32) -> (f32, f32) {
+    (
+        (tile.x + (tile.width - wide) / 2.0).round(),
+        (tile.y + (tile.height - tall) / 2.0).round(),
+    )
+}
+
+/// How the letter or mark on a tile is set.
+fn mark_run() -> Run {
+    Run::label(f32::MAX).bold()
+}
+
 /// A team name reduced to what fits on a square.
 ///
 /// The first letter of each word, up to two: Sloclap becomes S and Curiosity
@@ -284,6 +318,49 @@ mod tests {
         assert!(placed[0].1.bottom() <= placed[1].1.y);
         for (_, rect) in &placed {
             assert!(rect.x >= strip.x && rect.right() <= strip.right());
+        }
+    }
+
+    /// Whatever a tile carries sits in the middle of it.
+    ///
+    /// Including the envelope, which is not initials, is wider than any pair
+    /// of letters, and at the fixed offset this used to draw at began nine
+    /// pixels in and ended past the right edge of its own tile.
+    #[test]
+    fn a_tile_carries_its_mark_in_the_middle() {
+        let mut fonts = matterless_layout::Fonts::new();
+        let run = mark_run();
+        let tile = Rect::new(10.0, 40.0, TILE, TILE);
+        for name in [ENVELOPE, "Sloclap", "Curiosity Team"] {
+            let label = initials(name);
+            let wide = matterless_layout::extent_of(
+                &mut fonts,
+                &label,
+                f32::MAX,
+                matterless_layout::Style {
+                    size: run.size,
+                    line_height: run.line_height,
+                    bold: run.bold,
+                    italic: false,
+                    mono: run.mono,
+                },
+            )
+            .width;
+            let (x, y) = mark_at(tile, wide, run.line_height);
+            let (left, right) = (x - tile.x, tile.right() - (x + wide));
+            assert!(
+                (left - right).abs() <= 1.0,
+                "{label:?} sits {left} from the left and {right} from the right"
+            );
+            assert!(
+                left >= 0.0 && right >= 0.0,
+                "{label:?} is {wide} wide and runs off a {TILE} tile"
+            );
+            let (top, bottom) = (y - tile.y, tile.bottom() - (y + run.line_height));
+            assert!(
+                (top - bottom).abs() <= 1.0,
+                "{label:?} sits {top} from the top and {bottom} from the bottom"
+            );
         }
     }
 
