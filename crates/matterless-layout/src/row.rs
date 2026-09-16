@@ -704,7 +704,17 @@ pub fn lay_out(fonts: &mut Fonts, row: &Row, theme: &Theme) -> RowLayout {
                 bold: true,
                 italic: false,
                 mono: false,
-                press: None,
+                // The same press an `@name` in a sentence carries, so pressing
+                // who said it opens the same card -- which is what the official
+                // client does and the only thing the name was missing.
+                //
+                // Never for a webhook: what is shown there is a display name
+                // the sender chose, not an account, and looking it up can only
+                // fail.
+                press: match post.bot {
+                    true => None,
+                    false => Some(Press::Person(post.author_name.clone())),
+                },
                 faint: false,
                 emoji: None,
             });
@@ -1553,6 +1563,52 @@ mod tests {
         // a width that only accounted for one of them would run the last
         // letter of a full line out past its own background.
         assert_eq!(code.wrap, theme.text_width() - theme.code_padding * 2.0);
+    }
+
+    /// Pressing who said it opens them, the way pressing an `@name` does.
+    #[test]
+    fn the_author_of_a_message_can_be_pressed() {
+        let mut fonts = Fonts::new();
+        let theme = Theme::default();
+        let mut post = post(vec![text("morning")]);
+        post.author_name = "ada.lovelace".into();
+        let laid = lay_out(&mut fonts, &Row::Post { post }, &theme);
+        let header = laid
+            .blocks
+            .iter()
+            .find(|block| block.kind == Kind::Header)
+            .expect("no header");
+        let pressed: Vec<&Press> = header
+            .spans
+            .iter()
+            .filter_map(|span| span.press.as_ref())
+            .collect();
+        assert_eq!(
+            pressed,
+            vec![&Press::Person("ada.lovelace".into())],
+            "the name, and only the name: a timestamp leads nowhere"
+        );
+    }
+
+    /// What a webhook shows is a name its sender chose, not an account, so
+    /// looking it up could only ever fail.
+    #[test]
+    fn a_webhooks_name_leads_nowhere() {
+        let mut fonts = Fonts::new();
+        let theme = Theme::default();
+        let mut post = post(vec![text("build 412 failed")]);
+        post.author_name = "Build Robot".into();
+        post.bot = true;
+        let laid = lay_out(&mut fonts, &Row::Post { post }, &theme);
+        let header = laid
+            .blocks
+            .iter()
+            .find(|block| block.kind == Kind::Header)
+            .expect("no header");
+        assert!(
+            header.spans.iter().all(|span| span.press.is_none()),
+            "a webhook's display name was made pressable"
+        );
     }
 
     /// A pill is exactly its contents plus the same padding on either side.

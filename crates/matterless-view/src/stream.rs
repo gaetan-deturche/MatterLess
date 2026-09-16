@@ -1077,6 +1077,27 @@ impl Stream {
     ///
     /// Only a `Post` has one: a continuation is the same person still talking,
     /// which is exactly what leaving the gutter empty says.
+    /// Everyone whose face is on screen, so their presence can be asked for.
+    ///
+    /// The rows in view rather than every row loaded: history here has no
+    /// bound, and this is read from the frame loop. What is in view is a
+    /// screenful either way.
+    pub fn who_is_here(&self, within: Rect) -> Vec<String> {
+        let mut here = Vec::new();
+        let mut top = within.y + self.theme.pad_top - self.scroll;
+        for (index, laid) in self.laid.iter().enumerate() {
+            let bottom = top + laid.height;
+            if bottom >= within.y
+                && top <= within.bottom()
+                && let Some(Row::Post { post }) = self.rows.get(index)
+            {
+                here.push(post.author_id.clone());
+            }
+            top = bottom;
+        }
+        here
+    }
+
     pub fn faces(&self, within: Rect) -> Vec<(String, u32, u32)> {
         let mut wanted = Vec::new();
         let mut top = within.y + self.theme.pad_top - self.scroll;
@@ -1654,7 +1675,13 @@ impl Stream {
         }
     }
 
-    pub fn draw(&mut self, into: &mut Canvas<'_>, within: Rect, input: &Input) {
+    pub fn draw(
+        &mut self,
+        into: &mut Canvas<'_>,
+        within: Rect,
+        input: &Input,
+        presence: &std::collections::HashMap<String, String>,
+    ) {
         // Gathered as the rows are drawn, because only the shaping knows
         // where the words landed. Read by `boxes` on the next frame, which is
         // the same one-frame-old answer the toolbar is hit with -- and a
@@ -1708,6 +1735,7 @@ impl Stream {
                         width,
                         height,
                         press,
+                        quiet,
                     } = piece
                     {
                         let box_of = Rect::new(*x, *y, *width, *height);
@@ -1715,7 +1743,11 @@ impl Stream {
                         // ground, as they do in the stylesheet. Drawn before
                         // the words rather than after, or the background would
                         // cover what it is meant to be behind.
-                        if !matches!(press, matterless_layout::row::Press::Link(_)) {
+                        // Not a quiet one: the author's name over a message
+                        // is pressable and is not a mention, and wearing the
+                        // pill every message read as though it opened by
+                        // naming its own writer.
+                        if !quiet && !matches!(press, matterless_layout::row::Press::Link(_)) {
                             scene.rounded(
                                 box_of.x - 2.0,
                                 box_of.y + 1.0,
@@ -1780,6 +1812,33 @@ impl Stream {
                         // two clients.
                         radius: AVATAR / 2.0,
                     }]);
+                    // And whether they are around, on the corner of their own
+                    // face. After the picture, never before it: this scene is
+                    // painted in the order it is built, so a dot put where it
+                    // reads best rather than where it paints is a dot the face
+                    // lands on top of.
+                    if let Some(lit) = presence
+                        .get(&post.author_id)
+                        .and_then(|status| crate::sidebar::dot(status, palette))
+                    {
+                        let at = (inner.x + 2.0 + AVATAR - STATUS, top + 4.0 + AVATAR - STATUS);
+                        // A ring of whatever the row is drawn on, which is what
+                        // holds the dot to the face instead of letting it read
+                        // as something floating beside it.
+                        let behind = match hovered == Some(index) {
+                            true => palette.surface,
+                            false => palette.ground,
+                        };
+                        scene.rounded(
+                            at.0 - STATUS_RING,
+                            at.1 - STATUS_RING,
+                            STATUS + STATUS_RING * 2.0,
+                            STATUS + STATUS_RING * 2.0,
+                            behind,
+                            (STATUS + STATUS_RING * 2.0) / 2.0,
+                        );
+                        scene.rounded(at.0, at.1, STATUS, STATUS, lit, STATUS / 2.0);
+                    }
                 }
                 scene.extend(self.pictures(index, top, inner.x, palette.ground));
                 // The toolbar last of the row's own drawing, so it sits over
@@ -1846,6 +1905,11 @@ impl Stream {
 
 /// The size a face is drawn at, and the room the gutter already leaves for it.
 pub const AVATAR: f32 = 28.0;
+/// The presence dot on the corner of a face in the conversation.
+const STATUS: f32 = 9.0;
+/// The ring of row-coloured ground around it, which is what holds it to the
+/// face rather than letting it float over the message beside it.
+const STATUS_RING: f32 = 2.0;
 
 /// The corners the stylesheet cuts: a capsule on a reaction, a softer one on
 /// a card or a code block.
@@ -1968,12 +2032,14 @@ fn shift(piece: matterless_paint::Piece, by: f32) -> matterless_paint::Piece {
             width,
             height,
             press,
+            quiet,
         } => Piece::Press {
             x: x + by,
             y,
             width,
             height,
             press,
+            quiet,
         },
         Piece::Text {
             glyphs,

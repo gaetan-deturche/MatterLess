@@ -495,6 +495,7 @@ fn a_picture_is_drawn_over_its_own_placeholder() {
         },
         panel(),
         &Input::default(),
+        &std::collections::HashMap::new(),
     );
 
     let pieces: Vec<&Piece> = scene

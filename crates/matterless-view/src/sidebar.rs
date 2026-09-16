@@ -503,9 +503,13 @@ impl Sidebar {
                         ),
                     }
                     // Whether somebody is around, which is the one thing that
-                    // decides whether you write to them now. Only here: a dot
-                    // on every message row would say nothing about the
-                    // conversation and turn the margin into a light display.
+                    // decides whether you write to them now.
+                    //
+                    // This said for a long time that it belonged only here,
+                    // and that a dot against every message would turn the
+                    // margin into a light display. The official client puts
+                    // one on the face on each message and it does not, so the
+                    // stream draws them too -- see `Stream::draw`.
                     //
                     // After the face and not before it. The scene is painted in
                     // the order it is built, so a dot drawn first is a dot the
@@ -978,7 +982,7 @@ fn spoken(status: &str) -> &str {
 /// Offline draws no dot rather than a grey one. Absence is the common case,
 /// and a sidebar of grey dots is a sidebar of noise -- the question the dot
 /// answers is "are they there", and the answer is the dot's presence.
-fn dot(status: &str, palette: &matterless_paint::Palette) -> Option<[u8; 4]> {
+pub fn dot(status: &str, palette: &matterless_paint::Palette) -> Option<[u8; 4]> {
     let solid = |ink: [u8; 3]| [ink[0], ink[1], ink[2], 255];
     match status {
         "online" => Some(solid(palette.ok)),
