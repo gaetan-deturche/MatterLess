@@ -165,17 +165,24 @@ enum Act {
     Typing,
     /// Open a thread, and close it. A second stream beside the first.
     Threading,
+    /// Drag the window's edge, which is the dearest thing anybody can do to
+    /// it: every width rebuilds the swapchain.
+    ///
+    /// Driven rather than asked for, because measuring it by hand costs
+    /// somebody a drag per reading and answers one question at a time.
+    Resizing,
 }
 
 impl Act {
     /// Every act, in the order a run measures them: cheapest first, so the
     /// table above reads as the floor the ones below it are measured against.
-    const EVERY: [Act; 5] = [
+    const EVERY: [Act; 6] = [
         Act::Still,
         Act::Scrolling,
         Act::Switching,
         Act::Typing,
         Act::Threading,
+        Act::Resizing,
     ];
 
     fn what(self) -> &'static str {
@@ -185,6 +192,7 @@ impl Act {
             Act::Switching => "switching channel",
             Act::Typing => "typing",
             Act::Threading => "opening a thread",
+            Act::Resizing => "dragging the edge",
         }
     }
 }
@@ -314,12 +322,12 @@ impl Driver {
 
 struct App {
     window: Option<Arc<Window>>,
-    surface: Option<wgpu::Surface<'static>>,
+    /// Kept so another surface can be made for the window without starting
+    /// over. `MATTERLESS_SURFACE=new` builds one instead of rebuilding the
+    /// one there is, to find out which of the two is cheaper.
     view: Option<matterless_view::View>,
-    format: wgpu::TextureFormat,
     /// The same surface read without its sRGB encoding, which is what the
     /// pipeline writes through.
-    plain: wgpu::TextureFormat,
     size: (u32, u32),
     fonts: Fonts,
     painter: Painter,
@@ -345,6 +353,44 @@ struct App {
     /// runs so that the acts are measured against each other rather than
     /// against wherever the act before them wandered to.
     home: Option<String>,
+    /// When the window last changed size, while it is still changing.
+    ///
+    /// A drag reports a size on every frame of itself and each one shapes what
+    /// is on screen; the whole conversation is shaped once, when the edge
+    /// stops, to settle the heights of everything that is not.
+    resizing: Option<std::time::Instant>,
+    /// A size that has arrived and not been built for yet.
+    ///
+    /// Held rather than applied, and applied only where the surface is rebuilt
+    /// for it. `self.size` is what every rectangle in the window is measured
+    /// from and the surface is what they are drawn into: moved apart, even for
+    /// one frame, the window lays itself out for a size it is not yet, and the
+    /// scissor for a panel 1001 wide lands in a target 1000 wide -- which is
+    /// not a wrong pixel, it is a validation error and a dead window.
+    ///
+    /// Answered once the event queue is empty rather than as each size lands.
+    /// Rebuilding the swapchain costs about a tenth of a second on this
+    /// machine, measured in a release build for a change of one pixel: doing
+    /// it inside the handler left the window blocked in there while the system
+    /// queued the next dozen sizes, every one of which was then paid for in
+    /// turn. A drag can report sizes faster than the window can draw them, and
+    /// the only one worth building for is the one it ends up at.
+    sized: Option<(u32, u32)>,
+    /// When the surface was last built.
+    ///
+    /// Rebuilding it costs about a tenth of a second here -- measured in an
+    /// optimised build, against present mode and frame latency both, and
+    /// neither of them moves it. So the window cannot show itself at a new
+    /// size more than nine or ten times a second however this is arranged,
+    /// and doing it on every frame of a drag is what left the window itself
+    /// trailing the pointer: the system's own resize loop is waiting on this
+    /// handler to come back.
+    ///
+    /// Between rebuilds the frames still go out, into a surface that is the
+    /// size the window used to be; the compositor stretches them. Stale by a
+    /// fraction of a second and stretched a little is what every other window
+    /// on this desktop does while it is being dragged.
+    surfaced: std::time::Instant,
     input: Input,
     placed: Vec<Placed>,
     composer: Composer,
@@ -551,11 +597,11 @@ impl App {
         let mut app = Self {
             driver: Driver::asked(),
             home: None,
+            resizing: None,
+            sized: None,
+            surfaced: std::time::Instant::now(),
             window: None,
-            surface: None,
             view: None,
-            format: wgpu::TextureFormat::Bgra8UnormSrgb,
-            plain: wgpu::TextureFormat::Bgra8Unorm,
             size: (1000, 760),
             fonts: {
                 // Building this scans the system's font directories.
@@ -3812,6 +3858,26 @@ impl App {
                     did += 1;
                 }
             }
+            Act::Resizing => {
+                // A width that moves every frame, the way a hand on the edge
+                // moves it. Back and forth so it never runs off the screen.
+                let swing = (tick % 120) as i32;
+                let by = match swing < 60 {
+                    true => swing,
+                    false => 120 - swing,
+                };
+                let wide = 900 + by * 4;
+                if let Some(window) = self.window.as_ref() {
+                    let asked = window.request_inner_size(winit::dpi::PhysicalSize::new(
+                        wide as u32,
+                        self.size.1,
+                    ));
+                    // Some systems answer straight away rather than through an
+                    // event; either way the window has been asked to change.
+                    let _ = asked;
+                    did += 1;
+                }
+            }
         }
         did
     }
@@ -3843,6 +3909,59 @@ impl App {
             matterless_render::Row::ThreadFooter { root_id, .. } => Some(root_id.clone()),
             _ => None,
         })
+    }
+
+    /// Builds the surface for whatever size has arrived, if one has.
+    ///
+    /// Called from the frame rather than from the wait. Dragging a window's
+    /// border on this system runs a message loop of the operating system's
+    /// own, and `about_to_wait` is not reached again until the border is let
+    /// go -- so a window that resized itself there simply stopped resizing
+    /// while it was being resized.
+    ///
+    /// Once per frame is the whole point. A drag reports sizes faster than
+    /// this can draw them and rebuilding the swapchain costs about a tenth of
+    /// a second, so the sizes the window passed through on the way are not
+    /// worth building for: only the one it is in when a frame is about to be
+    /// drawn. `self.size` moves here and nowhere else, beside the surface it
+    /// has to agree with.
+    fn take_the_size(&mut self) {
+        let Some(size) = self.sized else {
+            return;
+        };
+        // Not yet, if one was built a moment ago and the edge is still moving.
+        // The last size always gets one: `resizing` runs out and asks again.
+        if size != self.size && self.surfaced.elapsed() < REBUILD {
+            return;
+        }
+        self.sized = None;
+        self.surfaced = std::time::Instant::now();
+        let _resizing = matterless_view::timing::watch("resizing the window", 0, "");
+        self.size = size;
+        {
+            // Rebuilt by handing the old swapchain over rather than retiring
+            // it -- `vk.rs` says what that is worth and what it is not.
+            let _surfacing = matterless_view::timing::watch("  reconfiguring the surface", 0, "");
+            if let Some(view) = self.view.as_mut()
+                && let Err(why) = view.resize(size)
+            {
+                eprintln!("could not resize the surface: {why}");
+            }
+        }
+        // What can be seen, at the new width, so the conversation re-wraps as
+        // the edge moves rather than once it stops. A screenful is a dozen
+        // messages and the channel is a hundred and eighty; the rest are
+        // settled once the dragging ends.
+        let _shaping = matterless_view::timing::watch("  shaping what shows", 0, "");
+        let within = self.stream_rect();
+        let width = self.channel_rect().width;
+        self.composer.lay_out(&mut self.fonts, width);
+        self.stream
+            .relay_seen(&mut self.fonts, within.width, within);
+        if let (Some(pane), Some(thread)) = (self.thread_stream_rect(), self.thread.as_mut()) {
+            thread.relay_seen(&mut self.fonts, pane.width, pane);
+        }
+        self.resizing = Some(std::time::Instant::now());
     }
 
     /// Everything the frame draws, in one scene.
@@ -4459,6 +4578,22 @@ impl ApplicationHandler<Update> for App {
             self.redraw();
             return events.set_control_flow(ControlFlow::Poll);
         }
+        // The rest of the conversation, once the edge has stopped moving.
+        // Asked for here because this already runs between every pair of sizes
+        // a drag reports, so there is no timer to keep.
+        if let Some(since) = self.resizing
+            && since.elapsed() >= SETTLE
+        {
+            self.resizing = None;
+            // The size the window came to rest at, if the throttle above was
+            // still holding one back when the edge stopped.
+            if self.sized.is_some() {
+                self.surfaced = std::time::Instant::now() - REBUILD;
+                self.take_the_size();
+            }
+            self.relayout();
+            self.redraw();
+        }
         let (expired, next) = self.typing.forget_stale();
         // Only when a line actually went: asking for a frame whenever one is
         // merely live would redraw every frame for as long as anybody types.
@@ -4479,10 +4614,17 @@ impl ApplicationHandler<Update> for App {
             self.forget_divider();
         }
         let filling = self.shape_some();
-        let next = [next, self.tooltip.wakes(), self.rest.wakes()]
-            .into_iter()
-            .flatten()
-            .min();
+        let next = [
+            next,
+            self.tooltip.wakes(),
+            self.rest.wakes(),
+            // So the window wakes to finish shaping even when the drag ends
+            // with nothing else to wake it.
+            self.resizing.map(|since| since + SETTLE),
+        ]
+        .into_iter()
+        .flatten()
+        .min();
         events.set_control_flow(match (filling, next) {
             // Straight back here for the next slice. Nothing else will wake
             // the window for work it is doing on its own.
@@ -4532,68 +4674,27 @@ impl ApplicationHandler<Update> for App {
             eprintln!("no notification area: closing the window will quit");
         }
 
-        // Vulkan by name rather than whatever the platform prefers, which on
-        // Windows would be DX12.
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::VULKAN,
-            ..Default::default()
-        });
-        let surface = instance
-            .create_surface(Arc::clone(&window))
-            .expect("a surface");
-        // The integrated chip in preference to the card, deliberately.
-        //
-        // A chat window has no business waking a discrete GPU: it draws a few
-        // hundred quads when somebody scrolls, and on a machine doing real
-        // work on that card it should stay out of the way.
-        //
-        // It is not free, and the cost is worth knowing before somebody
-        // "fixes" this. Where the display hangs off a discrete card -- which
-        // is the usual desktop arrangement -- every finished frame is copied
-        // across to be shown. Measured on a machine with an RTX 5070 beside an
-        // integrated Radeon, that was 350ms of extra swapchain creation at
-        // start-up, and the surface came back in the other channel order,
-        // which is the display saying whose it is. `--example what_gpu` prints
-        // what any given machine offers and what each costs.
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::LowPower,
-            compatible_surface: Some(&surface),
-            force_fallback_adapter: false,
-        }))
-        .expect("a Vulkan adapter");
-        let (device, queue) =
-            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default()))
-                .expect("a device");
-
-        let ready = began.elapsed();
-        let capabilities = surface.get_capabilities(&adapter);
-        self.format = capabilities.formats[0];
-        self.plain = matterless_view::plain(self.format);
-        let physical = window.inner_size();
-        self.size = (physical.width.max(1), physical.height.max(1));
-        surface.configure(
-            &device,
-            &wgpu::SurfaceConfiguration {
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-                format: self.format,
-                width: self.size.0,
-                height: self.size.1,
-                present_mode: wgpu::PresentMode::AutoVsync,
-                alpha_mode: capabilities.alpha_modes[0],
-                view_formats: vec![self.plain],
-                desired_maximum_frame_latency: 2,
-            },
-        );
-
-        println!(
-            "adapter: {} ({:?}), surface {:?} drawn through {:?}",
-            adapter.get_info().name,
-            adapter.get_info().backend,
-            self.format,
-            self.plain
-        );
-        self.view = Some(matterless_view::View::new(device, queue, self.plain));
-        self.surface = Some(surface);
+        // Direct3D. Everything the window draws through is built here and
+        // owned by the view: the device, the swapchain, the pipeline and the
+        // sheets.
+        let handle = match raw_window_handle::HasWindowHandle::window_handle(&window)
+            .expect("a window handle")
+            .as_raw()
+        {
+            raw_window_handle::RawWindowHandle::Win32(win32) => {
+                windows::Win32::Foundation::HWND(win32.hwnd.get() as *mut _)
+            }
+            _ => return events.exit(),
+        };
+        let view = match matterless_view::View::new(handle, self.size) {
+            Ok(view) => view,
+            Err(why) => {
+                eprintln!("could not open Direct3D: {why}");
+                return events.exit();
+            }
+        };
+        println!("drawing through Direct3D, {}x{}", self.size.0, self.size.1);
+        self.view = Some(view);
         // Already held, from before the tray was told about it.
         debug_assert!(self.window.is_some());
         self.relayout();
@@ -4606,11 +4707,7 @@ impl ApplicationHandler<Update> for App {
         // What the window waits on before it can be shown, since it now waits
         // on all of it: a swapchain is most of it and belongs to the driver,
         // and the rest is this program's to keep honest.
-        println!(
-            "ready in {}ms, of which {}ms was Vulkan up to the device",
-            began.elapsed().as_millis(),
-            ready.as_millis()
-        );
+        println!("ready in {}ms", began.elapsed().as_millis());
         // Everything is ready, so the window can be seen -- and the message
         // loop is about to start, so the shell's question about the icon will
         // be answered rather than timed out.
@@ -4655,29 +4752,16 @@ impl ApplicationHandler<Update> for App {
                 }
             }
             WindowEvent::Resized(size) => {
-                self.size = (size.width.max(1), size.height.max(1));
-                if let (Some(surface), Some(view)) = (&self.surface, &self.view) {
-                    surface.configure(
-                        &view.device,
-                        &wgpu::SurfaceConfiguration {
-                            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-                            format: self.format,
-                            width: self.size.0,
-                            height: self.size.1,
-                            present_mode: wgpu::PresentMode::AutoVsync,
-                            alpha_mode: wgpu::CompositeAlphaMode::Auto,
-                            view_formats: vec![self.plain],
-                            desired_maximum_frame_latency: 2,
-                        },
-                    );
-                }
-                // A width change is the case the DOM list could never do
-                // cleanly: here the new heights are known before the frame is
-                // drawn, so there is nothing to correct afterwards.
-                self.relayout();
-                if let Some(window) = &self.window {
-                    window.request_redraw();
-                }
+                // Remembered, not acted on. Rebuilding the swapchain costs
+                // about a tenth of a second on this machine -- measured in a
+                // release build, for a change of one pixel -- and doing it
+                // here meant the window sat blocked inside the handler while
+                // the system queued the next dozen sizes, every one of which
+                // was then paid for in turn. `about_to_wait` runs once the
+                // queue is empty, so only the size the window actually ended
+                // up in is ever built for.
+                self.sized = Some((size.width.max(1), size.height.max(1)));
+                self.redraw();
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.point_at(position.x as f32, position.y as f32);
@@ -4935,9 +5019,11 @@ impl ApplicationHandler<Update> for App {
                 self.wheel_by(by);
             }
             WindowEvent::RedrawRequested => {
-                if self.surface.is_none() || self.view.is_none() {
+                if self.view.is_none() {
                     return;
                 }
+                // Before anything measures itself against the window.
+                self.take_the_size();
                 // Once, here, before the frame it is measured by.
                 if let Some(driver) = self.driver.as_ref()
                     && let Some(act) = driver.act()
@@ -4959,10 +5045,7 @@ impl ApplicationHandler<Update> for App {
                     let mut placed = 0;
                     let mut refused = 0;
                     for (key, width, height, rgba) in self.arrived.drain(..) {
-                        match view
-                            .atlas
-                            .put_image(&view.queue, &key, &rgba, width, height)
-                        {
+                        match view.put_image(&key, &rgba, width, height) {
                             Some(_) => placed += 1,
                             // Bigger than the picture half itself, now that
                             // the half makes room rather than filling up.
@@ -4999,20 +5082,10 @@ impl ApplicationHandler<Update> for App {
                 let _drawing = matterless_view::timing::watch("drawing the frame", 0, "");
                 let size = self.size;
                 let ground = self.palette.ground;
-                let plain = self.plain;
-                let (Some(surface), Some(view)) = (&self.surface, &mut self.view) else {
+                let Some(view) = self.view.as_mut() else {
                     return;
                 };
-                let Ok(frame) = surface.get_current_texture() else {
-                    return;
-                };
-                // Through the plain view, so the palette is not encoded twice.
-                let target = frame.texture.create_view(&wgpu::TextureViewDescriptor {
-                    format: Some(plain),
-                    ..Default::default()
-                });
-                view.draw_scene(&target, &mut self.fonts, &scene, size, ground);
-                frame.present();
+                view.draw_scene(&mut self.fonts, &scene, size, ground);
                 // A frame's worth of input has been acted on.
                 self.input.settle();
                 if let Some(driver) = self.driver.as_mut()
@@ -5187,6 +5260,18 @@ fn named(key: &winit::keyboard::Key) -> Option<Key> {
 
 /// What a thread panel answers to. Keyed by root so reopening the same thread
 /// can be told from opening a different one.
+/// How long after the last size before the rest of the conversation is
+/// shaped. Short enough to feel like part of letting go of the edge.
+const SETTLE: std::time::Duration = std::time::Duration::from_millis(120);
+
+/// The least time between two builds of the surface.
+///
+/// One of them costs about a tenth of a second on this machine, so this is
+/// what decides how often a drag can show itself: often enough to follow the
+/// edge, rarely enough that the window is not sitting inside the graphics
+/// driver while somebody is trying to move it.
+const REBUILD: std::time::Duration = std::time::Duration::from_millis(200);
+
 fn thread_name(root_id: &str) -> String {
     format!("thread/{root_id}")
 }

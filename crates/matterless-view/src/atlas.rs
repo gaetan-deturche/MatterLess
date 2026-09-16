@@ -35,9 +35,15 @@
 //! them a second time to put them somewhere else would be a request to answer
 //! a question already answered.
 
+use crate::d3d::Gpu;
 use cosmic_text::{CacheKey, SwashCache, SwashContent};
 use matterless_layout::Fonts;
 use std::collections::HashMap;
+use windows::Win32::Graphics::Direct3D11::{
+    D3D11_BIND_SHADER_RESOURCE, D3D11_BOX, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
+    ID3D11ShaderResourceView, ID3D11Texture2D,
+};
+use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_SAMPLE_DESC};
 
 /// Which sheet a quad samples.
 ///
@@ -191,70 +197,85 @@ const KEEP: u64 = 3;
 
 /// One texture, and the shelf over it.
 struct Surface {
-    texture: wgpu::Texture,
-    view: wgpu::TextureView,
+    texture: ID3D11Texture2D,
+    view: ID3D11ShaderResourceView,
     pen: Pen,
 }
 
 impl Surface {
-    fn new(device: &wgpu::Device, label: &str, size: (u32, u32)) -> Self {
-        let texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some(label),
-            size: wgpu::Extent3d {
-                width: size.0,
-                height: size.1,
-                depth_or_array_layers: 1,
+    fn new(gpu: &Gpu, size: (u32, u32)) -> Self {
+        // Colour and coverage, not coverage alone. A letter is stored as white
+        // with the coverage in its alpha, so the vertex tints it; an emoji is
+        // stored as it is, and its vertex is white so nothing tints it. One
+        // format, one sampler, both kinds of glyph -- where a coverage-only
+        // atlas drew every emoji as a white silhouette. Straight rather than
+        // sRGB: these bytes are already sRGB and the frame is written without
+        // a second encoding, so sampling must not decode.
+        let how = D3D11_TEXTURE2D_DESC {
+            Width: size.0,
+            Height: size.1,
+            MipLevels: 1,
+            ArraySize: 1,
+            Format: DXGI_FORMAT_R8G8B8A8_UNORM,
+            SampleDesc: DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
             },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            // Colour and coverage, not coverage alone. A letter is stored as
-            // white with the coverage in its alpha, so the vertex tints it; an
-            // emoji is stored as it is, and its vertex is white so nothing
-            // tints it. One format, one sampler, both kinds of glyph -- where
-            // a coverage-only atlas drew every emoji as a white silhouette.
-            // Plain rather than sRGB: these bytes are already sRGB and the
-            // frame is written without a second encoding, so sampling must not
-            // decode.
-            format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
-        });
-        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+            Usage: D3D11_USAGE_DEFAULT,
+            BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
+            ..Default::default()
+        };
+        let mut texture: Option<ID3D11Texture2D> = None;
+        unsafe { gpu.device.CreateTexture2D(&how, None, Some(&mut texture)) }.expect("a sheet");
+        let texture = texture.expect("a sheet");
+        let mut view: Option<ID3D11ShaderResourceView> = None;
+        unsafe {
+            gpu.device
+                .CreateShaderResourceView(&texture, None, Some(&mut view))
+        }
+        .expect("a view of the sheet");
         Self {
             texture,
-            view,
+            view: view.expect("a view of the sheet"),
             pen: Pen::new(size),
         }
     }
 
-    fn write(&self, queue: &wgpu::Queue, x: u32, y: u32, width: u32, height: u32, data: &[u8]) {
+    /// Copies a rectangle of pixels in.
+    ///
+    /// Straight into the texture rather than through a staging buffer of our
+    /// own: the runtime keeps one and knows when the device is finished with
+    /// it, which is the whole difference between this and doing it by hand.
+    fn write(&self, gpu: &Gpu, x: u32, y: u32, width: u32, height: u32, data: &[u8]) {
         if width == 0 || height == 0 {
             return;
         }
-        queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &self.texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d { x, y, z: 0 },
-                aspect: wgpu::TextureAspect::All,
-            },
-            data,
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(width * 4),
-                rows_per_image: Some(height),
-            },
-            wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-        );
+        let wanted = (width * height * 4) as usize;
+        let Some(bytes) = data.get(..wanted) else {
+            return;
+        };
+        let where_to = D3D11_BOX {
+            left: x,
+            top: y,
+            front: 0,
+            right: x + width,
+            bottom: y + height,
+            back: 1,
+        };
+        unsafe {
+            gpu.context.UpdateSubresource(
+                &self.texture,
+                0,
+                Some(&where_to),
+                bytes.as_ptr() as *const _,
+                width * 4,
+                0,
+            )
+        };
     }
 }
 
-/// A sheet of pictures, and what is in it.
+/// A sheet of pictures, and what is in it./// A sheet of pictures, and what is in it.
 struct Store {
     surface: Surface,
     images: HashMap<String, Option<Held>>,
@@ -265,9 +286,9 @@ struct Store {
 }
 
 impl Store {
-    fn new(device: &wgpu::Device, what: &'static str, size: (u32, u32)) -> Self {
+    fn new(gpu: &Gpu, what: &'static str, size: (u32, u32)) -> Self {
         Self {
-            surface: Surface::new(device, what, size),
+            surface: Surface::new(gpu, size),
             images: HashMap::new(),
             forgotten: Vec::new(),
             what,
@@ -283,7 +304,7 @@ impl Store {
 
     fn put(
         &mut self,
-        queue: &wgpu::Queue,
+        gpu: &Gpu,
         key: &str,
         rgba: &[u8],
         width: u32,
@@ -303,7 +324,7 @@ impl Store {
                 // Out of room: throw away everything that is not on screen and
                 // pack what is left again. A picture that cannot be had even
                 // then is one larger than the sheet itself.
-                self.make_room(queue, now);
+                self.make_room(gpu, now);
                 match self.surface.pen.reserve(width, height) {
                     Some(slot) => slot,
                     None => {
@@ -314,8 +335,7 @@ impl Store {
                 }
             }
         };
-        self.surface
-            .write(queue, slot.x, slot.y, width, height, rgba);
+        self.surface.write(gpu, slot.x, slot.y, width, height, rgba);
         // Its own colours, so the vertex must not tint it.
         let slot = Slot {
             colour: true,
@@ -345,7 +365,7 @@ impl Store {
     /// that moving a picture costs an upload rather than a round trip, and so
     /// that what a reader is looking at does not blink while it is replaced by
     /// itself.
-    fn make_room(&mut self, queue: &wgpu::Queue, now: u64) {
+    fn make_room(&mut self, gpu: &Gpu, now: u64) {
         let before = self.images.len();
         // Absences go too: they are the record of a question already answered,
         // and after this the answer may be different.
@@ -381,7 +401,7 @@ impl Store {
                 continue;
             };
             self.surface
-                .write(queue, slot.x, slot.y, width, height, &held.pixels);
+                .write(gpu, slot.x, slot.y, width, height, &held.pixels);
             kept += 1;
             self.images.insert(
                 key,
@@ -408,29 +428,27 @@ pub struct Atlas {
 }
 
 impl Atlas {
-    pub fn new(device: &wgpu::Device, queue: &wgpu::Queue) -> Self {
+    pub fn new(gpu: &Gpu) -> Self {
         let atlas = Self {
-            letters: Surface::new(device, "letters", LETTERS),
+            letters: Surface::new(gpu, LETTERS),
             slots: HashMap::new(),
-            faces: Store::new(device, "faces", FACES),
-            pictures: Store::new(device, "pictures", PICTURES),
+            faces: Store::new(gpu, "faces", FACES),
+            pictures: Store::new(gpu, "pictures", PICTURES),
             now: 0,
         };
         // One opaque white texel at the origin of the letters sheet, so a solid
         // rectangle is the same pipeline as a glyph: it samples this and
         // multiplies by its colour.
-        atlas
-            .letters
-            .write(queue, 0, 0, 1, 1, &[255, 255, 255, 255]);
+        atlas.letters.write(gpu, 0, 0, 1, 1, &[255, 255, 255, 255]);
         atlas
     }
 
     /// What the pipeline binds, one per sheet.
-    pub fn view(&self, sheet: Sheet) -> &wgpu::TextureView {
+    pub fn view(&self, sheet: Sheet) -> ID3D11ShaderResourceView {
         match sheet {
-            Sheet::Letters => &self.letters.view,
-            Sheet::Faces => &self.faces.surface.view,
-            Sheet::Pictures => &self.pictures.surface.view,
+            Sheet::Letters => self.letters.view.clone(),
+            Sheet::Faces => self.faces.surface.view.clone(),
+            Sheet::Pictures => self.pictures.surface.view.clone(),
         }
     }
 
@@ -480,7 +498,7 @@ impl Atlas {
     /// and what every decoder here produces.
     pub fn put_image(
         &mut self,
-        queue: &wgpu::Queue,
+        gpu: &Gpu,
         key: &str,
         rgba: &[u8],
         width: u32,
@@ -488,8 +506,8 @@ impl Atlas {
     ) -> Option<Slot> {
         let now = self.now;
         match Sheet::of(key) {
-            Sheet::Faces => self.faces.put(queue, key, rgba, width, height, now),
-            _ => self.pictures.put(queue, key, rgba, width, height, now),
+            Sheet::Faces => self.faces.put(gpu, key, rgba, width, height, now),
+            _ => self.pictures.put(gpu, key, rgba, width, height, now),
         }
     }
 
@@ -499,7 +517,7 @@ impl Atlas {
     /// draws as nothing -- which is a real answer and is cached as one.
     pub fn slot(
         &mut self,
-        queue: &wgpu::Queue,
+        gpu: &Gpu,
         fonts: &mut Fonts,
         cache: &mut SwashCache,
         key: CacheKey,
@@ -543,7 +561,7 @@ impl Atlas {
             return None;
         };
         self.letters
-            .write(queue, slot.x, slot.y, width, height, &pixels);
+            .write(gpu, slot.x, slot.y, width, height, &pixels);
         let slot = Slot {
             left: image.placement.left,
             top: image.placement.top,

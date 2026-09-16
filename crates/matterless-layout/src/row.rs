@@ -1406,6 +1406,52 @@ mod tests {
         );
     }
 
+    /// What one row costs to shape, which is what a resize pays per message.
+    ///
+    ///     cargo test -p matterless-layout --release shaping_one_row -- --ignored --nocapture
+    #[test]
+    #[ignore = "a measurement, not an assertion"]
+    fn shaping_one_row_costs() {
+        let mut fonts = Fonts::new();
+        let theme = Theme::default();
+        // A spread of shapes a real channel holds, rather than one sentence
+        // repeated: a row is anything from a word to a screenful of code.
+        let bodies: Vec<Vec<Node>> = (0..179)
+            .map(|at| match at % 4 {
+                0 => vec![text("ok")],
+                1 => vec![text(&"a sentence with a fair few words in it ".repeat(3))],
+                2 => vec![Node::List {
+                    ordered: false,
+                    items: vec![vec![text("one")], vec![text("two")], vec![text("three")]],
+                }],
+                _ => vec![Node::CodeBlock {
+                    language: None,
+                    value: "a line of a stack trace\n".repeat(8),
+                }],
+            })
+            .collect();
+        let rows: Vec<Row> = bodies
+            .into_iter()
+            .map(|nodes| Row::Post { post: post(nodes) })
+            .collect();
+
+        // Warmed, so the font matching and the atlas are not in the number.
+        for row in &rows {
+            let _ = lay_out(&mut fonts, row, &theme);
+        }
+        let began = std::time::Instant::now();
+        for row in &rows {
+            let _ = lay_out(&mut fonts, row, &theme);
+        }
+        let took = began.elapsed();
+        println!(
+            "COST {} rows in {:.1}ms, {:.3}ms each",
+            rows.len(),
+            took.as_secs_f64() * 1000.0,
+            took.as_secs_f64() * 1000.0 / rows.len() as f64
+        );
+    }
+
     /// A tag makes its own room instead of borrowing the space beside it.
     ///
     /// The ground behind a mention reaches past its letters. With nothing but
