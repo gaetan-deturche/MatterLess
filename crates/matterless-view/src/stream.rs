@@ -1767,10 +1767,18 @@ impl Stream {
                         // pill every message read as though it opened by
                         // naming its own writer.
                         if !quiet && !matches!(press, matterless_layout::row::Press::Link(_)) {
+                            // Around the words rather than carved out of the
+                            // line. Measured against a rendered name, the
+                            // ground sat four pixels clear of the letters at
+                            // the top and one at the bottom, so a descender
+                            // ran into its own edge -- which reads as the
+                            // background eating the word rather than holding
+                            // it. A line box is not centred on its letters and
+                            // this has to be.
                             scene.rounded(
-                                box_of.x - 2.0,
-                                box_of.y + 1.0,
-                                box_of.width + 4.0,
+                                box_of.x - MENTION_PAD,
+                                box_of.y + 2.0,
+                                box_of.width + MENTION_PAD * 2.0,
                                 box_of.height - 2.0,
                                 palette.signal_soft,
                                 MENTION,
@@ -1954,6 +1962,8 @@ fn pill_run(theme: &matterless_layout::row::Theme) -> Run {
 }
 const CARD: f32 = 6.0;
 const MENTION: f32 = 3.0;
+/// How far a mention's ground reaches past it on either side.
+const MENTION_PAD: f32 = 3.0;
 /// How wide the "jump to newest" button is.
 const JUMP: f32 = 150.0;
 /// How wide the button that keeps a file is.

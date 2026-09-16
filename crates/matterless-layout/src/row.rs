@@ -263,6 +263,39 @@ const EMOJI_ROOM: usize = 4;
 /// leave the picture straddling two lines.
 const NBSP: &str = "\u{00A0}";
 
+/// A hair of room, put either side of a tag so its ground has somewhere to go.
+///
+/// The ground behind a mention reaches past its letters, and it was reaching
+/// into the one space that separates it from whatever is beside it: two tags
+/// in a row had their grounds touching, and a tag after a word had nothing
+/// between them at all. The gap a reader sees is what is left *after* the
+/// ground, so the room has to be made here rather than borrowed there.
+///
+/// A thin space rather than a full one, because this is a margin and not a
+/// word break -- and spaces standing in for width is what the spans for a
+/// custom emoji already do a few lines below.
+const TAG_ROOM: &str = "\u{2009}";
+
+/// A tag, with that room either side of it.
+///
+/// The room is not part of the press: a reader aiming at a name should not be
+/// able to miss it by a hair and still hit it, and the ground is drawn to the
+/// pressed glyphs rather than to these.
+fn tagged(tag: TextSpan, into: &mut Vec<TextSpan>) {
+    let room = TextSpan {
+        text: TAG_ROOM.to_string(),
+        bold: tag.bold,
+        italic: tag.italic,
+        mono: tag.mono,
+        press: None,
+        faint: false,
+        emoji: None,
+    };
+    into.push(room.clone());
+    into.push(tag);
+    into.push(room);
+}
+
 /// One paragraph-like run of inline content, and how far it is pushed in.
 struct Line {
     /// Inside a blockquote, which is drawn with a bar rather than only an
@@ -473,24 +506,30 @@ fn inline(
             // A mention and a channel link point at somebody and somewhere
             // whatever they are nested inside, so they name their own press
             // rather than inheriting the surrounding one.
-            Node::UserMention { username, .. } => into.push(TextSpan {
-                text: format!("@{username}"),
-                bold,
-                italic,
-                mono,
-                press: Some(Press::Person(username.clone())),
-                faint: false,
-                emoji: None,
-            }),
-            Node::ChannelLink { name } => into.push(TextSpan {
-                text: format!("~{name}"),
-                bold,
-                italic,
-                mono,
-                press: Some(Press::Channel(name.clone())),
-                faint: false,
-                emoji: None,
-            }),
+            Node::UserMention { username, .. } => tagged(
+                TextSpan {
+                    text: format!("@{username}"),
+                    bold,
+                    italic,
+                    mono,
+                    press: Some(Press::Person(username.clone())),
+                    faint: false,
+                    emoji: None,
+                },
+                into,
+            ),
+            Node::ChannelLink { name } => tagged(
+                TextSpan {
+                    text: format!("~{name}"),
+                    bold,
+                    italic,
+                    mono,
+                    press: Some(Press::Channel(name.clone())),
+                    faint: false,
+                    emoji: None,
+                },
+                into,
+            ),
             // A standard emoji is a character and shapes like any other letter.
             // A custom one has no character at all, so the span holds spaces
             // wide enough for the picture and carries the name for whoever
@@ -1351,11 +1390,69 @@ mod tests {
             None,
             &mut spans,
         );
+        // By what they lead to rather than by where they sit: a tag carries a
+        // hair of room either side of it, so its span is not the one after the
+        // words any more.
+        let leads: Vec<&Press> = spans
+            .iter()
+            .filter_map(|span| span.press.as_ref())
+            .collect();
         assert_eq!(
-            spans[0].press,
-            Some(Press::Link("https://example.invalid/x".into()))
+            leads,
+            vec![
+                &Press::Link("https://example.invalid/x".into()),
+                &Press::Person("ada".into()),
+            ]
         );
-        assert_eq!(spans[1].press, Some(Press::Person("ada".into())));
+    }
+
+    /// A tag makes its own room instead of borrowing the space beside it.
+    ///
+    /// The ground behind a mention reaches past its letters. With nothing but
+    /// the one space between two of them, those grounds met in the middle and
+    /// the pair read as one long tag -- and a tag straight after a word had
+    /// nothing between them at all.
+    #[test]
+    fn a_tag_carries_a_hair_of_room_on_either_side() {
+        let mut spans = Vec::new();
+        inline(
+            &[
+                Node::Text {
+                    value: "poke ".into(),
+                },
+                Node::UserMention {
+                    username: "remi".into(),
+                    everyone: false,
+                },
+                Node::Text { value: " ".into() },
+                Node::UserMention {
+                    username: "thibaut".into(),
+                    everyone: false,
+                },
+            ],
+            false,
+            false,
+            false,
+            None,
+            &mut spans,
+        );
+        let at = |who: &str| {
+            spans
+                .iter()
+                .position(|span| span.press == Some(Press::Person(who.into())))
+                .unwrap_or_else(|| panic!("no {who}: {spans:?}"))
+        };
+        for (who, side) in [("remi", 1usize), ("thibaut", 1)] {
+            let tag = at(who);
+            for beside in [tag - side, tag + side] {
+                assert_eq!(spans[beside].text, super::TAG_ROOM, "{who} has no room");
+                assert!(spans[beside].press.is_none(), "the room is pressable");
+            }
+        }
+        // And the room is between them, not inside either: what is pressed is
+        // the name and nothing else.
+        assert_eq!(spans[at("remi")].text, "@remi");
+        assert!(at("thibaut") > at("remi") + 1);
     }
 
     /// A card takes room, or the message under it is drawn over.
