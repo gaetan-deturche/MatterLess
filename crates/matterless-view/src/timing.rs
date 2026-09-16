@@ -14,6 +14,8 @@
 //! matters under a thousand that took no time at all, so only work slow enough
 //! to be felt says anything.
 
+use std::collections::HashMap;
+use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 /// Slow enough to be worth a line.
@@ -54,10 +56,72 @@ pub fn watch(what: &'static str, over: usize, each: &'static str) -> Option<Watc
 impl Drop for Watch {
     fn drop(&mut self) {
         let took = self.began.elapsed();
+        add(self.what, took);
         if took >= SLOW {
             println!("{}", says(self.what, self.over, self.each, took));
         }
     }
+}
+
+/// What every watch in this run has cost, added up.
+///
+/// The printed line answers "what just stalled". This answers "where does a
+/// frame go", which needs every watch rather than only the ones over the bar:
+/// six pieces of work at 3ms each say nothing one at a time and are the whole
+/// frame together.
+static TALLY: LazyLock<Mutex<HashMap<&'static str, Tallied>>> = LazyLock::new(Default::default);
+
+#[derive(Default, Clone, Copy)]
+struct Tallied {
+    runs: u32,
+    total: Duration,
+    worst: Duration,
+}
+
+fn add(what: &'static str, took: Duration) {
+    let Ok(mut tally) = TALLY.lock() else { return };
+    let seen = tally.entry(what).or_default();
+    seen.runs += 1;
+    seen.total += took;
+    seen.worst = seen.worst.max(took);
+}
+
+/// Throws the tally away, so what comes after is measured without it.
+///
+/// For the warm-up before a measured run: the first frames of a window carry
+/// the fonts being loaded and the atlas being filled, which are real costs and
+/// are not what a frame costs.
+pub fn forget() {
+    if let Ok(mut tally) = TALLY.lock() {
+        tally.clear();
+    }
+}
+
+/// Everything measured so far, dearest first.
+pub fn table() -> String {
+    let Ok(tally) = TALLY.lock() else {
+        return String::new();
+    };
+    let mut rows: Vec<(&str, Tallied)> = tally.iter().map(|(what, seen)| (*what, *seen)).collect();
+    rows.sort_by_key(|(_, seen)| std::cmp::Reverse(seen.total));
+    let mut out = format!(
+        "\n{:<28}{:>7}{:>12}{:>12}{:>12}\n",
+        "what", "runs", "total", "mean", "worst"
+    );
+    for (what, seen) in rows {
+        out.push_str(&format!(
+            "{:<28}{:>7}{:>11.1}{}{:>11.2}{}{:>11.2}{}\n",
+            what,
+            seen.runs,
+            seen.total.as_secs_f64() * 1000.0,
+            "ms",
+            seen.total.as_secs_f64() * 1000.0 / seen.runs.max(1) as f64,
+            "ms",
+            seen.worst.as_secs_f64() * 1000.0,
+            "ms",
+        ));
+    }
+    out
 }
 
 /// The line a slow watch prints.
@@ -108,6 +172,30 @@ mod tests {
     #[test]
     fn a_count_of_zero_never_divides_by_it() {
         assert!(!says("nothing at all", 0, "rows", Duration::ZERO).contains("each"));
+    }
+
+    /// A tally is what says where a frame goes; one line at a time cannot.
+    #[test]
+    fn the_table_adds_up_every_run_and_keeps_the_worst() {
+        super::forget();
+        super::add("the sidebar", Duration::from_millis(2));
+        super::add("the sidebar", Duration::from_millis(8));
+        super::add("the rail", Duration::from_millis(1));
+        let table = super::table();
+        let sidebar = table
+            .lines()
+            .find(|line| line.starts_with("the sidebar"))
+            .expect("{table}");
+        assert!(sidebar.contains('2'), "two runs: {sidebar:?}");
+        assert!(sidebar.contains("10.0ms"), "added up: {sidebar:?}");
+        assert!(sidebar.contains("8.00ms"), "the worst kept: {sidebar:?}");
+        // And the dearest is first, which is the only order worth reading.
+        let order: Vec<&str> = table
+            .lines()
+            .filter(|line| line.starts_with("the "))
+            .collect();
+        assert!(order[0].starts_with("the sidebar"), "{order:?}");
+        super::forget();
     }
 
     /// The release build reads no clock at all.

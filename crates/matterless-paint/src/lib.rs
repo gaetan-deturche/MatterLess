@@ -190,6 +190,23 @@ pub struct PlacedGlyph {
     pub scale: f32,
 }
 
+/// A run shaped at the origin, put where the caller asked for it.
+///
+/// Added to rather than shaped against: the pen and the offset are rounded
+/// apart, which is what the shaping did when it was the caller's own, so a
+/// label does not shift by a pixel the first time it comes from the store.
+fn moved(at_origin: &[PlacedGlyph], x: f32, y: f32) -> Vec<PlacedGlyph> {
+    let (x, y) = (x as i32, y as i32);
+    at_origin
+        .iter()
+        .map(|glyph| PlacedGlyph {
+            x: glyph.x + x,
+            y: glyph.y + y,
+            ..*glyph
+        })
+        .collect()
+}
+
 /// Where the glyphs of an already-shaped buffer land.
 ///
 /// `Painter::run` shapes its own text and is the right thing for a label. This
@@ -523,12 +540,66 @@ impl Run {
     }
 }
 
-/// Holds the rasterised glyphs between frames.
+/// One run of interface text, as the thing that decides its shaping.
 ///
-/// Rasterising is the expensive half -- shaping is cheap by comparison -- so the
-/// cache is the thing that must outlive a frame.
+/// The floats are held as their bits because that is what a key needs and
+/// because they are never arithmetic here: two runs either were asked for at
+/// the same size or they were not.
+#[derive(PartialEq, Eq, Hash, Clone)]
+struct Asked {
+    text: String,
+    size: u32,
+    line_height: u32,
+    wrap: u32,
+    bold: bool,
+    mono: bool,
+    icon: bool,
+    smooth: bool,
+}
+
+impl Asked {
+    fn of(text: &str, run: Run) -> Self {
+        Self {
+            text: text.to_string(),
+            size: run.size.to_bits(),
+            line_height: run.line_height.to_bits(),
+            wrap: run.wrap.to_bits(),
+            bold: run.bold,
+            mono: run.mono,
+            icon: run.icon,
+            smooth: run.smooth,
+        }
+    }
+}
+
+/// How many shaped runs to keep before the oldest of them are let go.
+///
+/// A window holds a few hundred labels at once -- every channel in the
+/// sidebar, every heading over them, every word on the toolbar. Well above
+/// that, so a full sidebar never sweeps, and well below the size at which the
+/// map itself would be worth thinking about.
+const KEPT: usize = 512;
+
+/// Holds the rasterised glyphs between frames, and the shaped runs with them.
+///
+/// This said for a long time that rasterising was the expensive half and
+/// shaping cheap by comparison. Measured, that is the wrong way round for
+/// interface text: a frame spent 11ms of its 21 in the sidebar, which is sixty
+/// labels that had not changed since the frame before, each one built into a
+/// `cosmic_text::Buffer` and shaped again from its string. The glyphs behind
+/// them were all cache hits.
+///
+/// So a label's shaping outlives the frame too, held at the origin and moved
+/// into place on the way out. The store is swept in two halves rather than by
+/// counting uses on every hit: when the live half fills, it becomes the spare
+/// and a new one starts, and anything asked for again is carried across. Text
+/// that changes every frame costs a sweep every `KEPT` runs and nothing else.
 pub struct Painter {
     glyphs: SwashCache,
+    /// Runs shaped at the origin, ready to be moved into place.
+    shaped: HashMap<Asked, Vec<PlacedGlyph>>,
+    /// The half before this one. Read on a miss, dropped on the next sweep.
+    spare: HashMap<Asked, Vec<PlacedGlyph>>,
 }
 
 impl Default for Painter {
@@ -541,6 +612,8 @@ impl Painter {
     pub fn new() -> Self {
         Self {
             glyphs: SwashCache::new(),
+            shaped: HashMap::new(),
+            spare: HashMap::new(),
         }
     }
 
@@ -901,6 +974,15 @@ impl Painter {
         if text.is_empty() {
             return Vec::new();
         }
+        let asked = Asked::of(text, run);
+        if !self.shaped.contains_key(&asked)
+            && let Some(before) = self.spare.remove(&asked)
+        {
+            self.shaped.insert(asked.clone(), before);
+        }
+        if let Some(at_origin) = self.shaped.get(&asked) {
+            return moved(at_origin, x, y);
+        }
         // Twice the size when it is a mark, and drawn back down below. The
         // shaping is what carries the size into the glyph's cache key, so this
         // is the only place it can be asked for.
@@ -932,14 +1014,18 @@ impl Painter {
                 let physical = glyph.physical((0.0, line.line_y), 1.0);
                 placed.push(PlacedGlyph {
                     key: physical.cache_key,
-                    x: x as i32 + (physical.x as f32 / over) as i32,
-                    y: y as i32 + (physical.y as f32 / over) as i32,
+                    x: (physical.x as f32 / over) as i32,
+                    y: (physical.y as f32 / over) as i32,
                     shade: Shade::Ink,
                     scale: 1.0 / over,
                 });
             }
         }
-        placed
+        if self.shaped.len() >= KEPT {
+            self.spare = std::mem::take(&mut self.shaped);
+        }
+        let at_origin = self.shaped.entry(asked).or_insert(placed);
+        moved(at_origin, x, y)
     }
 
     /// Shapes a block's spans and reports where each glyph lands.
@@ -1181,6 +1267,76 @@ mod tests {
             following: false,
             previews,
         }
+    }
+
+    fn same(left: &[PlacedGlyph], right: &[PlacedGlyph]) -> bool {
+        left.len() == right.len()
+            && left.iter().zip(right).all(|(one, two)| {
+                one.key == two.key && one.x == two.x && one.y == two.y && one.scale == two.scale
+            })
+    }
+
+    /// A label from the store lands where shaping it again would have put it.
+    ///
+    /// The whole risk of keeping a shaping is that the second time it is used
+    /// it comes back a pixel off, which is invisible in one label and is a
+    /// sidebar that shivers when anything else redraws it.
+    #[test]
+    fn a_kept_shaping_draws_exactly_where_a_fresh_one_would() {
+        let mut fonts = Fonts::new();
+        let run = Run::label(f32::MAX);
+        let fresh = Painter::new().run(&mut fonts, "Voyager | Progression", 31.0, 17.0, run);
+        let mut painter = Painter::new();
+        // The first call shapes it, the second can only have come from the
+        // store -- and both are asked for in the same place.
+        let first = painter.run(&mut fonts, "Voyager | Progression", 31.0, 17.0, run);
+        let again = painter.run(&mut fonts, "Voyager | Progression", 31.0, 17.0, run);
+        assert!(!fresh.is_empty(), "nothing was shaped at all");
+        assert!(same(&fresh, &first), "the first call moved");
+        assert!(same(&fresh, &again), "the kept one moved");
+    }
+
+    /// The same words at another size are another shaping, not the same one
+    /// scaled -- so everything the shaping depends on has to be in the key.
+    #[test]
+    fn a_run_asked_for_differently_is_not_the_one_already_kept() {
+        let mut fonts = Fonts::new();
+        let mut painter = Painter::new();
+        let plain = painter.run(&mut fonts, "Threads", 0.0, 0.0, Run::label(f32::MAX));
+        let bold = painter.run(&mut fonts, "Threads", 0.0, 0.0, Run::label(f32::MAX).bold());
+        let large = painter.run(
+            &mut fonts,
+            "Threads",
+            0.0,
+            0.0,
+            Run::label(f32::MAX).sized(30.0),
+        );
+        assert!(!same(&plain, &bold), "bold came back as the plain shaping");
+        assert!(
+            !same(&plain, &large),
+            "a larger size came back as the small one"
+        );
+    }
+
+    /// The store is swept rather than grown without end, and a sweep keeps
+    /// answering: what is asked for again is carried across from the half
+    /// being let go.
+    #[test]
+    fn a_sweep_does_not_lose_a_label_that_is_still_in_use() {
+        let mut fonts = Fonts::new();
+        let mut painter = Painter::new();
+        let run = Run::label(f32::MAX);
+        let kept = painter.run(&mut fonts, "Voyager | Dev", 4.0, 9.0, run);
+        // Enough one-off text to fill the live half twice over, which is what
+        // a clock that reads a changing count every frame does.
+        for at in 0..KEPT * 2 {
+            let _ = painter.run(&mut fonts, &format!("{at} replies"), 0.0, 0.0, run);
+        }
+        let after = painter.run(&mut fonts, "Voyager | Dev", 4.0, 9.0, run);
+        assert!(
+            same(&kept, &after),
+            "the label came back different after a sweep"
+        );
     }
 
     /// Nothing is drawn below the height the layout reserved.

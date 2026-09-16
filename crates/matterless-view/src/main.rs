@@ -144,6 +144,57 @@ const THREAD: f32 = 420.0;
 /// What the thread pane's reply box answers to.
 const THREAD_COMPOSER: &str = "thread-composer";
 
+/// Draws frames on its own, so a measurement does not need a hand on a wheel.
+///
+/// The window renders on demand: it waits, and a frame happens because
+/// something arrived or somebody moved. That is right for a client and wrong
+/// for measuring one -- the first attempt to find out where a frame goes was
+/// read off whatever the server happened to send, and the sample only grew
+/// when somebody scrolled.
+///
+/// `MATTERLESS_FRAMES=<n>` draws n frames back to back instead, prints what
+/// they cost and quits. The first `WARM` of them are thrown away: a window's
+/// opening frames carry the fonts being read and the atlas being filled, which
+/// are real costs and are not what a frame costs.
+struct Driver {
+    left: u32,
+    warm: u32,
+}
+
+impl Driver {
+    /// How many frames to draw before the tally is started.
+    const WARM: u32 = 30;
+
+    fn asked() -> Option<Self> {
+        let left = std::env::var("MATTERLESS_FRAMES")
+            .ok()?
+            .parse::<u32>()
+            .ok()?;
+        println!(
+            "drawing {left} frames after {} warm (MATTERLESS_FRAMES)",
+            Self::WARM
+        );
+        Some(Self {
+            left,
+            warm: Self::WARM,
+        })
+    }
+
+    /// Counts the frame just drawn. `false` once there are none left to draw.
+    fn drew(&mut self) -> bool {
+        if self.warm > 0 {
+            self.warm -= 1;
+            // Everything up to here was the window opening, not a frame.
+            if self.warm == 0 {
+                matterless_view::timing::forget();
+            }
+            return true;
+        }
+        self.left = self.left.saturating_sub(1);
+        self.left > 0
+    }
+}
+
 struct App {
     window: Option<Arc<Window>>,
     surface: Option<wgpu::Surface<'static>>,
@@ -170,6 +221,9 @@ struct App {
     /// and which half of a direct message names it.
     me: String,
     sidebar: Sidebar,
+    /// Set only by `MATTERLESS_FRAMES`, and the reason the window stops
+    /// waiting between frames.
+    driver: Option<Driver>,
     input: Input,
     placed: Vec<Placed>,
     composer: Composer,
@@ -374,6 +428,7 @@ impl App {
         let (channel, rows) = Self::feed();
         drop(reading);
         let mut app = Self {
+            driver: Driver::asked(),
             window: None,
             surface: None,
             view: None,
@@ -3475,6 +3530,10 @@ impl App {
         let strip = header::strip(self.column_rect());
         let stream = self.stream_rect();
 
+        // Each piece of a frame, so the table says where one goes rather than
+        // only that it was slow. Two spaces in front of the name because they
+        // are the halves of "building the frame", which is the line above them.
+        let probe = matterless_view::timing::watch("  the rail", 0, "");
         let rail = self.rail_rect();
         scene.clip_to(rail.x, rail.y, rail.width, rail.height);
         {
@@ -3486,7 +3545,9 @@ impl App {
             };
             self.rail.draw(&mut canvas, rail, &self.input);
         }
+        drop(probe);
 
+        let probe = matterless_view::timing::watch("  the sidebar", 0, "");
         scene.clip_to(sidebar.x, sidebar.y, sidebar.width, sidebar.height);
         let boxes = self.sidebar.boxes(sidebar);
         let mut canvas = Canvas {
@@ -3497,6 +3558,8 @@ impl App {
         };
         self.sidebar
             .draw(&mut canvas, &boxes, sidebar, &self.input, &self.presence);
+        drop(probe);
+        let probe = matterless_view::timing::watch("  the header", 0, "");
 
         // Read before the painter is borrowed, and given its own layer after: a
         // name too long for the strip is cut by the clip rather than running
@@ -3523,7 +3586,9 @@ impl App {
             palette: &self.palette,
         };
         header.draw(&mut canvas, strip, on_strip);
+        drop(probe);
 
+        let probe = matterless_view::timing::watch("  the stream", self.stream.rows.len(), "rows");
         if self.on_threads() {
             // The list instead of the conversation, in the same column: it was
             // chosen from the sidebar the way a channel is, so it opens where
@@ -3547,6 +3612,8 @@ impl App {
             };
             self.stream.draw(&mut canvas, stream, &self.input);
         }
+        drop(probe);
+        let probe = matterless_view::timing::watch("  the thread pane", 0, "");
 
         // The thread pane: its own header and its own clip, so a reply cannot
         // spill into the conversation it came from.
@@ -3601,6 +3668,8 @@ impl App {
             }
         }
 
+        drop(probe);
+        let probe = matterless_view::timing::watch("  the composers", 0, "");
         // The line above each composer. Drawn before the composers so it is
         // under them, which is where a reserved strip belongs.
         let open = self.sidebar.selected.clone().unwrap_or_default();
@@ -3647,6 +3716,7 @@ impl App {
         // rather than under a message that scrolled into the strip. Not at all
         // while the threads are up: there is nothing there to reply to.
         if self.on_threads() {
+            drop(probe);
             return scene;
         }
         let composer = self.composer_rect();
@@ -3660,6 +3730,8 @@ impl App {
             palette: &self.palette,
         };
         self.composer.draw(&mut canvas, within, focused);
+        drop(probe);
+        let _probe = matterless_view::timing::watch("  the overlays", 0, "");
 
         // Last, and over the whole window: the switcher covers what it stands
         // in front of rather than sitting beside it.
@@ -3982,6 +4054,13 @@ impl ApplicationHandler<Update> for App {
     /// else woke the window, which on a quiet channel is the person who
     /// stopped typing sending their message -- or never.
     fn about_to_wait(&mut self, events: &ActiveEventLoop) {
+        // Straight back for the next one, with nothing waited on: a measured
+        // frame is one this program asked for rather than one the server
+        // happened to cause.
+        if self.driver.is_some() {
+            self.redraw();
+            return events.set_control_flow(ControlFlow::Poll);
+        }
         let (expired, next) = self.typing.forget_stale();
         // Only when a line actually went: asking for a frame whenever one is
         // merely live would redraw every frame for as long as anybody types.
@@ -4562,6 +4641,13 @@ impl ApplicationHandler<Update> for App {
                 frame.present();
                 // A frame's worth of input has been acted on.
                 self.input.settle();
+                if let Some(driver) = self.driver.as_mut()
+                    && !driver.drew()
+                {
+                    drop(_drawing);
+                    println!("{}", matterless_view::timing::table());
+                    events.exit();
+                }
             }
             _ => {}
         }
