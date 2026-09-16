@@ -3137,7 +3137,19 @@ impl App {
         self.input.focus_on(THREAD_COMPOSER);
         // The pane takes width from the channel, so both have to be laid out
         // again before anything is drawn against the old one.
+        //
+        // Anchored on the message whose replies were asked for, not on
+        // whichever row happens to be at the top: the narrower column
+        // re-wraps everything between them, so holding the top still let the
+        // message the reader had just pointed at slide down the screen.
+        let anchored = self
+            .stream
+            .holding_row(&format!("post/{root_id}"), self.stream_rect());
         self.relayout();
+        if anchored.is_some() {
+            let within = self.stream_rect();
+            self.stream.hold(anchored, within);
+        }
         if let Some(within) = self.thread_stream_rect()
             && let Some(thread) = self.thread.as_mut()
         {
@@ -3146,8 +3158,19 @@ impl App {
     }
 
     fn close_thread(&mut self) {
-        if self.thread.take().is_some() {
-            self.relayout();
+        let Some(thread) = self.thread.take() else {
+            return;
+        };
+        // And back to the same message on the way out, for the same reason.
+        let root = thread.name.strip_prefix("thread/").map(str::to_string);
+        let anchored = root.and_then(|root| {
+            self.stream
+                .holding_row(&format!("post/{root}"), self.stream_rect())
+        });
+        self.relayout();
+        if anchored.is_some() {
+            let within = self.stream_rect();
+            self.stream.hold(anchored, within);
         }
     }
 
@@ -4250,6 +4273,17 @@ impl App {
     /// Once per width change, never per frame: the heights do not depend on the
     /// scroll position, which is the property that makes this list honest.
     fn relayout(&mut self) {
+        // What is being read, before any of it moves. Every row is about to be
+        // measured against a different width, so the scroll -- which is a
+        // number of pixels -- will point somewhere else when this is done.
+        // Opening a thread narrows the column, and the message whose replies
+        // the reader had just asked for was the first thing to slide away from
+        // under the pointer.
+        let held = self.stream.holding(self.stream_rect());
+        let thread_held = self
+            .thread_stream_rect()
+            .and_then(|within| self.thread.as_ref()?.holding(within));
+
         // The composer is shaped first: it decides its own height, and the
         // stream gets what is left, so its width has to be settled before the
         // rows are laid out against it.
@@ -4266,6 +4300,7 @@ impl App {
             self.stream.lay_out(&mut self.fonts, stream.width);
         }
         self.stream.clamp(stream);
+        self.stream.hold(held, stream);
 
         if let Some(pane) = self.thread_rect() {
             self.thread_composer.lay_out(&mut self.fonts, pane.width);
@@ -4277,6 +4312,7 @@ impl App {
                 matterless_view::timing::watch("shaping the thread", thread.rows.len(), "rows");
             thread.lay_out(&mut self.fonts, within.width);
             thread.clamp(within);
+            thread.hold(thread_held, within);
         }
     }
 }

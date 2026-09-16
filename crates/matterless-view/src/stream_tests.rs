@@ -144,6 +144,115 @@ fn carded(fonts: &mut Fonts) -> Stream {
     stream
 }
 
+/// Narrowing the column leaves the reader looking at the same message.
+///
+/// A scroll is a number of pixels and every row is re-measured when the column
+/// changes, so the same number lands somewhere else. Opening a thread narrows
+/// the conversation beside it, and the message whose replies had just been
+/// asked for was the first thing to slide out from under the pointer.
+#[test]
+fn a_narrower_column_keeps_the_reader_where_they_were() {
+    let mut fonts = Fonts::new();
+    let mut stream = Stream::new("stream");
+    stream.rows = (0..40)
+        .map(|at| {
+            let mut said = post(&format!("p{at}"), "");
+            // Long enough that a narrower column wraps it differently, which
+            // is the whole reason the pixels stop meaning what they meant.
+            said.nodes = Arc::new(vec![Node::Paragraph {
+                children: vec![Node::Text {
+                    value: "a sentence with enough words in it to wrap ".repeat(6),
+                }],
+            }]);
+            Row::Post { post: said }
+        })
+        .collect();
+
+    let wide = panel();
+    stream.lay_out(&mut fonts, wide.width);
+    // Somewhere in the middle: at either end there is nothing to lose.
+    stream.scroll = stream.reach(wide) / 2.0;
+    let held = stream.holding(wide).expect("nothing to hold");
+
+    // The column a thread pane leaves behind.
+    let narrow = Rect::new(wide.x, wide.y, wide.width * 0.6, wide.height);
+    stream.lay_out(&mut fonts, narrow.width);
+    stream.clamp(narrow);
+    let adrift = stream.holding(narrow).expect("nothing to hold");
+    assert_ne!(
+        adrift.0, held.0,
+        "the column got narrower and nothing moved, so this proves nothing"
+    );
+
+    stream.hold(Some(held.clone()), narrow);
+    let after = stream.holding(narrow).expect("nothing to hold");
+    assert_eq!(after.0, held.0, "a different message is under the top edge");
+    assert!(
+        (after.1 - held.1).abs() < 1.0,
+        "the same message, at a different height in it: {} against {}",
+        after.1,
+        held.1
+    );
+}
+
+/// A named message stays put, not merely whatever was at the top.
+///
+/// Holding the top row keeps the top row still and lets everything below it
+/// move, because the rows between are re-measured too -- so the message whose
+/// replies had just been asked for still slid down the screen.
+#[test]
+fn a_named_message_is_the_one_that_stays_put() {
+    let mut fonts = Fonts::new();
+    let mut stream = Stream::new("stream");
+    stream.rows = (0..40)
+        .map(|at| {
+            let mut said = post(&format!("p{at}"), "");
+            said.nodes = Arc::new(vec![Node::Paragraph {
+                children: vec![Node::Text {
+                    value: "a sentence with enough words in it to wrap ".repeat(6),
+                }],
+            }]);
+            Row::Post { post: said }
+        })
+        .collect();
+
+    let wide = panel();
+    stream.lay_out(&mut fonts, wide.width);
+    stream.scroll = stream.reach(wide) / 2.0;
+    // Not the row at the top: one further down, the way a message somebody
+    // pointed at usually is.
+    let top = stream.holding(wide).expect("nothing at the top").0;
+    let named = format!(
+        "post/p{}",
+        top.strip_prefix("post/p")
+            .unwrap()
+            .parse::<usize>()
+            .unwrap()
+            + 3
+    );
+    let anchored = stream.holding_row(&named, wide).expect("not on screen");
+
+    let narrow = Rect::new(wide.x, wide.y, wide.width * 0.6, wide.height);
+    stream.lay_out(&mut fonts, narrow.width);
+    stream.clamp(narrow);
+    // What holding the top would have done, for comparison.
+    stream.hold(stream.holding(wide), narrow);
+    let by_top = stream.holding_row(&named, narrow).expect("gone");
+    assert!(
+        (by_top.1 - anchored.1).abs() > 1.0,
+        "holding the top already kept it still, so this proves nothing"
+    );
+
+    stream.hold(Some(anchored.clone()), narrow);
+    let after = stream.holding_row(&named, narrow).expect("gone");
+    assert!(
+        (after.1 - anchored.1).abs() < 1.0,
+        "the named message moved: {} against {}",
+        after.1,
+        anchored.1
+    );
+}
+
 /// A press says where it was, not where that person is first named.
 ///
 /// The same person is named many times in a conversation, and the card that
