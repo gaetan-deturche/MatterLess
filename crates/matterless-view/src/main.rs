@@ -4188,10 +4188,61 @@ impl App {
             .as_deref()
             .and_then(|name| self.explains(name))
             .unwrap_or_default();
+        // A hand over whatever answers a press. Everything in this window
+        // looked alike under the pointer: a link, the message holding it and
+        // the empty margin beside them were one flat surface, and the only way
+        // to find out whether a thing could be pressed was to press it.
+        let over = hovered.as_deref().is_some_and(|name| self.pressable(name));
+        if let Some(window) = self.window.as_ref() {
+            window.set_cursor(match over {
+                true => winit::window::CursorIcon::Pointer,
+                false => winit::window::CursorIcon::Default,
+            });
+        }
         let at = self.input.pointer_at();
         self.tooltip.follows(hovered.as_deref(), at, |_| {
             (!explained.is_empty()).then_some(explained)
         });
+    }
+
+    /// Whether pressing what the pointer is over would do anything.
+    ///
+    /// A list of what *is* pressable rather than what is not, because the
+    /// surfaces are not the opposite of the controls: a row in the
+    /// conversation is neither. It catches the pointer so the toolbar knows
+    /// which message to hang off, and pressing it does nothing at all -- a
+    /// hand over every message would be a lie told the whole length of the
+    /// window.
+    ///
+    /// The alternative was a field on `Placed` saying so, set at each of the
+    /// forty places one is built. That is the tidier answer and a great deal
+    /// of edits for a cursor; this is one function, and the day a control
+    /// stops offering a hand is the day somebody adds a name to it.
+    fn pressable(&self, name: &str) -> bool {
+        // Anything the window can say something about does something. The two
+        // are written next to each other and gain their entries together.
+        if self.explains(name).is_some() {
+            return true;
+        }
+        // And the controls whose purpose is written on them, so they never
+        // needed explaining: rows in a panel, and the buttons on a box.
+        const PANELS: [&str; 7] = [
+            matterless_view::menu::NAME,
+            matterless_view::picker::NAME,
+            matterless_view::switcher::NAME,
+            matterless_view::listing::NAME,
+            matterless_view::whats_new::NAME,
+            matterless_view::updater_bar::NAME,
+            matterless_view::viewer::NAME,
+        ];
+        const BUTTONS: [&str; 4] = ["/send", "/attach", "/close", "/newest"];
+        name.starts_with("sidebar/channel/")
+            || name.starts_with("sidebar/team/")
+            || name == matterless_view::sidebar::NEW
+            || PANELS
+                .iter()
+                .any(|panel| name.starts_with(&format!("{panel}/")))
+            || BUTTONS.iter().any(|button| name.ends_with(button))
     }
 
     /// Lays the whole conversation out for the current width.

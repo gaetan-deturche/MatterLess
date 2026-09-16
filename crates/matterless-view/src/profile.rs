@@ -18,10 +18,69 @@ pub const NAME: &str = "profile";
 
 const WIDTH: f32 = 268.0;
 const PADDING: f32 = 12.0;
-const LINE: f32 = 20.0;
 /// Between the card and the name it was opened from, on whichever side it
 /// ends up.
 const GAP: f32 = 6.0;
+/// The dot in front of a status, the same one the sidebar draws.
+const DOT: f32 = 7.0;
+
+/// Which of the things a card says, and so how it is set.
+///
+/// Every line used to be the same words in the same face, bold for the handle
+/// and faint for the rest, which made the card one column of grey text rather
+/// than four answers to four questions. What somebody is called, what they
+/// call themselves and whether they are at their desk are not the same kind of
+/// fact and should not look like one.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Shown {
+    /// The handle, in the form you would type to reach them.
+    Handle,
+    /// Their name, which is the thing most readers came to find.
+    Name,
+    /// Whatever they chose to call themselves. Theirs rather than the
+    /// server's, so it is set quieter than the name.
+    Nickname,
+    /// Around, away, at lunch.
+    Status,
+}
+
+impl Shown {
+    /// How tall a line of it is.
+    fn tall(self) -> f32 {
+        match self {
+            Shown::Handle => 22.0,
+            Shown::Name => 20.0,
+            Shown::Nickname | Shown::Status => 18.0,
+        }
+    }
+
+    fn run(self) -> Run {
+        let (size, bold) = match self {
+            Shown::Handle => (14.5, true),
+            Shown::Name => (13.5, false),
+            Shown::Nickname | Shown::Status => (12.5, false),
+        };
+        Run {
+            size,
+            line_height: self.tall(),
+            bold,
+            mono: false,
+            wrap: f32::MAX,
+            icon: false,
+            smooth: false,
+        }
+    }
+
+    /// What it is written in. The name is worth reading and is inked as such;
+    /// the two below it are context and recede.
+    fn ink(self, palette: &matterless_paint::Palette) -> [u8; 3] {
+        match self {
+            Shown::Handle | Shown::Name => palette.ink,
+            Shown::Nickname => palette.soft,
+            Shown::Status => palette.faint,
+        }
+    }
+}
 const FACE: f32 = 48.0;
 /// How far the card is lifted off the conversation it was opened from.
 const DROP: f32 = 10.0;
@@ -95,24 +154,34 @@ impl Profile {
     }
 
     /// What the card actually says, so its height is what it needs.
-    fn lines(&self) -> Vec<(String, bool)> {
+    fn lines(&self) -> Vec<(String, Shown)> {
         let Some(card) = self.of.as_ref() else {
             return Vec::new();
         };
-        let mut lines = vec![(format!("@{}", card.username), true)];
+        let mut lines = vec![(format!("@{}", card.username), Shown::Handle)];
         // Only what is there. A blank line where a name would go says the
         // card is broken rather than that the field is empty.
-        for said in [&card.full_name, &card.nickname, &card.status] {
+        for (said, shown) in [
+            (&card.full_name, Shown::Name),
+            (&card.nickname, Shown::Nickname),
+            (&card.status, Shown::Status),
+        ] {
             if !said.is_empty() {
-                lines.push((said.clone(), false));
+                lines.push((said.clone(), shown));
             }
         }
         lines
     }
 
+    /// How tall the words are altogether, which is what the card is built
+    /// around now that its lines are not all the same height.
+    fn words_tall(&self) -> f32 {
+        self.lines().iter().map(|(_, shown)| shown.tall()).sum()
+    }
+
     /// Under the name that was pressed, and never off the panel.
     pub fn rect(&self, within: Rect) -> Rect {
-        let height = PADDING * 2.0 + (self.lines().len() as f32 * LINE).max(FACE);
+        let height = PADDING * 2.0 + self.words_tall().max(FACE);
         Rect::new(
             self.near
                 .x
@@ -209,21 +278,22 @@ impl Profile {
             key: crate::stream::avatar_key(&card.user_id, card.avatar_at),
             radius: FACE / 2.0,
         }]);
-        for (at, (said, bold)) in lines.into_iter().enumerate() {
-            let run = if bold {
-                Run::label(f32::MAX).bold()
-            } else {
-                Run::label(f32::MAX)
-            };
-            let glyphs = painter.run(
-                fonts,
-                &said,
-                panel.x + PADDING + FACE + 10.0,
-                panel.y + PADDING + at as f32 * LINE,
-                run,
-            );
-            let ink = if bold { palette.ink } else { palette.faint };
-            scene.glyphs(glyphs, ink, palette.faint);
+        let left = panel.x + PADDING + FACE + 10.0;
+        let mut y = panel.y + PADDING;
+        for (said, shown) in lines {
+            let mut x = left;
+            // A status wears the same dot the sidebar gives it, because it is
+            // the same fact: a word on its own among three other words is not
+            // how anybody reads whether somebody is about.
+            if shown == Shown::Status
+                && let Some(lit) = crate::sidebar::dot(&said, palette)
+            {
+                scene.rounded(x, y + (shown.tall() - DOT) / 2.0, DOT, DOT, lit, DOT / 2.0);
+                x += DOT + 6.0;
+            }
+            let glyphs = painter.run(fonts, &said, x, y, shown.run());
+            scene.glyphs(glyphs, shown.ink(palette), palette.faint);
+            y += shown.tall();
         }
     }
 }
@@ -286,6 +356,55 @@ mod tests {
         assert!(card.bottom() <= panel.bottom());
         assert!(card.x >= panel.x);
         assert!(card.y >= panel.y);
+    }
+
+    /// No two kinds of line on the card are set the same way.
+    ///
+    /// They all were: bold for the handle and faint for the other three, one
+    /// size throughout, so the card read as a column of grey text rather than
+    /// as four answers to four questions.
+    #[test]
+    fn each_thing_the_card_says_is_set_differently() {
+        let palette = matterless_paint::Palette::default();
+        let every = [Shown::Handle, Shown::Name, Shown::Nickname, Shown::Status];
+        // Taken together: two lines may share a size as long as something else
+        // about them differs, which is what "told apart" means.
+        let mut seen = Vec::new();
+        for shown in every {
+            let run = shown.run();
+            let set = (
+                run.size.to_bits(),
+                run.bold,
+                shown.ink(&palette),
+                shown.tall().to_bits(),
+            );
+            assert!(
+                !seen.contains(&set),
+                "{shown:?} is set exactly like something above it"
+            );
+            seen.push(set);
+        }
+        // And the order of them reads down the card: the handle is the
+        // loudest thing on it and the status the quietest.
+        assert!(Shown::Handle.run().size > Shown::Name.run().size);
+        assert!(Shown::Name.run().size > Shown::Status.run().size);
+        assert!(Shown::Handle.run().bold && !Shown::Name.run().bold);
+    }
+
+    /// A status is the one line with a colour of its own, and it is the same
+    /// colour the sidebar gives that status.
+    #[test]
+    fn a_status_carries_the_dot_the_sidebar_would_give_it() {
+        let palette = matterless_paint::Palette::default();
+        let mut profile = Profile::default();
+        profile.show(someone(), Rect::new(0.0, 0.0, 10.0, 10.0));
+        let lines = profile.lines();
+        let (said, shown) = lines.last().expect("no lines");
+        assert_eq!(*shown, Shown::Status);
+        assert!(
+            crate::sidebar::dot(said, &palette).is_some(),
+            "{said:?} has no dot, so the card says it in words alone"
+        );
     }
 
     /// A name with nothing under it puts the card over it instead.
