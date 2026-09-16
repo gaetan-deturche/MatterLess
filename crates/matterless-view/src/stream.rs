@@ -842,6 +842,64 @@ impl Stream {
             .map(|(_, rect)| *rect)
     }
 
+    /// Which row is under the top of the panel, and how far into it.
+    ///
+    /// A scroll is a distance in pixels, and every row's height changes when
+    /// the column it is laid out in changes -- so the same distance means
+    /// somewhere else afterwards. This is that place said in a way that
+    /// survives being laid out again: a row, and how far the panel's top edge
+    /// has cut into it.
+    pub fn holding(&self, within: Rect) -> Option<(String, f32)> {
+        let mut top = within.y + self.theme.pad_top - self.scroll;
+        for (index, laid) in self.laid.iter().enumerate() {
+            let bottom = top + laid.height;
+            // The first row whose bottom is still below the top edge is the
+            // one being read from.
+            if bottom > within.y {
+                return Some((key_of(self.rows.get(index)?), within.y - top));
+            }
+            top = bottom;
+        }
+        None
+    }
+
+    /// The same, for one row the caller has in mind rather than whichever is
+    /// under the top edge.
+    ///
+    /// Holding the top row keeps the top row still and lets everything below
+    /// it move, because the rows in between are re-measured too. When the
+    /// reader has just pointed at a particular message, that message is the
+    /// one that has to stay put.
+    pub fn holding_row(&self, key: &str, within: Rect) -> Option<(String, f32)> {
+        let mut top = within.y + self.theme.pad_top - self.scroll;
+        for (index, laid) in self.laid.iter().enumerate() {
+            if self.rows.get(index).map(key_of).as_deref() == Some(key) {
+                return Some((key.to_string(), within.y - top));
+            }
+            top += laid.height;
+        }
+        None
+    }
+
+    /// Puts the reader back where `holding` found them.
+    ///
+    /// Nothing at all when the row is gone -- a channel that was reloaded
+    /// under the reader has no such place, and guessing one would be worse
+    /// than the top of what it does have.
+    pub fn hold(&mut self, held: Option<(String, f32)>, within: Rect) {
+        let Some((key, into)) = held else {
+            return;
+        };
+        let mut top = self.theme.pad_top;
+        for (index, laid) in self.laid.iter().enumerate() {
+            if self.rows.get(index).map(key_of).as_deref() == Some(key.as_str()) {
+                self.scroll = (top + into).clamp(0.0, self.reach(within));
+                return;
+            }
+            top += laid.height;
+        }
+    }
+
     /// Where one message sits on screen, for a panel that has to point at it.
     ///
     /// `None` when it is scrolled out of view, which is the honest answer: a
