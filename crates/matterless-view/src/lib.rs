@@ -444,12 +444,19 @@ impl View {
     }
 
     /// Draws one frame and presents it.
+    ///
+    /// `waiting` is whether to hold the frame back until the screen is ready
+    /// for it. Every frame does, bar one: a frame drawn from inside a resize,
+    /// where the window itself is waiting on this to come back and a
+    /// sixtieth of a second spent watching for the vertical blank is a
+    /// sixtieth the edge spends behind the pointer.
     pub fn draw_scene(
         &mut self,
         fonts: &mut Fonts,
         scene: &matterless_paint::Scene,
         size: (u32, u32),
         ground: [u8; 4],
+        waiting: bool,
     ) {
         let Some(target) = self.gpu.target.clone() else {
             return;
@@ -582,8 +589,10 @@ impl View {
         }
 
         // Vsync, because a chat window has nothing to gain from drawing faster
-        // than the screen shows it.
-        let _ = unsafe { self.gpu.chain.Present(1, DXGI_PRESENT(0)) };
+        // than the screen shows it -- except while it is being resized, when
+        // what it has to gain is the frame arriving before the compositor
+        // shows the window at its new size.
+        let _ = unsafe { self.gpu.chain.Present(u32::from(waiting), DXGI_PRESENT(0)) };
         // A frame has been drawn, which is what the atlas ages its pictures
         // by: everything on screen was just asked for, so anything that was
         // not is a frame older than the things it competes with for room.
