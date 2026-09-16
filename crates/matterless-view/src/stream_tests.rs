@@ -144,6 +144,74 @@ fn carded(fonts: &mut Fonts) -> Stream {
     stream
 }
 
+/// A press says where it was, not where that person is first named.
+///
+/// The same person is named many times in a conversation, and the card that
+/// opens has to point at the name under the pointer. Looked up by the press
+/// afterwards it answered with the first of them, so pressing a name near the
+/// bottom of the screen opened a card at the top of it.
+#[test]
+fn a_press_carries_the_words_that_were_pressed() {
+    use matterless_paint::{Painter, Palette, Scene};
+
+    let mut fonts = Fonts::new();
+    let mut painter = Painter::new();
+    let mut scene = Scene::default();
+    let mut stream = Stream::new("stream");
+    // Two messages naming the same person, so the press and the person are
+    // not the same question.
+    stream.rows = (0..2)
+        .map(|at| {
+            let mut said = post(&format!("p{at}"), "");
+            said.nodes = Arc::new(vec![Node::Paragraph {
+                children: vec![Node::UserMention {
+                    username: "ada".into(),
+                    everyone: false,
+                }],
+            }]);
+            Row::Post { post: said }
+        })
+        .collect();
+    stream.lay_out(&mut fonts, panel().width);
+    // Presses are recorded as the rows are drawn, so nothing is pressable
+    // until a frame has been built.
+    stream.draw(
+        &mut crate::sidebar::Canvas {
+            scene: &mut scene,
+            painter: &mut painter,
+            fonts: &mut fonts,
+            palette: &Palette::default(),
+        },
+        panel(),
+        &Input::default(),
+        &std::collections::HashMap::new(),
+    );
+
+    let placed = stream.boxes(panel(), None);
+    let box_of = |name: &str| {
+        placed
+            .iter()
+            .find(|item| item.name == name)
+            .unwrap_or_else(|| panic!("{name} is placed"))
+            .rect
+    };
+    let (first, second) = (box_of("stream/press/0"), box_of("stream/press/1"));
+    assert!(
+        second.y > first.y,
+        "the two names are in the same place: {first:?} {second:?}"
+    );
+
+    let Some(Chose::Press { press, at }) = click(&mut stream, "stream/press/1") else {
+        panic!("the second name was not pressable")
+    };
+    assert_eq!(press, matterless_layout::row::Press::Person("ada".into()));
+    assert_eq!(
+        at,
+        Some(second),
+        "the press pointed at the first `@ada` rather than the one pressed"
+    );
+}
+
 /// A card is a link, and the whole card is it -- not just the words inside.
 ///
 /// It was drawn and nothing else: pressing one did nothing at all, which for a
@@ -154,9 +222,10 @@ fn a_page_card_opens_its_link() {
     let mut stream = carded(&mut fonts);
     assert_eq!(
         click(&mut stream, "stream/row/0/preview/0"),
-        Some(Chose::Press(matterless_layout::row::Press::Link(
-            "https://example.com/a".to_string()
-        )))
+        Some(Chose::Press {
+            press: matterless_layout::row::Press::Link("https://example.com/a".to_string()),
+            at: None,
+        })
     );
 }
 
@@ -168,10 +237,13 @@ fn a_quoted_card_goes_to_the_message() {
     let mut stream = carded(&mut fonts);
     assert_eq!(
         click(&mut stream, "stream/row/0/preview/1"),
-        Some(Chose::Press(matterless_layout::row::Press::Post {
-            channel_id: "c9".to_string(),
-            post_id: "quoted".to_string(),
-        }))
+        Some(Chose::Press {
+            press: matterless_layout::row::Press::Post {
+                channel_id: "c9".to_string(),
+                post_id: "quoted".to_string(),
+            },
+            at: None,
+        })
     );
 }
 

@@ -68,6 +68,13 @@ const MARGIN: f32 = 12.0;
 const MAX_LINES: usize = 8;
 /// What the stylesheet cuts the box's corners by.
 const BOX: f32 = 8.0;
+/// How far the box is lifted off the conversation behind it.
+///
+/// Small: this is furniture that stays put, not a card that has just appeared
+/// over the window, and the shadow is there to separate it from the last
+/// message rather than to announce it. It has to stay inside `MARGIN`, which
+/// is the only room there is between the box and the edge of its own clip.
+const DROP: f32 = 6.0;
 /// The buttons inside the box: one to attach, one to send.
 const BUTTON: f32 = 26.0;
 const SEND: f32 = 52.0;
@@ -425,9 +432,9 @@ impl Composer {
         if !self.plain {
             scene.fill(strip.x, strip.y, strip.width, strip.height, palette.ground);
         }
-        // A border rather than a shadow: one rectangle behind another, which is
-        // the only outline this renderer draws -- and a focused box has to be
-        // visibly different from an unfocused one.
+        // The border is one rectangle behind another, which is the only
+        // outline this renderer draws -- and a focused box has to be visibly
+        // different from an unfocused one.
         //
         // Behind rather than four bars along the edges: a bar has square ends,
         // so four of them around a rounded box leave the corners open.
@@ -436,10 +443,16 @@ impl Composer {
         } else {
             palette.rule
         };
-        Panel::flat(outer, BOX)
-            .edge(edge)
-            .fill(palette.surface)
-            .draw(scene);
+        // And a shadow under it, which the border is not a substitute for:
+        // one says which box has the keyboard, the other says the box is in
+        // front of the conversation rather than part of it. A field inside a
+        // panel gets none -- the panel it sits in is already the thing that
+        // floats, and a shadow inside a shadow is just dirt.
+        let panel = match self.plain {
+            true => Panel::flat(outer, BOX),
+            false => Panel::floating(outer, BOX, DROP),
+        };
+        panel.edge(edge).fill(palette.surface).draw(scene);
 
         if self.is_empty() {
             let glyphs = painter.run(

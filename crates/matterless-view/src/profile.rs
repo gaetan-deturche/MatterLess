@@ -12,13 +12,19 @@
 use crate::sidebar::Canvas;
 use matterless_paint::Run;
 use matterless_ui::{Placed, Rect};
+use matterless_widgets::Panel;
 
 pub const NAME: &str = "profile";
 
 const WIDTH: f32 = 268.0;
 const PADDING: f32 = 12.0;
 const LINE: f32 = 20.0;
+/// Between the card and the name it was opened from, on whichever side it
+/// ends up.
+const GAP: f32 = 6.0;
 const FACE: f32 = 48.0;
+/// How far the card is lifted off the conversation it was opened from.
+const DROP: f32 = 10.0;
 /// What a panel's corners are cut by, from the stylesheet.
 const PANEL: f32 = 8.0;
 
@@ -43,6 +49,15 @@ pub struct Profile {
     pub of: Option<Card>,
     /// Where the name that was pressed sits, so the card points at it.
     pub near: Rect,
+    /// Opened by the press being answered right now.
+    ///
+    /// The card is dismissed by a click anywhere that is not on it, and the
+    /// click that opens it is a click on a name in a message -- which is not
+    /// on it. Presses are answered before the dismissal is considered, so
+    /// without this the card was shown and hidden again inside one frame and
+    /// never appeared at all: a name could be pressed, the pointer said so,
+    /// and nothing happened.
+    fresh: bool,
 }
 
 impl Default for Profile {
@@ -50,6 +65,7 @@ impl Default for Profile {
         Self {
             of: None,
             near: Rect::new(0.0, 0.0, 0.0, 0.0),
+            fresh: false,
         }
     }
 }
@@ -62,10 +78,20 @@ impl Profile {
     pub fn show(&mut self, card: Card, near: Rect) {
         self.of = Some(card);
         self.near = near;
+        self.fresh = true;
     }
 
     pub fn hide(&mut self) {
         self.of = None;
+        self.fresh = false;
+    }
+
+    /// Whether the press being answered is the one that opened it.
+    ///
+    /// Answers true once. The click that opened the card must not also close
+    /// it; the next one must.
+    pub fn opening(&mut self) -> bool {
+        std::mem::take(&mut self.fresh)
     }
 
     /// What the card actually says, so its height is what it needs.
@@ -92,13 +118,33 @@ impl Profile {
                 .x
                 .min(within.right() - WIDTH - PADDING)
                 .max(within.x + PADDING),
-            self.near
-                .bottom()
-                .min(within.bottom() - height - PADDING)
-                .max(within.y + PADDING),
+            self.above_or_below(within, height),
             WIDTH,
             height,
         )
+    }
+
+    /// Under the name, or over it when there is no room under.
+    ///
+    /// Sliding it up to fit was the same as putting it on top of the name it
+    /// is about: a card opened from the last message in a channel covered that
+    /// message, so what the reader had just pressed was the one thing they
+    /// could no longer see. The side flips instead, which is what a popover
+    /// does and what leaves the name it belongs to visible.
+    fn above_or_below(&self, within: Rect, height: f32) -> f32 {
+        let below = self.near.bottom() + GAP;
+        let above = self.near.y - GAP - height;
+        if below + height + PADDING <= within.bottom() {
+            return below;
+        }
+        if above >= within.y + PADDING {
+            return above;
+        }
+        // Taller than the room on either side of it, which no amount of
+        // choosing fixes: keep it on screen and let it overlap.
+        below
+            .min(within.bottom() - height - PADDING)
+            .max(within.y + PADDING)
     }
 
     pub fn boxes(&self, within: Rect) -> Vec<Placed> {
@@ -138,15 +184,15 @@ impl Profile {
             fonts,
             palette,
         } = into;
-        scene.floating(
-            panel.x,
-            panel.y,
-            panel.width,
-            panel.height,
-            palette.surface,
-            PANEL,
-            10.0,
-        );
+        // Through the widget rather than by hand, which is what gives it the
+        // hairline. Drawn as a shadow and a fill alone, a panel has no edge at
+        // all: the shadow fades into the surface with nothing to fade away
+        // *from*, and what says a popup is over the window rather than part of
+        // it is that hard boundary, not the darkness under it.
+        Panel::floating(panel, PANEL, DROP)
+            .edge(palette.rule)
+            .fill(palette.surface)
+            .draw(scene);
         scene.rounded(
             panel.x + PADDING,
             panel.y + PADDING,
@@ -197,6 +243,37 @@ mod tests {
         }
     }
 
+    /// The click that opens the card does not also close it.
+    ///
+    /// The card is dismissed by a click that is not on it, and the click that
+    /// opens it is on a name in a message -- which is not on it. Presses are
+    /// answered before dismissal is considered, so the card was shown and
+    /// hidden inside the same frame and never appeared: pressing a name did
+    /// nothing, while the pointer and the underline said it would.
+    #[test]
+    fn the_press_that_opens_the_card_is_not_the_one_that_shuts_it() {
+        let mut profile = Profile::default();
+        profile.show(someone(), Rect::new(100.0, 100.0, 60.0, 16.0));
+        assert!(profile.opening(), "the press that opened it");
+        assert!(
+            !profile.opening(),
+            "and only that one -- the next click has to be able to shut it"
+        );
+    }
+
+    /// Answered once whether or not anything acted on it, or the flag outlives
+    /// the frame it belongs to and swallows a later click instead.
+    #[test]
+    fn opening_is_forgotten_even_when_nobody_acts_on_it() {
+        let mut profile = Profile::default();
+        profile.show(someone(), Rect::new(0.0, 0.0, 10.0, 10.0));
+        profile.hide();
+        assert!(
+            !profile.opening(),
+            "a card that was shut still claimed to be opening"
+        );
+    }
+
     /// The card follows the name it was opened from, but a name at the edge
     /// must not push it off: a card you cannot read answers nothing.
     #[test]
@@ -209,6 +286,39 @@ mod tests {
         assert!(card.bottom() <= panel.bottom());
         assert!(card.x >= panel.x);
         assert!(card.y >= panel.y);
+    }
+
+    /// A name with nothing under it puts the card over it instead.
+    ///
+    /// Slid up to fit, the card covered the very name it was opened from --
+    /// so pressing somebody in the last message of a channel hid that message
+    /// behind the answer.
+    #[test]
+    fn a_card_with_no_room_below_opens_above_the_name() {
+        let mut profile = Profile::default();
+        let panel = Rect::new(0.0, 0.0, 1000.0, 700.0);
+        let name = Rect::new(200.0, 660.0, 90.0, 16.0);
+        profile.show(someone(), name);
+        let card = profile.rect(panel);
+        assert!(
+            card.bottom() <= name.y,
+            "the card sits over the name it is about: {card:?} against {name:?}"
+        );
+        assert!(card.y >= panel.y, "and off the top of the panel");
+    }
+
+    /// And stays under it whenever it fits, which is the ordinary case.
+    #[test]
+    fn a_card_with_room_opens_under_the_name() {
+        let mut profile = Profile::default();
+        let panel = Rect::new(0.0, 0.0, 1000.0, 700.0);
+        let name = Rect::new(200.0, 120.0, 90.0, 16.0);
+        profile.show(someone(), name);
+        let card = profile.rect(panel);
+        assert!(
+            card.y >= name.bottom(),
+            "the card jumped above a name with room under it: {card:?}"
+        );
     }
 
     /// Only what the server actually holds. A blank line where a name would

@@ -1420,7 +1420,7 @@ impl App {
     }
 
     /// Follows something somebody wrote: a link, a person, a conversation.
-    fn press(&mut self, press: matterless_layout::row::Press) {
+    fn press(&mut self, press: matterless_layout::row::Press, at: Option<Rect>) {
         use matterless_layout::row::Press;
         match press {
             Press::Link(href) => {
@@ -1442,7 +1442,7 @@ impl App {
                     None => println!("no channel called {name} in the local store"),
                 }
             }
-            Press::Person(username) => self.show_profile(&username),
+            Press::Person(username) => self.show_profile(&username, at),
             // Inside the app rather than out of it: the message is on this
             // server and in this store, so following a quoted card is a scroll
             // and not a browser.
@@ -1469,7 +1469,7 @@ impl App {
     /// Anchored to the words that were pressed, which the stream recorded when
     /// it drew them -- the card has to point at the name it is about, and a
     /// mention appears many times in a conversation.
-    fn show_profile(&mut self, username: &str) {
+    fn show_profile(&mut self, username: &str, at: Option<Rect>) {
         let Some(user) = self
             .store
             .as_ref()
@@ -1478,9 +1478,15 @@ impl App {
             println!("nobody called {username} in the local store");
             return;
         };
-        let near = self
-            .stream
-            .pressed_rect(&matterless_layout::row::Press::Person(username.to_string()))
+        // Where the reader actually pressed. Asking the stream where this
+        // person is named answers with the first place they are, which is not
+        // where the pointer was: the card opened at the top of the screen
+        // whatever was clicked further down it.
+        let near = at
+            .or_else(|| {
+                self.stream
+                    .pressed_rect(&matterless_layout::row::Press::Person(username.to_string()))
+            })
             .unwrap_or_else(|| self.stream_rect());
         self.profile.show(
             matterless_view::profile::Card {
@@ -2019,7 +2025,7 @@ impl App {
                 post_id,
                 on,
             }) => self.act(action, post_id, on),
-            Some(Chose::Press(press)) => self.press(press),
+            Some(Chose::Press { press, at }) => self.press(press, at),
             Some(Chose::Save { file_id, name }) => {
                 if let Some(link) = self.link.as_ref() {
                     link.send(matterless_view::live::Ask::Download { file_id, name });
@@ -3263,13 +3269,15 @@ impl App {
         // somebody is and has nothing to press. Escape, or a click anywhere
         // that is not on it -- which is what a reader expects of a popover and
         // means it never has to be closed deliberately.
-        if self.profile.open()
-            && (self.input.struck(Key::Escape)
-                || self
-                    .input
-                    .clicked()
-                    .is_some_and(|name| name != matterless_view::profile::NAME))
-        {
+        let dismissed = self.input.struck(Key::Escape)
+            || self
+                .input
+                .clicked()
+                .is_some_and(|name| name != matterless_view::profile::NAME);
+        // `opening` first and always, so the flag is cleared whether or not
+        // anything was dismissed this frame -- left standing it would swallow
+        // the next click instead of this one.
+        if self.profile.open() && !self.profile.opening() && dismissed {
             self.profile.hide();
         }
 
