@@ -144,6 +144,51 @@ const THREAD: f32 = 420.0;
 /// What the thread pane's reply box answers to.
 const THREAD_COMPOSER: &str = "thread-composer";
 
+/// One thing a reader does, kept up for as long as it is being measured.
+///
+/// A window redrawing the same picture is the cheapest frame it will ever
+/// have: nothing is reshaped, no row is laid out again, every picture is
+/// already in the atlas. Measuring only that says a frame costs a fraction of
+/// a millisecond and hides everything a reader would actually feel.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Act {
+    /// The floor: the same scene, drawn again.
+    Still,
+    /// Down for a stretch and back up. Rows leave the plan and come back,
+    /// which is what a store that only ever grows would hide.
+    Scrolling,
+    /// Round the sidebar. The dearest thing this program does on a keystroke,
+    /// and the one the reader complained about first.
+    Switching,
+    /// Into the composer, until it wraps, then cleared: a box of one line and
+    /// a box of four are not the same work.
+    Typing,
+    /// Open a thread, and close it. A second stream beside the first.
+    Threading,
+}
+
+impl Act {
+    /// Every act, in the order a run measures them: cheapest first, so the
+    /// table above reads as the floor the ones below it are measured against.
+    const EVERY: [Act; 5] = [
+        Act::Still,
+        Act::Scrolling,
+        Act::Switching,
+        Act::Typing,
+        Act::Threading,
+    ];
+
+    fn what(self) -> &'static str {
+        match self {
+            Act::Still => "still",
+            Act::Scrolling => "scrolling",
+            Act::Switching => "switching channel",
+            Act::Typing => "typing",
+            Act::Threading => "opening a thread",
+        }
+    }
+}
+
 /// Draws frames on its own, so a measurement does not need a hand on a wheel.
 ///
 /// The window renders on demand: it waits, and a frame happens because
@@ -157,41 +202,113 @@ const THREAD_COMPOSER: &str = "thread-composer";
 /// opening frames carry the fonts being read and the atlas being filled, which
 /// are real costs and are not what a frame costs.
 struct Driver {
+    /// Which act is being measured, as an index into `Act::EVERY`.
+    at: usize,
+    /// Frames to draw for each act.
+    each: u32,
+    /// Frames left in this one.
     left: u32,
+    /// Frames of warm-up left before the tally is started.
     warm: u32,
+    /// Frames into this act, warm-up included, which is what the acts that
+    /// have a rhythm -- scroll down then up, type then clear -- count on.
+    tick: u32,
+    /// How many times the act being measured actually did its thing.
+    ///
+    /// Counted because an act that quietly does nothing reads exactly like an
+    /// act that is free: the first scrolling run turned the wheel with the
+    /// pointer over no panel, nothing moved, and the table reported the cost
+    /// of a still frame under the word "scrolling".
+    did: u32,
 }
 
 impl Driver {
     /// How many frames to draw before the tally is started.
+    ///
+    /// Not only for the window opening: an act has its own warm-up. The first
+    /// frame after a channel is switched to has every one of its rows to lay
+    /// out, and counting that as the cost of switching would say switching is
+    /// what a first frame costs.
     const WARM: u32 = 30;
 
     fn asked() -> Option<Self> {
-        let left = std::env::var("MATTERLESS_FRAMES")
+        let each = std::env::var("MATTERLESS_FRAMES")
             .ok()?
             .parse::<u32>()
             .ok()?;
         println!(
-            "drawing {left} frames after {} warm (MATTERLESS_FRAMES)",
+            "{each} frames for each of {} acts, {} warm before each (MATTERLESS_FRAMES)",
+            Act::EVERY.len(),
             Self::WARM
         );
         Some(Self {
-            left,
+            at: 0,
+            each,
+            left: each,
             warm: Self::WARM,
+            tick: 0,
+            did: 0,
         })
     }
 
-    /// Counts the frame just drawn. `false` once there are none left to draw.
-    fn drew(&mut self) -> bool {
+    fn act(&self) -> Option<Act> {
+        Act::EVERY.get(self.at).copied()
+    }
+
+    fn over(&self) -> bool {
+        self.at >= Act::EVERY.len()
+    }
+
+    /// The very first frame of an act, which is when it is put back to where
+    /// every act begins.
+    ///
+    /// Without this each act inherited whatever the one before it left: the
+    /// channel-switching act wandered off down the sidebar, and the thread act
+    /// after it landed in a conversation with no thread in it and measured
+    /// nothing at all while reporting a number.
+    fn fresh(&self) -> bool {
+        self.warm == Self::WARM
+    }
+
+    /// Whether what this frame did counts. The warm-up's work is real and is
+    /// not what the act costs.
+    fn counting(&self) -> bool {
+        self.warm == 0
+    }
+
+    /// Counts the frame just drawn, and names the act if that was its last.
+    ///
+    /// The name is what the caller prints the table under: a run answers
+    /// "what does scrolling cost" rather than "what does a frame cost", which
+    /// is the question anybody actually has. The count comes back with it
+    /// rather than being left to be read off the driver, which is where the
+    /// first version put it -- after this had already reset it, so every act
+    /// reported having done nothing.
+    fn drew(&mut self) -> Option<(&'static str, u32)> {
+        let act = self.act()?;
+        // The clock runs through the warm-up too, so an act keeps its rhythm
+        // from its first frame. Held still, the channel-switching act asked
+        // for the same switch on every one of its thirty warm frames.
+        self.tick += 1;
         if self.warm > 0 {
             self.warm -= 1;
-            // Everything up to here was the window opening, not a frame.
+            // What came before was the window opening, or the first frames of
+            // this act, and neither is what the act costs.
             if self.warm == 0 {
                 matterless_view::timing::forget();
             }
-            return true;
+            return None;
         }
-        self.left = self.left.saturating_sub(1);
-        self.left > 0
+        self.left -= 1;
+        if self.left > 0 {
+            return None;
+        }
+        self.at += 1;
+        self.left = self.each;
+        self.warm = Self::WARM;
+        self.tick = 0;
+        let did = std::mem::take(&mut self.did);
+        Some((act.what(), did))
     }
 }
 
@@ -224,6 +341,10 @@ struct App {
     /// Set only by `MATTERLESS_FRAMES`, and the reason the window stops
     /// waiting between frames.
     driver: Option<Driver>,
+    /// The channel every driven act starts from, remembered the first time one
+    /// runs so that the acts are measured against each other rather than
+    /// against wherever the act before them wandered to.
+    home: Option<String>,
     input: Input,
     placed: Vec<Placed>,
     composer: Composer,
@@ -429,6 +550,7 @@ impl App {
         drop(reading);
         let mut app = Self {
             driver: Driver::asked(),
+            home: None,
             window: None,
             surface: None,
             view: None,
@@ -3523,6 +3645,167 @@ impl App {
         }
     }
 
+    /// The pointer, moved to where it now is.
+    ///
+    /// Its own method for the same reason the wheel is: the driver has to put
+    /// the pointer somewhere before it turns one, and a wheel is answered by
+    /// whichever panel the pointer is over.
+    fn point_at(&mut self, x: f32, y: f32) {
+        self.placed = self.targets();
+        let boxes = self.placed.clone();
+        self.input.apply(UiEvent::PointerMoved { x, y }, &boxes);
+        // A held press is a drag, which selects text in the composer.
+        if self.input.pressed().is_some() {
+            self.react();
+        }
+        self.watch_pointer();
+        self.redraw();
+    }
+
+    /// A turn of the wheel, wherever the pointer is.
+    ///
+    /// Its own method because the driver turns the wheel too, and a
+    /// measurement of scrolling that went down a path of its own would be a
+    /// measurement of the path of its own.
+    fn wheel_by(&mut self, by: f32) {
+        let boxes = self.targets();
+        self.input.apply(UiEvent::Wheel { x: 0.0, y: by }, &boxes);
+        // One wheel, five panels, and the pointer decides which of them
+        // it belongs to -- which is what `wheel_over` is for. Each panel
+        // asks about itself, so a fixed strip simply takes the turn and
+        // does nothing with it.
+        let sidebar = self.sidebar_rect();
+        self.sidebar.react(&self.input, &boxes, sidebar);
+        // The list on the right, and the one filling the column, each
+        // take the turn when the pointer is over them -- the same way
+        // every other panel does.
+        if self.aside_rect().is_some() || self.on_threads() {
+            self.react();
+        }
+        let stream = self.stream_rect();
+        self.stream.react(&self.input, &boxes, stream);
+        self.want_older();
+        if let Some(within) = self.thread_stream_rect()
+            && let Some(thread) = self.thread.as_mut()
+        {
+            thread.react(&self.input, &boxes, within);
+        }
+        self.redraw();
+    }
+
+    /// Does what the act being measured says, once.
+    ///
+    /// Everything here goes through what an event would call rather than
+    /// reaching into a panel: a driver with a shortcut measures the shortcut.
+    fn drive(&mut self, act: Act, tick: u32, fresh: bool) -> u32 {
+        if fresh {
+            // Where the reader was when the run began, so every act reads the
+            // same conversation.
+            match self.home.clone() {
+                Some(home) => self.open_channel(&home),
+                None => self.home = self.sidebar.selected.clone(),
+            }
+        }
+        let mut did = 0;
+        match act {
+            // Nothing, on purpose: the floor every other act is read against.
+            Act::Still => did += 1,
+            Act::Scrolling => {
+                // Over the conversation first. A wheel is answered by the
+                // panel the pointer is over, and a driver that never moved one
+                // turned the wheel at nothing: the first run of this act
+                // reported the cost of a still frame and called it scrolling.
+                let stream = self.stream_rect();
+                self.point_at(
+                    stream.x + stream.width / 2.0,
+                    stream.y + stream.height / 2.0,
+                );
+                let line = self.stream.theme.line_height;
+                // Thirty frames down, thirty back up, so the same rows leave
+                // the plan and return rather than the list running off the end
+                // and sitting there.
+                let before = self.stream.scroll;
+                self.wheel_by(match (tick / 30) % 2 {
+                    0 => -line * 3.0,
+                    _ => line * 3.0,
+                });
+                // Only when the list actually moved. At the end of a
+                // conversation the wheel is refused, which is right and is
+                // not scrolling.
+                if self.stream.scroll != before {
+                    did += 1;
+                }
+            }
+            Act::Switching => {
+                // Not every frame: a channel that is switched away from before
+                // its first frame is drawn is never drawn at all.
+                if tick.is_multiple_of(40)
+                    && let Some(next) = self.another_channel()
+                {
+                    self.open_channel(&next);
+                    did += 1;
+                }
+            }
+            Act::Typing => {
+                // The composer only hears what is aimed at it, and nothing has
+                // clicked it.
+                self.input.focus_on(composer::NAME);
+                let before = self.composer.text().len();
+                match tick.is_multiple_of(90) {
+                    true => self.composer.clear(&mut self.fonts),
+                    false => {
+                        self.input.apply(UiEvent::Typed("mesure ".to_string()), &[]);
+                        self.react();
+                    }
+                }
+                if self.composer.text().len() != before {
+                    did += 1;
+                }
+                self.redraw();
+            }
+            Act::Threading => {
+                // Open, and forty frames later the same call closes it again,
+                // which is what pressing the footer twice does.
+                if tick.is_multiple_of(40)
+                    && let Some(root) = self.a_thread()
+                {
+                    self.open_thread(&root);
+                    did += 1;
+                }
+            }
+        }
+        did
+    }
+
+    /// A channel other than the open one, walking the sidebar and coming back
+    /// round. `None` when the reader is in one channel and no others.
+    fn another_channel(&self) -> Option<String> {
+        let every: Vec<&String> = self
+            .sidebar
+            .entries
+            .iter()
+            .filter_map(|entry| match entry {
+                matterless_view::sidebar::Entry::Channel { id, .. } => Some(id),
+                _ => None,
+            })
+            .collect();
+        let open = self.sidebar.selected.as_deref().unwrap_or_default();
+        let at = every.iter().position(|id| id.as_str() == open);
+        let next = match at {
+            Some(at) => every.get(at + 1).or(every.first()),
+            None => every.first(),
+        };
+        next.map(|id| (*id).clone())
+    }
+
+    /// A thread in the open channel, if the reader can see one.
+    fn a_thread(&self) -> Option<String> {
+        self.stream.rows.iter().find_map(|row| match row {
+            matterless_render::Row::ThreadFooter { root_id, .. } => Some(root_id.clone()),
+            _ => None,
+        })
+    }
+
     /// Everything the frame draws, in one scene.
     fn scene(&mut self) -> Scene {
         let mut scene = Scene::default();
@@ -4057,7 +4340,15 @@ impl ApplicationHandler<Update> for App {
         // Straight back for the next one, with nothing waited on: a measured
         // frame is one this program asked for rather than one the server
         // happened to cause.
-        if self.driver.is_some() {
+        if let Some(driver) = self.driver.as_ref() {
+            if driver.act().is_none() {
+                // Every act measured, and the exit already asked for.
+                return events.set_control_flow(ControlFlow::Wait);
+            }
+            // Only asked for here. The act itself belongs to the frame: this
+            // runs whenever the loop has nothing left to deliver, which is
+            // several times per frame, and an act driven from here happened
+            // seven times for every one it was supposed to.
             self.redraw();
             return events.set_control_flow(ControlFlow::Poll);
         }
@@ -4282,21 +4573,7 @@ impl ApplicationHandler<Update> for App {
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
-                self.placed = self.targets();
-                let boxes = self.placed.clone();
-                self.input.apply(
-                    UiEvent::PointerMoved {
-                        x: position.x as f32,
-                        y: position.y as f32,
-                    },
-                    &boxes,
-                );
-                // A held press is a drag, which selects text in the composer.
-                if self.input.pressed().is_some() {
-                    self.react();
-                }
-                self.watch_pointer();
-                self.redraw();
+                self.point_at(position.x as f32, position.y as f32);
             }
             // A file dragged onto the window goes to the conversation under
             // the pointer -- the thread if one is open and the pointer is in
@@ -4548,33 +4825,23 @@ impl ApplicationHandler<Update> for App {
                     }
                     MouseScrollDelta::PixelDelta(position) => position.y as f32,
                 };
-                let boxes = self.targets();
-                self.input.apply(UiEvent::Wheel { x: 0.0, y: by }, &boxes);
-                // One wheel, five panels, and the pointer decides which of them
-                // it belongs to -- which is what `wheel_over` is for. Each panel
-                // asks about itself, so a fixed strip simply takes the turn and
-                // does nothing with it.
-                let sidebar = self.sidebar_rect();
-                self.sidebar.react(&self.input, &boxes, sidebar);
-                // The list on the right, and the one filling the column, each
-                // take the turn when the pointer is over them -- the same way
-                // every other panel does.
-                if self.aside_rect().is_some() || self.on_threads() {
-                    self.react();
-                }
-                let stream = self.stream_rect();
-                self.stream.react(&self.input, &boxes, stream);
-                self.want_older();
-                if let Some(within) = self.thread_stream_rect()
-                    && let Some(thread) = self.thread.as_mut()
-                {
-                    thread.react(&self.input, &boxes, within);
-                }
-                self.redraw();
+                self.wheel_by(by);
             }
             WindowEvent::RedrawRequested => {
                 if self.surface.is_none() || self.view.is_none() {
                     return;
+                }
+                // Once, here, before the frame it is measured by.
+                if let Some(driver) = self.driver.as_ref()
+                    && let Some(act) = driver.act()
+                {
+                    let (tick, fresh, counting) = (driver.tick, driver.fresh(), driver.counting());
+                    let did = self.drive(act, tick, fresh);
+                    if let Some(driver) = self.driver.as_mut()
+                        && counting
+                    {
+                        driver.did += did;
+                    }
                 }
                 // Pictures go into the atlas here, on the thread that owns the
                 // GPU and before the scene names them: uploading after the
@@ -4642,11 +4909,20 @@ impl ApplicationHandler<Update> for App {
                 // A frame's worth of input has been acted on.
                 self.input.settle();
                 if let Some(driver) = self.driver.as_mut()
-                    && !driver.drew()
+                    && let Some((act, did)) = driver.drew()
                 {
                     drop(_drawing);
-                    println!("{}", matterless_view::timing::table());
-                    events.exit();
+                    println!(
+                        "\n== {act}, {did} times =={}",
+                        matterless_view::timing::table()
+                    );
+                    if did == 0 {
+                        println!("  nothing happened -- this act measured a still frame");
+                    }
+                    matterless_view::timing::forget();
+                    if driver.over() {
+                        events.exit();
+                    }
                 }
             }
             _ => {}
@@ -4820,4 +5096,98 @@ fn lifts_unreads(store: &matterless_store::Store, me: &str) -> bool {
         .flatten()
         .as_deref()
         == Some("true")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Act, Driver};
+
+    /// A driver with no window, wound by hand.
+    fn driver(each: u32) -> Driver {
+        Driver {
+            at: 0,
+            each,
+            left: each,
+            warm: Driver::WARM,
+            tick: 0,
+            did: 0,
+        }
+    }
+
+    /// Winds a whole act and reports what it was called and what it counted.
+    ///
+    /// Every one of the three things this got wrong -- the count read after it
+    /// had been reset, the warm-up's work counted as the act's, the clock held
+    /// still so an act fired on every warm frame -- is a sequencing mistake
+    /// that is invisible in a table and obvious here.
+    fn wind(driver: &mut Driver, each: u32) -> (&'static str, u32) {
+        let mut done = None;
+        for _ in 0..Driver::WARM + each {
+            if driver.counting() {
+                driver.did += 1;
+            }
+            done = driver.drew().or(done);
+        }
+        done.expect("an act that never ended")
+    }
+
+    /// The warm-up is not part of what the act cost.
+    #[test]
+    fn only_the_measured_frames_are_counted() {
+        let mut driver = driver(50);
+        let (what, did) = wind(&mut driver, 50);
+        assert_eq!(what, Act::Still.what());
+        assert_eq!(did, 50, "the warm-up was counted with the act");
+    }
+
+    /// The clock runs from the act's first frame, warm-up included, so an act
+    /// that does something every fortieth frame does it at the same rate
+    /// before and after the measurement starts.
+    #[test]
+    fn the_clock_never_stands_still() {
+        let mut driver = driver(10);
+        let mut ticks = Vec::new();
+        for _ in 0..Driver::WARM + 10 {
+            ticks.push(driver.tick);
+            driver.drew();
+        }
+        assert_eq!(ticks[0], 0);
+        assert_eq!(ticks[1], 1, "held still through the warm-up: {ticks:?}");
+        assert_eq!(
+            ticks.last(),
+            Some(&(Driver::WARM + 9)),
+            "the clock stopped somewhere: {ticks:?}"
+        );
+    }
+
+    /// Every act is measured, once, in order, and then the run is over.
+    #[test]
+    fn a_run_is_every_act_and_then_the_end() {
+        let mut driver = driver(5);
+        let mut named = Vec::new();
+        for _ in 0..Act::EVERY.len() {
+            named.push(wind(&mut driver, 5).0);
+        }
+        let expected: Vec<&str> = Act::EVERY.iter().map(|act| act.what()).collect();
+        assert_eq!(named, expected);
+        assert!(driver.over(), "the run did not end");
+        assert_eq!(driver.act(), None, "an act past the last of them");
+        assert_eq!(driver.drew(), None, "it kept going after the end");
+    }
+
+    /// The first frame of an act is the one that puts the window back where
+    /// every act starts, and no other frame is.
+    #[test]
+    fn only_an_acts_first_frame_is_a_fresh_one() {
+        let mut driver = driver(5);
+        assert!(driver.fresh(), "the very first frame");
+        driver.drew();
+        assert!(!driver.fresh(), "still fresh a frame later");
+        // The rest of this act exactly, so the next frame is the next act's
+        // first and nothing has been taken out of it.
+        for _ in 0..Driver::WARM + 5 - 1 {
+            driver.drew();
+        }
+        assert!(driver.fresh(), "the next act did not start fresh");
+    }
 }
