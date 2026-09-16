@@ -17,6 +17,8 @@ pub mod clock;
 pub mod composer;
 #[cfg(test)]
 mod composer_tests;
+pub mod d3d;
+pub mod d3d_draw;
 pub mod edit;
 pub mod feed;
 pub mod filecache;
@@ -49,22 +51,17 @@ pub mod updater_bar;
 pub mod viewer;
 pub mod whats_new;
 
+use crate::d3d::Gpu;
+use crate::d3d_draw::{Bound, Viewport};
 use atlas::{Atlas, Sheet};
 use cosmic_text::SwashCache;
 use matterless_layout::Fonts;
 use matterless_paint::Piece;
-
-/// The format the frame is written through, which is never an sRGB one.
-///
-/// The palette is authored in sRGB -- the same hex the stylesheet uses -- and
-/// both the browser and the CPU snapshot blend those bytes as they stand.
-/// Handing them to an sRGB surface encodes them a second time: the ground
-/// leaves the shader as 15/255 and lands as 69/255, which is how a near-black
-/// panel turns slate grey while the light text barely moves. Drawing through
-/// the plain view of the same surface keeps one encoding, stylesheet to screen.
-pub fn plain(format: wgpu::TextureFormat) -> wgpu::TextureFormat {
-    format.remove_srgb_suffix()
-}
+use windows::Win32::Foundation::{HWND, RECT};
+use windows::Win32::Graphics::Direct3D::D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
+use windows::Win32::Graphics::Direct3D11::*;
+use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_SAMPLE_DESC};
+use windows::Win32::Graphics::Dxgi::DXGI_PRESENT;
 
 /// One corner of a quad, in pixels and atlas coordinates.
 #[repr(C)]
@@ -95,17 +92,6 @@ pub struct Vertex {
     pub softness: f32,
 }
 
-impl Vertex {
-    const LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
-        array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
-        step_mode: wgpu::VertexStepMode::Vertex,
-        attributes: &wgpu::vertex_attr_array![
-            0 => Float32x2, 1 => Float32x2, 2 => Float32x4, 3 => Uint32,
-            4 => Float32x2, 5 => Float32x2, 6 => Float32, 7 => Float32,
-        ],
-    };
-}
-
 /// Casts the vertices to bytes for upload.
 ///
 /// Hand-rolled rather than pulling in `bytemuck`: `Vertex` is four-byte fields
@@ -119,14 +105,6 @@ fn as_bytes(vertices: &[Vertex]) -> &[u8] {
             std::mem::size_of_val(vertices),
         )
     }
-}
-
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-struct Viewport {
-    size: [f32; 2],
-    scroll: f32,
-    padding: f32,
 }
 
 fn viewport_bytes(viewport: &Viewport) -> &[u8] {
@@ -145,7 +123,7 @@ fn viewport_bytes(viewport: &Viewport) -> &[u8] {
 /// texel so it goes through the same pipeline as a glyph.
 pub fn vertices_of(
     pieces: &[Piece],
-    queue: &wgpu::Queue,
+    gpu: &Gpu,
     fonts: &mut Fonts,
     cache: &mut SwashCache,
     atlas: &mut Atlas,
@@ -241,7 +219,7 @@ pub fn vertices_of(
                 };
                 let (loud, quiet, followed) = (shade(ink), shade(faint), shade(signal));
                 for glyph in glyphs {
-                    let Some(slot) = atlas.slot(queue, fonts, cache, glyph.key) else {
+                    let Some(slot) = atlas.slot(gpu, fonts, cache, glyph.key) else {
                         continue;
                     };
                     // White for a glyph that brought its own colour, so the
@@ -347,58 +325,6 @@ const SHOWN: u32 = 3;
 /// so it could be drawn down, and that one wants filtering.
 const SMOOTH_LETTERS: u32 = 4;
 
-/// Binds everything the pipeline samples: the two samplers, the three sheets,
-/// and whatever is open.
-///
-/// One function because it is called three times -- at startup, when a picture
-/// is opened, and when it is closed -- and three copies of a seven-entry
-/// descriptor is three places for an entry to go to the wrong binding.
-#[allow(clippy::too_many_arguments)]
-fn bind_all(
-    device: &wgpu::Device,
-    layout: &wgpu::BindGroupLayout,
-    uniform: &wgpu::Buffer,
-    sampler: &wgpu::Sampler,
-    smooth: &wgpu::Sampler,
-    atlas: &Atlas,
-    shown: &wgpu::TextureView,
-) -> wgpu::BindGroup {
-    device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("list"),
-        layout,
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: uniform.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: wgpu::BindingResource::Sampler(sampler),
-            },
-            wgpu::BindGroupEntry {
-                binding: 2,
-                resource: wgpu::BindingResource::Sampler(smooth),
-            },
-            wgpu::BindGroupEntry {
-                binding: 3,
-                resource: wgpu::BindingResource::TextureView(atlas.view(Sheet::Letters)),
-            },
-            wgpu::BindGroupEntry {
-                binding: 4,
-                resource: wgpu::BindingResource::TextureView(atlas.view(Sheet::Faces)),
-            },
-            wgpu::BindGroupEntry {
-                binding: 5,
-                resource: wgpu::BindingResource::TextureView(atlas.view(Sheet::Pictures)),
-            },
-            wgpu::BindGroupEntry {
-                binding: 6,
-                resource: wgpu::BindingResource::TextureView(shown),
-            },
-        ],
-    })
-}
-
 /// One layer's vertices and the rectangle they are clipped to.
 ///
 /// A layer is one draw. Every sheet is bound at once and each quad names the
@@ -406,330 +332,141 @@ fn bind_all(
 /// scissor changes, and that is what a layer is.
 type Span = (std::ops::Range<u32>, Clip);
 
-/// The GPU side of the list: a device, a pipeline, an atlas and a vertex buffer.
+/// The GPU side of the list: a device, a swapchain, a pipeline and an atlas.
 pub struct View {
-    pub device: wgpu::Device,
-    pub queue: wgpu::Queue,
-    pipeline: wgpu::RenderPipeline,
-    /// Every texture at once. Bound once a frame, whatever is on screen.
-    bindings: wgpu::BindGroup,
-    uniform: wgpu::Buffer,
-    vertices: wgpu::Buffer,
-    capacity: usize,
+    pub gpu: Gpu,
+    bound: Bound,
     pub atlas: Atlas,
     cache: SwashCache,
-    /// What the pipeline binds against, kept so a second bind group can be
-    /// built for the picture being looked at.
-    layout: wgpu::BindGroupLayout,
-    sampler: wgpu::Sampler,
-    smooth: wgpu::Sampler,
+    vertices: Option<ID3D11Buffer>,
+    capacity: usize,
     /// The picture a reader has opened, in a texture of its own.
     ///
     /// One at a time, replaced when another is opened and dropped when the
     /// viewer shuts. Not in a sheet: they are packed for things drawn at the
     /// size they were fetched, and a picture opened full size is neither.
-    shown: Option<wgpu::TextureView>,
-    /// What stands in the fourth binding while nothing is open.
-    nothing: wgpu::TextureView,
+    shown: Option<ID3D11ShaderResourceView>,
+    /// What stands in the fourth slot while nothing is open. A slot left empty
+    /// is a shader reading from nothing, which draws a black rectangle.
+    nothing: ID3D11ShaderResourceView,
 }
 
 impl View {
-    /// Builds the pipeline against an already-configured surface format.
-    pub fn new(device: wgpu::Device, queue: wgpu::Queue, format: wgpu::TextureFormat) -> Self {
-        let atlas = Atlas::new(&device, &queue);
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("list"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
-        });
-        let uniform = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("viewport"),
-            size: std::mem::size_of::<Viewport>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        // Two samplers, because the atlas holds two kinds of thing. A glyph is
-        // rasterised at the size it is drawn, so filtering it only blurs it. A
-        // picture is scaled to whatever box the layout reserved, and point
-        // sampling that drops whole rows of pixels -- which is what makes a
-        // downscaled screenshot look shattered.
-        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("atlas"),
-            mag_filter: wgpu::FilterMode::Nearest,
-            min_filter: wgpu::FilterMode::Nearest,
-            ..Default::default()
-        });
-        let smooth = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("pictures"),
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            // Clamped, so sampling the edge of a slot cannot wrap round to the
-            // other side of the atlas.
-            address_mode_u: wgpu::AddressMode::ClampToEdge,
-            address_mode_v: wgpu::AddressMode::ClampToEdge,
-            ..Default::default()
-        });
-        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("list"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-                // The three sheets and the opened picture, all bound at once:
-                // four textures is well inside any device's limit, and a quad
-                // that names the one it wants costs nothing where binding them
-                // in turn cost a draw call per switch.
-                wgpu::BindGroupLayoutEntry {
-                    binding: 3,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 4,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 5,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 6,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-            ],
-        });
-        // Something for the fourth texture to be while nothing is open. A
-        // binding cannot be left empty, and one texel is cheaper to keep than
-        // a second pipeline for the frames with no picture in them.
-        let nothing = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("nothing shown"),
-            size: wgpu::Extent3d {
-                width: 1,
-                height: 1,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
-        });
-        let nothing = nothing.create_view(&wgpu::TextureViewDescriptor::default());
-        let bindings = bind_all(
-            &device, &layout, &uniform, &sampler, &smooth, &atlas, &nothing,
-        );
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("list"),
-            bind_group_layouts: &[&layout],
-            push_constant_ranges: &[],
-        });
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("list"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vertex"),
-                buffers: &[Vertex::LAYOUT],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fragment"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format,
-                    // Straight alpha: the coverage decides how much of the ink
-                    // lands, which is what antialiased text is.
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview: None,
-            cache: None,
-        });
-        let vertices = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("quads"),
-            size: 4096 * std::mem::size_of::<Vertex>() as u64,
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        Self {
-            device,
-            queue,
-            pipeline,
-            bindings,
-            uniform,
-            vertices,
-            capacity: 4096,
+    /// Opens Direct3D for a window and builds everything that draws into it.
+    pub fn new(window: HWND, size: (u32, u32)) -> Result<Self, String> {
+        let gpu = Gpu::new(window, size)?;
+        let bound = Bound::new(&gpu)?;
+        let atlas = Atlas::new(&gpu);
+        let nothing = one_texel(&gpu)?;
+        Ok(Self {
+            gpu,
+            bound,
             atlas,
             cache: SwashCache::new(),
-            layout,
-            sampler,
-            smooth,
+            vertices: None,
+            capacity: 0,
             shown: None,
             nothing,
-        }
+        })
     }
 
-    /// Puts the picture a reader has opened into a texture of its own.
+    /// Builds the buffers again for a new size.
+    pub fn resize(&mut self, size: (u32, u32)) -> Result<(), String> {
+        self.gpu.resize(size)
+    }
+
+    /// Puts a picture that has arrived into the sheets.
     ///
-    /// Replaces whatever was there: only one is ever looked at, so the last
-    /// one's texture is dropped here rather than accumulating. `rgba` is
-    /// `width * height * 4` bytes, already scaled to something the window can
-    /// draw -- the decoder does that, because the window knows how big it is
-    /// and the GPU has a limit this must stay under either way.
+    /// Here rather than on the atlas so the caller does not have to hold the
+    /// device as well: everything about the GPU is this view's.
+    pub fn put_image(
+        &mut self,
+        key: &str,
+        rgba: &[u8],
+        width: u32,
+        height: u32,
+    ) -> Option<atlas::Slot> {
+        self.atlas.put_image(&self.gpu, key, rgba, width, height)
+    }
+
+    /// Puts a picture in a texture of its own, for the viewer.
     pub fn show(&mut self, width: u32, height: u32, rgba: &[u8]) {
-        let side = self.device.limits().max_texture_dimension_2d;
-        if width == 0 || height == 0 || width > side || height > side {
-            eprintln!("a {width}x{height} picture is not one this device can hold");
-            self.shown = None;
+        let wanted = (width as usize) * (height as usize) * 4;
+        if rgba.len() < wanted || width == 0 || height == 0 {
             return;
         }
-        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("shown"),
-            size: wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
+        let how = D3D11_TEXTURE2D_DESC {
+            Width: width,
+            Height: height,
+            MipLevels: 1,
+            ArraySize: 1,
+            Format: DXGI_FORMAT_R8G8B8A8_UNORM,
+            SampleDesc: DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
             },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            // Plain, exactly as the sheets are: these bytes are already sRGB
-            // and the frame is written without a second encoding, so sampling
-            // must not decode. Declaring this one sRGB decoded it on the way
-            // out and the same picture came back paler full size than it was
-            // in the message it was opened from.
-            format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
-        });
-        self.queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            rgba,
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(width * 4),
-                rows_per_image: Some(height),
-            },
-            wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-        );
-        self.shown = Some(texture.create_view(&wgpu::TextureViewDescriptor::default()));
-        self.rebind();
+            Usage: D3D11_USAGE_DEFAULT,
+            BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
+            ..Default::default()
+        };
+        // Given its pixels as it is made, since they are all there already.
+        let first = D3D11_SUBRESOURCE_DATA {
+            pSysMem: rgba.as_ptr() as *const _,
+            SysMemPitch: width * 4,
+            SysMemSlicePitch: 0,
+        };
+        let mut texture: Option<ID3D11Texture2D> = None;
+        if unsafe {
+            self.gpu
+                .device
+                .CreateTexture2D(&how, Some(&first), Some(&mut texture))
+        }
+        .is_err()
+        {
+            return;
+        }
+        let Some(texture) = texture else { return };
+        let mut view: Option<ID3D11ShaderResourceView> = None;
+        if unsafe {
+            self.gpu
+                .device
+                .CreateShaderResourceView(&texture, None, Some(&mut view))
+        }
+        .is_err()
+        {
+            return;
+        }
+        self.shown = view;
     }
 
-    /// Binds everything again, which is what a new or dropped picture needs:
-    /// the fourth texture is part of the same group as the three sheets.
-    fn rebind(&mut self) {
-        let shown = self.shown.as_ref().unwrap_or(&self.nothing);
-        self.bindings = bind_all(
-            &self.device,
-            &self.layout,
-            &self.uniform,
-            &self.sampler,
-            &self.smooth,
-            &self.atlas,
-            shown,
-        );
-    }
-
-    /// Lets go of it. The texture is freed with the bind group holding it.
     pub fn stop_showing(&mut self) {
         self.shown = None;
-        self.rebind();
     }
 
-    /// Draws a whole frame: every panel, each clipped to its own rectangle.
-    ///
-    /// One pass per layer, because the scissor is set per draw. A window is a
-    /// handful of panels, so that is a handful of draws -- and the alternative,
-    /// clipping each shape on the CPU, would mean rebuilding geometry whenever
-    /// a panel moved.
+    /// Draws one frame and presents it.
     pub fn draw_scene(
         &mut self,
-        target: &wgpu::TextureView,
         fonts: &mut Fonts,
         scene: &matterless_paint::Scene,
         size: (u32, u32),
         ground: [u8; 4],
     ) {
-        let viewport = Viewport {
-            size: [size.0 as f32, size.1 as f32],
-            // Scrolling is baked into the positions by whoever built the scene;
-            // a panel that scrolls is not the renderer's business.
-            scroll: 0.0,
-            padding: 0.0,
+        let Some(target) = self.gpu.target.clone() else {
+            return;
         };
-        self.queue
-            .write_buffer(&self.uniform, 0, viewport_bytes(&viewport));
-
         // One buffer for the frame, with each layer's span remembered.
         let mut quads: Vec<Vertex> = Vec::new();
         let mut spans: Vec<Span> = Vec::new();
         // And the one picture that samples its own texture, kept apart because
-        // it needs the other bind group. Last in the buffer and last in the
-        // pass: it is an overlay over the whole window, so there is nothing it
-        // should be drawn under.
+        // it is built after the rest of the frame. Last in the buffer and last
+        // in the pass: it is an overlay over the whole window, so there is
+        // nothing it should be drawn under.
         let mut shown: Vec<Span> = Vec::new();
         for layer in &scene.layers {
             let from = quads.len() as u32;
             vertices_of(
                 &layer.pieces,
-                &self.queue,
+                &self.gpu,
                 fonts,
                 &mut self.cache,
                 &mut self.atlas,
@@ -766,123 +503,224 @@ impl View {
             }
         }
 
-        if quads.len() > self.capacity {
-            self.capacity = quads.len().next_power_of_two();
-            self.vertices = self.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("quads"),
-                size: (self.capacity * std::mem::size_of::<Vertex>()) as u64,
-                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-        }
-        if !quads.is_empty() {
-            self.queue.write_buffer(&self.vertices, 0, as_bytes(&quads));
+        // Cloned rather than borrowed: the context is a handle, and holding a
+        // borrow of it would stop the buffer being grown while it is bound.
+        let context = self.gpu.context.clone();
+        // Cleared first, whatever is drawn after.
+        let clear = [
+            ground[0] as f32 / 255.0,
+            ground[1] as f32 / 255.0,
+            ground[2] as f32 / 255.0,
+            1.0,
+        ];
+        unsafe {
+            context.ClearRenderTargetView(&target, &clear);
+            context.OMSetRenderTargets(Some(&[Some(target.clone())]), None);
+            context.RSSetViewports(Some(&[self.gpu.viewport()]));
         }
 
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("frame"),
-            });
-        {
-            let clear = wgpu::Color {
-                r: ground[0] as f64 / 255.0,
-                g: ground[1] as f64 / 255.0,
-                b: ground[2] as f64 / 255.0,
-                a: 1.0,
+        if !quads.is_empty() && self.room_for(quads.len()) {
+            self.write(&quads);
+            let sheets = [
+                Some(self.atlas.view(Sheet::Letters)),
+                Some(self.atlas.view(Sheet::Faces)),
+                Some(self.atlas.view(Sheet::Pictures)),
+                Some(match self.shown.as_ref() {
+                    Some(view) => view.clone(),
+                    None => self.nothing.clone(),
+                }),
+            ];
+            let viewport = Viewport {
+                size: [size.0 as f32, size.1 as f32],
+                // Scrolling is baked into the positions by whoever built the
+                // scene; a panel that scrolls is not the renderer's business.
+                scroll: 0.0,
+                padding: 0.0,
             };
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("frame"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: target,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(clear),
-                        store: wgpu::StoreOp::Store,
-                    },
-                    depth_slice: None,
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-            });
-            if !quads.is_empty() {
-                pass.set_pipeline(&self.pipeline);
-                // Once for the frame. Every texture is in this group and each
-                // quad names the one it samples, so the only thing left that
-                // splits a frame into draws is the scissor.
-                pass.set_bind_group(0, &self.bindings, &[]);
-                pass.set_vertex_buffer(0, self.vertices.slice(..));
-                for (range, clip) in spans {
-                    // Clamped to the surface: a scissor outside it is a
-                    // validation error, and a panel can be dragged past the edge.
-                    let x = clip.0.max(0.0).min(size.0 as f32) as u32;
-                    let y = clip.1.max(0.0).min(size.1 as f32) as u32;
-                    let width = (clip.2.min(size.0 as f32 - x as f32)).max(0.0) as u32;
-                    let height = (clip.3.min(size.1 as f32 - y as f32)).max(0.0) as u32;
-                    if width == 0 || height == 0 {
-                        continue;
-                    }
-                    pass.set_scissor_rect(x, y, width, height);
-                    pass.draw(range, 0..1);
-                }
+            self.write_uniform(&viewport);
+
+            let stride = std::mem::size_of::<Vertex>() as u32;
+            let offset = 0u32;
+            unsafe {
+                context.IASetInputLayout(&self.bound.layout);
+                context.IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+                context.IASetVertexBuffers(
+                    0,
+                    1,
+                    Some(&self.vertices.clone()),
+                    Some(&stride),
+                    Some(&offset),
+                );
+                context.VSSetShader(&self.bound.vertex, None);
+                context.PSSetShader(&self.bound.fragment, None);
+                context.VSSetConstantBuffers(0, Some(&[Some(self.bound.uniform.clone())]));
+                // Every texture at once, and each quad names the one it wants:
+                // the only thing left that splits a frame into draws is the
+                // scissor.
+                context.PSSetShaderResources(0, Some(&sheets));
+                context.PSSetSamplers(
+                    0,
+                    Some(&[
+                        Some(self.bound.point.clone()),
+                        Some(self.bound.smooth.clone()),
+                    ]),
+                );
+                context.OMSetBlendState(&self.bound.blend, None, 0xffff_ffff);
+                context.RSSetState(&self.bound.raster);
             }
-            // The opened picture. Its own draw only because it is built after
-            // the rest of the frame, not because it needs a different binding:
-            // it names the fourth texture like anything else names a sheet.
-            if self.shown.is_some() && !shown.is_empty() {
-                pass.set_pipeline(&self.pipeline);
-                pass.set_bind_group(0, &self.bindings, &[]);
-                pass.set_vertex_buffer(0, self.vertices.slice(..));
-                for (range, clip) in shown {
-                    let x = clip.0.max(0.0).min(size.0 as f32) as u32;
-                    let y = clip.1.max(0.0).min(size.1 as f32) as u32;
-                    let width = (clip.2.min(size.0 as f32 - x as f32)).max(0.0) as u32;
-                    let height = (clip.3.min(size.1 as f32 - y as f32)).max(0.0) as u32;
-                    if width == 0 || height == 0 {
-                        continue;
-                    }
-                    pass.set_scissor_rect(x, y, width, height);
-                    pass.draw(range, 0..1);
+            // The opened picture last, over everything, for the same reason it
+            // is built last.
+            for (range, clip) in spans.into_iter().chain(shown) {
+                let Some(scissor) = fits(clip, size) else {
+                    continue;
+                };
+                unsafe {
+                    context.RSSetScissorRects(Some(&[scissor]));
+                    context.Draw(range.end - range.start, range.start);
                 }
             }
         }
-        self.queue.submit(Some(encoder.finish()));
-        // A frame has been drawn, which is what the atlas ages its pictures by:
-        // everything on screen was just asked for, so anything that was not is
-        // a frame older than the things it is competing with for room.
+
+        // Vsync, because a chat window has nothing to gain from drawing faster
+        // than the screen shows it.
+        let _ = unsafe { self.gpu.chain.Present(1, DXGI_PRESENT(0)) };
+        // A frame has been drawn, which is what the atlas ages its pictures
+        // by: everything on screen was just asked for, so anything that was
+        // not is a frame older than the things it competes with for room.
         self.atlas.drew();
+    }
+
+    /// Grows the vertex buffer if the frame has outgrown it.
+    ///
+    /// Only ever upwards: a conversation that once needed this many quads will
+    /// need them again the moment it is scrolled back to.
+    fn room_for(&mut self, quads: usize) -> bool {
+        if self.vertices.is_some() && quads <= self.capacity {
+            return true;
+        }
+        let capacity = quads.next_power_of_two().max(4096);
+        let how = D3D11_BUFFER_DESC {
+            ByteWidth: (capacity * std::mem::size_of::<Vertex>()) as u32,
+            Usage: D3D11_USAGE_DYNAMIC,
+            BindFlags: D3D11_BIND_VERTEX_BUFFER.0 as u32,
+            CPUAccessFlags: D3D11_CPU_ACCESS_WRITE.0 as u32,
+            ..Default::default()
+        };
+        let mut made: Option<ID3D11Buffer> = None;
+        if unsafe { self.gpu.device.CreateBuffer(&how, None, Some(&mut made)) }.is_err() {
+            return false;
+        }
+        self.vertices = made;
+        self.capacity = capacity;
+        self.vertices.is_some()
+    }
+
+    /// Copies the frame's quads in, discarding what was there.
+    ///
+    /// `DISCARD` rather than a second buffer: it tells the runtime the old
+    /// contents are not wanted, so it hands back memory the device has
+    /// finished with instead of waiting for it.
+    fn write(&self, quads: &[Vertex]) {
+        let Some(buffer) = self.vertices.as_ref() else {
+            return;
+        };
+        let mut into = D3D11_MAPPED_SUBRESOURCE::default();
+        if unsafe {
+            self.gpu
+                .context
+                .Map(buffer, 0, D3D11_MAP_WRITE_DISCARD, 0, Some(&mut into))
+        }
+        .is_err()
+        {
+            return;
+        }
+        let bytes = as_bytes(quads);
+        // SAFETY: the buffer was made at least this big, and `Map` gives a
+        // pointer to all of it.
+        unsafe {
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), into.pData as *mut u8, bytes.len());
+            self.gpu.context.Unmap(buffer, 0);
+        }
+    }
+
+    fn write_uniform(&self, viewport: &Viewport) {
+        let mut into = D3D11_MAPPED_SUBRESOURCE::default();
+        if unsafe {
+            self.gpu.context.Map(
+                &self.bound.uniform,
+                0,
+                D3D11_MAP_WRITE_DISCARD,
+                0,
+                Some(&mut into),
+            )
+        }
+        .is_err()
+        {
+            return;
+        }
+        let bytes = viewport_bytes(viewport);
+        // SAFETY: the buffer is exactly this size.
+        unsafe {
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), into.pData as *mut u8, bytes.len());
+            self.gpu.context.Unmap(&self.bound.uniform, 0);
+        }
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// The invariant the whole palette rests on: nothing is encoded twice.
-    #[test]
-    fn the_frame_is_never_written_through_an_srgb_view() {
-        for format in [
-            wgpu::TextureFormat::Bgra8UnormSrgb,
-            wgpu::TextureFormat::Rgba8UnormSrgb,
-            wgpu::TextureFormat::Bgra8Unorm,
-            wgpu::TextureFormat::Rgba8Unorm,
-        ] {
-            assert!(!plain(format).is_srgb(), "{format:?} stayed sRGB");
-        }
+/// One transparent texel, to stand in the fourth slot while nothing is open.
+fn one_texel(gpu: &Gpu) -> Result<ID3D11ShaderResourceView, String> {
+    let how = D3D11_TEXTURE2D_DESC {
+        Width: 1,
+        Height: 1,
+        MipLevels: 1,
+        ArraySize: 1,
+        Format: DXGI_FORMAT_R8G8B8A8_UNORM,
+        SampleDesc: DXGI_SAMPLE_DESC {
+            Count: 1,
+            Quality: 0,
+        },
+        Usage: D3D11_USAGE_DEFAULT,
+        BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
+        ..Default::default()
+    };
+    let nothing = [0u8; 4];
+    let first = D3D11_SUBRESOURCE_DATA {
+        pSysMem: nothing.as_ptr() as *const _,
+        SysMemPitch: 4,
+        SysMemSlicePitch: 0,
+    };
+    let mut texture: Option<ID3D11Texture2D> = None;
+    unsafe {
+        gpu.device
+            .CreateTexture2D(&how, Some(&first), Some(&mut texture))
     }
-
-    /// The plain view has to be the same texture read differently, or the
-    /// surface will not accept it.
-    #[test]
-    fn a_plain_format_is_left_alone() {
-        assert_eq!(
-            plain(wgpu::TextureFormat::Bgra8UnormSrgb),
-            wgpu::TextureFormat::Bgra8Unorm
-        );
-        assert_eq!(
-            plain(wgpu::TextureFormat::Bgra8Unorm),
-            wgpu::TextureFormat::Bgra8Unorm
-        );
+    .map_err(|why| why.to_string())?;
+    let texture = texture.ok_or("no texture")?;
+    let mut view: Option<ID3D11ShaderResourceView> = None;
+    unsafe {
+        gpu.device
+            .CreateShaderResourceView(&texture, None, Some(&mut view))
     }
+    .map_err(|why| why.to_string())?;
+    view.ok_or_else(|| "no view".to_string())
+}
+
+/// A clip rectangle, clamped to what is actually on the surface.
+///
+/// A scissor outside it is refused rather than a wrong pixel, and a panel can
+/// be dragged past the edge.
+fn fits(clip: Clip, size: (u32, u32)) -> Option<RECT> {
+    let x = clip.0.max(0.0).min(size.0 as f32) as i32;
+    let y = clip.1.max(0.0).min(size.1 as f32) as i32;
+    let width = (clip.2.min(size.0 as f32 - x as f32)).max(0.0) as i32;
+    let height = (clip.3.min(size.1 as f32 - y as f32)).max(0.0) as i32;
+    if width == 0 || height == 0 {
+        return None;
+    }
+    Some(RECT {
+        left: x,
+        top: y,
+        right: x + width,
+        bottom: y + height,
+    })
 }

@@ -10,3 +10,14 @@ license = "MIT"
 [profile.release]
 lto = "thin"
 codegen-units = 1
+
+# The dev build is the one this is developed against, and shaping text is
+# almost entirely somebody else's code: cosmic-text, rustybuzz, swash. Left
+# unoptimised it cost 0.53ms to lay out one message against 0.04ms optimised,
+# which turned a window resize into a quarter of a second of shaping and made
+# every timing taken in this build a measurement of the wrong thing.
+#
+# The dependencies are optimised and this program is not, so a backtrace still
+# names our own functions and an incremental build still only rebuilds ours.
+[profile.dev.package."*"]
+opt-level = 3

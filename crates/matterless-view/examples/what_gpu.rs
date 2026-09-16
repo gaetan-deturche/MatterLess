@@ -1,57 +1,46 @@
-//! Which adapters this machine offers, and what each costs to start on.
+//! Which adapters this machine offers, and which one the window would take.
 //!
 //! The window asks for one by preference and prints the name it got, which
 //! says nothing about what it passed over. On a machine with both an
 //! integrated and a discrete GPU that is the difference between the chip in
-//! the processor and the card in the slot -- and the swapchain, which is most
-//! of what starting up waits for, belongs to whichever driver answered.
+//! the processor and the card in the slot.
 //!
 //!     cargo run -p matterless-view --example what_gpu
 
-use std::time::Instant;
-
 fn main() {
-    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-        backends: wgpu::Backends::VULKAN,
-        ..Default::default()
-    });
-
-    println!("Vulkan adapters on this machine:");
-    for adapter in instance.enumerate_adapters(wgpu::Backends::VULKAN) {
-        let info = adapter.get_info();
-        println!(
-            "  {:?}  {}  (driver {} {})",
-            info.device_type, info.name, info.driver, info.driver_info
-        );
+    #[cfg(windows)]
+    match look() {
+        Ok(()) => {}
+        Err(why) => eprintln!("could not ask Direct3D: {why}"),
     }
+    #[cfg(not(windows))]
+    println!("Direct3D is a Windows thing");
+}
 
-    // What the window would choose, and what the other choice would be.
-    for preference in [
-        wgpu::PowerPreference::LowPower,
-        wgpu::PowerPreference::HighPerformance,
-    ] {
-        let began = Instant::now();
-        let chosen = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: preference,
-            compatible_surface: None,
-            force_fallback_adapter: false,
-        }));
-        let Ok(adapter) = chosen else {
-            println!("\n{preference:?}: nothing answered");
+#[cfg(windows)]
+fn look() -> Result<(), String> {
+    use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIFactory1};
+
+    let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1() }.map_err(|why| why.to_string())?;
+    let mut at = 0;
+    while let Ok(adapter) = unsafe { factory.EnumAdapters(at) } {
+        at += 1;
+        let Ok(about) = (unsafe { adapter.GetDesc() }) else {
             continue;
         };
-        let info = adapter.get_info();
+        let named = String::from_utf16_lossy(&about.Description)
+            .trim_end_matches(char::from(0))
+            .to_string();
+        // No memory of its own is what an integrated chip looks like from
+        // here: it shares the machine's. That is the one the window prefers.
+        let kind = match about.DedicatedVideoMemory > 0 {
+            true => "discrete",
+            false => "integrated -- preferred",
+        };
         println!(
-            "\n{preference:?} -> {} ({:?}) in {}ms",
-            info.name,
-            info.device_type,
-            began.elapsed().as_millis()
+            "{named} ({kind}), {} MB of its own",
+            about.DedicatedVideoMemory / (1024 * 1024)
         );
-        let at = Instant::now();
-        let device = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default()));
-        match device {
-            Ok(_) => println!("  device in {}ms", at.elapsed().as_millis()),
-            Err(error) => println!("  no device: {error}"),
-        }
     }
+    Ok(())
 }

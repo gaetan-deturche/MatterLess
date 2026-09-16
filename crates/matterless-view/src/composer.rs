@@ -139,6 +139,26 @@ impl Composer {
         self.editor.shape_as_needed(fonts.system_mut(), false);
     }
 
+    /// The placeholder, cut to the room there is.
+    ///
+    /// Left to the clip it ended mid-letter: opening a thread narrows this box
+    /// and the hint read "Shift+Enter for a ne", which is not a shorter
+    /// sentence but a broken one. An ellipsis says the words go on.
+    fn hint(&self, fonts: &mut Fonts, width: f32) -> String {
+        matterless_layout::elided(
+            fonts,
+            &self.placeholder,
+            width,
+            matterless_layout::Style {
+                size: SIZE,
+                line_height: LINE,
+                bold: false,
+                italic: false,
+                mono: false,
+            },
+        )
+    }
+
     /// How many lines the text occupies, capped at what the box will show.
     fn lines(&self) -> usize {
         self.editor
@@ -455,9 +475,10 @@ impl Composer {
         panel.edge(edge).fill(palette.surface).draw(scene);
 
         if self.is_empty() {
+            let said = self.hint(fonts, inner.width);
             let glyphs = painter.run(
                 fonts,
-                &self.placeholder,
+                &said,
                 inner.x,
                 inner.y,
                 matterless_paint::Run {
@@ -561,5 +582,43 @@ impl Composer {
             },
             palette.faint,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Composer;
+    use matterless_layout::Fonts;
+
+    /// The hint is cut to the box, with an ellipsis where it was cut.
+    ///
+    /// Drawn at its full width and left to the clip, it ended mid-letter: open
+    /// a thread and the message box narrows, and the hint read "Shift+Enter
+    /// for a ne" -- which does not read as a hint too long for its box, it
+    /// reads as a hint that is wrong.
+    #[test]
+    fn a_hint_too_long_for_its_box_says_so_rather_than_stopping() {
+        let mut fonts = Fonts::new();
+        let composer = Composer::new("composer");
+        let wide = composer.hint(&mut fonts, 400.0);
+        assert!(
+            wide.ends_with("new line)"),
+            "{wide:?} was cut at a width with room"
+        );
+
+        let narrow = composer.hint(&mut fonts, 60.0);
+        assert!(narrow.len() < wide.len(), "{narrow:?} was not cut");
+        assert!(
+            narrow.ends_with('\u{2026}'),
+            "{narrow:?} does not say it was cut"
+        );
+    }
+
+    /// No room at all is not the same as a box with nothing in it.
+    #[test]
+    fn a_box_with_no_room_says_nothing_rather_than_guessing() {
+        let mut fonts = Fonts::new();
+        let composer = Composer::new("composer");
+        assert_eq!(composer.hint(&mut fonts, 0.0), "");
     }
 }

@@ -248,6 +248,44 @@ impl Stream {
         self.reused
     }
 
+    /// Lays out only the rows on screen, for a width that is still changing.
+    ///
+    /// Shaping a channel is 180 messages of cosmic-text and takes longer than
+    /// a frame -- measured at 24ms against 0.4ms for all the bookkeeping
+    /// around it, so there is nothing to shave, only work to not do. A drag of
+    /// the window's edge asks for a new width on every frame of itself, and
+    /// what the reader can see is a dozen rows of the hundred and eighty.
+    ///
+    /// So the dozen are shaped against the new width and the rest keep the
+    /// heights they had. The list is briefly a little wrong about its own
+    /// height, which shows as the scrollbar drifting while the edge moves; the
+    /// full pass at the end of the drag settles it. What it is never wrong
+    /// about is the part being looked at.
+    pub fn relay_seen(&mut self, fonts: &mut Fonts, width: f32, within: Rect) {
+        self.theme = Theme {
+            width: width - Theme::default().pad_x * 2.0,
+            ..self.theme
+        };
+        let mut top = within.y + self.theme.pad_top - self.scroll;
+        for (index, row) in self.rows.iter().enumerate() {
+            let Some(was) = self.laid.get(index) else {
+                break;
+            };
+            let bottom = top + was.height;
+            if bottom >= within.y && top <= within.bottom() {
+                self.laid[index] = lay_out(fonts, row, &self.theme);
+            }
+            top = bottom;
+            if top > within.bottom() {
+                break;
+            }
+        }
+        // Every row is against a stale width now, this one's included: the
+        // cache must not hand any of them back.
+        self.kept.clear();
+        self.kept_against = (f32::NAN, 0, 0);
+    }
+
     /// Takes a fresh plan.
     ///
     /// `lazily` says the reader is at the newest message, which is the only

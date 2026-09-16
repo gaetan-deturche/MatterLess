@@ -7,6 +7,9 @@ version = "0.1.5"
 edition = "2024"
 
 [dependencies]
+# Direct3D 11 is in the  crate below; nothing else is needed to
+# draw. The shader is HLSL and is compiled at startup by the runtime
+# compiler, which ships with Windows.
 cosmic-text = "0.19"
 matterless-core = { path = "../matterless-core" }
 matterless-layout = { path = "../matterless-layout" }
@@ -33,14 +36,12 @@ serde_json = "1"
 # The session the app already established, read rather than collected: this
 # window has no business asking for a password to mint a second one.
 keyring = "3"
-# The Vulkan backend is selected explicitly at instance creation; wgpu is the
-# API on top of it rather than an abstraction over which one to use.
-wgpu = "26"
 # Only the window needs these. Kept behind a feature so the crate can still be
 # built for a machine with no display -- which is what `--snapshot` and the
 # examples that measure layout are for.
 winit = { version = "0.30", optional = true }
-pollster = { version = "0.4", optional = true }
+# The window's handle, to hand Direct3D. winit answers in these types.
+raw-window-handle = { version = "0.6", optional = true }
 # Headless verification: the same rows written out as an image, for a machine
 # with no display and for comparing against the DOM list.
 png = { version = "0.18", optional = true }
@@ -63,7 +64,7 @@ rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs"] 
 # On by default so the window is one command. Turned off for a build that only
 # needs the layout and the painter, which needs no windowing library at all.
 default = ["window"]
-window = ["winit", "pollster", "png"]
+window = ["winit", "raw-window-handle", "png"]
 
 [[bin]]
 name = "matterless-view"
@@ -99,6 +100,15 @@ windows = { version = "0.61.3", features = [
     # Starting with Windows is a value under `Run`, which is where the app's
     # autostart plugin put it -- so a reader who had it on still has it on.
     "Win32_System_Registry",
+    # Direct3D, for one measurement only: whether DXGI resizes a swapchain as
+    # slowly as Vulkan does on the same adapter. See the 
+    # example -- nothing in the window draws through it.
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    # Compiling the HLSL at startup.
+    "Win32_Graphics_Direct3D_Fxc",
 ] }
 
 [build-dependencies]
