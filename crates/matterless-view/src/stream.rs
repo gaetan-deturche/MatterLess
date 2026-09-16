@@ -1290,11 +1290,12 @@ impl Stream {
             let y = top + block.y;
             // The stylesheet's own shape: a 10px capsule on the raised
             // surface, signalled when it is the reader's own.
+            let tall = block.height - 3.0;
             scene.rounded(
                 x,
                 y,
                 block.wrap,
-                block.height - 3.0,
+                tall,
                 if reaction.mine {
                     palette.signal_soft
                 } else {
@@ -1302,6 +1303,10 @@ impl Stream {
                 },
                 PILL,
             );
+            // Each thing centred in the capsule by its own height rather than
+            // dropped a fixed three pixels: a face is sixteen tall and a line
+            // of words eighteen, so one offset cannot put both in the middle.
+            let middle = |of: f32| (y + (tall - of) / 2.0).round();
             let mut text_at = x + self.theme.pill_padding;
             // A custom emoji has no character to shape, so the square the
             // layout reserved gets the picture instead. Without this the pill
@@ -1310,7 +1315,7 @@ impl Stream {
                 if let Some(id) = self.custom.get(&reaction.emoji) {
                     scene.extend([matterless_paint::Piece::Image {
                         x: text_at,
-                        y: y + 3.0,
+                        y: middle(self.theme.emoji_size),
                         width: self.theme.emoji_size,
                         height: self.theme.emoji_size,
                         key: emoji_key(id),
@@ -1327,8 +1332,8 @@ impl Stream {
                     .map(|span| span.text.as_str())
                     .collect::<String>(),
                 text_at,
-                y + 3.0,
-                Run::label(f32::MAX),
+                middle(self.theme.pill_line),
+                pill_run(&self.theme),
             );
             scene.glyphs(
                 label,
@@ -1511,10 +1516,27 @@ impl Stream {
             palette,
         } = into;
         let y = top + (self.theme.footer_height - FACE) / 2.0;
-        let mut x = left + self.theme.gutter;
+        let left_of_faces = left + self.theme.gutter;
         // The first three, which is what the app shows: past that the faces
         // stop identifying anybody and become a texture.
-        for face in participants.iter().take(FACES) {
+        let shown: Vec<&matterless_render::ThreadFace> = participants.iter().take(FACES).collect();
+        // Whatever this row is drawn on, which is what a ring has to be for a
+        // face to read as being in front of the one behind it rather than as
+        // two circles with a pale gap between them.
+        let behind = if hot { palette.surface } else { palette.ground };
+        // Right to left, so the first of them ends up on top -- the order the
+        // official client stacks them in, and the one that reads as a queue
+        // rather than a pile.
+        for (at, face) in shown.iter().enumerate().rev() {
+            let x = left_of_faces + at as f32 * FACE_STEP;
+            scene.rounded(
+                x - RING,
+                y - RING,
+                FACE + RING * 2.0,
+                FACE + RING * 2.0,
+                behind,
+                FACE / 2.0 + RING,
+            );
             scene.rounded(x, y, FACE, FACE, palette.raised, FACE / 2.0);
             scene.extend([matterless_paint::Piece::Image {
                 x,
@@ -1524,8 +1546,12 @@ impl Stream {
                 key: avatar_key(&face.user_id, face.avatar_at),
                 radius: FACE / 2.0,
             }]);
-            x += FACE + 3.0;
         }
+        // Past the last face, not past where a fourth would have gone.
+        let x = match shown.len() {
+            0 => left_of_faces,
+            count => left_of_faces + (count - 1) as f32 * FACE_STEP + FACE,
+        };
         let plural = if *reply_count == 1 {
             "reply"
         } else {
@@ -1536,12 +1562,17 @@ impl Stream {
         } else {
             format!("{reply_count} {plural}")
         };
+        // Centred by the line it is actually set on. Centring an 18px line
+        // against the 21px of body text put the words a pixel and a half above
+        // the faces beside them, which is the kind of gap that reads as wrong
+        // without reading as anything in particular.
+        let words = Run::label(f32::MAX);
         let glyphs = painter.run(
             fonts,
             &said,
-            x + 5.0,
-            top + (self.theme.footer_height - self.theme.line_height) / 2.0,
-            Run::label(f32::MAX),
+            x + 8.0,
+            top + ((self.theme.footer_height - words.line_height) / 2.0).round(),
+            words,
         );
         // Unread replies are the reason to open it, so they read at full
         // strength while a thread with nothing new recedes.
@@ -1819,6 +1850,25 @@ pub const AVATAR: f32 = 28.0;
 /// The corners the stylesheet cuts: a capsule on a reaction, a softer one on
 /// a card or a code block.
 const PILL: f32 = 10.0;
+
+/// How the words on a reaction pill are set.
+///
+/// Taken from the theme rather than written here, because the layout measures
+/// the pill's width from the same two numbers and the width it arrives at is
+/// the width this draws and hit-tests. Set at 13 here while the layout
+/// measured at 14, every pill came out a little wider than its contents and
+/// all of the slack fell on the right of them.
+fn pill_run(theme: &matterless_layout::row::Theme) -> Run {
+    Run {
+        size: theme.pill_size,
+        line_height: theme.pill_line,
+        bold: false,
+        mono: false,
+        wrap: f32::MAX,
+        icon: false,
+        smooth: false,
+    }
+}
 const CARD: f32 = 6.0;
 const MENTION: f32 = 3.0;
 /// How wide the "jump to newest" button is.
@@ -1829,6 +1879,11 @@ const SAVE: f32 = 46.0;
 /// A face on a thread footer, and how many of them are shown.
 const FACE: f32 = 18.0;
 const FACES: usize = 3;
+/// How far along the next face begins: less than a face wide, so they overlap.
+const FACE_STEP: f32 = 12.0;
+/// The ring of row-coloured ground each face is drawn inside, which is what
+/// separates one from the one it overlaps.
+const RING: f32 = 1.5;
 
 /// What a user's picture is called, versioned so a new picture is a new name.
 ///
@@ -1970,6 +2025,95 @@ fn size_of(bytes: i64) -> String {
 /// What a custom emoji's picture is called.
 pub fn emoji_key(emoji_id: &str) -> String {
     format!("emoji/{emoji_id}")
+}
+
+#[cfg(test)]
+mod pills {
+    use super::pill_run;
+    use matterless_layout::Fonts;
+    use matterless_layout::row::{Kind, Theme, lay_out};
+    use matterless_paint::Painter;
+    use matterless_render::{PostRow, ReactionSummary, Row};
+    use std::sync::Arc;
+
+    /// The words drawn on a pill fit the width the layout reserved for it.
+    ///
+    /// The two ends of this live in different crates: the layout decides how
+    /// wide a pill is and this draws into it. They agreed on the padding and
+    /// not on the size of the words -- measured at 14 and set at 13 -- so
+    /// every pill carried a couple of pixels of slack on its right and read as
+    /// contents that had not been centred.
+    #[test]
+    fn a_pill_is_drawn_at_the_size_it_was_measured_at() {
+        let mut fonts = Fonts::new();
+        let mut painter = Painter::new();
+        let theme = Theme::default();
+        let post = PostRow {
+            post_id: "p1".into(),
+            root_id: String::new(),
+            author_id: "u1".into(),
+            author_name: "ada".into(),
+            create_at: 0,
+            update_at: 0,
+            edited: false,
+            nodes: Arc::new(vec![matterless_render::markdown::Node::Text {
+                value: "nice".into(),
+            }]),
+            reactions: vec![ReactionSummary {
+                emoji: "tada".into(),
+                count: 12,
+                mine: false,
+                unicode: Some("\u{1F389}".into()),
+                names: Vec::new(),
+            }],
+            files: Vec::new(),
+            attachments: Vec::new(),
+            avatar_at: 0,
+            bot: false,
+            body_is_attachment_only: false,
+            pending: false,
+            failed: false,
+            pinned: false,
+            saved: false,
+            following: false,
+            previews: Vec::new(),
+        };
+        let laid = lay_out(&mut fonts, &Row::Post { post }, &theme);
+        let pill = laid
+            .blocks
+            .iter()
+            .find(|block| block.kind == Kind::Reactions)
+            .expect("no pill");
+        let said: String = pill.spans.iter().map(|span| span.text.as_str()).collect();
+        // What the layout kept for the words, and what the words will
+        // actually measure when this module sets them. The whole defect is
+        // these two numbers being allowed to differ, so compare them directly
+        // rather than looking at where the glyphs landed: a couple of pixels
+        // of slack is invisible in a position and plain in a subtraction.
+        let run = pill_run(&theme);
+        let drawn = matterless_layout::extent_of(
+            &mut fonts,
+            &said,
+            f32::MAX,
+            matterless_layout::Style {
+                size: run.size,
+                line_height: run.line_height,
+                bold: run.bold,
+                italic: false,
+                mono: run.mono,
+            },
+        )
+        .width;
+        let kept = pill.wrap - theme.pill_padding * 2.0;
+        assert!(
+            (kept - drawn).abs() < 0.5,
+            "a pill keeps {kept} for words that set {drawn} wide"
+        );
+        // And the painter agrees the text is that wide, so the comparison
+        // above is about the shaping rather than about two calls to it.
+        let glyphs = painter.run(&mut fonts, &said, theme.pill_padding, 0.0, run);
+        assert!(!glyphs.is_empty(), "nothing was drawn at all");
+    }
 }
 
 #[cfg(test)]

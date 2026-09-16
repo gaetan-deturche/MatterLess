@@ -56,6 +56,16 @@ pub struct Theme {
     /// Inside a reaction pill, and between two of them.
     pub pill_padding: f32,
     pub pill_gap: f32,
+    /// The words on a pill: its count, and the face in front of one.
+    ///
+    /// Here rather than at each end because the width measured here is the
+    /// width the pill is drawn and hit as. Measured at one size and drawn at
+    /// another, a pill comes out wider than what is in it and the slack all
+    /// falls on the right -- which reads as a pill whose contents are not
+    /// centred, because they are not.
+    pub pill_size: f32,
+    /// The line a pill's words are set on, and so how tall they measure.
+    pub pill_line: f32,
     /// The square a custom emoji is drawn in, which has no character to shape.
     pub emoji_size: f32,
     pub reaction_height: f32,
@@ -106,6 +116,8 @@ impl Default for Theme {
             card_height: 56.0,
             pill_padding: 7.0,
             pill_gap: 5.0,
+            pill_size: 13.0,
+            pill_line: 18.0,
             small_size: 11.5,
             system_size: 12.5,
             emoji_size: 16.0,
@@ -1010,8 +1022,8 @@ pub fn lay_out(fonts: &mut Fonts, row: &Row, theme: &Theme) -> RowLayout {
                 &label,
                 f32::MAX,
                 crate::Style {
-                    size: theme.body_size,
-                    line_height: theme.reaction_height,
+                    size: theme.pill_size,
+                    line_height: theme.pill_line,
                     bold: false,
                     italic: false,
                     mono: false,
@@ -1033,7 +1045,7 @@ pub fn lay_out(fonts: &mut Fonts, row: &Row, theme: &Theme) -> RowLayout {
                 lines: 1,
                 kind: Kind::Reactions,
                 spans: vec![plain(label)],
-                size: theme.body_size,
+                size: theme.pill_size,
                 // The pill's own width, which is what it is drawn and hit as.
                 wrap: width,
             });
@@ -1541,6 +1553,55 @@ mod tests {
         // a width that only accounted for one of them would run the last
         // letter of a full line out past its own background.
         assert_eq!(code.wrap, theme.text_width() - theme.code_padding * 2.0);
+    }
+
+    /// A pill is exactly its contents plus the same padding on either side.
+    ///
+    /// The width measured here is the width the pill is drawn and hit as, so
+    /// if it is measured at one size and the words set at another the pill
+    /// comes out wider than what is in it -- and every bit of the slack falls
+    /// on the right, because the words start at the left padding. That reads
+    /// as contents that are not centred, which is what they were.
+    #[test]
+    fn a_reaction_pill_is_no_wider_than_what_is_in_it() {
+        let mut fonts = Fonts::new();
+        let theme = Theme::default();
+        let mut post = post(vec![text("nice")]);
+        post.reactions = vec![matterless_render::ReactionSummary {
+            emoji: "tada".into(),
+            count: 12,
+            mine: false,
+            unicode: Some("\u{1F389}".into()),
+            names: Vec::new(),
+        }];
+        let laid = lay_out(&mut fonts, &Row::Post { post }, &theme);
+        let pill = laid
+            .blocks
+            .iter()
+            .find(|block| block.kind == Kind::Reactions)
+            .expect("no pill");
+        let said: String = pill.spans.iter().map(|span| span.text.as_str()).collect();
+        // Measured the way the pill will be drawn: at the size the block
+        // itself carries, which is the only size anybody downstream knows.
+        let words = crate::extent_of(
+            &mut fonts,
+            &said,
+            f32::MAX,
+            crate::Style {
+                size: pill.size,
+                line_height: theme.pill_line,
+                bold: false,
+                italic: false,
+                mono: false,
+            },
+        )
+        .width;
+        assert!(
+            (pill.wrap - (words + theme.pill_padding * 2.0)).abs() < 0.5,
+            "pill {} wide for {words} of words and {} of padding",
+            pill.wrap,
+            theme.pill_padding * 2.0
+        );
     }
 
     /// A list item is a run of inline content, not one block per node.
