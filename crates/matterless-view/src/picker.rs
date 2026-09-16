@@ -13,7 +13,7 @@ use matterless_layout::Fonts;
 use matterless_paint::Run;
 use matterless_ui::input::{Input, Key};
 use matterless_ui::{Placed, Rect};
-use matterless_widgets::{Canvas, Named};
+use matterless_widgets::{Canvas, Named, Panel};
 
 pub const NAME: &str = "picker";
 /// What this widget's hit boxes are called. The join and its inverse in one
@@ -272,15 +272,15 @@ impl Picker {
             fonts,
             palette,
         } = into;
-        scene.floating(
-            panel.x,
-            panel.y,
-            panel.width,
-            panel.height,
-            palette.surface,
-            PANEL,
-            10.0,
-        );
+        // Through the widget rather than by hand, which is what gives it the
+        // hairline. Drawn as a shadow and a fill alone, a panel has no edge at
+        // all: the shadow fades into the surface with nothing to fade away
+        // *from*, and what says a popup is over the window rather than part of
+        // it is that hard boundary, not the darkness under it.
+        Panel::floating(panel, PANEL, 10.0)
+            .edge(palette.rule)
+            .fill(palette.surface)
+            .draw(scene);
         for (at, rect) in cells {
             let Some(choice) = self.found.get(at) else {
                 continue;

@@ -14,6 +14,7 @@ use matterless_layout::Fonts;
 use matterless_paint::Run;
 use matterless_ui::Rect;
 use matterless_ui::input::{Input, Key};
+use matterless_widgets::Panel;
 
 /// What the box answers to when the pointer is tested against it.
 pub const NAME: &str = "switcher";
@@ -423,15 +424,15 @@ impl Switcher {
             within.height,
             [0, 0, 0, 102],
         );
-        scene.floating(
-            panel.x,
-            panel.y,
-            panel.width,
-            panel.height,
-            palette.surface,
-            PANEL,
-            12.0,
-        );
+        // Through the widget rather than by hand, which is what gives it the
+        // hairline. Drawn as a shadow and a fill alone, a panel has no edge at
+        // all: the shadow fades into the surface with nothing to fade away
+        // *from*, and what says a popup is over the window rather than part of
+        // it is that hard boundary, not the darkness under it.
+        Panel::floating(panel, PANEL, 12.0)
+            .edge(palette.rule)
+            .fill(palette.surface)
+            .draw(scene);
         // Who is already in it, above the list they were picked from, so the
         // reader can see what Return will open.
         if !self.picked.is_empty() {

@@ -392,14 +392,39 @@ impl Scene {
         radius: f32,
         drop: f32,
     ) {
+        // Spread as well as offset, and darker than it looks like it needs
+        // to be. This palette's ground is (13, 18, 24): there are two dozen
+        // levels between it and black, so a shadow drawn the way a light
+        // theme's is comes out as a three pixel smudge that nobody sees. The
+        // first attempt at this measured as a real change to the pixels and
+        // was invisible on screen, which is the same as not being there.
+        // `box-shadow: 0 <offset> <blur> rgba(0, 0, 0, .7)`, with a little
+        // spread so that something at the bottom of the window still casts
+        // upwards -- offset alone puts nothing above a panel.
+        //
+        // The blur is the part that has to stay small. Widened to four times
+        // the drop it stopped being the panel's shape at all: a ten pixel drop
+        // gave a forty pixel fade, which is a twenty pixel smear either side of
+        // every edge, and the shadow under a card read as a grey cloud beside
+        // it rather than as the card being off the page.
+        //
+        // What actually separates a popup from the window is the hairline
+        // around it, not the darkness underneath: the shadow only has to fall
+        // away from that edge. Panels drawn without one had nothing for it to
+        // fall away from, and no amount of darkening fixed that.
+        let spread = drop * 0.15;
+        let blur = drop;
+        // A radius wider than the box is not a rounder box, it is a shape the
+        // distance function has no answer for.
+        let corner = (radius + spread).min((width + height) / 4.0);
         self.soft(
-            x,
-            y + drop,
-            width,
-            height,
-            [0, 0, 0, 90],
-            radius,
-            drop * 3.0,
+            x - spread,
+            y - spread + drop * 0.35,
+            width + spread * 2.0,
+            height + spread * 2.0,
+            [0, 0, 0, 200],
+            corner,
+            blur,
         );
         self.rounded(x, y, width, height, colour, radius);
     }

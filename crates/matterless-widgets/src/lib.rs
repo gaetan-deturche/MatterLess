@@ -584,8 +584,35 @@ mod tests {
         assert_eq!(flat.len(), 2, "an edge and a fill");
         assert_eq!(over.len(), 3, "a shadow as well");
 
-        let (_, y, .., soft) = box_of(&over[0]);
-        assert_eq!(y, rect.y + 12.0, "the shadow is offset down");
+        let (x, y, width, height, .., soft) = box_of(&over[0]);
+        // How far the shadow actually reaches, which is its rectangle plus
+        // the half of the fade that falls outside the edge -- what the shader
+        // draws, rather than the rectangle handed to it.
+        let fade = soft / 2.0;
+        // Past the panel on every side, so something at the bottom of the
+        // window still casts upwards -- offset alone puts nothing above it.
+        assert!(x - fade < rect.x, "nothing to the left");
+        assert!(y - fade < rect.y, "nothing above");
+        assert!(x + width + fade > rect.right(), "nothing to the right");
+        assert!(y + height + fade > rect.bottom(), "nothing below");
+        // And biased downwards all the same: it is a shadow, not a glow.
+        assert!(
+            y + height / 2.0 > rect.y + rect.height / 2.0,
+            "the shadow is not sitting below the panel"
+        );
+        // Still the panel's shape, though. Spread far enough and blurred hard
+        // enough, a shadow stops reading as the thing above it and becomes a
+        // grey cloud beside it -- so it stays close to the box it belongs to.
+        assert!(
+            width < rect.width * 1.25 && height < rect.height * 1.25,
+            "the shadow is a different shape from its panel: {width}x{height}              under {}x{}",
+            rect.width,
+            rect.height
+        );
+        assert!(
+            soft < rect.height,
+            "blurred wider than the panel is tall, which is a smear"
+        );
         assert!(soft > box_of(&flat[0]).6, "and is softer than an edge");
 
         // Whatever is in front of it is the same panel either way.

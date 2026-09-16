@@ -33,7 +33,23 @@ pub enum Chose {
         on: bool,
     },
     /// Follow something somebody wrote: a link, a person, a conversation.
-    Press(matterless_layout::row::Press),
+    Press {
+        press: matterless_layout::row::Press,
+        /// Where the words that were pressed sit, for whatever has to point at
+        /// them.
+        ///
+        /// Carried rather than looked up afterwards, for the same reason the
+        /// menu's rect is: by then all anybody has is the press itself, and
+        /// the same person is named a dozen times in a conversation. Asking
+        /// where `@someone` is answers with the first of them, so the card
+        /// opened against a name at the top of the screen however far down the
+        /// one actually pressed was.
+        ///
+        /// `None` for a press with no words of its own -- a preview card is
+        /// the whole box, and what it leads to opens a browser rather than
+        /// anything that needs anchoring.
+        at: Option<Rect>,
+    },
     /// Keep a file somebody attached.
     Save { file_id: String, name: String },
     /// Look at one of a message's pictures properly.
@@ -960,9 +976,12 @@ impl Stream {
         if let Some(at) = clicked
             .strip_prefix(&format!("{}/press/", self.name))
             .and_then(|at| at.parse::<usize>().ok())
-            && let Some((press, _)) = self.presses.get(at)
+            && let Some((press, at)) = self.presses.get(at)
         {
-            return Some(Chose::Press(press.clone()));
+            return Some(Chose::Press {
+                press: press.clone(),
+                at: Some(*at),
+            });
         }
         // A preview card, which sits inside a row and is a link in its own
         // right: the whole card, not just the words in it.
@@ -971,7 +990,7 @@ impl Stream {
             && let (Ok(index), Ok(ordinal)) = (index.parse::<usize>(), ordinal.parse::<usize>())
             && let Some(press) = self.preview_press(index, ordinal)
         {
-            return Some(Chose::Press(press));
+            return Some(Chose::Press { press, at: None });
         }
         // A pill next, because it sits inside a row and its name says so.
         if let Some((index, ordinal)) = self.reaction_at(clicked)
