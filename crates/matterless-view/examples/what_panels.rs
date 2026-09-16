@@ -130,7 +130,12 @@ fn main() {
             fonts: &mut fonts,
             palette: &palette,
         };
-        stream.draw(&mut canvas, within, &input);
+        stream.draw(
+            &mut canvas,
+            within,
+            &input,
+            &std::collections::HashMap::new(),
+        );
     }
     println!("{:10} {}", "stream", digest(&scene));
 

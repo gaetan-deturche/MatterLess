@@ -303,6 +303,14 @@ pub enum Piece {
         width: f32,
         height: f32,
         press: Press,
+        /// Pressable, but not dressed as a mention.
+        ///
+        /// A name in a sentence is called out from the words around it -- a
+        /// signalled ground, the signal ink. The author's name over a message
+        /// is not in a sentence: it is the heading, it is already bold, and
+        /// dressing it the same way made every message look as though it began
+        /// by mentioning its own writer.
+        quiet: bool,
     },
 }
 
@@ -713,12 +721,41 @@ impl Painter {
                     // it sat under every round avatar as a hard-cornered grey
                     // block -- visible at each corner of the circle. Whoever
                     // draws the face draws its ground with it.
+                    //
+                    // The presses come out with the glyphs rather than being
+                    // dropped on the floor. This took `.0` and threw the rest
+                    // away, so the author's name could carry a press all it
+                    // liked and nothing downstream ever heard about it.
+                    let (glyphs, _, presses, _) = self.glyphs_of(fonts, block, x, y, theme);
+                    // A span that can be pressed is shaded as a link, which is
+                    // right in a sentence and wrong here: the author's name is
+                    // the heading of the message rather than a reference to
+                    // somebody inside it, so it keeps the ink it would have
+                    // had.
+                    let glyphs: Vec<PlacedGlyph> = glyphs
+                        .into_iter()
+                        .map(|glyph| match glyph.shade {
+                            Shade::Signal => PlacedGlyph {
+                                shade: Shade::Ink,
+                                ..glyph
+                            },
+                            _ => glyph,
+                        })
+                        .collect();
                     pieces.push(Piece::Text {
-                        glyphs: self.glyphs_of(fonts, block, x, y, theme).0,
+                        glyphs,
                         ink: palette.ink,
                         faint: palette.faint,
                         signal: palette.signal,
                     });
+                    pieces.extend(presses.into_iter().map(|one| Piece::Press {
+                        x: one.x,
+                        y: one.y,
+                        width: one.width,
+                        height: one.height,
+                        press: one.press,
+                        quiet: true,
+                    }));
                 }
                 Kind::Code => {
                     // The full column, not the wrap: `wrap` is the width the
@@ -795,6 +832,7 @@ impl Painter {
                         width: one.width,
                         height: one.height,
                         press: one.press,
+                        quiet: false,
                     }));
                     // A custom emoji's placeholder, turned into the picture it
                     // was standing in for. Drawn to the room the spaces
@@ -1336,6 +1374,61 @@ mod tests {
         assert!(
             same(&kept, &after),
             "the label came back different after a sweep"
+        );
+    }
+
+    /// A press on the author's name survives into the draw list.
+    ///
+    /// The header arm took only the glyphs out of the shaping and dropped
+    /// everything else, so the name could carry a press all it liked and
+    /// nothing downstream ever heard about it -- the layout looked right and
+    /// the click did nothing.
+    #[test]
+    fn a_header_hands_on_the_press_it_was_given() {
+        use matterless_layout::row::Press;
+
+        let mut fonts = Fonts::new();
+        let mut painter = Painter::new();
+        let theme = Theme::default();
+        let mut row = post(Vec::new());
+        row.author_name = "ada.lovelace".into();
+        let laid = lay_out(&mut fonts, &Row::Post { post: row }, &theme);
+        let pieces = painter.pieces_of(
+            &mut fonts,
+            &laid,
+            0.0,
+            &theme,
+            &Palette::default(),
+            &HashMap::new(),
+        );
+        let pressed: Vec<&Press> = pieces
+            .iter()
+            .filter_map(|piece| match piece {
+                Piece::Press { press, .. } => Some(press),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            pressed.contains(&&Press::Person("ada.lovelace".into())),
+            "the author is not pressable in the draw list: {pressed:?}"
+        );
+        // And quietly: whoever draws the pill behind a mention has to be able
+        // to tell that this is not one. Dressed the same way, every message
+        // read as though it opened by naming its own writer.
+        assert!(
+            pieces
+                .iter()
+                .all(|piece| !matches!(piece, Piece::Press { quiet: false, .. })),
+            "the author's name is dressed as a mention"
+        );
+        // Nor shaded as a link, for the same reason.
+        assert!(
+            pieces.iter().all(|piece| match piece {
+                Piece::Text { glyphs, .. } =>
+                    glyphs.iter().all(|glyph| glyph.shade != Shade::Signal),
+                _ => true,
+            }),
+            "the author's name is inked as a link"
         );
     }
 

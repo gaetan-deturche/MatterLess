@@ -1358,11 +1358,14 @@ impl App {
 
     /// Asks who is around, when the set of people worth asking about changes.
     ///
-    /// Derived from the sidebar rather than from the messages on screen: the
-    /// sidebar is where presence is actually read, because whether somebody is
-    /// around decides whether you write to them now. The rows in a channel
-    /// change constantly while the people in them almost never do, so asking
-    /// from there would be a request per arriving message.
+    /// The sidebar's direct messages, and whoever is on screen.
+    ///
+    /// This asked only about the sidebar for a long time, on the grounds that
+    /// the rows in a channel change constantly while the people in them almost
+    /// never do. True, and it meant a face in a conversation could never have
+    /// a dot: nothing had asked how that person was. The set is deduped and
+    /// compared before anything is sent, so the rows changing under an
+    /// unchanged cast still costs no request.
     fn ask_who_is_around(&mut self) {
         let Some(link) = self.link.as_ref() else {
             return;
@@ -1376,6 +1379,11 @@ impl App {
                 _ => None,
             })
             .collect();
+        // Whoever is in view, in the conversation and in the thread beside it.
+        wanted.extend(self.stream.who_is_here(self.stream_rect()));
+        if let (Some(within), Some(thread)) = (self.thread_stream_rect(), self.thread.as_ref()) {
+            wanted.extend(thread.who_is_here(within));
+        }
         // The reader themselves, because their own presence is on the strip
         // at the top of the sidebar and nothing else would ask for it.
         wanted.push(self.me.clone());
@@ -3893,7 +3901,8 @@ impl App {
                 fonts: &mut self.fonts,
                 palette: &self.palette,
             };
-            self.stream.draw(&mut canvas, stream, &self.input);
+            self.stream
+                .draw(&mut canvas, stream, &self.input, &self.presence);
         }
         drop(probe);
         let probe = matterless_view::timing::watch("  the thread pane", 0, "");
@@ -3903,6 +3912,9 @@ impl App {
         // Mutable because a stream records where it drew each link, which is
         // what the next frame hit-tests against.
         let following = self.following_open_thread();
+        // Read before the pane is: who is around is a fact about the window,
+        // and drawing the thread holds the rest of it.
+        let presence_of = self.presence.clone();
         if let (Some(pane), Some(thread)) = (self.thread_rect(), self.thread.as_mut()) {
             // The pane's own frame: `.pane { border-left: 1px solid var(--rule);
             // background: var(--ground) }`. Without the rule it ran into the
@@ -3935,7 +3947,7 @@ impl App {
                 fonts: &mut self.fonts,
                 palette: &self.palette,
             };
-            thread.draw(&mut canvas, rows, &self.input);
+            thread.draw(&mut canvas, rows, &self.input, &presence_of);
 
             if let Some(strip) = self.thread_composer_rect() {
                 scene.clip_to(strip.x, strip.y, strip.width, strip.height);
