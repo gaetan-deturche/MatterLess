@@ -100,9 +100,15 @@ windows = { version = "0.61.3", features = [
     # Starting with Windows is a value under `Run`, which is where the app's
     # autostart plugin put it -- so a reader who had it on still has it on.
     "Win32_System_Registry",
-    # Direct3D, for one measurement only: whether DXGI resizes a swapchain as
-    # slowly as Vulkan does on the same adapter. See the 
-    # example -- nothing in the window draws through it.
+    # Copy and paste that cross to other windows. The clipboard is opened and
+    # read through DataExchange; the text itself is a movable global handle,
+    # which is what Memory is for.
+    "Win32_System_DataExchange",
+    "Win32_System_Memory",
+    "Win32_System_Ole",
+    # Direct3D, which is what the window draws through -- chosen over Vulkan
+    # because rebuilding a swapchain on a resize costs 1.9ms here against
+    # 97.7ms on the same adapter. See `d3d.rs`.
     "Win32_Graphics_Direct3D",
     "Win32_Graphics_Direct3D11",
     "Win32_Graphics_Dxgi",

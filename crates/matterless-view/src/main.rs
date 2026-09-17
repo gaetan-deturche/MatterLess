@@ -392,8 +392,9 @@ struct App {
     /// reply survives glancing back at the channel, and cleared when a
     /// different thread opens.
     thread_composer: Composer,
-    /// Copy and paste within this window. Crossing to another process needs a
-    /// platform clipboard, which is a dependency this window does not have yet.
+    /// What was last copied, which every widget that copies or pastes is
+    /// handed. Joined to the system's clipboard in `react`, so the two agree
+    /// without a dozen widgets each having to know there is a system.
     clipboard: String,
     /// The socket thread, once it is up. Sends go through it.
     link: Option<matterless_view::live::Link>,
@@ -1975,7 +1976,7 @@ impl App {
                 // The raw markdown, not the rendered body: what was typed is
                 // what somebody pasting it elsewhere means to carry.
                 Some(said) => {
-                    self.clipboard = said.message;
+                    self.copy(said.message);
                     println!("copied a message");
                 }
                 None => eprintln!("no copy of {about} to read"),
@@ -2026,7 +2027,7 @@ impl App {
                 matterless_view::feed::channel_link(store, &self.server, channel_id)
             }) {
                 Some(link) => {
-                    self.clipboard = link;
+                    self.copy(link);
                     println!("copied a channel link");
                 }
                 None => eprintln!("no team to build a link from"),
@@ -2863,10 +2864,8 @@ impl App {
                 self.input = input;
             }
             Action::Link => match self.permalink(&post_id) {
-                // Into this window's own clipboard, which is where everything
-                // else it copies goes until there is a platform one.
                 Some(link) => {
-                    self.clipboard = link;
+                    self.copy(link);
                     println!("copied a permalink");
                 }
                 None => eprintln!("no team to build a link from"),
@@ -3254,8 +3253,38 @@ impl App {
             .or_else(|| self.stream.holding_row(&format!("post/{root_id}"), within))
     }
 
-    /// Hands the frame's input to the widgets that want it.
+    /// Copies text, into this window and into every other one.
+    fn copy(&mut self, text: String) {
+        matterless_view::clip::write(&text);
+        self.clipboard = text;
+    }
+
+    /// Hands the frame's input to the widgets that want it, with the system's
+    /// clipboard joined to this window's own around it.
+    ///
+    /// Pulled in before anything can paste and pushed back out if anything
+    /// copied. Only on a frame where a paste is actually being asked for:
+    /// opening the clipboard takes a lock every other application waits on,
+    /// and taking it once a frame would be taking it for nothing.
+    ///
+    /// Around the whole pass rather than inside it, because the pass returns
+    /// early in a dozen places -- a panel that covers the window answers the
+    /// frame and nothing behind it gets a look.
     fn react(&mut self) {
+        if self.input.chord(Key::Char('v'))
+            && let Some(said) = matterless_view::clip::read()
+        {
+            self.clipboard = said;
+        }
+        let before = self.clipboard.clone();
+        self.reacted();
+        if self.clipboard != before {
+            matterless_view::clip::write(&self.clipboard);
+        }
+    }
+
+    /// Hands the frame's input to the widgets that want it.
+    fn reacted(&mut self) {
         // Where the offer sits, before anything asks what is under the
         // pointer: it is measured rather than computed per frame because
         // measuring needs the fonts and a hit test does not have them.
