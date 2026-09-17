@@ -286,3 +286,33 @@ fn sending_a_reply_leaves_the_channel_draft_alone() {
     assert_eq!(thread.text(), "");
     assert_eq!(channel.text(), "half a thought");
 }
+
+/// A focused field shows a caret, empty or not.
+///
+/// Reported missing from the search box and the channel switcher. Both are
+/// plain `Composer`s and both are drawn focused, so what this pins is the one
+/// thing that could still be false: that a field with nothing typed in it has
+/// a laid-out line for the caret to sit on.
+#[test]
+fn a_field_has_a_caret_before_anything_is_typed() {
+    let mut fonts = Fonts::new();
+    let mut field = Composer::new("query").plain();
+    field.lay_out(&mut fonts, panel().width);
+    let at = field
+        .caret(panel())
+        .expect("a focused field with no caret to draw");
+    let inner = panel();
+    assert!(
+        at.0 >= inner.x && at.1 >= inner.y,
+        "the caret is outside the box: {at:?}"
+    );
+
+    // And it moves with what is typed, rather than staying at the left edge.
+    field.fill("jump to", &mut fonts);
+    field.lay_out(&mut fonts, panel().width);
+    let typed = field.caret(panel()).expect("no caret after typing");
+    assert!(
+        typed.0 > at.0,
+        "the caret did not follow the words: {at:?} then {typed:?}"
+    );
+}

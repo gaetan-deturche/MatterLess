@@ -132,6 +132,19 @@ impl Composer {
     /// Shapes the text for this width. Must run before the height is asked for
     /// or the box is drawn, because both are answers about the shaping.
     pub fn lay_out(&mut self, fonts: &mut Fonts, width: f32) {
+        // A caret is a place in a laid-out line, and `new` builds the buffer
+        // with no lines at all -- so a box nobody had typed in yet had nowhere
+        // to put one, and showed none until the first keystroke made a line.
+        // Which is the one moment a reader does not need telling the box is
+        // theirs: they have just written in it.
+        //
+        // Only when there are none. Setting the text every time would empty
+        // the box on every layout, which is every frame of a window resize.
+        if self.editor.with_buffer(|buffer| buffer.lines.is_empty()) {
+            self.editor.with_buffer_mut(|buffer| {
+                buffer.set_text("", &Attrs::new(), Shaping::Advanced, None);
+            });
+        }
         let inner = (width - self.margin() * 2.0 - self.padding() * 2.0).max(1.0);
         self.editor.with_buffer_mut(|buffer| {
             buffer.set_size(Some(inner), None);
@@ -157,6 +170,23 @@ impl Composer {
                 mono: false,
             },
         )
+    }
+
+    /// Inside the box, where the words go: what the caret is placed against,
+    /// what a click is measured from, and what the text is drawn at.
+    fn inner(&self, within: Rect) -> Rect {
+        self.box_of(within).inset(self.padding())
+    }
+
+    /// Where the caret sits inside the box, if it has one to show.
+    ///
+    /// Answered here rather than worked out while drawing, so a test can ask.
+    /// `None` when the editor has no laid-out line to put it on, which is what
+    /// a field that has never been laid out looks like.
+    pub fn caret(&self, within: Rect) -> Option<(f32, f32)> {
+        let inner = self.inner(within);
+        let (x, y) = self.editor.cursor_position()?;
+        Some((inner.x + x as f32, inner.y + y as f32))
     }
 
     /// How many lines the text occupies, capped at what the box will show.
@@ -281,7 +311,7 @@ impl Composer {
         within: Rect,
         clipboard: &mut String,
     ) -> Option<String> {
-        let inner = self.box_of(within).inset(self.padding());
+        let inner = self.inner(within);
         let focused = input.focus() == Some(self.name.as_str());
 
         // The pointer puts the caret where it was clicked, and dragging from
@@ -443,7 +473,7 @@ impl Composer {
         } = into;
         let strip = self.strip(within);
         let outer = self.box_of(within);
-        let inner = outer.inset(self.padding());
+        let inner = self.inner(within);
 
         // The strip a message box sits on, which is the foot of the panel and
         // its own surface. A field has none: the app's `header` carries no
@@ -519,10 +549,10 @@ impl Composer {
 
         // Solid rather than blinking: a blink needs a clock and a redraw of its
         // own, and this window only draws when something happens.
-        if focused && let Some((x, y)) = self.editor.cursor_position() {
+        if focused && let Some((x, y)) = self.caret(within) {
             scene.fill(
-                inner.x + x as f32,
-                inner.y + y as f32,
+                x,
+                y,
                 1.5,
                 LINE,
                 [palette.ink[0], palette.ink[1], palette.ink[2], 255],
