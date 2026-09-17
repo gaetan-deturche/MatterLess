@@ -1463,6 +1463,9 @@ impl App {
     fn press(&mut self, press: matterless_layout::row::Press, at: Option<Rect>) {
         use matterless_layout::row::Press;
         match press {
+            // Answered by the panel it was pressed in, which is the only thing
+            // that knows how tall the row becomes. It never reaches here.
+            Press::Whole(_) => {}
             Press::Link(href) => {
                 matterless_view::open::link(&href);
             }
@@ -2058,6 +2061,9 @@ impl App {
     fn acted(&mut self, chose: Option<matterless_view::stream::Chose>) {
         use matterless_view::stream::Chose;
         match chose {
+            // The panel has already changed what it measures; this is the
+            // measuring, which needs the fonts it does not have.
+            Some(Chose::Reshape) => self.relayout(),
             Some(Chose::Thread(root)) => self.open_thread(&root),
             Some(Chose::Retry(pending)) => self.retry(&pending),
             Some(Chose::Act {
@@ -2207,6 +2213,9 @@ impl App {
             let at = at.parse::<usize>().ok()?;
             let (press, _) = stream.presses_seen().get(at)?;
             return Some(match press {
+                // The words say it themselves -- "Show the other 40 lines" --
+                // so a tooltip repeating them is one more thing to read.
+                matterless_layout::row::Press::Whole(_) => return None,
                 matterless_layout::row::Press::Person(_) => "Show profile".to_string(),
                 matterless_layout::row::Press::Channel(_) => "Go to channel".to_string(),
                 matterless_layout::row::Press::Post { .. } => "Go to the message".to_string(),

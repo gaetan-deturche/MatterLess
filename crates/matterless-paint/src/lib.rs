@@ -239,6 +239,19 @@ pub fn placed_glyphs(buffer: &Buffer, x: f32, y: f32) -> Vec<PlacedGlyph> {
 /// how the browser and the virtualiser came to disagree.
 #[derive(Debug, Clone)]
 pub enum Piece {
+    /// A rectangle that fades from nothing at its top into `colour` at its
+    /// bottom.
+    ///
+    /// What a cut code block trails off into, so the reader can see that the
+    /// last line they are shown is not the last line there is. One quad: the
+    /// fragment already interpolates whatever the corners carry.
+    Fade {
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        colour: [u8; 4],
+    },
     Fill {
         x: f32,
         y: f32,
@@ -813,6 +826,57 @@ impl Painter {
                         signal: palette.signal,
                     });
                 }
+                // The ground under the offer to see the rest of a cut listing.
+                // A hairline beneath the surface, which is how everything
+                // raised on this palette gets an edge to be seen against.
+                Kind::Pill => {
+                    let round = block.height / 2.0;
+                    pieces.push(Piece::Fill {
+                        x: x - 1.0,
+                        y: y - 1.0,
+                        width: block.wrap + 2.0,
+                        height: block.height + 2.0,
+                        colour: palette.rule,
+                        radius: round + 1.0,
+                        softness: 1.0,
+                    });
+                    pieces.push(Piece::Fill {
+                        x,
+                        y,
+                        width: block.wrap,
+                        height: block.height,
+                        colour: palette.surface,
+                        radius: round,
+                        softness: 1.0,
+                    });
+                }
+                // The bottom of a cut code block, fading into the ground the
+                // block is drawn on. Over the lines rather than beside them,
+                // which is what makes the listing trail off.
+                Kind::Fade => {
+                    pieces.push(Piece::Fade {
+                        x,
+                        y,
+                        width: theme.text_width(),
+                        height: block.height,
+                        colour: palette.raised,
+                    });
+                }
+                // A rule written in the message, dividing one section of a
+                // long notice from the next. Across the text column rather
+                // than the whole row, so it lines up with the words it
+                // separates.
+                Kind::Rule => {
+                    pieces.push(Piece::Fill {
+                        x,
+                        y,
+                        width: theme.text_width(),
+                        height: block.height,
+                        colour: palette.rule,
+                        radius: 0.0,
+                        softness: 1.0,
+                    });
+                }
                 // The same as text, a step quieter, with a bar down its left.
                 Kind::Quote => {
                     let (glyphs, _, _, _) = self.glyphs_of(fonts, block, x, y, theme);
@@ -960,6 +1024,23 @@ impl Painter {
                     colour,
                     ..
                 } => canvas.fill(*x as i32, *y as i32, *width as i32, *height as i32, *colour),
+                // Flat here, at half its strength: this path exists to check
+                // heights and glyph positions on a machine with no display,
+                // and a gradient is neither -- but drawing nothing would let a
+                // snapshot claim a cut listing runs on.
+                Piece::Fade {
+                    x,
+                    y,
+                    width,
+                    height,
+                    colour,
+                } => canvas.fill(
+                    *x as i32,
+                    *y as i32,
+                    *width as i32,
+                    *height as i32,
+                    [colour[0], colour[1], colour[2], colour[3] / 2],
+                ),
                 // Nothing is drawn for a press: it is a box a pointer can
                 // land on, and the words in it are already drawn as text.
                 Piece::Press { .. } => {}

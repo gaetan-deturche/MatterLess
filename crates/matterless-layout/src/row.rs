@@ -41,6 +41,17 @@ pub struct Theme {
     pub pad_bottom: f32,
     /// Between the blocks inside a message.
     pub block_gap: f32,
+    /// A written rule's thickness: `hr { border-top: 1px }`. The air around it
+    /// is `block_gap`, like any other pair of blocks.
+    pub rule_height: f32,
+    /// How many lines of a code block are shown before the rest is offered
+    /// rather than drawn.
+    ///
+    /// A Sentry crash notice carries its stack trace in one, and drawn whole
+    /// it is the window: the conversation around it cannot be read past it.
+    /// Counted as the lines were written rather than as they wrap, so the
+    /// height reserved is the height drawn whatever the column does.
+    pub code_lines_shown: usize,
     pub code_size: f32,
     pub code_line_height: f32,
     /// Padding a code block draws around its lines: `10px 12px`.
@@ -118,6 +129,8 @@ impl Default for Theme {
             pad_top: 12.0,
             pad_bottom: 4.0,
             block_gap: 6.0,
+            rule_height: 1.0,
+            code_lines_shown: 12,
             code_size: 12.5,
             code_line_height: 18.0,
             code_padding: 12.0,
@@ -205,6 +218,22 @@ pub enum Kind {
     /// One line of a webhook's attachment -- a Jira notice, a build result.
     /// Stacked the same way, on its own ground with a bar down its left.
     Attached,
+    /// A horizontal rule written in the message: `---`, and `<hr>` in the
+    /// app. A kind of its own because it is the one block with no words in
+    /// it, and it used to be a blank line pretending -- which reserved the
+    /// space a rule takes and then drew nothing in it.
+    Rule,
+    /// Where a cut code block trails off into its own ground, so the last line
+    /// shown does not look like the last line there is. Drawn over the lines
+    /// above it, which is why it is its own block and comes after them.
+    Fade,
+    /// The ground behind the offer to see the rest of a cut code block.
+    ///
+    /// Its own block for the same reason the fade is: what decides this is
+    /// the order it is drawn in, between the listing it covers and the words
+    /// it is under. Without it the offer is set over code, which is a line of
+    /// text over another line of text and reads as neither.
+    Pill,
     Footer,
     Separator,
 }
@@ -231,6 +260,13 @@ pub enum Press {
     /// the message is on this server and in the local store, so following it
     /// is a scroll rather than a browser.
     Post { channel_id: String, post_id: String },
+    /// Show the whole of a message whose code block has been cut short, or
+    /// cut it short again. By post id.
+    ///
+    /// Answered by the panel the message is in rather than by the app: what
+    /// it changes is what that row measures, and the same message open in a
+    /// channel and in a thread beside it can be shown whole in one of them.
+    Whole(String),
 }
 
 /// A piece of text with the styling that changes its width.
@@ -322,6 +358,15 @@ struct Line {
     /// The bullet or number in front of it, for the first line of a list item.
     /// Empty for everything else.
     marker: String,
+    /// Part of a list, which is set with no gap between its items: `li {
+    /// margin: 0 }` against the `p` above it.
+    ///
+    /// A gap after every line at all is what made a five-item list read as
+    /// nearly double-spaced against the official client. The gap belongs to
+    /// the list, not to each item of it, so it is taken only where two of
+    /// these meet -- which leaves one after the last item, before whatever
+    /// the message says next.
+    tight: bool,
 }
 
 /// What goes in front of a list item, by how deep the list is.
@@ -351,11 +396,34 @@ fn marker_for(ordered: bool, at: usize, depth: f32) -> String {
 /// will too once the renderer can scroll sideways. That is a change to `wrap`
 /// alone -- the count stays right, because it asks what will be drawn rather
 /// than what was written.
-fn code_block(fonts: &mut Fonts, block: &str, y: f32, theme: &Theme, into: &mut Vec<Block>) -> f32 {
+fn code_block(
+    fonts: &mut Fonts,
+    block: &str,
+    y: f32,
+    theme: &Theme,
+    opened: bool,
+    key: &str,
+    into: &mut Vec<Block>,
+) -> f32 {
     let wrap = (theme.text_width() - theme.code_padding * 2.0).max(40.0);
+    // Long enough to be worth cutting short, which a stack trace is and the
+    // two lines of a command are not.
+    let written = block.lines().count();
+    let long = written > theme.code_lines_shown;
+    let cut = long && !opened;
+    // The lines as written, so what is reserved is what is drawn however the
+    // column wraps them.
+    let shown = match cut {
+        true => block
+            .lines()
+            .take(theme.code_lines_shown)
+            .collect::<Vec<_>>()
+            .join("\n"),
+        false => block.to_string(),
+    };
     let count = crate::extent_of(
         fonts,
-        block,
+        &shown,
         wrap,
         crate::Style {
             size: theme.code_size,
@@ -366,7 +434,20 @@ fn code_block(fonts: &mut Fonts, block: &str, y: f32, theme: &Theme, into: &mut 
         },
     )
     .lines;
-    let height = count as f32 * theme.code_line_height + theme.code_padding;
+    // Where the listing itself stops, which is what the fade has to reach and
+    // what the offer hangs below.
+    let text_ends = theme.code_padding_y + count as f32 * theme.code_line_height;
+    // Half a padding past that rather than centred on it: far enough down to
+    // sit under the listing it is about, still far enough up to overlap its
+    // last line.
+    let offer = text_ends + theme.code_padding_y / 2.0 - theme.line_height / 2.0;
+    // The ground ends halfway down the offer, so the offer straddles it: half
+    // on the listing it is about and half on the message below. Which is what
+    // makes it a control on the block rather than a last line inside it.
+    let height = match long {
+        true => offer + theme.line_height / 2.0,
+        false => count as f32 * theme.code_line_height + theme.code_padding,
+    };
     into.push(Block {
         y,
         x: 0.0,
@@ -374,7 +455,7 @@ fn code_block(fonts: &mut Fonts, block: &str, y: f32, theme: &Theme, into: &mut 
         lines: count,
         kind: Kind::Code,
         spans: vec![TextSpan {
-            text: block.to_string(),
+            text: shown,
             bold: false,
             italic: false,
             mono: true,
@@ -385,6 +466,102 @@ fn code_block(fonts: &mut Fonts, block: &str, y: f32, theme: &Theme, into: &mut 
         size: theme.code_size,
         wrap,
     });
+    // The way to the rest of it, or back to being rid of it. Only for a block
+    // long enough to have been cut: a line offering to show what is already
+    // shown is one more thing to read.
+    if long {
+        let words = match cut {
+            true => format!("Show the other {} lines", written - theme.code_lines_shown),
+            false => "Show less".to_string(),
+        };
+        // The listing trailing off into its own ground, over the last lines
+        // shown: what says the last line drawn is not the last line there is.
+        // Only when there is something behind it to trail off from.
+        if cut {
+            // From three lines up -- the offer sits on the last of them, and a
+            // fade still at half strength by then leaves the words behind the
+            // offer as legible as the offer.
+            let from =
+                theme.code_padding_y + (count as f32 - 3.0).max(0.0) * theme.code_line_height;
+            // To where the *text* ends, not where the block does. Run to the
+            // floor of the block instead and the gradient is only seven parts
+            // in ten of the way along by the time it passes the last line, so
+            // that line stays a third readable however far the fade goes on
+            // below it. Under the text it is the block's own colour either
+            // way, so nothing shows the join.
+            into.push(Block {
+                y: y + from,
+                x: 0.0,
+                height: text_ends - from,
+                lines: 0,
+                kind: Kind::Fade,
+                spans: Vec::new(),
+                size: theme.code_size,
+                wrap: theme.text_width(),
+            });
+        }
+        // Centred across the block, which is where an end is looked for.
+        let across = crate::extent_of(
+            fonts,
+            &words,
+            theme.text_width(),
+            crate::Style {
+                size: theme.body_size,
+                line_height: theme.line_height,
+                bold: false,
+                italic: false,
+                mono: false,
+            },
+        )
+        .width;
+        // Over the last line shown, not under it: the listing carries on behind
+        // the offer and fades out around it, which is what says there is more
+        // of it rather than that it stopped here. Low on that line rather than
+        // centred on it, so what shows around the offer is the faintest part of
+        // the fade rather than the half of a line that is still perfectly
+        // readable.
+        let above = y + offer;
+        let x = ((theme.text_width() - across) / 2.0).max(0.0);
+        // Its own ground, because words set straight over code are two lines of
+        // text in one place and read as neither.
+        // A pixel of slack on the words, against the rounding between
+        // measuring a run and shaping it again at exactly that width. The
+        // ground carries the same slack, so it stays centred on them.
+        let room = across + 1.0;
+        into.push(Block {
+            y: above,
+            x: x - theme.pill_padding,
+            height: theme.line_height,
+            lines: 0,
+            kind: Kind::Pill,
+            spans: Vec::new(),
+            size: theme.body_size,
+            wrap: room + theme.pill_padding * 2.0,
+        });
+        into.push(Block {
+            y: above,
+            x,
+            height: theme.line_height,
+            lines: 1,
+            kind: Kind::Text,
+            // Room for the words and nothing else, so the line cannot wrap
+            // somewhere other than where it was measured.
+            wrap: room,
+            spans: vec![TextSpan {
+                text: words,
+                bold: false,
+                italic: false,
+                mono: false,
+                press: Some(Press::Whole(key.to_string())),
+                faint: true,
+                emoji: None,
+            }],
+            size: theme.body_size,
+        });
+        // The half of the offer that hangs below the ground: room the row owes
+        // it even though the block itself has ended.
+        return offer + theme.line_height + theme.block_gap;
+    }
     height + theme.block_gap
 }
 
@@ -399,6 +576,9 @@ fn code_block(fonts: &mut Fonts, block: &str, y: f32, theme: &Theme, into: &mut 
 enum Piece {
     Line(Line),
     Code(String),
+    /// A written `---`, which divides one section of a long notice from the
+    /// next. The Sentry crash notices are made of these.
+    Rule,
 }
 
 /// Ends the run of inline content being gathered, if there is one.
@@ -412,6 +592,7 @@ fn flush(pending: &mut Vec<TextSpan>, indent: f32, into: &mut Vec<Piece>) {
         indent,
         heading: false,
         marker: String::new(),
+        tight: false,
     }));
 }
 
@@ -436,6 +617,7 @@ fn lines_of(nodes: &[Node], indent: f32, into: &mut Vec<Piece>) {
                     indent,
                     heading: false,
                     marker: String::new(),
+                    tight: false,
                 }));
             }
             Node::Heading { children, .. } => {
@@ -448,6 +630,7 @@ fn lines_of(nodes: &[Node], indent: f32, into: &mut Vec<Piece>) {
                     indent,
                     heading: true,
                     marker: String::new(),
+                    tight: false,
                 }));
             }
             // A quote is pushed in like a list item, and marked so whoever
@@ -466,6 +649,7 @@ fn lines_of(nodes: &[Node], indent: f32, into: &mut Vec<Piece>) {
             }
             Node::List { ordered, items } => {
                 flush(&mut pending, indent, into);
+                let list = into.len();
                 for (at, item) in items.iter().enumerate() {
                     let from = into.len();
                     lines_of(item, indent + 1.0, into);
@@ -475,6 +659,14 @@ fn lines_of(nodes: &[Node], indent: f32, into: &mut Vec<Piece>) {
                     // opens with a code block has no line to mark there.
                     if let Some(Piece::Line(first)) = into.get_mut(from) {
                         first.marker = marker_for(*ordered, at, indent);
+                    }
+                }
+                // Every line the list produced, its nested lists included: the
+                // gap belongs to the list rather than to each item, so it is
+                // taken where the list ends and not between its items.
+                for piece in into.iter_mut().skip(list) {
+                    if let Piece::Line(line) = piece {
+                        line.tight = true;
                     }
                 }
             }
@@ -497,13 +689,7 @@ fn lines_of(nodes: &[Node], indent: f32, into: &mut Vec<Piece>) {
             }
             Node::Rule => {
                 flush(&mut pending, indent, into);
-                into.push(Piece::Line(Line {
-                    quoted: false,
-                    spans: Vec::new(),
-                    indent,
-                    heading: false,
-                    marker: String::new(),
-                }))
+                into.push(Piece::Rule)
             }
             // Inline: gathered with whatever came before it, and ended by the
             // next thing that is not.
@@ -707,6 +893,16 @@ fn line_count(fonts: &mut Fonts, line: &Line, width: f32, theme: &Theme) -> usiz
 
 /// Lays out a row and reports its exact height.
 pub fn lay_out(fonts: &mut Fonts, row: &Row, theme: &Theme) -> RowLayout {
+    lay_out_opened(fonts, row, theme, false)
+}
+
+/// The same, told whether the reader has asked to see the whole of this row.
+///
+/// Which for now means a code block too long to draw: cut short unless they
+/// have said otherwise. The answer belongs to the panel rather than to the
+/// message -- the same message read in a channel and in a thread beside it
+/// can be opened in one and not the other.
+pub fn lay_out_opened(fonts: &mut Fonts, row: &Row, theme: &Theme, opened: bool) -> RowLayout {
     let mut blocks = Vec::new();
     let mut y = 0.0_f32;
 
@@ -883,17 +1079,50 @@ pub fn lay_out(fonts: &mut Fonts, row: &Row, theme: &Theme) -> RowLayout {
         y += theme.header_height + theme.block_gap;
     }
 
+    // Which message a "show the rest" would be about.
+    let said = post.map(|post| post.post_id.as_str()).unwrap_or_default();
+
     let mut pieces = Vec::new();
     lines_of(nodes, 0.0, &mut pieces);
+
+    // Which pieces sit tight against the one after them, worked out before the
+    // pass so each can be asked about its neighbour.
+    let tight: Vec<bool> = pieces
+        .iter()
+        .map(|piece| matches!(piece, Piece::Line(line) if line.tight))
+        .collect();
 
     // One pass, in the order the message was written. Two passes -- every line
     // and then every code block -- is what put a message's names above all of
     // its blocks instead of each name above its own.
-    for piece in pieces {
+    for (at, piece) in pieces.into_iter().enumerate() {
+        // Nothing between two lines of one list. The ordinary gap everywhere
+        // else, the end of a list included.
+        let gap = match (tight.get(at), tight.get(at + 1)) {
+            (Some(true), Some(true)) => 0.0,
+            _ => theme.block_gap,
+        };
         let line = match piece {
             Piece::Line(line) => line,
             Piece::Code(block) => {
-                y += code_block(fonts, &block, y, theme, &mut blocks);
+                y += code_block(fonts, &block, y, theme, opened, said, &mut blocks);
+                continue;
+            }
+            // A hairline across the column, and the air either side of it is
+            // the gap every block gets. It used to be a blank line: the room a
+            // rule takes, with no rule drawn in it.
+            Piece::Rule => {
+                blocks.push(Block {
+                    y,
+                    x: 0.0,
+                    height: theme.rule_height,
+                    lines: 0,
+                    kind: Kind::Rule,
+                    spans: Vec::new(),
+                    size: theme.body_size,
+                    wrap: theme.text_width(),
+                });
+                y += theme.rule_height + gap;
                 continue;
             }
         };
@@ -930,7 +1159,7 @@ pub fn lay_out(fonts: &mut Fonts, row: &Row, theme: &Theme) -> RowLayout {
             size,
             wrap,
         });
-        y += height + theme.block_gap;
+        y += height + gap;
     }
 
     if attachments > 0 {
@@ -2359,6 +2588,244 @@ mod tests {
         // they used to be joined into.
         assert_eq!(attached.lines, 2);
         assert_eq!(attached.height, 2.0 * theme.line_height);
+    }
+
+    /// A stack trace is cut short, and the rest is offered rather than drawn.
+    ///
+    /// The Sentry crash notices carry one, and drawn whole it is the window:
+    /// the conversation around it cannot be read past it.
+    #[test]
+    fn a_long_code_block_is_cut_short_and_the_rest_offered() {
+        let mut fonts = Fonts::new();
+        let theme = Theme::default();
+        let trace = (0..40)
+            .map(|at| format!("  at frame {at}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let said = post(vec![Node::CodeBlock {
+            language: None,
+            value: trace.clone(),
+        }]);
+        let row = Row::Post { post: said };
+
+        let cut = lay_out(&mut fonts, &row, &theme);
+        let block = cut
+            .blocks
+            .iter()
+            .find(|block| block.kind == Kind::Code)
+            .expect("a code block");
+        assert_eq!(
+            block.lines, theme.code_lines_shown,
+            "the block was not cut short"
+        );
+        // And the way to the rest of it, which is what makes cutting it
+        // something other than losing it.
+        let offer = cut
+            .blocks
+            .iter()
+            .flat_map(|block| block.spans.iter())
+            .find(|span| matches!(span.press, Some(Press::Whole(_))))
+            .expect("nothing offers the rest");
+        assert!(
+            offer
+                .text
+                .contains(&format!("{}", 40 - theme.code_lines_shown)),
+            "the offer does not say how much is left: {:?}",
+            offer.text
+        );
+
+        // Inside the block, over the last lines of the listing rather than
+        // under them: the listing carries on behind the offer and fades out
+        // around it, which is what says there is more of it.
+        let offer_box = cut
+            .blocks
+            .iter()
+            .find(|one| {
+                one.spans
+                    .iter()
+                    .any(|span| matches!(span.press, Some(Press::Whole(_))))
+            })
+            .expect("nothing offers the rest");
+        let floor = block.y + block.height;
+        assert_eq!(
+            floor,
+            offer_box.y + offer_box.height / 2.0,
+            "the ground does not end halfway down the offer, so it does not straddle it"
+        );
+        // Over the *last* of it, not the middle: the lines it covers are the
+        // ones nobody can finish reading anyway.
+        let last = block.y
+            + theme.code_padding_y
+            + (theme.code_lines_shown as f32 - 1.0) * theme.code_line_height;
+        assert!(
+            offer_box.y + offer_box.height > last,
+            "the offer is above the last line shown"
+        );
+        // And across the middle of it, which is where an end is looked for.
+        let middle = offer_box.x + offer_box.wrap / 2.0;
+        assert!(
+            (middle - theme.text_width() / 2.0).abs() < theme.indent,
+            "the offer sits at {middle}, not across the middle of {}",
+            theme.text_width()
+        );
+        // On a ground of its own, because words set straight over code are two
+        // lines of text in one place and read as neither.
+        let pill = cut
+            .blocks
+            .iter()
+            .find(|one| one.kind == Kind::Pill)
+            .expect("the offer is set straight over the listing");
+        assert!(
+            pill.x <= offer_box.x && pill.x + pill.wrap >= offer_box.x + offer_box.wrap,
+            "the ground is narrower than the words on it"
+        );
+        assert_eq!(pill.y, offer_box.y, "the ground is not behind the words");
+
+        // And the row is tall enough for the half of the offer that hangs
+        // below the ground, which the block's own height does not cover.
+        assert!(
+            cut.height >= offer_box.y + offer_box.height,
+            "the row ends at {} and the offer at {}, so it is drawn outside its row",
+            cut.height,
+            offer_box.y + offer_box.height
+        );
+
+        // With the listing fading out behind it rather than beside it, and
+        // reaching full strength exactly where the text stops.
+        //
+        // Not where the *block* stops: the gradient would then still be seven
+        // parts in ten along as it passed the last line, leaving that line a
+        // third readable under the offer however far the fade ran on below it.
+        let fade = cut
+            .blocks
+            .iter()
+            .find(|one| one.kind == Kind::Fade)
+            .expect("the listing stops dead rather than fading");
+        let text_ends =
+            block.y + theme.code_padding_y + theme.code_lines_shown as f32 * theme.code_line_height;
+        assert!(
+            fade.y < offer_box.y,
+            "the fade starts below the offer, so the words behind it are untouched"
+        );
+        assert_eq!(
+            fade.y + fade.height,
+            text_ends,
+            "the fade does not reach its full strength where the last line ends"
+        );
+
+        // Opened, it is all there, and the offer turns into its opposite.
+        let whole = lay_out_opened(&mut fonts, &row, &theme, true);
+        let block = whole
+            .blocks
+            .iter()
+            .find(|block| block.kind == Kind::Code)
+            .expect("a code block");
+        assert_eq!(block.lines, 40);
+        assert!(whole.height > cut.height, "the row did not grow");
+        assert!(
+            whole
+                .blocks
+                .iter()
+                .flat_map(|block| block.spans.iter())
+                .any(|span| matches!(span.press, Some(Press::Whole(_)))),
+            "there is no way back to the short one"
+        );
+    }
+
+    /// A short one is left alone, and offers nothing.
+    #[test]
+    fn a_short_code_block_is_left_whole() {
+        let mut fonts = Fonts::new();
+        let theme = Theme::default();
+        let said = post(vec![Node::CodeBlock {
+            language: None,
+            value: "cargo test\ncargo clippy".into(),
+        }]);
+        let laid = lay_out(&mut fonts, &Row::Post { post: said }, &theme);
+        assert!(
+            !laid
+                .blocks
+                .iter()
+                .flat_map(|block| block.spans.iter())
+                .any(|span| matches!(span.press, Some(Press::Whole(_)))),
+            "a two-line block offers to show the rest of itself"
+        );
+    }
+
+    /// A written `---` is a rule, not a blank line.
+    ///
+    /// It used to reserve the room a rule takes and then draw nothing in it,
+    /// so the sections of a long notice ran together with an unexplained gap
+    /// where each divider belonged.
+    #[test]
+    fn a_written_rule_is_drawn_as_one() {
+        let mut fonts = Fonts::new();
+        let theme = Theme::default();
+        let said = post(vec![text("before"), Node::Rule, text("after")]);
+        let laid = lay_out(&mut fonts, &Row::Post { post: said }, &theme);
+        let rule = laid
+            .blocks
+            .iter()
+            .find(|block| block.kind == Kind::Rule)
+            .expect("no rule: a blank line again");
+        assert_eq!(rule.height, theme.rule_height);
+        assert!(rule.spans.is_empty(), "a rule has no words in it");
+        // Between the two lines it divides, and not on top of either.
+        let lines: Vec<&Block> = laid
+            .blocks
+            .iter()
+            .filter(|block| block.kind == Kind::Text && !block.spans.is_empty())
+            .collect();
+        assert!(
+            lines[0].y < rule.y && rule.y < lines[1].y,
+            "the rule is not between the sections it separates"
+        );
+    }
+
+    /// A list is set with no gap between its items, and one after the last.
+    ///
+    /// The gap belongs to the list rather than to each item of it. Taken
+    /// between every pair of lines, a five-item list read as nearly
+    /// double-spaced against the official client.
+    #[test]
+    fn a_list_is_not_double_spaced() {
+        let mut fonts = Fonts::new();
+        let theme = Theme::default();
+        let item = |what: &str| {
+            vec![Node::Paragraph {
+                children: vec![Node::Text { value: what.into() }],
+            }]
+        };
+        let said = post(vec![
+            Node::List {
+                ordered: false,
+                items: vec![item("one"), item("two"), item("three")],
+            },
+            text("after the list"),
+        ]);
+        let laid = lay_out(&mut fonts, &Row::Post { post: said }, &theme);
+        // The item lines, which are the ones carrying words at the list's
+        // indent -- not the markers, which sit outside it.
+        let items: Vec<&Block> = laid
+            .blocks
+            .iter()
+            .filter(|block| block.kind == Kind::Text && block.wrap > theme.indent)
+            .collect();
+        assert_eq!(items.len(), 4, "three items and the line after them");
+        for pair in items[..3].windows(2) {
+            assert_eq!(
+                pair[1].y - (pair[0].y + pair[0].height),
+                0.0,
+                "two items of one list are a gap apart"
+            );
+        }
+        // And the line after the list is a gap below it, so the list still
+        // reads as a thing that ended.
+        assert_eq!(
+            items[3].y - (items[2].y + items[2].height),
+            theme.block_gap,
+            "the list does not end with a gap"
+        );
     }
 
     /// The message starts a gap below the name, not against it.
