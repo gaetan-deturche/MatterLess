@@ -715,70 +715,94 @@ fn reply_opens_the_thread() {
     );
 }
 
-/// The react button opens the quick faces rather than reacting: it is a way in
-/// to seven of them and the search behind them, and reacting on the first
-/// press would mean the reader never got to choose.
+/// The reader's most-used sit on the strip, and one press reacts with one.
+///
+/// Which is the whole of why they are there: a press, a row of faces and
+/// another press is three for the reaction anybody makes most often.
 #[test]
-fn react_opens_the_faces_rather_than_reacting() {
+fn a_most_used_face_reacts_in_one_press() {
     let mut fonts = Fonts::new();
     let mut stream = conversation(&mut fonts);
+    stream.favourites = vec![
+        ("+1".to_string(), "\u{1f44d}".to_string()),
+        ("tada".to_string(), "\u{1f389}".to_string()),
+    ];
     assert_eq!(
-        click_hovering(&mut stream, 1, "stream/row/1/tool/react"),
-        None
-    );
-    let open = stream.boxes(panel(), Some(1));
-    assert!(open.iter().any(|placed| placed.name == "stream/faces/0"));
-
-    // And then a face is the reaction it stands for.
-    assert_eq!(
-        click_hovering(&mut stream, 1, "stream/faces/0"),
+        click_hovering(&mut stream, 1, "stream/row/1/quick/1"),
         Some(Chose::React {
             post_id: "root".to_string(),
-            emoji: "+1".to_string(),
+            emoji: "tada".to_string(),
             on: true,
         })
     );
+    // And they sit before the controls, which is where a press lands first.
+    let placed = stream.boxes(panel(), Some(1));
+    let face = placed
+        .iter()
+        .find(|one| one.name == "stream/row/1/quick/0")
+        .expect("no face on the strip");
+    let react = placed
+        .iter()
+        .find(|one| one.name == "stream/row/1/tool/react")
+        .expect("no react button");
     assert!(
-        !stream
-            .boxes(panel(), Some(1))
-            .iter()
-            .any(|placed| placed.name == "stream/faces/0"),
-        "answered, so they are gone"
+        face.rect.right() <= react.rect.x,
+        "the faces are not before the controls"
     );
 }
 
-/// The last face is not a face: it opens the whole picker, which is what
-/// anything outside the quick seven needs.
+/// A row keeps its toolbar while something it opened is still up.
+///
+/// The row of quick faces and the emoji grid both hang off a button on that
+/// toolbar, and both are reached by moving the pointer off it -- so a toolbar
+/// that answered only the pointer went away as soon as either was aimed at,
+/// leaving the panel hanging off nothing. Which is the same argument as a
+/// button inside a row counting as that row, one step further out.
 #[test]
-fn the_end_of_the_quick_row_opens_the_picker() {
+fn a_row_keeps_its_toolbar_while_its_own_panel_is_up() {
     let mut fonts = Fonts::new();
     let mut stream = conversation(&mut fonts);
+    let input = Input::default();
+
+    // Nothing open and the pointer nowhere: no row is hovered.
+    assert_eq!(stream.hovered(&input), None);
+
+    // The grid, which the app raises and tells the panel about.
     click_hovering(&mut stream, 1, "stream/row/1/tool/react");
-    let last = crate::actions::QUICK.len();
+    stream.held = Some("root".to_string());
     assert_eq!(
-        click_hovering(&mut stream, 1, &format!("stream/faces/{last}")),
-        Some(Chose::Act {
-            action: crate::actions::Action::React,
-            post_id: "root".to_string(),
-            on: true,
-        })
+        stream.hovered(&input),
+        Some(1),
+        "the toolbar went away when the grid appeared"
     );
+
+    // Put away, and the row answers the pointer again -- which is nowhere.
+    stream.held = None;
+    assert_eq!(stream.hovered(&input), None);
 }
 
-/// A click anywhere else puts the faces away, the way a `details` closes when
-/// the page is clicked.
+/// The react button opens the whole grid, carrying the button it hangs off.
+///
+/// It used to open a row of seven faces with the grid behind *them* -- a press
+/// to reach a shortlist and another to leave it. The reader's own most-used
+/// are on the strip itself now, which answers that question better and beside
+/// it, so the shortlist was a second answer to a question already answered.
 #[test]
-fn the_faces_close_when_something_else_is_pressed() {
+fn the_react_button_opens_the_grid_under_itself() {
     let mut fonts = Fonts::new();
     let mut stream = conversation(&mut fonts);
-    click_hovering(&mut stream, 1, "stream/row/1/tool/react");
-    click_hovering(&mut stream, 1, "stream/faces/elsewhere");
-    assert!(
-        !stream
-            .boxes(panel(), Some(1))
-            .iter()
-            .any(|placed| placed.name.starts_with("stream/faces")),
-        "the catcher shut them"
+    let button = stream
+        .boxes(panel(), Some(1))
+        .into_iter()
+        .find(|placed| placed.name == "stream/row/1/tool/react")
+        .expect("no button to react from")
+        .rect;
+    assert_eq!(
+        click_hovering(&mut stream, 1, "stream/row/1/tool/react"),
+        Some(Chose::Pick {
+            post_id: "root".to_string(),
+            under: button,
+        })
     );
 }
 

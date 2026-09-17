@@ -34,6 +34,43 @@ pub struct Canvas<'a> {
     pub palette: &'a Palette,
 }
 
+/// Draws one short run in the middle of a box, measured rather than guessed.
+///
+/// For an emoji on a button: the tiles of the picker, the group marks above
+/// them, and the reader's most-used on a message's toolbar. Every one of those
+/// was centred against a constant standing in for the glyph's width -- and
+/// emoji are not one width, so each sat a different distance off the middle of
+/// its own square, which reads as a row that was never aligned at all.
+///
+/// Takes the painter and the fonts rather than a `Canvas`, because every
+/// caller has already taken one apart to reach its scene.
+pub fn centred(
+    scene: &mut Scene,
+    painter: &mut Painter,
+    fonts: &mut Fonts,
+    palette: &Palette,
+    text: &str,
+    within: Rect,
+    run: Run,
+) {
+    let style = Style {
+        size: run.size,
+        line_height: run.line_height,
+        bold: run.bold,
+        italic: false,
+        mono: run.mono,
+    };
+    let wide = matterless_layout::extent_of(fonts, text, f32::MAX, style).width;
+    let glyphs = painter.run(
+        fonts,
+        text,
+        within.x + (within.width - wide) / 2.0,
+        within.y + (within.height - run.line_height) / 2.0,
+        run,
+    );
+    scene.glyphs(glyphs, palette.ink, palette.faint);
+}
+
 /// A panel: a hairline, and a fill one pixel inside it.
 ///
 /// The hairline is not a stroke, because the scene has no strokes -- it is the

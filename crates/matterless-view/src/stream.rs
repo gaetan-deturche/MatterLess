@@ -71,6 +71,15 @@ pub enum Chose {
     /// The rect travels with it because the menu hangs off the button, and by
     /// the time the shell reacts the pointer has already moved.
     More { post_id: String, under: Rect },
+    /// Open the emoji picker for one message, under what was pressed.
+    ///
+    /// The rect travels with it for the same reason the menu's does: the grid
+    /// hangs off the button, and by the time the shell reacts the pointer has
+    /// moved. Without it the picker was anchored to the bottom of the message
+    /// instead -- which for a message as tall as a crash notice is somewhere
+    /// off the screen, so it was pushed back on and landed in the middle of
+    /// the words it was opened from.
+    Pick { post_id: String, under: Rect },
     /// A row measures something different now: shape this panel again.
     ///
     /// Answered by whoever has the fonts, which this panel does not when a
@@ -117,12 +126,6 @@ pub struct Stream {
     /// This panel's own bar. Each list has one, because a drag in the thread
     /// pane must not scroll the channel behind it.
     pub bar: crate::scrollbar::Scrollbar,
-    /// The message whose quick faces are open, and the button they hang from.
-    ///
-    /// Held rather than recomputed because the row it belongs to scrolls: the
-    /// rect is where the button was when it was pressed, which is where the
-    /// row of faces stays until it is answered or dismissed.
-    picking: Option<(String, Rect)>,
     /// What was shaped last time, by row identity.
     ///
     /// A channel is replanned far more often than it changes: opening it, the
@@ -169,6 +172,19 @@ pub struct Stream {
     /// channel and in a thread beside it is opened in one without the other
     /// following.
     opened: std::collections::HashSet<String>,
+    /// A message whose toolbar stays lit though the pointer has moved off it,
+    /// because something opened from that toolbar is still up.
+    ///
+    /// Set from whatever the picker is open for, once a frame, so it cannot
+    /// drift from it -- and by post id rather than by index, because a page of
+    /// older history arriving moves every index while the row stays the row.
+    pub held: Option<String>,
+    /// The reactions this reader uses most, on the toolbar itself.
+    ///
+    /// Name and character, ready to draw: the panel has no store to ask and
+    /// the answer changes only when somebody reacts, so the app hands it over
+    /// rather than this reaching for it once a row.
+    pub favourites: Vec<(String, String)>,
 }
 
 /// Whether this row is that message.
@@ -208,12 +224,13 @@ impl Stream {
             me: String::new(),
             presses: Vec::new(),
             bar: crate::scrollbar::Scrollbar::default(),
-            picking: None,
             kept: std::collections::HashMap::new(),
             kept_against: (f32::NAN, 0, 0),
             reused: 0,
             above: Vec::new(),
             opened: std::collections::HashSet::new(),
+            held: None,
+            favourites: Vec::new(),
         }
     }
 
@@ -538,6 +555,13 @@ impl Stream {
                 // pill rather than on the message behind it.
                 // Only the hovered row has a toolbar, so only it has buttons.
                 if hovered == Some(index) {
+                    for (at, rect) in self.favourites(index, top, within) {
+                        placed.push(Placed {
+                            name: self.favourite_name(index, at),
+                            rect,
+                            depth: 3,
+                        });
+                    }
                     for (tool, rect) in self.tools(index, top, within) {
                         placed.push(Placed {
                             name: self.tool_name(index, tool),
@@ -624,28 +648,6 @@ impl Stream {
                 rect: *rect,
                 depth: 3,
             });
-        }
-        // The quick faces over all of it, with a catcher under them: they hang
-        // outside the row that opened them and a click anywhere else puts them
-        // away, which is what a `details` gets from the browser for nothing.
-        if let Some(panel) = self.faces_panel(within) {
-            placed.push(Placed {
-                name: format!("{}/faces/elsewhere", self.name),
-                rect: within,
-                depth: 6,
-            });
-            placed.push(Placed {
-                name: format!("{}/faces", self.name),
-                rect: panel,
-                depth: 7,
-            });
-            for (at, face) in crate::actions::faces(panel).into_iter().enumerate() {
-                placed.push(Placed {
-                    name: format!("{}/faces/{at}", self.name),
-                    rect: face,
-                    depth: 8,
-                });
-            }
         }
         placed
     }
@@ -1101,54 +1103,20 @@ impl Stream {
         if let Some((_, y)) = input.wheel_over(placed, |name| name == self.name) {
             self.scroll = (self.scroll - y).clamp(0.0, self.reach(within));
         }
-        // Escape puts the faces away before anything else reads the frame: a
-        // panel that stays open under a keystroke meant to close it is the one
-        // thing every reader tries first.
-        if self.picking.is_some() && input.struck(matterless_ui::input::Key::Escape) {
-            self.picking = None;
-            return None;
-        }
         let clicked = input.clicked()?;
-        // The quick faces, while they are open. Before the rows, because they
-        // float over one and a click on a face is not a click on the message
-        // it happens to be in front of.
-        if let Some((post_id, _)) = self.picking.clone() {
-            let chosen = clicked.strip_prefix(&format!("{}/faces", self.name));
-            // The panel itself keeps them open, the way a `details` does.
-            if chosen == Some("") {
-                return None;
-            }
-            match chosen.and_then(|rest| rest.strip_prefix('/')) {
-                // A face: the reaction it stands for.
-                Some(at)
-                    if at
-                        .parse::<usize>()
-                        .is_ok_and(|at| at < crate::actions::QUICK.len()) =>
-                {
-                    self.picking = None;
-                    let (name, _) = crate::actions::QUICK[at.parse::<usize>().expect("checked")];
-                    return Some(Chose::React {
-                        post_id,
-                        emoji: name.to_string(),
-                        // Always on: the quick row adds a reaction, and taking
-                        // one back is what the pill under the message is for.
-                        on: true,
-                    });
-                }
-                // The one past them opens the search rather than reacting.
-                Some(at) if at.parse::<usize>().is_ok() => {
-                    self.picking = None;
-                    return Some(Chose::Act {
-                        action: crate::actions::Action::React,
-                        post_id,
-                        on: true,
-                    });
-                }
-                // The catcher, or anything else on the window: they close,
-                // and the click still counts for whatever it landed on, which
-                // is what the catcher does in the app too.
-                _ => self.picking = None,
-            }
+        // One of the reader's most-used, straight off the strip: the whole
+        // point of them being there is that this takes one press.
+        if let Some((index, at)) = self.favourite_at(clicked)
+            && let Some(Row::Post { post } | Row::Continuation { post }) = self.rows.get(index)
+            && let Some((emoji, _)) = self.favourites.get(at)
+        {
+            return Some(Chose::React {
+                post_id: post.post_id.clone(),
+                emoji: emoji.clone(),
+                // Always adding, as the quick row does: taking one back is
+                // what the pill under the message is for.
+                on: true,
+            });
         }
         // One of the three controls on the hovered message.
         if let Some((index, tool)) = self.tool_at(clicked)
@@ -1162,10 +1130,13 @@ impl Stream {
                 .map(|(_, rect)| rect)
                 .unwrap_or(within);
             return match tool {
-                crate::actions::Tool::React => {
-                    self.picking = Some((post_id, under));
-                    None
-                }
+                // Straight to the whole grid. It used to open a row of seven
+                // faces with the grid behind *them*, which was a press to
+                // reach a shortlist and another to leave it -- and now that
+                // the reader's own most-used are on the strip itself, that
+                // shortlist was a second answer to a question already
+                // answered better beside it.
+                crate::actions::Tool::React => Some(Chose::Pick { post_id, under }),
                 crate::actions::Tool::Reply => self.root_of(index).map(Chose::Thread),
                 crate::actions::Tool::More => Some(Chose::More { post_id, under }),
             };
@@ -1275,7 +1246,10 @@ impl Stream {
         let Some(laid) = self.laid.get(index) else {
             return Vec::new();
         };
-        crate::actions::tools(Rect::new(inner.x, top, inner.width, laid.height))
+        crate::actions::tools(
+            Rect::new(inner.x, top, inner.width, laid.height),
+            self.favourites.len(),
+        )
     }
 
     /// What one of a row's controls is called.
@@ -1290,10 +1264,29 @@ impl Stream {
         Some((index.parse().ok()?, crate::actions::Tool::from_slug(slug)?))
     }
 
-    /// Where the quick faces hang, while they are open.
-    fn faces_panel(&self, within: Rect) -> Option<Rect> {
-        let (_, under) = self.picking.as_ref()?;
-        Some(crate::actions::faces_panel(*under, within))
+    /// Where each of the reader's most-used sits on a row's strip.
+    fn favourites(&self, index: usize, top: f32, within: Rect) -> Vec<(usize, Rect)> {
+        let inner = self.inner(within);
+        let Some(laid) = self.laid.get(index) else {
+            return Vec::new();
+        };
+        crate::actions::favourites(
+            Rect::new(inner.x, top, inner.width, laid.height),
+            self.favourites.len(),
+        )
+    }
+
+    /// What one of them is called. A name of its own, so a press on a face is
+    /// never read as a press on the button beside it.
+    fn favourite_name(&self, index: usize, at: usize) -> String {
+        format!("{}/row/{index}/quick/{at}", self.name)
+    }
+
+    /// The row and the most-used a face name refers to.
+    fn favourite_at(&self, name: &str) -> Option<(usize, usize)> {
+        let rest = name.strip_prefix(&format!("{}/row/", self.name))?;
+        let (index, at) = rest.split_once("/quick/")?;
+        Some((index.parse().ok()?, at.parse().ok()?))
     }
 
     /// The row a name refers to, if it is one of this panel's.
@@ -1310,11 +1303,30 @@ impl Stream {
         Some((index.parse().ok()?, ordinal.parse().ok()?))
     }
 
+    /// Which row a message is, if it is still in the plan.
+    fn index_of_post(&self, post_id: &str) -> Option<usize> {
+        self.rows.iter().position(|row| {
+            matches!(
+                row,
+                Row::Post { post } | Row::Continuation { post } if post.post_id == post_id
+            )
+        })
+    }
+
     /// The row under the pointer, for drawing it hovered.
     ///
     /// A button inside a row counts as that row, or the toolbar would vanish
-    /// the moment the pointer reached it.
+    /// the moment the pointer reached it. And a panel opened *from* a row
+    /// counts as that row for as long as it is up, which is the same argument
+    /// one step further out: the emoji grid is anchored to a button on the
+    /// toolbar, and a toolbar that went away the moment the grid appeared left
+    /// the grid hanging off nothing.
     pub fn hovered(&self, input: &Input) -> Option<usize> {
+        if let Some(post_id) = self.held.as_deref()
+            && let Some(index) = self.index_of_post(post_id)
+        {
+            return Some(index);
+        }
         let name = input.hovered()?;
         self.index_of(name)
             .or_else(|| self.tool_at(name).map(|(index, _)| index))
@@ -1632,13 +1644,16 @@ impl Stream {
         if placed.is_empty() {
             return;
         }
-        let open_on = self.picking.as_ref().map(|(post_id, _)| post_id.clone());
+        let open_on = self.held.clone();
         let here = self.post_at(index).map(str::to_string);
         let inner = self.inner(within);
         let Some(height) = self.laid.get(index).map(|laid| laid.height) else {
             return;
         };
-        let strip = crate::actions::strip(Rect::new(inner.x, top, inner.width, height));
+        let strip = crate::actions::strip(
+            Rect::new(inner.x, top, inner.width, height),
+            self.favourites.len(),
+        );
         let Canvas {
             scene,
             painter,
@@ -1651,6 +1666,48 @@ impl Stream {
             .edge(palette.rule)
             .fill(palette.surface)
             .draw(scene);
+        // The reader's most-used, before the controls: a reaction made every
+        // day should be one press rather than a press, a row of faces and
+        // another press.
+        for (at, rect) in crate::actions::favourites(
+            Rect::new(inner.x, top, inner.width, height),
+            self.favourites.len(),
+        ) {
+            let Some((_, face)) = self.favourites.get(at) else {
+                continue;
+            };
+            let under = input.hovered() == Some(self.favourite_name(index, at).as_str());
+            if under {
+                scene.rounded(
+                    rect.x,
+                    rect.y,
+                    rect.width,
+                    rect.height,
+                    palette.ground,
+                    crate::actions::SQUARE_CORNER,
+                );
+            }
+            // A character rather than a mark, so it goes through the colour
+            // atlas exactly as the same emoji does in a message -- and centred
+            // by measuring it, because emoji are not one width.
+            matterless_widgets::centred(
+                scene,
+                painter,
+                fonts,
+                palette,
+                face,
+                rect,
+                Run {
+                    size: 15.0,
+                    line_height: 18.0,
+                    bold: false,
+                    mono: false,
+                    wrap: f32::MAX,
+                    icon: false,
+                    smooth: false,
+                },
+            );
+        }
         for (tool, rect) in placed {
             let under = input.hovered() == Some(self.tool_name(index, tool).as_str());
             // Open counts as hovered: the button that opened a panel must not
@@ -1708,61 +1765,6 @@ impl Stream {
                 .take(index)
                 .map(|row| row.height)
                 .sum::<f32>()
-    }
-
-    /// Draws the quick faces, while they are open.
-    fn quick(&self, into: &mut Canvas<'_>, within: Rect, input: &Input) {
-        let Some(panel) = self.faces_panel(within) else {
-            return;
-        };
-        let name = self.name.clone();
-        let Canvas {
-            scene,
-            painter,
-            fonts,
-            palette,
-        } = into;
-        Panel::floating(panel, crate::actions::CORNER, 4.0)
-            .edge(palette.rule)
-            .fill(palette.surface)
-            .draw(scene);
-        for (at, rect) in crate::actions::faces(panel).into_iter().enumerate() {
-            let under = input.hovered() == Some(format!("{name}/faces/{at}").as_str());
-            if under {
-                scene.rounded(rect.x, rect.y, rect.width, rect.height, palette.raised, 5.0);
-            }
-            match crate::actions::QUICK.get(at) {
-                Some((_, face)) => {
-                    let glyphs = painter.run(
-                        fonts,
-                        face,
-                        rect.x + 3.0,
-                        rect.y + 2.0,
-                        Run::label(f32::MAX).sized(15.0),
-                    );
-                    scene.glyphs(glyphs, palette.ink, palette.faint);
-                }
-                // The one that is not a face: set apart by a rule of its own,
-                // because it opens a search rather than reacting.
-                None => {
-                    scene.fill(
-                        rect.x - 3.0,
-                        rect.y + 2.0,
-                        1.0,
-                        rect.height - 4.0,
-                        palette.rule,
-                    );
-                    let glyphs = painter.run(
-                        fonts,
-                        "\u{22ef}",
-                        rect.x + 5.0,
-                        rect.y + 3.0,
-                        Run::label(f32::MAX).sized(13.0),
-                    );
-                    scene.glyphs(glyphs, palette.faint, palette.faint);
-                }
-            }
-        }
     }
 
     /// Draws the file cards: an attachment that is not a picture.
@@ -2160,9 +2162,6 @@ impl Stream {
             self.scroll,
             self.reach(within),
         );
-        // Over everything, including the bar: the faces hang outside the row
-        // that opened them and belong in front of whatever they overlap.
-        self.quick(&mut canvas, within, input);
     }
 }
 
