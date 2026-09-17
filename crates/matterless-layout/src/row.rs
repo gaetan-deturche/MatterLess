@@ -325,21 +325,81 @@ fn marker_for(ordered: bool, at: usize, depth: f32) -> String {
     }
 }
 
+/// Reserves room for one code block, and says how much it took.
+///
+/// Measured at the width it will actually be shaped at, rather than counting
+/// the lines as typed. Those two disagreed: the painter wrapped at the column
+/// while this counted newlines, so one long log line reserved a single line's
+/// height and drew over the message below it.
+///
+/// The app scrolls a code block sideways rather than wrapping it, and this
+/// will too once the renderer can scroll sideways. That is a change to `wrap`
+/// alone -- the count stays right, because it asks what will be drawn rather
+/// than what was written.
+fn code_block(fonts: &mut Fonts, block: &str, y: f32, theme: &Theme, into: &mut Vec<Block>) -> f32 {
+    let wrap = (theme.text_width() - theme.code_padding * 2.0).max(40.0);
+    let count = crate::extent_of(
+        fonts,
+        block,
+        wrap,
+        crate::Style {
+            size: theme.code_size,
+            line_height: theme.code_line_height,
+            bold: false,
+            italic: false,
+            mono: true,
+        },
+    )
+    .lines;
+    let height = count as f32 * theme.code_line_height + theme.code_padding;
+    into.push(Block {
+        y,
+        x: 0.0,
+        height,
+        lines: count,
+        kind: Kind::Code,
+        spans: vec![TextSpan {
+            text: block.to_string(),
+            bold: false,
+            italic: false,
+            mono: true,
+            press: None,
+            faint: false,
+            emoji: None,
+        }],
+        size: theme.code_size,
+        wrap,
+    });
+    height + theme.block_gap
+}
+
+/// One thing in a message body, in the order it was written.
+///
+/// A code block used to be gathered into a list of its own while every line of
+/// text went into another, and the layout drew all of one and then all of the
+/// other. A message that alternates the two -- a name, its block, the next
+/// name -- came out as every name followed by every block, which is not the
+/// message anybody sent. So there is one sequence, and its order is the order
+/// it was written in.
+enum Piece {
+    Line(Line),
+    Code(String),
+}
+
 /// Ends the run of inline content being gathered, if there is one.
-fn flush(pending: &mut Vec<TextSpan>, indent: f32, into: &mut Vec<Line>) {
+fn flush(pending: &mut Vec<TextSpan>, indent: f32, into: &mut Vec<Piece>) {
     if pending.is_empty() {
         return;
     }
-    into.push(Line {
+    into.push(Piece::Line(Line {
         quoted: false,
         spans: std::mem::take(pending),
         indent,
         heading: false,
         marker: String::new(),
-    });
+    }));
 }
 
-/// Flattens the markdown into the blocks a reader sees stacked.
 /// Flattens the markdown into the blocks a reader sees stacked.
 ///
 /// Inline content is *gathered* rather than taken one node at a time. A
@@ -347,7 +407,7 @@ fn flush(pending: &mut Vec<TextSpan>, indent: f32, into: &mut Vec<Line>) {
 /// text, the mention, the space between two mentions, the closing bracket. One
 /// line per node put every `@name` on a line of its own with a blank line after
 /// it, which is what a real message from this server looked like.
-fn lines_of(nodes: &[Node], indent: f32, into: &mut Vec<Line>, code: &mut Vec<String>) {
+fn lines_of(nodes: &[Node], indent: f32, into: &mut Vec<Piece>) {
     let mut pending: Vec<TextSpan> = Vec::new();
     for node in nodes {
         match node {
@@ -355,25 +415,25 @@ fn lines_of(nodes: &[Node], indent: f32, into: &mut Vec<Line>, code: &mut Vec<St
                 flush(&mut pending, indent, into);
                 let mut spans = Vec::new();
                 inline(children, false, false, false, None, &mut spans);
-                into.push(Line {
+                into.push(Piece::Line(Line {
                     quoted: false,
                     spans,
                     indent,
                     heading: false,
                     marker: String::new(),
-                });
+                }));
             }
             Node::Heading { children, .. } => {
                 flush(&mut pending, indent, into);
                 let mut spans = Vec::new();
                 inline(children, true, false, false, None, &mut spans);
-                into.push(Line {
+                into.push(Piece::Line(Line {
                     quoted: false,
                     spans,
                     indent,
                     heading: true,
                     marker: String::new(),
-                });
+                }));
             }
             // A quote is pushed in like a list item, and marked so whoever
             // draws it can put a bar down its left and set it in the softer
@@ -382,49 +442,53 @@ fn lines_of(nodes: &[Node], indent: f32, into: &mut Vec<Line>, code: &mut Vec<St
             Node::Blockquote { children } => {
                 flush(&mut pending, indent, into);
                 let from = into.len();
-                lines_of(children, indent + 1.0, into, code);
-                for line in into.iter_mut().skip(from) {
-                    line.quoted = true;
+                lines_of(children, indent + 1.0, into);
+                for piece in into.iter_mut().skip(from) {
+                    if let Piece::Line(line) = piece {
+                        line.quoted = true;
+                    }
                 }
             }
             Node::List { ordered, items } => {
                 flush(&mut pending, indent, into);
                 for (at, item) in items.iter().enumerate() {
                     let from = into.len();
-                    lines_of(item, indent + 1.0, into, code);
+                    lines_of(item, indent + 1.0, into);
                     // On the first line of the item only: the rest of a
                     // wrapped item hangs under the words, not under the dot.
-                    if let Some(first) = into.get_mut(from) {
+                    // The first *line*, not the first piece: an item that
+                    // opens with a code block has no line to mark there.
+                    if let Some(Piece::Line(first)) = into.get_mut(from) {
                         first.marker = marker_for(*ordered, at, indent);
                     }
                 }
             }
             Node::CodeBlock { value, .. } => {
                 flush(&mut pending, indent, into);
-                code.push(value.clone())
+                into.push(Piece::Code(value.clone()))
             }
             Node::Table { head, rows } => {
                 flush(&mut pending, indent, into);
                 // Not laid out as a table yet: each cell is a line, which is
                 // the same *number* of lines a stacked fallback draws.
                 for cell in head {
-                    lines_of(cell, indent, into, code);
+                    lines_of(cell, indent, into);
                 }
                 for row in rows {
                     for cell in row {
-                        lines_of(cell, indent, into, code);
+                        lines_of(cell, indent, into);
                     }
                 }
             }
             Node::Rule => {
                 flush(&mut pending, indent, into);
-                into.push(Line {
+                into.push(Piece::Line(Line {
                     quoted: false,
                     spans: Vec::new(),
                     indent,
                     heading: false,
                     marker: String::new(),
-                })
+                }))
             }
             // Inline: gathered with whatever came before it, and ended by the
             // next thing that is not.
@@ -792,11 +856,20 @@ pub fn lay_out(fonts: &mut Fonts, row: &Row, theme: &Theme) -> RowLayout {
         y += theme.header_height;
     }
 
-    let mut lines = Vec::new();
-    let mut code = Vec::new();
-    lines_of(nodes, 0.0, &mut lines, &mut code);
+    let mut pieces = Vec::new();
+    lines_of(nodes, 0.0, &mut pieces);
 
-    for line in lines {
+    // One pass, in the order the message was written. Two passes -- every line
+    // and then every code block -- is what put a message's names above all of
+    // its blocks instead of each name above its own.
+    for piece in pieces {
+        let line = match piece {
+            Piece::Line(line) => line,
+            Piece::Code(block) => {
+                y += code_block(fonts, &block, y, theme, &mut blocks);
+                continue;
+            }
+        };
         let x = line.indent * theme.indent;
         let wrap = theme.text_width() - x;
         let count = line_count(fonts, &line, wrap, theme);
@@ -828,52 +901,6 @@ pub fn lay_out(fonts: &mut Fonts, row: &Row, theme: &Theme) -> RowLayout {
             kind: if line.quoted { Kind::Quote } else { Kind::Text },
             spans: line.spans,
             size,
-            wrap,
-        });
-        y += height + theme.block_gap;
-    }
-
-    for block in &code {
-        // Measured at the width it will actually be shaped at, rather than
-        // counting the lines as typed. Those two disagreed: the painter wrapped
-        // at the column while this counted newlines, so one long log line
-        // reserved a single line's height and drew over the message below it.
-        //
-        // The app scrolls a code block sideways rather than wrapping it, and
-        // this will too once the renderer can scroll sideways. That is a change
-        // to `wrap` alone -- the count stays right, because it asks what will be
-        // drawn rather than what was written.
-        let wrap = (theme.text_width() - theme.code_padding * 2.0).max(40.0);
-        let count = crate::extent_of(
-            fonts,
-            block,
-            wrap,
-            crate::Style {
-                size: theme.code_size,
-                line_height: theme.code_line_height,
-                bold: false,
-                italic: false,
-                mono: true,
-            },
-        )
-        .lines;
-        let height = count as f32 * theme.code_line_height + theme.code_padding;
-        blocks.push(Block {
-            y,
-            x: 0.0,
-            height,
-            lines: count,
-            kind: Kind::Code,
-            spans: vec![TextSpan {
-                text: block.clone(),
-                bold: false,
-                italic: false,
-                mono: true,
-                press: None,
-                faint: false,
-                emoji: None,
-            }],
-            size: theme.code_size,
             wrap,
         });
         y += height + theme.block_gap;
@@ -1623,6 +1650,59 @@ mod tests {
     }
 
     /// Short lines do not wrap, so the count is the lines as written.
+    #[test]
+    fn a_message_keeps_its_blocks_in_the_order_they_were_written() {
+        let mut fonts = Fonts::new();
+        let theme = Theme::default();
+        // The shape of a daily standup notice: a name, what they said, the
+        // next name. Every name used to be drawn above every block, because
+        // the lines and the code blocks were gathered into separate lists and
+        // laid out one list after the other.
+        let said = |who: &str| Node::Paragraph {
+            children: vec![Node::Strong {
+                children: vec![Node::Text { value: who.into() }],
+            }],
+        };
+        let block = |what: &str| Node::CodeBlock {
+            language: None,
+            value: what.into(),
+        };
+        let row = Row::Post {
+            post: post(vec![
+                said("Lazare"),
+                block("OoO"),
+                said("Silana"),
+                block("BWC avec Mos."),
+            ]),
+        };
+        let laid = lay_out(&mut fonts, &row, &theme);
+        // Each name above its own block, by the order they come out at.
+        let order: Vec<Kind> = laid
+            .blocks
+            .iter()
+            .filter(|block| matches!(block.kind, Kind::Text | Kind::Code))
+            .filter(|block| !block.spans.is_empty())
+            .map(|block| block.kind)
+            .collect();
+        assert_eq!(
+            order,
+            vec![Kind::Text, Kind::Code, Kind::Text, Kind::Code],
+            "the message came out as {order:?}"
+        );
+        // And stacked downwards, rather than two piles at the same heights.
+        let tops: Vec<f32> = laid
+            .blocks
+            .iter()
+            .filter(|block| matches!(block.kind, Kind::Text | Kind::Code))
+            .filter(|block| !block.spans.is_empty())
+            .map(|block| block.y)
+            .collect();
+        assert!(
+            tops.windows(2).all(|pair| pair[0] < pair[1]),
+            "the blocks are not in descending order: {tops:?}"
+        );
+    }
+
     #[test]
     fn a_code_block_counts_its_own_lines() {
         let mut fonts = Fonts::new();
