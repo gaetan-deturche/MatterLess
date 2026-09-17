@@ -22,6 +22,12 @@ pub enum Event {
         y: f32,
     },
     PointerPressed,
+    /// The press just reported was the second or third in quick succession.
+    ///
+    /// Sent by the window rather than worked out here: whether two presses are
+    /// one gesture is a question about a clock, and this layer has none. It
+    /// should not grow one for a rule the platform already has an answer to.
+    PointerRepeated(u32),
     PointerReleased,
     /// The other button went down, which is a question rather than a command:
     /// it asks what can be done here instead of doing something.
@@ -100,6 +106,9 @@ pub struct Input {
     pressed_now: Option<String>,
     /// Set for one frame when a press and its release agreed.
     clicked: Option<String>,
+    /// How many presses in quick succession the last one was: two for a
+    /// double, three for a triple, one for an ordinary press.
+    clicks: u32,
     /// The box the other button was pressed on, for one frame.
     contexted: Option<String>,
     wheel: (f32, f32),
@@ -124,10 +133,12 @@ impl Input {
             Event::PointerPressed => {
                 self.pressed_on = self.hovered.clone();
                 self.pressed_now = self.hovered.clone();
+                self.clicks = 1;
                 // Focus follows the press, not the release: a reader who holds
                 // the button down on a field expects it to be theirs already.
                 self.focus = self.hovered.clone();
             }
+            Event::PointerRepeated(clicks) => self.clicks = clicks,
             Event::Contexted => {
                 // No press and release to agree: the menu opens where the
                 // button went down, which is what every platform does with it.
@@ -190,6 +201,15 @@ impl Input {
 
     pub fn clicked_on(&self, name: &str) -> bool {
         self.clicked.as_deref() == Some(name)
+    }
+
+    /// How many presses in quick succession the last one was.
+    ///
+    /// Two takes the word under the pointer, three the line: what every text
+    /// box does and what this one could not even be asked, because nothing
+    /// counted.
+    pub fn clicks(&self) -> u32 {
+        self.clicks.max(1)
     }
 
     pub fn focus(&self) -> Option<&str> {

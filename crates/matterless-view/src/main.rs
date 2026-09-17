@@ -392,6 +392,9 @@ struct App {
     /// reply survives glancing back at the channel, and cleared when a
     /// different thread opens.
     thread_composer: Composer,
+    /// When and where the pointer was last pressed, and how many presses in a
+    /// row that was, so a double or triple press can be told from two.
+    pressed_before: Option<(std::time::Instant, (f32, f32), u32)>,
     /// What was last copied, which every widget that copies or pastes is
     /// handed. Joined to the system's clipboard in `react`, so the two agree
     /// without a dozen widgets each having to know there is a system.
@@ -634,6 +637,7 @@ impl App {
                     "Reply... (Enter to send, Shift+Enter for a new line)".to_string();
                 reply
             },
+            pressed_before: None,
             clipboard: String::new(),
             link: None,
             outstanding: Arc::new(matterless_render::pending::PendingPosts::default()),
@@ -3291,6 +3295,31 @@ impl App {
             .or_else(|| self.stream.holding_row(&format!("post/{root_id}"), within))
     }
 
+    /// How many presses in quick succession this one is, if more than one.
+    ///
+    /// Counted here because it is a question about a clock, and the input
+    /// layer has none. Half a second and four pixels: the interval every
+    /// desktop uses, and near enough to the same spot that a reader aiming at
+    /// one word has not moved on to another.
+    fn repeated(&mut self) -> Option<u32> {
+        const APART: std::time::Duration = std::time::Duration::from_millis(500);
+        const NEAR: f32 = 4.0;
+        let at = self.input.pointer_at()?;
+        let now = std::time::Instant::now();
+        let again = match self.pressed_before.take() {
+            Some((when, was, many))
+                if now.duration_since(when) < APART
+                    && (was.0 - at.0).abs() <= NEAR
+                    && (was.1 - at.1).abs() <= NEAR =>
+            {
+                many + 1
+            }
+            _ => 1,
+        };
+        self.pressed_before = Some((now, at, again));
+        (again > 1).then_some(again)
+    }
+
     /// Copies text, into this window and into every other one.
     fn copy(&mut self, text: String) {
         matterless_view::clip::write(&text);
@@ -5149,12 +5178,18 @@ impl ApplicationHandler<Update> for App {
                     return;
                 }
                 let boxes = self.targets();
-                let event = if state == winit::event::ElementState::Pressed {
-                    UiEvent::PointerPressed
-                } else {
-                    UiEvent::PointerReleased
+                let down = state == winit::event::ElementState::Pressed;
+                let event = match down {
+                    true => UiEvent::PointerPressed,
+                    false => UiEvent::PointerReleased,
                 };
                 self.input.apply(event, &boxes);
+                // Whether this press carries on from the last one, which is a
+                // question about a clock and so is answered here rather than
+                // in the input layer.
+                if down && let Some(again) = self.repeated() {
+                    self.input.apply(UiEvent::PointerRepeated(again), &boxes);
+                }
                 // The menu first, and alone: while one is open its catcher
                 // covers the window, so everything under it is out of reach
                 // until it has been answered or dismissed.
