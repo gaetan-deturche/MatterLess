@@ -195,6 +195,112 @@ fn a_narrower_column_keeps_the_reader_where_they_were() {
     );
 }
 
+/// Opening a thread holds the "N replies" line, not the message above it.
+///
+/// That line is what was pressed, and the message it hangs under is often
+/// several wrapped lines whose height changes in the narrower column -- so
+/// anchoring the message pins the message's top and lets the line slide out
+/// from under the pointer. The same complaint as holding the top row, one row
+/// further down.
+#[test]
+fn the_replies_line_is_what_a_thread_opens_from() {
+    let mut fonts = Fonts::new();
+    let mut stream = Stream::new("stream");
+    let wordy_post = |at: usize| {
+        let mut said = post(&format!("p{at}"), "");
+        said.nodes = Arc::new(vec![Node::Paragraph {
+            children: vec![Node::Text {
+                value: "a sentence with enough words in it to wrap ".repeat(6),
+            }],
+        }]);
+        Row::Post { post: said }
+    };
+    stream.rows = (0..20).map(wordy_post).collect();
+    // The message whose replies get asked for, and the line that asks.
+    stream.rows.push(wordy_post(20));
+    stream.rows.push(Row::ThreadFooter {
+        root_id: "p20".into(),
+        reply_count: 15,
+        last_reply_at: 0,
+        participants: Vec::new(),
+        unread_replies: 0,
+        unread_mentions: 0,
+        following: true,
+    });
+    stream.rows.extend((21..40).map(wordy_post));
+
+    let wide = panel();
+    stream.lay_out(&mut fonts, wide.width);
+    // With the pair somewhere in the middle, where there is something to lose.
+    stream.scroll = stream.reach(wide) / 2.0;
+    let (line, message) = ("footer/p20", "post/p20");
+    let by_line = stream.holding_row(line, wide).expect("no replies line");
+    let by_message = stream.holding_row(message, wide).expect("no message");
+
+    // The column a thread pane leaves behind.
+    let narrow = Rect::new(wide.x, wide.y, wide.width * 0.6, wide.height);
+    stream.lay_out(&mut fonts, narrow.width);
+
+    // What anchoring the message would have done to the line.
+    stream.hold(Some(by_message), narrow);
+    let adrift = stream.holding_row(line, narrow).expect("gone");
+    assert!(
+        (adrift.1 - by_line.1).abs() > 1.0,
+        "anchoring the message already held the line still, so this proves nothing"
+    );
+
+    stream.hold(Some(by_line.clone()), narrow);
+    let after = stream.holding_row(line, narrow).expect("gone");
+    assert!(
+        (after.1 - by_line.1).abs() < 1.0,
+        "the replies line moved: {} against {}",
+        after.1,
+        by_line.1
+    );
+}
+
+/// Opening a thread and closing it again leaves the channel where it started.
+///
+/// The two do different things on purpose. Opening honours the press and
+/// holds the line that was clicked, which moves the column. Closing has no
+/// press to honour, so what it owes the reader is the place they were in
+/// before the pane took half of it -- and that place has to be remembered
+/// across the open, because by then the column is somewhere else.
+#[test]
+fn opening_a_thread_and_closing_it_leaves_the_channel_where_it_was() {
+    let mut fonts = Fonts::new();
+    let wide = panel();
+    let mut stream = wordy(&mut fonts, wide.width);
+    stream.scroll = stream.reach(wide) / 2.0;
+    let started = stream.scroll;
+
+    // Where the channel was, kept for the way back.
+    let was = stream.anchor(wide);
+    // The press being honoured: some row other than the one the middle would
+    // have picked, the way a footer further down the panel is.
+    let pressed = stream
+        .holding_row("post/p25", wide)
+        .expect("not in the channel");
+
+    // The pane opens, taking width, and the pressed line is held.
+    let narrow = Rect::new(wide.x, wide.y, wide.width * 0.6, wide.height);
+    stream.lay_out(&mut fonts, narrow.width);
+    stream.hold(Some(pressed), narrow);
+    assert!(
+        (stream.scroll - started).abs() > 1.0,
+        "the pane opening left the channel where it was, so this proves nothing"
+    );
+
+    // And closes again.
+    stream.lay_out(&mut fonts, wide.width);
+    stream.anchored(was, wide);
+    assert!(
+        (stream.scroll - started).abs() < 1.0,
+        "the channel came back to {} instead of {started}",
+        stream.scroll
+    );
+}
+
 /// A long conversation of rows that wrap differently in a narrower column.
 fn wordy(fonts: &mut Fonts, width: f32) -> Stream {
     let mut stream = Stream::new("stream");
