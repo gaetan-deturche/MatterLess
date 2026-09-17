@@ -343,6 +343,8 @@ struct App {
     /// The open thread, when there is one. A second stream rather than a
     /// second kind of panel: a thread is the same rows in a narrower column.
     thread: Option<Stream>,
+    /// Where the channel was before the thread pane took half of it.
+    parked: Option<Parked>,
     palette: Palette,
     /// The store, kept open: switching channel is a read, not a reload.
     store: Option<Arc<matterless_store::Store>>,
@@ -590,6 +592,7 @@ impl App {
             driver: Driver::asked(),
             home: None,
             resizing: None,
+            parked: None,
             sized: None,
             window: None,
             view: None,
@@ -3175,18 +3178,22 @@ impl App {
         // The pane takes width from the channel, so both have to be laid out
         // again before anything is drawn against the old one.
         //
-        // Anchored on the message whose replies were asked for, not on
-        // whichever row happens to be at the top: the narrower column
-        // re-wraps everything between them, so holding the top still let the
-        // message the reader had just pointed at slide down the screen.
-        let anchored = self
-            .stream
-            .holding_row(&format!("post/{root_id}"), self.stream_rect());
+        // Anchored on the line whose replies were asked for. A press is a
+        // stronger word about where somebody is looking than the middle of the
+        // panel is, but only at the moment it happens -- so this is the one
+        // place a row is named from outside, and it is named once.
+        let anchored = self.asked_from(root_id);
+        // Where the channel is now, to come back to when the pane closes.
+        let was = self.anchors().0;
         self.relayout();
         if anchored.is_some() {
             let within = self.stream_rect();
             self.stream.hold(anchored, within);
         }
+        self.parked = Some(Parked {
+            was,
+            left_at: self.stream.scroll,
+        });
         if let Some(within) = self.thread_stream_rect()
             && let Some(thread) = self.thread.as_mut()
         {
@@ -3198,17 +3205,44 @@ impl App {
         let Some(thread) = self.thread.take() else {
             return;
         };
-        // And back to the same message on the way out, for the same reason.
-        let root = thread.name.strip_prefix("thread/").map(str::to_string);
-        let anchored = root.and_then(|root| {
-            self.stream
-                .holding_row(&format!("post/{root}"), self.stream_rect())
-        });
+        let _ = thread;
+        // Back to where the channel was before the pane took half of it --
+        // which is not the same thing as the line that opened it. Closing is
+        // nobody pointing at anything: there is no press to honour, so what
+        // matters is that the column ends up where it started.
+        //
+        // Only if the reader has not moved it since. Scrolling the channel
+        // while reading the thread makes this stale, and coming back to a
+        // place they have left is worse than any of the alternatives -- so it
+        // is dropped, and `relayout` holds them where they actually are.
+        // Changing channel leaves nothing to find either way.
+        let parked = self
+            .parked
+            .take()
+            .filter(|parked| (parked.left_at - self.stream.scroll).abs() < 1.0);
         self.relayout();
-        if anchored.is_some() {
+        if let Some(parked) = parked {
             let within = self.stream_rect();
-            self.stream.hold(anchored, within);
+            self.stream.anchored(parked.was, within);
         }
+    }
+
+    /// What to hold on to when a thread opens or closes beside the channel.
+    ///
+    /// The "N replies" line, and not the message it hangs under. That line is
+    /// what was pressed to get here, and the message above it can be a dozen
+    /// wrapped lines whose height changes in the narrower column -- so holding
+    /// the message pinned the top of the message and let the line the reader
+    /// had actually clicked slide out from under the pointer, which is the
+    /// same complaint as holding the top row, one row further down.
+    ///
+    /// The message itself when there is no such line: a thread opened from a
+    /// message that has no replies yet has no footer to hold.
+    fn asked_from(&self, root_id: &str) -> Option<(String, f32)> {
+        let within = self.stream_rect();
+        self.stream
+            .holding_row(&format!("footer/{root_id}"), within)
+            .or_else(|| self.stream.holding_row(&format!("post/{root_id}"), within))
     }
 
     /// Hands the frame's input to the widgets that want it.
@@ -3654,6 +3688,10 @@ impl App {
             return;
         };
         let _open = matterless_view::timing::watch("opening a channel", 0, "");
+        // A place in the conversation being left behind. The scroll check
+        // would drop it anyway, and a row of one channel is not a row of
+        // another, but neither of those is a reason to carry it across.
+        self.parked = None;
         // The threads row is a place to go, not a channel to read: it fills
         // the same column, so opening it is the same gesture, but there is no
         // conversation to load and nothing to mark read.
@@ -3840,9 +3878,13 @@ impl App {
                 self.redraw();
             }
             Act::Threading => {
-                // Open, and forty frames later the same call closes it again,
-                // which is what pressing the footer twice does.
-                if tick.is_multiple_of(40)
+                // Open, and eight frames later the same call closes it again,
+                // which is what pressing the footer twice does. Eight rather
+                // than forty because a run is commonly shorter than forty, and
+                // a period longer than the run measured the opening only --
+                // which is how closing came to be the one path here that
+                // nothing ever drove.
+                if tick.is_multiple_of(8)
                     && let Some(root) = self.a_thread()
                 {
                     self.open_thread(&root);
@@ -5319,6 +5361,21 @@ fn named(key: &winit::keyboard::Key) -> Option<Key> {
 /// Where the reader was in the conversation and in the thread beside it, if
 /// one is open. Taken before anything moves and handed to `shape`.
 type Anchors = (Anchor, Option<Anchor>);
+
+/// Where the channel was when a thread took half of it.
+///
+/// Opening a thread narrows the column and holds the line that was pressed,
+/// which moves the channel: the press is the best thing to honour at that
+/// moment, but it is not where the reader had been. Closing the pane has no
+/// press to honour, so what it owes them is the column they started with.
+struct Parked {
+    /// The place the channel held before the pane opened.
+    was: Anchor,
+    /// And where the pane's opening left the scroll, so that a reader who has
+    /// since moved the channel themselves can be told from one who has not.
+    /// Theirs is the newer word about where they are.
+    left_at: f32,
+}
 
 /// How much of the conversation a pass measures.
 ///
