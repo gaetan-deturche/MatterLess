@@ -388,6 +388,25 @@ struct App {
     input: Input,
     placed: Vec<Placed>,
     composer: Composer,
+    /// Half-written messages, by the conversation they were being written to.
+    ///
+    /// A draft belongs to its conversation: what somebody began saying in one
+    /// channel makes no sense in the next, and is exactly what they want back
+    /// when they return to it. So a box is not cleared on the way out -- it is
+    /// put away, and brought back when the reader is.
+    ///
+    /// In memory only. A draft is a thought in progress rather than a
+    /// document, and one handed back a week after the window was last open
+    /// would be a surprise rather than a convenience.
+    drafts: std::collections::HashMap<String, String>,
+    /// Where each box is writing to, so its text can be put away under the
+    /// right name when the reader moves.
+    ///
+    /// Kept beside the boxes rather than read off what is open, because the
+    /// thread pane is taken away and rebuilt every time anybody posts in it --
+    /// so by the time the question is asked there is nothing left to ask.
+    writing_to: Option<String>,
+    replying_to: Option<String>,
     /// The thread pane's own reply box. Kept across a close so a half-written
     /// reply survives glancing back at the channel, and cleared when a
     /// different thread opens.
@@ -637,6 +656,9 @@ impl App {
                     "Reply... (Enter to send, Shift+Enter for a new line)".to_string();
                 reply
             },
+            drafts: std::collections::HashMap::new(),
+            writing_to: None,
+            replying_to: None,
             pressed_before: None,
             clipboard: String::new(),
             link: None,
@@ -3222,10 +3244,22 @@ impl App {
         // time one opens starts with none of what the app already knows.
         stream.favourites = self.stream.favourites.clone();
         println!("thread {root_id}: {} rows", stream.rows.len());
-        // A reply half-written to one thread does not belong in another. It
-        // survives closing and reopening the same one, which is the case worth
-        // keeping.
-        self.thread_composer.clear(&mut self.fonts);
+        // The reply being written goes with the thread being left, and
+        // whatever was left in this one comes back. It used to be cleared
+        // outright -- and this is the path a thread is *reopened* by:
+        // `reread_thread` takes the pane away and builds it again through here
+        // every time anybody posts in it. So a reader typing a reply lost it
+        // the moment somebody else answered, which is exactly when they were
+        // most likely to be typing.
+        //
+        // Put away under the root the reply was begun for rather than under
+        // whatever pane is open, because by here that pane has already been
+        // taken. Reopening the same thread parks and restores the same draft,
+        // which is the no-op it should be.
+        let leaving = self.replying_to.take();
+        self.park(leaving, self.thread_composer.text());
+        self.replying_to = Some(thread_name(root_id));
+        self.resume(Which::Thread, &thread_name(root_id));
         self.thread = Some(stream);
         // Writing is what the pane is for, so it opens focused.
         self.input.focus_on(THREAD_COMPOSER);
@@ -3332,6 +3366,39 @@ impl App {
     /// message it belongs to -- or off the pane entirely.
     fn picker_within(&self) -> matterless_ui::Rect {
         self.column_rect()
+    }
+
+    /// Puts a half-written message away under the conversation it was for.
+    ///
+    /// An empty one is forgotten rather than kept: a reader who cleared the
+    /// box meant to clear it, and a blank draft coming back is the same as no
+    /// draft coming back with extra bookkeeping behind it.
+    fn park(&mut self, under: Option<String>, text: String) {
+        let Some(under) = under else {
+            return;
+        };
+        match text.trim().is_empty() {
+            true => self.drafts.remove(&under),
+            false => self.drafts.insert(under, text),
+        };
+    }
+
+    /// Brings back what was left for this conversation, or empties the box.
+    ///
+    /// Emptied through `clear` rather than filled with nothing, because
+    /// filling marks the box as written in -- and a box nobody has touched is
+    /// not the same as one they emptied.
+    fn resume(&mut self, box_of: Which, under: &str) {
+        let draft = self.drafts.get(under).cloned();
+        let fonts = &mut self.fonts;
+        let box_of = match box_of {
+            Which::Channel => &mut self.composer,
+            Which::Thread => &mut self.thread_composer,
+        };
+        match draft {
+            Some(draft) => box_of.fill(&draft, fonts),
+            None => box_of.clear(fonts),
+        }
     }
 
     /// Copies text, into this window and into every other one.
@@ -3835,6 +3902,12 @@ impl App {
             self.thread = None;
             return;
         }
+        // What was being written here goes with the channel being left, and
+        // whatever was left in the one being opened comes back.
+        let leaving = self.writing_to.take();
+        self.park(leaving, self.composer.text());
+        self.writing_to = Some(channel.to_string());
+        self.resume(Which::Channel, channel);
         self.followed.hide();
         // Before anything marks it read, which is what this is for.
         self.recall_watermark(channel, &store);
@@ -5517,6 +5590,13 @@ fn named(key: &winit::keyboard::Key) -> Option<Key> {
 
 /// What a thread panel answers to. Keyed by root so reopening the same thread
 /// can be told from opening a different one.
+/// Which of the two message boxes a draft belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Which {
+    Channel,
+    Thread,
+}
+
 /// Where the reader was in the conversation and in the thread beside it, if
 /// one is open. Taken before anything moves and handed to `shape`.
 type Anchors = (Anchor, Option<Anchor>);
