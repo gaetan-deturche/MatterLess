@@ -3139,7 +3139,7 @@ impl App {
         if let Some(body) = self.thread_body() {
             boxes.extend(self.thread_composer.boxes_in(body));
         }
-        boxes.extend(self.picker.boxes(self.picked_near, self.stream_rect()));
+        boxes.extend(self.picker.boxes(self.picked_near, self.picker_within()));
         if let Some(pane) = self.aside_rect() {
             boxes.extend(self.listing.boxes(pane));
             boxes.extend(self.search.boxes(pane));
@@ -3217,6 +3217,10 @@ impl App {
         let mut stream = Stream::new(thread_name(root_id));
         stream.rows = matterless_render::plan_thread(&root, &replies, &options);
         stream.custom = matterless_view::feed::custom_emoji(store, &stream.rows);
+        // The same reactions on its toolbars as on the channel's. A thread is
+        // a second panel of the same messages, and a pane built fresh each
+        // time one opens starts with none of what the app already knows.
+        stream.favourites = self.stream.favourites.clone();
         println!("thread {root_id}: {} rows", stream.rows.len());
         // A reply half-written to one thread does not belong in another. It
         // survives closing and reopening the same one, which is the case worth
@@ -3318,6 +3322,16 @@ impl App {
         };
         self.pressed_before = Some((now, at, again));
         (again > 1).then_some(again)
+    }
+
+    /// The room the emoji grid is kept inside.
+    ///
+    /// The whole column rather than the channel's own half of it: the grid can
+    /// be opened from a message in the thread pane as readily as from one
+    /// beside it, and clamped to the channel it would be pushed left off the
+    /// message it belongs to -- or off the pane entirely.
+    fn picker_within(&self) -> matterless_ui::Rect {
+        self.column_rect()
     }
 
     /// Copies text, into this window and into every other one.
@@ -3565,7 +3579,7 @@ impl App {
                 self.input = input;
                 return;
             }
-            let within = self.stream_rect();
+            let within = self.picker_within();
             let store = self.store.clone();
             let chosen = self.picker.react(
                 &mut self.fonts,
@@ -4443,7 +4457,8 @@ impl App {
         // small panel and whatever it covers is not what the reader is doing.
         if self.picker.open() {
             let near = self.picked_near;
-            let field = self.picker.field(near, stream);
+            let within = self.picker_within();
+            let field = self.picker.field(near, within);
             scene.clip_to(0.0, 0.0, self.size.0 as f32, self.size.1 as f32);
             let mut canvas = Canvas {
                 scene: &mut scene,
@@ -4451,7 +4466,7 @@ impl App {
                 fonts: &mut self.fonts,
                 palette: &self.palette,
             };
-            self.picker.draw(&mut canvas, &self.input, near, stream);
+            self.picker.draw(&mut canvas, &self.input, near, within);
             self.picker.query.draw(&mut canvas, field, true);
         }
         if self.offered.open() {
