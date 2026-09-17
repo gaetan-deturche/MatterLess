@@ -742,6 +742,23 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    /// The reactions this reader uses most, commonest first.
+    ///
+    /// Counted from what they have actually done rather than kept as a list of
+    /// recents: the answer is already in the table, it survives a restart
+    /// without anything being written down, and it cannot drift from the truth
+    /// because it *is* the truth. Ties break by name so the order does not
+    /// wander between two equally used ones.
+    pub fn favourite_emoji(&self, user_id: &str, many: u32) -> Result<Vec<String>> {
+        let connection = self.lock();
+        let mut statement = connection.prepare(
+            "SELECT emoji_name FROM reactions WHERE user_id = ?1 \
+             GROUP BY emoji_name ORDER BY COUNT(*) DESC, emoji_name LIMIT ?2",
+        )?;
+        let rows = statement.query_map(params![user_id, many], |row| row.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     // --------------------------------------------------------------- unreads
 
     /// Derived from the channel counter minus the member counter -- the only

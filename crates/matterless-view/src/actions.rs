@@ -12,7 +12,13 @@ use matterless_ui::Rect;
 /// One of the three controls on a hovered message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tool {
-    /// Opens the quick faces, and the whole picker behind them.
+    /// Opens the whole picker.
+    ///
+    /// It used to open a row of seven faces with the picker behind them. The
+    /// reader's own most-used sit on the strip now, which answers "the one I
+    /// always reach for" better and in no presses at all -- so the shortlist
+    /// was a second answer to a question already answered beside it, and a
+    /// press to reach the grid that was not.
     React,
     /// Opens this message's thread.
     Reply,
@@ -72,97 +78,50 @@ pub const SQUARE_CORNER: f32 = 5.0;
 /// How tall the strip is, which is what a row has to leave room for.
 pub const HEIGHT: f32 = PADDING * 2.0 + SQUARE;
 
+/// How many of the reader's most-used reactions sit on the strip itself.
+///
+/// The official client puts three there, and they are worth their room: the
+/// reaction anybody makes most often is one press rather than a press, a row
+/// of faces and another press. Not a `Tool`, because a tool is a fixed button
+/// with a static name and a glyph of its own, and these are data -- whichever
+/// three the reader has used most.
+pub const FAVOURITES: usize = 3;
+
 /// Where the strip floats: `top: -2px; right: 4px` of the message.
-pub fn strip(within: Rect) -> Rect {
-    let width = PADDING * 2.0 + TOOLS.len() as f32 * SQUARE + (TOOLS.len() - 1) as f32 * GAP;
+pub fn strip(within: Rect, favourites: usize) -> Rect {
+    let buttons = TOOLS.len() + favourites;
+    let width = PADDING * 2.0 + buttons as f32 * SQUARE + (buttons - 1) as f32 * GAP;
     Rect::new(within.right() - 4.0 - width, within.y - 2.0, width, HEIGHT)
 }
 
-/// Where each control sits inside it.
-pub fn tools(within: Rect) -> Vec<(Tool, Rect)> {
-    let strip = strip(within);
+/// Where each of the reader's most-used sits, before the controls.
+///
+/// First on the strip because they are what gets pressed: a reaction the
+/// reader makes every day should not be behind the button for the ones they
+/// do not.
+pub fn favourites(within: Rect, many: usize) -> Vec<(usize, Rect)> {
+    let strip = strip(within, many);
+    (0..many).map(|at| (at, square(strip, at))).collect()
+}
+
+/// Where each control sits inside it, after the faces.
+pub fn tools(within: Rect, favourites: usize) -> Vec<(Tool, Rect)> {
+    let strip = strip(within, favourites);
     TOOLS
         .iter()
         .enumerate()
-        .map(|(at, tool)| {
-            (
-                *tool,
-                Rect::new(
-                    strip.x + PADDING + at as f32 * (SQUARE + GAP),
-                    strip.y + PADDING,
-                    SQUARE,
-                    SQUARE,
-                ),
-            )
-        })
+        .map(|(at, tool)| (*tool, square(strip, favourites + at)))
         .collect()
 }
 
-/// The faces the react button opens with.
-///
-/// "the ones a keyboard cannot beat; anything else is a search away rather
-/// than absent" -- so this is deliberately short, and the last button opens
-/// the search.
-pub const QUICK: [(&str, &str); 7] = [
-    ("+1", "\u{1f44d}"),
-    ("-1", "\u{1f44e}"),
-    ("tada", "\u{1f389}"),
-    ("eyes", "\u{1f440}"),
-    ("heart", "\u{2764}\u{fe0f}"),
-    ("joy", "\u{1f602}"),
-    ("thinking_face", "\u{1f914}"),
-];
-
-/// A face is 15px of type padded 3px; the row is `gap: 2px` in `padding: 4px`.
-const FACE: f32 = 21.0;
-const FACE_GAP: f32 = 2.0;
-const FACE_PADDING: f32 = 4.0;
-
-/// Where the quick faces hang: under the react button, and above it when there
-/// is no room below.
-///
-/// Downward by default -- "anchored to the top of the message, that is where
-/// the room usually is" -- which is what `.tools .choices` overrides the
-/// picker's own upward default to.
-pub fn faces_panel(under: Rect, within: Rect) -> Rect {
-    // The seven faces, then the one that opens the search, which is set apart
-    // by a rule and so takes a little more room.
-    let width =
-        FACE_PADDING * 2.0 + (QUICK.len() + 1) as f32 * FACE + QUICK.len() as f32 * FACE_GAP + 5.0;
-    let height = FACE_PADDING * 2.0 + FACE;
-    let below = under.bottom() + 2.0;
-    let y = if below + height <= within.bottom() {
-        below
-    } else {
-        under.y - 2.0 - height
-    };
+/// The nth square along the strip.
+fn square(strip: Rect, at: usize) -> Rect {
     Rect::new(
-        under
-            .x
-            .min(within.right() - width - 4.0)
-            .max(within.x + 4.0),
-        y,
-        width,
-        height,
+        strip.x + PADDING + at as f32 * (SQUARE + GAP),
+        strip.y + PADDING,
+        SQUARE,
+        SQUARE,
     )
-}
-
-/// Where each face sits, and the "more" button after them.
-///
-/// The extra entry is that button: it is the one that is not a reaction, which
-/// is why the app gives it a rule of its own.
-pub fn faces(panel: Rect) -> Vec<Rect> {
-    (0..QUICK.len() + 1)
-        .map(|at| {
-            let extra = if at == QUICK.len() { 5.0 } else { 0.0 };
-            Rect::new(
-                panel.x + FACE_PADDING + at as f32 * (FACE + FACE_GAP) + extra,
-                panel.y + FACE_PADDING,
-                FACE,
-                FACE,
-            )
-        })
-        .collect()
 }
 
 /// What one item in the menu behind `...` does.
@@ -323,51 +282,19 @@ mod tests {
     #[test]
     fn the_three_tools_sit_in_the_corner_of_the_row() {
         let row = Rect::new(100.0, 50.0, 600.0, 80.0);
-        let placed = tools(row);
+        let placed = tools(row, 0);
         assert_eq!(placed.len(), 3);
         assert_eq!(placed[0].0, Tool::React);
         assert_eq!(placed[2].0, Tool::More);
         for pair in placed.windows(2) {
             assert!(pair[0].1.right() <= pair[1].1.x, "they overlap");
         }
-        let strip = strip(row);
+        let strip = strip(row, 0);
         assert!(strip.right() <= row.right(), "it stays inside the row");
         assert!(
             strip.x > row.x + row.width / 2.0,
             "and keeps out of the message's own first words"
         );
-    }
-
-    /// The faces open downward when there is room and upward when there is
-    /// not: the scroller clips at both ends, and a fixed side is wrong at one
-    /// of them.
-    #[test]
-    fn the_faces_open_away_from_the_nearer_edge() {
-        let stream = Rect::new(0.0, 0.0, 800.0, 600.0);
-        let high = faces_panel(Rect::new(400.0, 20.0, 24.0, 24.0), stream);
-        assert!(high.y >= 44.0, "below the button");
-        let low = faces_panel(Rect::new(400.0, 570.0, 24.0, 24.0), stream);
-        assert!(low.bottom() <= 570.0, "above it");
-        for panel in [high, low] {
-            assert!(panel.x >= stream.x && panel.right() <= stream.right());
-        }
-    }
-
-    /// Eight buttons in the row: the seven faces and the one that opens a
-    /// search, which is not a face.
-    #[test]
-    fn the_quick_row_holds_the_faces_and_a_way_past_them() {
-        let panel = faces_panel(
-            Rect::new(100.0, 100.0, 24.0, 24.0),
-            Rect::new(0.0, 0.0, 800.0, 600.0),
-        );
-        let placed = faces(panel);
-        assert_eq!(placed.len(), QUICK.len() + 1);
-        for pair in placed.windows(2) {
-            assert!(pair[0].right() <= pair[1].x);
-        }
-        let last = placed.last().expect("the more button");
-        assert!(last.right() <= panel.right());
     }
 
     /// "Tomorrow" is the next nine in the morning, whichever side of it the

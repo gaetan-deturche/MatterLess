@@ -2065,6 +2065,12 @@ impl App {
             // The panel has already changed what it measures; this is the
             // measuring, which needs the fonts it does not have.
             Some(Chose::Reshape) => self.relayout(),
+            // Under the button that was pressed, which is what the quick row
+            // of faces was sitting on before it made room for the whole grid.
+            Some(Chose::Pick { post_id, under }) => {
+                self.picked_near = under;
+                self.picker.show(&post_id, &mut self.fonts, &mut self.input);
+            }
             Some(Chose::Thread(root)) => self.open_thread(&root),
             Some(Chose::Retry(pending)) => self.retry(&pending),
             Some(Chose::Act {
@@ -2198,15 +2204,6 @@ impl App {
     /// screen and both name their boxes after themselves.
     fn explains_in(&self, stream: &Stream, name: &str) -> Option<String> {
         let rest = name.strip_prefix(&format!("{}/", stream.name))?;
-        // A face on the quick row is the emoji it stands for, by name: a
-        // picture of a face does not say what reacting with it means.
-        if let Some(at) = rest.strip_prefix("faces/") {
-            let at = at.parse::<usize>().ok()?;
-            return Some(match matterless_view::actions::QUICK.get(at) {
-                Some((emoji, _)) => format!(":{emoji}:"),
-                None => "More reactions".to_string(),
-            });
-        }
         // A pressable run of words. A mention and a channel say where they
         // lead; a link says where it goes, which the app leaves to the
         // browser's status bar and this window has nowhere else to put.
@@ -2225,6 +2222,14 @@ impl App {
         }
         let (index, what) = rest.strip_prefix("row/")?.split_once('/')?;
         let index = index.parse::<usize>().ok()?;
+        // One of the reader's most-used on the strip: the emoji it stands
+        // for, by name -- a picture of a face does not say what reacting with
+        // it means.
+        if let Some(at) = what.strip_prefix("quick/") {
+            let at = at.parse::<usize>().ok()?;
+            let (emoji, _) = stream.favourites.get(at)?;
+            return Some(format!(":{emoji}:"));
+        }
         if let Some(slug) = what.strip_prefix("tool/") {
             return Some(
                 matterless_view::actions::Tool::from_slug(slug)?
@@ -2670,6 +2675,36 @@ impl App {
     /// Called after anything that changes what is visible -- a scroll, a new
     /// message, a channel switch. The asked set is what keeps that from being a
     /// request per frame.
+    /// Reads which reactions this reader uses most, for the toolbar.
+    ///
+    /// Counted from the store rather than kept as a list of recents: the
+    /// answer is already in the reactions table, it survives a restart with
+    /// nothing written down, and it cannot drift from the truth because it is
+    /// the truth. Asked when the conversation changes rather than per frame --
+    /// it is a query, and the answer only moves when somebody reacts.
+    fn recall_favourites(&mut self) {
+        let Some(store) = self.store.as_ref() else {
+            return;
+        };
+        let many = matterless_view::actions::FAVOURITES as u32;
+        let favourites: Vec<(String, String)> = store
+            .favourite_emoji(&self.me, many)
+            .unwrap_or_default()
+            .into_iter()
+            // Only the ones that can be drawn as a character. A custom emoji
+            // is a picture the atlas has to be holding, which the strip has
+            // nowhere to wait for.
+            .filter_map(|name| {
+                let face = matterless_render::emoji::character_for(&name)?;
+                Some((name, face))
+            })
+            .collect();
+        self.stream.favourites = favourites.clone();
+        if let Some(thread) = self.thread.as_mut() {
+            thread.favourites = favourites;
+        }
+    }
+
     fn want_faces(&mut self) {
         let Some(link) = self.link.as_ref() else {
             return;
@@ -2818,12 +2853,15 @@ impl App {
         use matterless_view::actions::Action;
         match action {
             Action::React => {
-                // Anchored under the message, so the grid says which one it
-                // would react to without needing a title that says so.
+                // From the menu rather than from the quick row, which carries
+                // its own anchor. Under the *top* of the message: its bottom
+                // is where a crash notice's stack trace ends, which is off the
+                // screen, and a panel pushed back on from there covers the
+                // message it was opened from.
                 let stream = self.stream_rect();
                 let row = self.stream.row_rect(&post_id, stream);
                 self.picked_near = row
-                    .map(|row| matterless_ui::Rect::new(row.x + 60.0, row.bottom(), 0.0, 0.0))
+                    .map(|row| matterless_ui::Rect::new(row.x + 60.0, row.y, 0.0, 0.0))
                     .unwrap_or(stream);
                 self.picker.show(&post_id, &mut self.fonts, &mut self.input);
             }
@@ -3481,7 +3519,19 @@ impl App {
         // opened from a message, so while it is up the keys belong to it.
         if self.picker.open() {
             let mut input = std::mem::take(&mut self.input);
-            if input.struck(Key::Escape) {
+            // Escape, or a press anywhere that is not on it: a popover opened
+            // from a message has no close button and should not need one.
+            //
+            // `opening` first and always, so the flag is cleared whether or
+            // not anything dismissed it this frame. The press that opens the
+            // picker is still in this frame's input, so left standing it would
+            // be read as a press outside and shut it again -- which is the
+            // whole of why the profile card could not be opened by clicking.
+            let opening = self.picker.opening();
+            let elsewhere = input
+                .clicked()
+                .is_some_and(|name| !matterless_view::picker::owns(name));
+            if input.struck(Key::Escape) || (elsewhere && !opening) {
                 self.picker.hide(&mut input);
                 self.input = input;
                 return;
@@ -3726,6 +3776,7 @@ impl App {
             return;
         };
         let _open = matterless_view::timing::watch("opening a channel", 0, "");
+        self.recall_favourites();
         // A place in the conversation being left behind. The scroll check
         // would drop it anyway, and a row of one channel is not a row of
         // another, but neither of those is a reason to carry it across.
@@ -3826,6 +3877,17 @@ impl App {
         // it belongs to -- which is what `wheel_over` is for. Each panel
         // asks about itself, so a fixed strip simply takes the turn and
         // does nothing with it.
+        // A floating panel over the conversation takes the turn while it is
+        // up, and takes it alone: the picker's grid scrolls and the
+        // conversation behind it stays where the reader left it. `wheel_over`
+        // asks whether a matching box is under the pointer rather than whether
+        // it is the topmost one, so the stream would otherwise scroll too --
+        // under a panel the reader is looking at.
+        if self.picker.open() {
+            self.react();
+            self.redraw();
+            return;
+        }
         let sidebar = self.sidebar_rect();
         self.sidebar.react(&self.input, &boxes, sidebar);
         // The list on the right, and the one filling the column, each
@@ -4360,7 +4422,7 @@ impl App {
                 fonts: &mut self.fonts,
                 palette: &self.palette,
             };
-            self.picker.draw(&mut canvas, near, stream);
+            self.picker.draw(&mut canvas, &self.input, near, stream);
             self.picker.query.draw(&mut canvas, field, true);
         }
         if self.offered.open() {
@@ -5181,6 +5243,15 @@ impl ApplicationHandler<Update> for App {
                 }
                 // Before anything measures itself against the window.
                 self.take_the_size();
+                // Whichever message has the emoji grid open keeps its toolbar,
+                // though the pointer has left it for the grid. Derived once a
+                // frame rather than set beside every `show` and `hide`, so it
+                // cannot be left standing after the grid has gone.
+                let held = self.picker.for_post.clone();
+                self.stream.held = held.clone();
+                if let Some(thread) = self.thread.as_mut() {
+                    thread.held = held;
+                }
                 // Once, here, before the frame it is measured by.
                 if let Some(driver) = self.driver.as_ref()
                     && let Some(act) = driver.act()
