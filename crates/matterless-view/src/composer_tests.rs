@@ -316,3 +316,80 @@ fn a_field_has_a_caret_before_anything_is_typed() {
         "the caret did not follow the words: {at:?} then {typed:?}"
     );
 }
+
+/// Undo steps back one edit, and redo forward again.
+///
+/// A message half written is exactly where losing a word hurts, and nothing
+/// answered `Ctrl+Z` at all. Changes rather than copies of the text: the
+/// editor hands back what an edit was and can reverse one.
+#[test]
+fn undo_steps_back_one_edit_and_redo_forward() {
+    let mut fonts = Fonts::new();
+    let (mut composer, mut input) = ready(&mut fonts);
+    // Two words, which are two steps: a run of typing ends after the space
+    // that follows it, so a step is a word rather than a letter.
+    type_text(&mut composer, &mut fonts, &mut input, "hello ");
+    type_text(&mut composer, &mut fonts, &mut input, "world");
+    assert_eq!(composer.text(), "hello world");
+
+    holding(&mut input, command());
+    press(&mut input, Key::Char('z'));
+    frame(&mut composer, &mut fonts, &mut input);
+    assert_eq!(
+        composer.text(),
+        "hello ",
+        "undo took a letter rather than the word"
+    );
+
+    press(&mut input, Key::Char('z'));
+    frame(&mut composer, &mut fonts, &mut input);
+    assert_eq!(composer.text(), "", "the second undo did nothing");
+
+    // And nothing past the beginning, rather than a panic on an empty stack.
+    press(&mut input, Key::Char('z'));
+    frame(&mut composer, &mut fonts, &mut input);
+    assert_eq!(composer.text(), "");
+
+    press(&mut input, Key::Char('y'));
+    frame(&mut composer, &mut fonts, &mut input);
+    assert_eq!(composer.text(), "hello ", "redo did not come back");
+}
+
+/// Typing after an undo throws away what was undone.
+///
+/// A reader who undid something and then wrote has chosen a different future;
+/// offering to redo the one they left would be offering to throw away what
+/// they just wrote.
+#[test]
+fn typing_after_an_undo_forgets_what_was_undone() {
+    let mut fonts = Fonts::new();
+    let (mut composer, mut input) = ready(&mut fonts);
+    type_text(&mut composer, &mut fonts, &mut input, "hello");
+    holding(&mut input, command());
+    press(&mut input, Key::Char('z'));
+    frame(&mut composer, &mut fonts, &mut input);
+    assert_eq!(composer.text(), "");
+
+    holding(&mut input, Mods::default());
+    type_text(&mut composer, &mut fonts, &mut input, "goodbye");
+    holding(&mut input, command());
+    press(&mut input, Key::Char('y'));
+    frame(&mut composer, &mut fonts, &mut input);
+    assert_eq!(
+        composer.text(),
+        "goodbye",
+        "redo reached past what was written after it"
+    );
+}
+
+/// A word at a time, which is what every other text box does.
+#[test]
+fn command_backspace_rubs_out_a_word() {
+    let mut fonts = Fonts::new();
+    let (mut composer, mut input) = ready(&mut fonts);
+    type_text(&mut composer, &mut fonts, &mut input, "hello there");
+    holding(&mut input, command());
+    press(&mut input, Key::Backspace);
+    frame(&mut composer, &mut fonts, &mut input);
+    assert_eq!(composer.text(), "hello ");
+}

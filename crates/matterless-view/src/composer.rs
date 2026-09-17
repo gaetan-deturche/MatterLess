@@ -12,7 +12,7 @@
 //! and bidirectional runs, all of which it already has right.
 
 use cosmic_text::{
-    Action, Attrs, Buffer, Cursor, Edit, Editor, Metrics, Motion, Selection, Shaping,
+    Action, Attrs, Buffer, Change, Cursor, Edit, Editor, Metrics, Motion, Selection, Shaping,
 };
 use matterless_layout::Fonts;
 use matterless_paint::Run;
@@ -32,6 +32,18 @@ pub struct Composer {
     /// True once anything has been typed, so an empty buffer can be told from
     /// one the reader has emptied on purpose.
     pub touched: bool,
+    /// What has been done, and what has been undone, so both can be walked.
+    ///
+    /// Changes rather than copies of the text: `cosmic-text` hands back what
+    /// an edit *was* and can reverse one, so a stack of those is exact and
+    /// costs the words that moved rather than the whole message each time.
+    ///
+    /// Redo is emptied by any fresh edit, which is what every editor does: a
+    /// reader who undid something and then typed has chosen a different
+    /// future, and offering to redo the one they left would be offering to
+    /// throw away what they just wrote.
+    done: Vec<Change>,
+    undone: Vec<Change>,
     /// A field, not a message box: no paperclip, no Send, and none of the
     /// height they take.
     ///
@@ -88,6 +100,26 @@ const TOOLS: f32 = 34.0;
 /// something somebody sent rather than as something to press.
 const CLIP: &str = matterless_layout::marks::ATTACH;
 
+/// Whether an edit carries straight on from the one before it.
+///
+/// A run of typing is one step to undo rather than one step per letter: a
+/// reader who typed a word and pressed undo wants the word gone, not its last
+/// character. Only insertions, and only where the new one begins exactly where
+/// the last one ended -- a caret moved elsewhere starts a step of its own.
+///
+/// The run ends *after* whitespace rather than before it, so a step is a word
+/// and the space that follows it. Ending before would leave the space as a
+/// step of its own, which is an undo that visibly does nothing.
+fn carries_on(last: &Change, next: &Change) -> bool {
+    let (Some(ended), Some(starts)) = (last.items.last(), next.items.first()) else {
+        return false;
+    };
+    ended.insert
+        && ended.end == starts.start
+        && !ended.text.chars().any(char::is_whitespace)
+        && next.items.iter().all(|item| item.insert)
+}
+
 impl Default for Composer {
     fn default() -> Self {
         Self::new(NAME)
@@ -102,6 +134,8 @@ impl Composer {
             placeholder: "Write a message... (Enter to send, Shift+Enter for a new line)"
                 .to_string(),
             touched: false,
+            done: Vec::new(),
+            undone: Vec::new(),
             plain: false,
         }
     }
@@ -323,10 +357,15 @@ impl Composer {
             let at = ((x - inner.x) as i32, (y - inner.y) as i32);
             // The frame the button went down places the caret; every frame
             // after that drags a selection from it.
-            let action = if input.pressed_now() == Some(self.name.as_str()) {
-                Action::Click { x: at.0, y: at.1 }
-            } else {
-                Action::Drag { x: at.0, y: at.1 }
+            // Two presses take the word under the pointer and three take the
+            // line, which is what every other text box does.
+            let action = match input.pressed_now() == Some(self.name.as_str()) {
+                true => match input.clicks() {
+                    1 => Action::Click { x: at.0, y: at.1 },
+                    2 => Action::DoubleClick { x: at.0, y: at.1 },
+                    _ => Action::TripleClick { x: at.0, y: at.1 },
+                },
+                false => Action::Drag { x: at.0, y: at.1 },
             };
             let system = fonts.system_mut();
             self.editor.action(system, action);
@@ -347,6 +386,10 @@ impl Composer {
                         sent = Some(text);
                     }
                 }
+                // A word at a time, which is what every other text box does
+                // and what a mistyped `@name` wants.
+                Key::Backspace if mods.command => self.rub_out(fonts, Motion::LeftWord),
+                Key::Delete if mods.command => self.rub_out(fonts, Motion::RightWord),
                 Key::Backspace => self.act(fonts, Action::Backspace),
                 Key::Delete => self.act(fonts, Action::Delete),
                 Key::Escape => self.editor.set_selection(Selection::None),
@@ -356,12 +399,24 @@ impl Composer {
                 Key::Right => self.motion(fonts, Motion::Right, mods.shift),
                 Key::Up => self.motion(fonts, Motion::Up, mods.shift),
                 Key::Down => self.motion(fonts, Motion::Down, mods.shift),
+                // The ends of the whole message rather than of the line, which
+                // in a box that grows to eight lines is a different place.
+                Key::Home if mods.command => self.motion(fonts, Motion::BufferStart, mods.shift),
+                Key::End if mods.command => self.motion(fonts, Motion::BufferEnd, mods.shift),
                 Key::Home => self.motion(fonts, Motion::Home, mods.shift),
                 Key::End => self.motion(fonts, Motion::End, mods.shift),
                 _ => {}
             }
         }
 
+        // Back a step, and forward again. Both spellings of redo, because both
+        // are in use and a reader has one of them in their fingers.
+        if input.chord(Key::Char('z')) && !mods.shift {
+            self.walk(fonts, true);
+        }
+        if (input.chord(Key::Char('z')) && mods.shift) || input.chord(Key::Char('y')) {
+            self.walk(fonts, false);
+        }
         if input.chord(Key::Char('a')) {
             // Anchored at the start and moved to the end, which is what a
             // selection *is* here: there is no "select everything" action.
@@ -408,15 +463,84 @@ impl Composer {
         sent
     }
 
+    /// Does one thing to the text, and remembers that it did.
+    ///
+    /// The change is opened and closed around every edit rather than around a
+    /// run of them, so undo steps back one action: a reader who typed a word
+    /// and pressed undo expects the word gone, not the sentence. An action
+    /// that changed nothing -- a motion, an escape -- hands back no change and
+    /// leaves the stacks alone.
     fn act(&mut self, fonts: &mut Fonts, action: Action) {
         let system = fonts.system_mut();
+        self.editor.start_change();
         self.editor.action(system, action);
+        let Some(change) = self
+            .editor
+            .finish_change()
+            .filter(|one| !one.items.is_empty())
+        else {
+            return;
+        };
+        // A different future has been chosen: what was undone before it cannot
+        // be redone without throwing this away.
+        self.undone.clear();
+        match self
+            .done
+            .last_mut()
+            .filter(|last| carries_on(last, &change))
+        {
+            Some(last) => last.items.extend(change.items),
+            None => self.done.push(change),
+        }
+    }
+
+    /// Steps back one edit, or forward again.
+    ///
+    /// Reversing a change and applying it is what undoing one *is* here --
+    /// `cosmic-text` hands back what an edit was and can turn it round, so
+    /// nothing has to be kept but the changes themselves.
+    fn walk(&mut self, fonts: &mut Fonts, back: bool) {
+        let from = match back {
+            true => &mut self.done,
+            false => &mut self.undone,
+        };
+        let Some(change) = from.pop() else {
+            return;
+        };
+        // Both stacks hold changes the way they were made, and only undoing
+        // turns one round. Reversing on the way forward as well applies the
+        // undo a second time instead of redoing it -- which walks the cursors
+        // off the text they were recorded against, and lands inside a letter
+        // rather than between two.
+        let mut applied = change.clone();
+        if back {
+            applied.reverse();
+        }
+        self.editor.apply_change(&applied);
+        self.editor.shape_as_needed(fonts.system_mut(), false);
+        match back {
+            true => self.undone.push(change),
+            false => self.done.push(change),
+        }
     }
 
     /// Moves the caret, extending the selection when shift is held.
     ///
     /// The anchor is the caller's to manage: the editor moves a cursor, and
     /// whether that drags a selection behind it is a decision above it.
+    /// Rubs out as far as one motion reaches.
+    ///
+    /// There is no "delete a word" action: a selection out to the word
+    /// boundary and then a backspace is what one is. Anything already selected
+    /// goes instead, which is what a reader who selected something and pressed
+    /// it meant.
+    fn rub_out(&mut self, fonts: &mut Fonts, motion: Motion) {
+        if self.editor.selection() == Selection::None {
+            self.motion(fonts, motion, true);
+        }
+        self.act(fonts, Action::Backspace);
+    }
+
     fn motion(&mut self, fonts: &mut Fonts, motion: Motion, extend: bool) {
         if extend {
             if self.editor.selection() == Selection::None {
