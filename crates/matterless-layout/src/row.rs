@@ -80,6 +80,15 @@ pub struct Theme {
     pub card_padding: f32,
     /// What a webhook's attachment is set at: `font-size: 13.5px`.
     pub attached_size: f32,
+    /// The room inside a webhook's card, above its first line and below its
+    /// last: `padding: 8px`.
+    ///
+    /// Reserved here rather than left to whoever draws the card. The painter
+    /// used to reach eight pixels above the first line for it, which was room
+    /// nothing had set aside -- and the thing directly above an attachment is
+    /// the name of whoever sent it, so the card was drawn over the author and
+    /// their avatar.
+    pub attached_padding: f32,
     /// How many lines of a description or a quoted message are kept. Past this
     /// a card stops being a summary and starts being the page.
     pub preview_lines: usize,
@@ -129,6 +138,7 @@ impl Default for Theme {
             preview_width: 520.0,
             card_padding: 10.0,
             attached_size: 13.5,
+            attached_padding: 8.0,
             preview_lines: 3,
             utc_offset_minutes: 0,
             today: 0,
@@ -276,17 +286,22 @@ const NBSP: &str = "\u{00A0}";
 /// custom emoji already do a few lines below.
 const TAG_ROOM: &str = "\u{2009}";
 
-/// A tag, with that room either side of it.
+/// Anything that carries a ground, with that room either side of it.
 ///
-/// The room is not part of the press: a reader aiming at a name should not be
-/// able to miss it by a hair and still hit it, and the ground is drawn to the
-/// pressed glyphs rather than to these.
+/// The room belongs to neither the press nor the ground. A reader aiming at a
+/// name should not be able to miss it by a hair and still hit it, and a ground
+/// is drawn to the glyphs it is for -- the pressed ones for a tag, the
+/// monospaced ones for `code` -- rather than to these. Which is what makes
+/// them room: they are the only thing either ground cannot reach into.
 fn tagged(tag: TextSpan, into: &mut Vec<TextSpan>) {
     let room = TextSpan {
         text: TAG_ROOM.to_string(),
         bold: tag.bold,
         italic: tag.italic,
-        mono: tag.mono,
+        // Never monospaced, whatever it is beside. `code` finds its ground by
+        // asking which glyphs were set in the mono face, so room set in that
+        // face would be swallowed by the very ground it is holding off.
+        mono: false,
         press: None,
         faint: false,
         emoji: None,
@@ -558,15 +573,22 @@ fn inline(
             Node::Link { children, href } => {
                 inline(children, bold, italic, mono, openable(href).as_ref(), into)
             }
-            Node::InlineCode { value } | Node::InlineMath { value } => into.push(TextSpan {
-                text: value.clone(),
-                bold,
-                italic,
-                mono: true,
-                press: press.cloned(),
-                faint: false,
-                emoji: None,
-            }),
+            // With room either side, for the same reason a tag has it: the
+            // ground behind `code` reaches past its letters, and what it was
+            // reaching into was the one space separating it from the word
+            // beside it.
+            Node::InlineCode { value } | Node::InlineMath { value } => tagged(
+                TextSpan {
+                    text: value.clone(),
+                    bold,
+                    italic,
+                    mono: true,
+                    press: press.cloned(),
+                    faint: false,
+                    emoji: None,
+                },
+                into,
+            ),
             // A mention and a channel link point at somebody and somewhere
             // whatever they are nested inside, so they name their own press
             // rather than inheriting the surrounding one.
@@ -853,7 +875,12 @@ pub fn lay_out(fonts: &mut Fonts, row: &Row, theme: &Theme) -> RowLayout {
             size: theme.header_size,
             wrap: theme.text_width(),
         });
-        y += theme.header_height;
+        // The same gap that separates every other pair of blocks. Without it
+        // the first line of the message began exactly where the name's box
+        // ended, which is close enough that anything with a ground of its own
+        // -- `code` on that first line -- was drawn a pixel under the name and
+        // into the reach of its descenders.
+        y += theme.header_height + theme.block_gap;
     }
 
     let mut pieces = Vec::new();
@@ -939,6 +966,10 @@ pub fn lay_out(fonts: &mut Fonts, row: &Row, theme: &Theme) -> RowLayout {
     // a bot puts its whole payload in `attachments` and leaves the body empty,
     // so a post with none of this drawn is a post with nothing on it at all.
     for attached in post.map(|post| post.attachments.as_slice()).unwrap_or(&[]) {
+        // The card's own room, set aside before its first line so that the
+        // ground drawn behind it lands on space this reserved rather than on
+        // the author's name above.
+        y += theme.attached_padding;
         let x = theme.quote_bar + theme.indent / 2.0;
         let wrap = (theme.text_width() - x - theme.indent / 2.0).max(40.0);
         let mut push = |text: &str, bold: bool, faint: bool, fonts: &mut Fonts| {
@@ -973,7 +1004,9 @@ pub fn lay_out(fonts: &mut Fonts, row: &Row, theme: &Theme) -> RowLayout {
             });
             y += count as f32 * theme.line_height;
         };
-        let plain_of = matterless_render::markdown::plain_text;
+        // Keeping the lines: a notice is written in them, and this is the
+        // whole of the message when a webhook leaves the body empty.
+        let plain_of = matterless_render::markdown::plain_lines;
         push(&plain_of(&attached.pretext), false, true, fonts);
         push(
             attached.title.as_deref().unwrap_or_default(),
@@ -992,7 +1025,7 @@ pub fn lay_out(fonts: &mut Fonts, row: &Row, theme: &Theme) -> RowLayout {
                 fonts,
             );
         }
-        y += theme.block_gap;
+        y += theme.attached_padding + theme.block_gap;
     }
 
     // A link or permalink card, as a stack of lines rather than one block: a
@@ -1528,6 +1561,46 @@ mod tests {
         assert!(at("thibaut") > at("remi") + 1);
     }
 
+    /// And so does `code`, whose ground reaches the same way a tag's does.
+    ///
+    /// The room must not be monospaced itself: the ground behind `code` is
+    /// drawn to whichever glyphs were set in the mono face, so room in that
+    /// face would be swallowed by the ground it is there to hold off.
+    #[test]
+    fn code_carries_a_hair_of_room_on_either_side() {
+        let mut spans = Vec::new();
+        inline(
+            &[
+                Node::Text {
+                    value: "run ".into(),
+                },
+                Node::InlineCode {
+                    value: "cargo test".into(),
+                },
+                Node::Text {
+                    value: " first".into(),
+                },
+            ],
+            false,
+            false,
+            false,
+            None,
+            &mut spans,
+        );
+        let at = spans
+            .iter()
+            .position(|span| span.text == "cargo test")
+            .unwrap_or_else(|| panic!("no code: {spans:?}"));
+        for beside in [at - 1, at + 1] {
+            assert_eq!(spans[beside].text, super::TAG_ROOM, "code has no room");
+            assert!(
+                !spans[beside].mono,
+                "the room is monospaced, so the ground will eat it"
+            );
+        }
+        assert!(spans[at].mono, "the code is not monospaced");
+    }
+
     /// A card takes room, or the message under it is drawn over.
     ///
     /// Reserved by the layout rather than discovered by the painter, which is
@@ -1633,6 +1706,10 @@ mod tests {
     }
 
     /// A continuation omits the author line, and that is the only difference.
+    ///
+    /// The line and the gap under it: the header is separated from the first
+    /// block of the message by the same gap that separates every other pair of
+    /// blocks, so a message without a header is shorter by both.
     #[test]
     fn a_continuation_is_shorter_by_its_header() {
         let mut fonts = Fonts::new();
@@ -1646,7 +1723,10 @@ mod tests {
             &theme,
         );
         let next = lay_out(&mut fonts, &Row::Continuation { post: post(body) }, &theme);
-        assert_eq!(first.height - next.height, theme.header_height);
+        assert_eq!(
+            first.height - next.height,
+            theme.header_height + theme.block_gap
+        );
     }
 
     /// Short lines do not wrap, so the count is the lines as written.
@@ -2198,6 +2278,135 @@ mod tests {
             laid.height,
             sent.height + theme.line_height,
             "and the row is a line taller for saying it"
+        );
+    }
+
+    /// A build notice from a webhook: two lines, in an attachment, with the
+    /// body left empty.
+    fn webhook(theme: &Theme, fonts: &mut Fonts) -> RowLayout {
+        let mut said = post(Vec::new());
+        said.bot = true;
+        said.author_name = "sloclapbot".into();
+        said.body_is_attachment_only = true;
+        said.attachments = vec![matterless_render::Attachment {
+            color: None,
+            pretext: Vec::new(),
+            title: None,
+            text: vec![Node::Paragraph {
+                children: vec![
+                    Node::Text {
+                        value: "Client Build Is Fixed".into(),
+                    },
+                    Node::SoftBreak,
+                    Node::Text {
+                        value: "For stream //CuriosityP4/Dev/Main".into(),
+                    },
+                ],
+            }],
+            title_link: None,
+            fields: Vec::new(),
+        }];
+        lay_out(fonts, &Row::Post { post: said }, theme)
+    }
+
+    /// The card's padding is room this reserved, not room it borrows from
+    /// whatever is above.
+    ///
+    /// What is above an attachment is the name of whoever sent it, so a card
+    /// that reached upwards for its padding was drawn over the author and
+    /// their avatar.
+    #[test]
+    fn a_webhook_card_leaves_itself_room_to_be_drawn_in() {
+        let mut fonts = Fonts::new();
+        let theme = Theme::default();
+        let laid = webhook(&theme, &mut fonts);
+        let header = laid
+            .blocks
+            .iter()
+            .find(|block| block.kind == Kind::Header)
+            .expect("a header");
+        let first = laid
+            .blocks
+            .iter()
+            .find(|block| block.kind == Kind::Attached)
+            .expect("an attachment");
+        assert!(
+            first.y - (header.y + header.height) >= theme.attached_padding,
+            "the card starts {}px below the header and reaches {}px up for its \
+             padding, so it is drawn over the name",
+            first.y - (header.y + header.height),
+            theme.attached_padding
+        );
+    }
+
+    /// And it is written in lines, which is how it has to be read.
+    #[test]
+    fn a_webhook_keeps_the_lines_it_was_written_in() {
+        let mut fonts = Fonts::new();
+        let theme = Theme::default();
+        let laid = webhook(&theme, &mut fonts);
+        let attached = laid
+            .blocks
+            .iter()
+            .find(|block| block.kind == Kind::Attached)
+            .expect("an attachment");
+        let said = &attached.spans.first().expect("some words").text;
+        assert!(
+            said.contains('\n'),
+            "the two lines were run together: {said:?}"
+        );
+        // And the height reserved is for both of them, not for the one line
+        // they used to be joined into.
+        assert_eq!(attached.lines, 2);
+        assert_eq!(attached.height, 2.0 * theme.line_height);
+    }
+
+    /// The message starts a gap below the name, not against it.
+    ///
+    /// Every other pair of blocks in a message is separated by `block_gap`,
+    /// and the header was the one join that got nothing: the first line began
+    /// exactly where the name's box ended. Which is invisible for plain words
+    /// -- a line box is taller than its letters -- and not invisible at all
+    /// for anything carrying a ground of its own, since `code` on that first
+    /// line was drawn a pixel under the name and into its descenders.
+    #[test]
+    fn the_first_line_of_a_message_clears_the_name_above_it() {
+        let mut fonts = Fonts::new();
+        let theme = Theme::default();
+        let said = post(vec![Node::Paragraph {
+            children: vec![
+                Node::Text {
+                    value: "run ".into(),
+                },
+                Node::InlineCode {
+                    value: "cargo test".into(),
+                },
+                Node::Text {
+                    value: " first".into(),
+                },
+            ],
+        }]);
+        let laid = lay_out(&mut fonts, &Row::Post { post: said }, &theme);
+        let header = laid
+            .blocks
+            .iter()
+            .find(|block| block.kind == Kind::Header)
+            .expect("a header");
+        let first = laid
+            .blocks
+            .iter()
+            .find(|block| block.kind == Kind::Text)
+            .expect("a line");
+        assert_eq!(
+            first.y - (header.y + header.height),
+            theme.block_gap,
+            "the message does not start a block's gap below the name"
+        );
+        // And the ground behind `code`, which is the line inset by a pixel,
+        // clears the name's box rather than starting under it.
+        assert!(
+            first.y + 1.0 > header.y + header.height,
+            "the code ground starts inside the header"
         );
     }
 }
