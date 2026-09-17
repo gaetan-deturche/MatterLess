@@ -362,8 +362,24 @@ fn flush_text(stack: &mut [Frame], pending: &mut String) {
 /// drawn when the image will not load, so nested emphasis and links have
 /// nothing to contribute but their words.
 pub fn plain_text(nodes: &[Node]) -> String {
+    flatten(nodes, " ")
+}
+
+/// The same, keeping the lines somebody wrote.
+///
+/// `plain_text` is for the places that want a single line -- a preview's
+/// description, a notification, a tooltip -- and it joins everything with
+/// spaces. A webhook's attachment is not one of those: its notices are
+/// written in lines, and running them together is how a build notice came out
+/// as one sentence with its second tick stranded in the middle of it.
+pub fn plain_lines(nodes: &[Node]) -> String {
+    flatten(nodes, "\n")
+}
+
+/// Flattens nodes to text, with `between` put wherever the writing broke.
+fn flatten(nodes: &[Node], between: &str) -> String {
     let mut out = String::new();
-    fn walk(nodes: &[Node], out: &mut String) {
+    fn walk(nodes: &[Node], out: &mut String, between: &str) {
         for node in nodes {
             match node {
                 Node::Text { value } | Node::InlineCode { value } | Node::InlineMath { value } => {
@@ -389,16 +405,32 @@ pub fn plain_text(nodes: &[Node]) -> String {
                 Node::Emphasis { children }
                 | Node::Strong { children }
                 | Node::Strike { children }
-                | Node::Link { children, .. }
-                | Node::Paragraph { children }
+                | Node::Link { children, .. } => walk(children, out, between),
+                // A block of its own, so it starts where the last one ended
+                // rather than against it. Two paragraphs used to be run
+                // together with nothing at all between them.
+                Node::Paragraph { children }
                 | Node::Heading { children, .. }
-                | Node::Blockquote { children } => walk(children, out),
-                Node::SoftBreak | Node::HardBreak => out.push(' '),
+                | Node::Blockquote { children } => {
+                    separate(out, between);
+                    walk(children, out, between);
+                }
+                Node::CodeBlock { value, .. } => {
+                    separate(out, between);
+                    out.push_str(value);
+                }
+                Node::SoftBreak | Node::HardBreak => out.push_str(between),
                 _ => {}
             }
         }
     }
-    walk(nodes, &mut out);
+    /// Ends what came before, if anything did and it has not ended already.
+    fn separate(out: &mut String, between: &str) {
+        if !out.is_empty() && !out.ends_with(between) {
+            out.push_str(between);
+        }
+    }
+    walk(nodes, &mut out, between);
     out.trim().to_string()
 }
 

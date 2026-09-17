@@ -754,21 +754,25 @@ impl Stream {
                 (block, finished) => {
                     if let Some((start, end)) = finished {
                         let x = left + self.theme.gutter;
-                        // Padded `8px 12px`, so the ground reaches beyond the
-                        // words on every side rather than hugging them.
+                        // Padded, so the ground reaches beyond the words on
+                        // every side rather than hugging them -- into room the
+                        // layout set aside for it. Reaching into room nobody
+                        // reserved is how this came to be drawn over the name
+                        // of whoever sent it.
+                        let pad = self.theme.attached_padding;
                         into.scene.rounded(
                             x,
-                            top + start - 8.0,
+                            top + start - pad,
                             self.theme.text_width(),
-                            end - start + 16.0,
+                            end - start + pad * 2.0,
                             into.palette.surface,
                             CARD,
                         );
                         into.scene.fill(
                             x,
-                            top + start - 8.0,
+                            top + start - pad,
                             self.theme.quote_bar,
-                            end - start + 16.0,
+                            end - start + pad * 2.0,
                             into.palette.rule,
                         );
                     }
