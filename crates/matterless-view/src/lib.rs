@@ -13,6 +13,7 @@ pub mod actions;
 pub mod aside;
 pub mod atlas;
 pub mod badge;
+pub mod clip;
 pub mod clock;
 pub mod composer;
 #[cfg(test)]
