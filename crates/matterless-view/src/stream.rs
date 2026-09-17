@@ -11,7 +11,7 @@
 //! knowing which message the pointer is over.
 
 use matterless_layout::Fonts;
-use matterless_layout::row::{RowLayout, Theme, lay_out};
+use matterless_layout::row::{RowLayout, Theme};
 use matterless_paint::Run;
 use matterless_render::Row;
 use matterless_ui::input::Input;
@@ -71,6 +71,12 @@ pub enum Chose {
     /// The rect travels with it because the menu hangs off the button, and by
     /// the time the shell reacts the pointer has already moved.
     More { post_id: String, under: Rect },
+    /// A row measures something different now: shape this panel again.
+    ///
+    /// Answered by whoever has the fonts, which this panel does not when a
+    /// press arrives. It carries no name because the panel has already made
+    /// the change -- all that is left is to measure it.
+    Reshape,
 }
 
 /// Where a reader is, said so that it still means the same place once every
@@ -156,6 +162,13 @@ pub struct Stream {
     /// guess-then-correct the layout crate exists to avoid -- nothing on
     /// screen is ever wrong, there is simply less of it for a moment.
     above: Vec<Row>,
+    /// The messages whose long code blocks the reader has asked to see whole,
+    /// by post id.
+    ///
+    /// The panel's own, not the message's: the same crash notice read in a
+    /// channel and in a thread beside it is opened in one without the other
+    /// following.
+    opened: std::collections::HashSet<String>,
 }
 
 /// Whether this row is that message.
@@ -200,6 +213,15 @@ impl Stream {
             kept_against: (f32::NAN, 0, 0),
             reused: 0,
             above: Vec::new(),
+            opened: std::collections::HashSet::new(),
+        }
+    }
+
+    /// Whether this panel has been asked to show the whole of a row.
+    fn shows_whole(&self, row: &Row) -> bool {
+        match row {
+            Row::Post { post } | Row::Continuation { post } => self.opened.contains(&post.post_id),
+            _ => false,
         }
     }
 
@@ -253,7 +275,14 @@ impl Stream {
                     .filter(|(was, _)| was == row)
                     .map(|(_, laid)| laid.clone());
                 reused += usize::from(found.is_some());
-                let laid = found.unwrap_or_else(|| lay_out(fonts, row, &self.theme));
+                let laid = found.unwrap_or_else(|| {
+                    matterless_layout::row::lay_out_opened(
+                        fonts,
+                        row,
+                        &self.theme,
+                        self.shows_whole(row),
+                    )
+                });
                 kept.insert(key, (row.clone(), laid.clone()));
                 laid
             })
@@ -293,7 +322,17 @@ impl Stream {
             };
             let bottom = top + was.height;
             if bottom >= within.y && top <= within.bottom() {
-                self.laid[index] = lay_out(fonts, row, &self.theme);
+                // Read straight off the field rather than through
+                // `shows_whole`: the row being written to is borrowed from the
+                // same `self`, and only the fields are disjoint.
+                let whole = match row {
+                    Row::Post { post } | Row::Continuation { post } => {
+                        self.opened.contains(&post.post_id)
+                    }
+                    _ => false,
+                };
+                self.laid[index] =
+                    matterless_layout::row::lay_out_opened(fonts, row, &self.theme, whole);
             }
             top = bottom;
             if top > within.bottom() {
@@ -1163,6 +1202,18 @@ impl Stream {
             .and_then(|at| at.parse::<usize>().ok())
             && let Some((press, at)) = self.presses.get(at)
         {
+            // The one press this panel answers itself. What it changes is how
+            // tall a row of this panel is, which nothing outside it has an
+            // opinion about -- and the shaping cache holds that height against
+            // a row that has not otherwise changed, so it has to be told.
+            if let matterless_layout::row::Press::Whole(post_id) = press {
+                let post_id = post_id.clone();
+                if !self.opened.remove(&post_id) {
+                    self.opened.insert(post_id);
+                }
+                self.kept.clear();
+                return Some(Chose::Reshape);
+            }
             return Some(Chose::Press {
                 press: press.clone(),
                 at: Some(*at),
@@ -2223,6 +2274,19 @@ fn shift(piece: matterless_paint::Piece, by: f32) -> matterless_paint::Piece {
         // Never in a stream: the picture being looked at covers the whole
         // window and belongs to no panel, so nothing shifts it into one.
         Piece::Shown { .. } => piece,
+        Piece::Fade {
+            x,
+            y,
+            width,
+            height,
+            colour,
+        } => Piece::Fade {
+            x: x + by,
+            y,
+            width,
+            height,
+            colour,
+        },
         Piece::Fill {
             x,
             y,

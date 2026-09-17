@@ -142,6 +142,33 @@ pub fn vertices_of(
             // than the atlas, so it needs its own bind group and therefore its
             // own draw. `draw_scene` picks these out.
             Piece::Shown { .. } => {}
+            Piece::Fade {
+                x,
+                y,
+                width,
+                height,
+                colour,
+            } => {
+                let rgba = [
+                    colour[0] as f32 / 255.0,
+                    colour[1] as f32 / 255.0,
+                    colour[2] as f32 / 255.0,
+                    colour[3] as f32 / 255.0,
+                ];
+                // Transparent at the top, the colour itself at the bottom.
+                // Straight alpha, so the see-through end keeps the colour and
+                // only loses its opacity.
+                fading(
+                    into,
+                    [*x, *y, *x + *width, *y + *height],
+                    [solid_uv[0], solid_uv[1], solid_uv[0], solid_uv[1]],
+                    [rgba[0], rgba[1], rgba[2], 0.0],
+                    rgba,
+                    Sheet::Letters as u32,
+                    0.0,
+                    1.0,
+                );
+            }
             Piece::Fill {
                 x,
                 y,
@@ -286,6 +313,25 @@ fn quad(
     radius: f32,
     softness: f32,
 ) {
+    fading(into, rect, uv, colour, colour, sheet, radius, softness);
+}
+
+/// The same, with a colour at the top and another at the bottom.
+///
+/// A gradient costs nothing here: the fragment already interpolates whatever
+/// the corners carry, so a fade is one quad rather than a stack of strips or a
+/// texture. Used where a cut code block trails off into its own ground.
+#[allow(clippy::too_many_arguments)]
+fn fading(
+    into: &mut Vec<Vertex>,
+    rect: [f32; 4],
+    uv: [f32; 4],
+    top: [f32; 4],
+    bottom: [f32; 4],
+    sheet: u32,
+    radius: f32,
+    softness: f32,
+) {
     let [x0, y0, x1, y1] = rect;
     let [u0, v0, u1, v1] = uv;
     let half_size = [(x1 - x0) / 2.0, (y1 - y0) / 2.0];
@@ -295,7 +341,10 @@ fn quad(
     let corner = |x: f32, y: f32, u: f32, v: f32| Vertex {
         position: [x, y],
         uv: [u, v],
-        colour,
+        colour: match y <= y0 {
+            true => top,
+            false => bottom,
+        },
         sheet,
         local: [x - (x0 + half_size[0]), y - (y0 + half_size[1])],
         half_size,
