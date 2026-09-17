@@ -1,6 +1,6 @@
 //! What the stream has to get right about rows and the pointer.
 
-use super::stream::{Chose, Stream};
+use super::stream::{Anchor, Chose, Stream};
 use matterless_layout::Fonts;
 use matterless_render::{PostRow, Row, markdown::Node};
 use matterless_ui::Rect;
@@ -186,7 +186,7 @@ fn a_narrower_column_keeps_the_reader_where_they_were() {
 
     stream.hold(Some(held.clone()), narrow);
     let after = stream.holding(narrow).expect("nothing to hold");
-    assert_eq!(after.0, held.0, "a different message is under the top edge");
+    assert_eq!(after.0, held.0, "a different message is across the middle");
     assert!(
         (after.1 - held.1).abs() < 1.0,
         "the same message, at a different height in it: {} against {}",
@@ -195,11 +195,171 @@ fn a_narrower_column_keeps_the_reader_where_they_were() {
     );
 }
 
-/// A named message stays put, not merely whatever was at the top.
+/// A long conversation of rows that wrap differently in a narrower column.
+fn wordy(fonts: &mut Fonts, width: f32) -> Stream {
+    let mut stream = Stream::new("stream");
+    stream.rows = (0..40)
+        .map(|at| {
+            let mut said = post(&format!("p{at}"), "");
+            said.nodes = Arc::new(vec![Node::Paragraph {
+                children: vec![Node::Text {
+                    value: "a sentence with enough words in it to wrap ".repeat(6),
+                }],
+            }]);
+            Row::Post { post: said }
+        })
+        .collect();
+    stream.lay_out(fonts, width);
+    stream
+}
+
+/// At either end it is an edge that is being read against, and no row can
+/// stand in for one.
+#[test]
+fn the_anchor_is_an_edge_at_either_end_and_a_row_between() {
+    let mut fonts = Fonts::new();
+    let within = panel();
+    let mut stream = wordy(&mut fonts, within.width);
+
+    stream.to_bottom(within);
+    assert_eq!(stream.anchor(within), Anchor::End);
+    stream.scroll = 0.0;
+    assert_eq!(stream.anchor(within), Anchor::Start);
+    stream.scroll = stream.reach(within) / 2.0;
+    assert!(matches!(stream.anchor(within), Anchor::Row(Some(_))));
+}
+
+/// The newest message is held against the bottom edge, which is the one place
+/// it is ever supposed to be.
 ///
-/// Holding the top row keeps the top row still and lets everything below it
-/// move, because the rows between are re-measured too -- so the message whose
-/// replies had just been asked for still slid down the screen.
+/// Holding a row instead leaves it adrift of that edge by however much the
+/// rows below the held one have changed -- and a reader at the newest message
+/// is the common case, so this was most of what still moved on a resize.
+#[test]
+fn the_newest_message_stays_against_the_bottom() {
+    let mut fonts = Fonts::new();
+    let wide = panel();
+    let mut stream = wordy(&mut fonts, wide.width);
+    stream.to_bottom(wide);
+    let anchor = stream.anchor(wide);
+    // What holding a row would have done, for comparison. Taken now, before
+    // anything moves, which is when an anchor is ever taken.
+    let by_row = stream.holding(wide);
+
+    let narrow = Rect::new(wide.x, wide.y, wide.width * 0.6, wide.height);
+    stream.lay_out(&mut fonts, narrow.width);
+    stream.hold(by_row, narrow);
+    assert!(
+        stream.behind(narrow) > 1.0,
+        "a row anchor already kept it against the bottom, so this proves nothing"
+    );
+
+    stream.anchored(anchor, narrow);
+    assert!(
+        stream.behind(narrow) <= 1.0,
+        "the newest message sits {}px off the bottom edge",
+        stream.behind(narrow)
+    );
+}
+
+/// A taller panel keeps the middle on the same message, not the top edge.
+///
+/// Nothing re-wraps when only the height changes, so every row keeps its
+/// place in the list and the whole question is where the panel's own middle
+/// lands. Measuring the anchor from the top edge made a panel growing
+/// downwards hold its rows against the top: the same rule the X axis follows
+/// stopped being followed the moment the axis changed.
+#[test]
+fn a_taller_panel_keeps_the_middle_on_the_same_message() {
+    let mut fonts = Fonts::new();
+    let short = panel();
+    let mut stream = wordy(&mut fonts, short.width);
+    stream.scroll = stream.reach(short) / 2.0;
+
+    let middle = stream.holding(short).expect("nothing to hold").0;
+    let anchor = stream.anchor(short);
+
+    // The window's bottom edge dragged down, which moves the panel's middle
+    // and leaves every row exactly as it was.
+    let tall = Rect::new(short.x, short.y, short.width, short.height + 200.0);
+    stream.anchored(anchor, tall);
+
+    assert_eq!(
+        stream.holding(tall).expect("nothing to hold").0,
+        middle,
+        "a different message lies across the middle of the taller panel"
+    );
+}
+
+/// A shorter panel keeps the newest message against the bottom.
+///
+/// Reported from the window: dragging the bottom edge *up* while at the end
+/// of a channel threw the reader off it. A shorter panel reaches further, so
+/// the distance from the newest message grows by exactly the height removed
+/// -- which is why this has to be asked before the panel changes and not
+/// after. Asked after, the reader looks like somebody who had scrolled up by
+/// that much, and gets held by a row like one.
+#[test]
+fn a_shorter_panel_keeps_the_newest_message_against_the_bottom() {
+    let mut fonts = Fonts::new();
+    let tall = panel();
+    let mut stream = wordy(&mut fonts, tall.width);
+    stream.to_bottom(tall);
+
+    let anchor = stream.anchor(tall);
+    assert_eq!(anchor, Anchor::End, "at the end and not seen to be");
+
+    let short = Rect::new(tall.x, tall.y, tall.width, tall.height - 200.0);
+    // What the same question asked too late would have answered.
+    assert!(
+        stream.anchor(short) != Anchor::End,
+        "the shorter panel still looks like the end, so this proves nothing"
+    );
+
+    stream.anchored(anchor, short);
+    assert!(
+        stream.behind(short) <= 1.0,
+        "the newest message sits {}px off the bottom edge",
+        stream.behind(short)
+    );
+}
+
+/// And the top of the channel is the same in reverse.
+///
+/// Where holding a row is not merely useless but wrong: the rows above the
+/// held one growing taller pushes the scroll up to keep it still, and the
+/// first message in the channel slides off the top of the panel.
+#[test]
+fn the_top_of_the_channel_stays_at_the_top() {
+    let mut fonts = Fonts::new();
+    let wide = panel();
+    let mut stream = wordy(&mut fonts, wide.width);
+    stream.scroll = 0.0;
+    let anchor = stream.anchor(wide);
+    let by_row = stream.holding(wide);
+
+    let narrow = Rect::new(wide.x, wide.y, wide.width * 0.6, wide.height);
+    stream.lay_out(&mut fonts, narrow.width);
+    stream.hold(by_row, narrow);
+    assert!(
+        stream.scroll > 1.0,
+        "a row anchor already stayed at the top, so this proves nothing"
+    );
+
+    stream.anchored(anchor, narrow);
+    assert_eq!(
+        stream.scroll, 0.0,
+        "the first message is {}px above the top edge",
+        stream.scroll
+    );
+}
+
+/// A named message stays put, not merely whichever row the anchor would pick.
+///
+/// Whatever is held is the only thing that does not move; everything else
+/// slides by however much the rows between it and the anchor have changed. So
+/// the message whose replies had just been asked for still slid down the
+/// screen, being a few rows off the one being held.
 #[test]
 fn a_named_message_is_the_one_that_stays_put() {
     let mut fonts = Fonts::new();
@@ -219,9 +379,9 @@ fn a_named_message_is_the_one_that_stays_put() {
     let wide = panel();
     stream.lay_out(&mut fonts, wide.width);
     stream.scroll = stream.reach(wide) / 2.0;
-    // Not the row at the top: one further down, the way a message somebody
-    // pointed at usually is.
-    let top = stream.holding(wide).expect("nothing at the top").0;
+    // Not the row the anchor would pick: one further down, the way a message
+    // somebody pointed at usually is.
+    let top = stream.holding(wide).expect("nothing to hold").0;
     let named = format!(
         "post/p{}",
         top.strip_prefix("post/p")
@@ -235,7 +395,7 @@ fn a_named_message_is_the_one_that_stays_put() {
     let narrow = Rect::new(wide.x, wide.y, wide.width * 0.6, wide.height);
     stream.lay_out(&mut fonts, narrow.width);
     stream.clamp(narrow);
-    // What holding the top would have done, for comparison.
+    // What holding the anchor's own row would have done, for comparison.
     stream.hold(stream.holding(wide), narrow);
     let by_top = stream.holding_row(&named, narrow).expect("gone");
     assert!(

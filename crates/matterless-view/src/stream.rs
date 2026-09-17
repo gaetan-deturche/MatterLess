@@ -73,6 +73,26 @@ pub enum Chose {
     More { post_id: String, under: Rect },
 }
 
+/// Where a reader is, said so that it still means the same place once every
+/// row has been measured against a different width.
+///
+/// A scroll is a number of pixels and is not that: the same distance points
+/// somewhere else the moment the rows change height.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Anchor {
+    /// At the newest message, which is where a conversation opens and where it
+    /// stays while somebody reads along. Held against the bottom edge, not by
+    /// any row: the rows above are what changed.
+    End,
+    /// At the top of what has been loaded. Held against the top edge, for the
+    /// same reason and in reverse.
+    Start,
+    /// Reading somewhere in between, where neither edge means anything: the
+    /// row lying across the middle of the panel, and where the top edge falls
+    /// relative to it. `None` when there is no such row.
+    Row(Option<(String, f32)>),
+}
+
 /// One conversation: its rows, their heights, and where the reader is in it.
 pub struct Stream {
     /// What this panel answers to, so a channel and a thread can coexist.
@@ -880,43 +900,104 @@ impl Stream {
             .map(|(_, rect)| *rect)
     }
 
-    /// Which row is under the top of the panel, and how far into it.
+    /// Which row lies across the middle of the panel, and where it sits.
     ///
     /// A scroll is a distance in pixels, and every row's height changes when
     /// the column it is laid out in changes -- so the same distance means
     /// somewhere else afterwards. This is that place said in a way that
-    /// survives being laid out again: a row, and how far the panel's top edge
-    /// has cut into it.
+    /// survives being laid out again: a row, and how far below its top the
+    /// middle of the panel falls.
+    ///
+    /// The middle rather than the top because whatever is held is the only
+    /// thing that does not move: everything else slides by however much the
+    /// rows between it and the anchor have changed. Held at the top, all of
+    /// that lands at the bottom of the panel. Held at the middle, it is halved
+    /// and sent to both edges, and none of it happens where the eye is.
+    ///
+    /// Measured from the middle too, and not only chosen there. A distance
+    /// from the top edge is the same rule only while the panel keeps its
+    /// height: drag the window's bottom edge and the middle moves while that
+    /// distance does not, which held the rows against the *top* of a panel
+    /// growing downwards. Choosing at one end and measuring from the other was
+    /// the whole of the Y axis not obeying this.
     pub fn holding(&self, within: Rect) -> Option<(String, f32)> {
+        let middle = within.y + within.height / 2.0;
         let mut top = within.y + self.theme.pad_top - self.scroll;
         for (index, laid) in self.laid.iter().enumerate() {
             let bottom = top + laid.height;
-            // The first row whose bottom is still below the top edge is the
-            // one being read from.
-            if bottom > within.y {
-                return Some((key_of(self.rows.get(index)?), within.y - top));
+            if bottom > middle {
+                return Some((key_of(self.rows.get(index)?), middle - top));
             }
             top = bottom;
         }
-        None
+        // Past the end of the rows, which is a panel taller than its contents.
+        // The last row is the nearest thing to a middle it has.
+        let last = self.laid.len().checked_sub(1)?;
+        Some((
+            key_of(self.rows.get(last)?),
+            middle - (top - self.laid[last].height),
+        ))
     }
 
-    /// The same, for one row the caller has in mind rather than whichever is
-    /// under the top edge.
+    /// The same, for one row the caller has in mind rather than whichever the
+    /// middle happens to land on.
     ///
-    /// Holding the top row keeps the top row still and lets everything below
-    /// it move, because the rows in between are re-measured too. When the
-    /// reader has just pointed at a particular message, that message is the
-    /// one that has to stay put.
+    /// Whatever is held is the only thing that stays still, and everything
+    /// else slides by however much the rows in between have been re-measured.
+    /// When the reader has just pointed at a particular message, that message
+    /// is the one that has to stay put.
     pub fn holding_row(&self, key: &str, within: Rect) -> Option<(String, f32)> {
+        let middle = within.y + within.height / 2.0;
         let mut top = within.y + self.theme.pad_top - self.scroll;
         for (index, laid) in self.laid.iter().enumerate() {
             if self.rows.get(index).map(key_of).as_deref() == Some(key) {
-                return Some((key.to_string(), within.y - top));
+                return Some((key.to_string(), middle - top));
             }
             top += laid.height;
         }
         None
+    }
+
+    /// Where the reader is, in a form that survives every row being measured
+    /// again.
+    ///
+    /// Which is three different places depending on where they are sitting.
+    ///
+    /// At either end, an *edge* is what is being read against and no row can
+    /// stand in for it. A reader at the newest message is reading the bottom
+    /// of the conversation: hold a row for them and the newest message ends up
+    /// somewhere other than against the bottom edge, which is the one place it
+    /// is ever supposed to be. The top of the channel is the same in reverse,
+    /// and holding a row there is actively wrong -- the rows above the middle
+    /// growing taller pushes the scroll up to keep the middle still, and the
+    /// first message in the channel slides off the top.
+    ///
+    /// In between, neither edge means anything and the row across the middle
+    /// is what they are reading.
+    pub fn anchor(&self, within: Rect) -> Anchor {
+        // A hair of tolerance, because the scroll is a float and a reader at
+        // either end has usually arrived there by being clamped to it. The end
+        // is asked about first: a conversation shorter than its panel is at
+        // both at once, and the bottom is where it is drawn.
+        if self.behind(within) <= 1.0 {
+            return Anchor::End;
+        }
+        match self.scroll <= 1.0 {
+            true => Anchor::Start,
+            false => Anchor::Row(self.holding(within)),
+        }
+    }
+
+    /// Puts them back there, after the rows have changed under them.
+    pub fn anchored(&mut self, anchor: Anchor, within: Rect) {
+        match anchor {
+            Anchor::End => self.to_bottom(within),
+            Anchor::Start => self.scroll = 0.0,
+            Anchor::Row(held) => {
+                self.hold(held, within);
+                self.clamp(within);
+            }
+        }
     }
 
     /// Puts the reader back where `holding` found them.
@@ -925,13 +1006,17 @@ impl Stream {
     /// under the reader has no such place, and guessing one would be worse
     /// than the top of what it does have.
     pub fn hold(&mut self, held: Option<(String, f32)>, within: Rect) {
-        let Some((key, into)) = held else {
+        let Some((key, under)) = held else {
             return;
         };
+        // `under` is how far below the row's top the middle of the panel fell,
+        // so putting the row back means putting the middle back on it -- which
+        // is the half of this that makes a panel of a different height work.
+        let middle = within.height / 2.0;
         let mut top = self.theme.pad_top;
         for (index, laid) in self.laid.iter().enumerate() {
             if self.rows.get(index).map(key_of).as_deref() == Some(key.as_str()) {
-                self.scroll = (top + into).clamp(0.0, self.reach(within));
+                self.scroll = (top + under - middle).clamp(0.0, self.reach(within));
                 return;
             }
             top += laid.height;
