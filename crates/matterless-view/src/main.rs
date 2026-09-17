@@ -27,7 +27,7 @@ use matterless_view::composer::{self, Composer};
 use matterless_view::header::{self, Header};
 use matterless_view::live::Update;
 use matterless_view::sidebar::{Canvas, Entry, Sidebar};
-use matterless_view::stream::Stream;
+use matterless_view::stream::{Anchor, Stream};
 use std::sync::Arc;
 use winit::application::ApplicationHandler;
 use winit::event::{MouseScrollDelta, WindowEvent};
@@ -171,18 +171,24 @@ enum Act {
     /// Driven rather than asked for, because measuring it by hand costs
     /// somebody a drag per reading and answers one question at a time.
     Resizing,
+    /// The same, downwards. Nothing re-wraps when only the height changes, so
+    /// this is the axis that says whether the reader is being held or merely
+    /// left where they were -- and while the act above was the only one, that
+    /// question went unasked twice.
+    Heightening,
 }
 
 impl Act {
     /// Every act, in the order a run measures them: cheapest first, so the
     /// table above reads as the floor the ones below it are measured against.
-    const EVERY: [Act; 6] = [
+    const EVERY: [Act; 7] = [
         Act::Still,
         Act::Scrolling,
         Act::Switching,
         Act::Typing,
         Act::Threading,
         Act::Resizing,
+        Act::Heightening,
     ];
 
     fn what(self) -> &'static str {
@@ -193,6 +199,7 @@ impl Act {
             Act::Typing => "typing",
             Act::Threading => "opening a thread",
             Act::Resizing => "dragging the edge",
+            Act::Heightening => "dragging the bottom edge",
         }
     }
 }
@@ -3862,6 +3869,26 @@ impl App {
                     did += 1;
                 }
             }
+            Act::Heightening => {
+                // The bottom edge, up and back down. Held at the newest
+                // message throughout: a shorter panel reaches further, so a
+                // reader who was against the bottom edge is the case this is
+                // here to keep honest.
+                let swing = (tick % 120) as i32;
+                let by = match swing < 60 {
+                    true => swing,
+                    false => 120 - swing,
+                };
+                let tall = 500 + by * 4;
+                if let Some(window) = self.window.as_ref() {
+                    let asked = window.request_inner_size(winit::dpi::PhysicalSize::new(
+                        self.size.0,
+                        tall as u32,
+                    ));
+                    let _ = asked;
+                    did += 1;
+                }
+            }
         }
         did
     }
@@ -3920,6 +3947,13 @@ impl App {
             return;
         };
         let _resizing = matterless_view::timing::watch("resizing the window", 0, "");
+        // Where the reader is, measured against the panel they are still
+        // looking at. This has to happen before the size moves: an anchor read
+        // against the new panel and put back against that same panel is an
+        // identity when nothing re-wraps, and nothing re-wraps when only the
+        // height changed -- which is the whole of why a vertical drag held the
+        // rows against the top edge however the anchor itself was written.
+        let held = self.anchors();
         self.size = size;
         {
             let _surfacing = matterless_view::timing::watch("  reconfiguring the surface", 0, "");
@@ -3929,19 +3963,10 @@ impl App {
                 eprintln!("could not resize the surface: {why}");
             }
         }
-        // What can be seen, at the new width, so the conversation re-wraps as
-        // the edge moves rather than once it stops. A screenful is a dozen
-        // messages and the channel is a hundred and eighty; the rest are
-        // settled once the dragging ends.
-        let _shaping = matterless_view::timing::watch("  shaping what shows", 0, "");
-        let within = self.stream_rect();
-        let width = self.channel_rect().width;
-        self.composer.lay_out(&mut self.fonts, width);
-        self.stream
-            .relay_seen(&mut self.fonts, within.width, within);
-        if let (Some(pane), Some(thread)) = (self.thread_stream_rect(), self.thread.as_mut()) {
-            thread.relay_seen(&mut self.fonts, pane.width, pane);
-        }
+        // Re-wrapped as the edge moves rather than once it stops, and by the
+        // same path that will run when it does stop -- only over less of the
+        // conversation. The rest is settled once the dragging ends.
+        self.shape(Shaping::WhatShows, held);
         self.resizing = Some(std::time::Instant::now());
     }
 
@@ -3955,11 +3980,8 @@ impl App {
     /// `waiting` is passed down to the present: false only for the frame drawn
     /// from inside a resize, which the window is waiting on.
     fn paint(&mut self, waiting: bool) {
-        let building = matterless_view::timing::watch(
-            "building the frame",
-            self.stream.rows.len(),
-            "rows",
-        );
+        let building =
+            matterless_view::timing::watch("building the frame", self.stream.rows.len(), "rows");
         let scene = self.scene();
         drop(building);
         let _drawing = matterless_view::timing::watch("drawing the frame", 0, "");
@@ -4397,21 +4419,48 @@ impl App {
     }
 
     /// Lays the whole conversation out for the current width.
-    ///
-    /// Once per width change, never per frame: the heights do not depend on the
-    /// scroll position, which is the property that makes this list honest.
     fn relayout(&mut self) {
-        // What is being read, before any of it moves. Every row is about to be
-        // measured against a different width, so the scroll -- which is a
-        // number of pixels -- will point somewhere else when this is done.
-        // Opening a thread narrows the column, and the message whose replies
-        // the reader had just asked for was the first thing to slide away from
-        // under the pointer.
-        let held = self.stream.holding(self.stream_rect());
-        let thread_held = self
-            .thread_stream_rect()
-            .and_then(|within| self.thread.as_ref()?.holding(within));
+        let held = self.anchors();
+        self.shape(Shaping::Everything, held);
+    }
 
+    /// Where the reader is in each panel, for putting them back afterwards.
+    ///
+    /// Every row is about to be measured against a different column, so the
+    /// scroll -- which is a number of pixels -- will point somewhere else once
+    /// that is done. Opening a thread narrows the conversation beside it, and
+    /// the message whose replies had just been asked for was the first thing
+    /// to slide out from under the pointer.
+    ///
+    /// Which place each panel keeps depends on where its reader is sitting:
+    /// `Stream::anchor` decides that, between the two edges and the row across
+    /// the middle.
+    fn anchors(&self) -> Anchors {
+        (
+            self.stream.anchor(self.stream_rect()),
+            self.thread_stream_rect()
+                .and_then(|within| Some(self.thread.as_ref()?.anchor(within))),
+        )
+    }
+
+    /// Measures the window's contents against the column they now have.
+    ///
+    /// One path for both of the times this happens, which is the point of it.
+    /// A drag shapes only what shows, because a channel is a hundred and
+    /// eighty messages of cosmic-text and a screenful is a dozen; when the
+    /// edge stops, the rest catch up. That is the *only* difference between
+    /// them. Everything else -- which width each panel gets, the order they
+    /// are measured in, and where the reader is put afterwards -- is this one
+    /// body, so that letting go of the edge cannot rearrange anything the drag
+    /// had already settled.
+    ///
+    /// The anchors are the caller's to take, and are not taken here, because
+    /// *when* they were taken is the whole of whether they work: they have to
+    /// describe the panel the reader is still looking at. Measured against the
+    /// panel they are about to be in, and put back against that same panel,
+    /// they say nothing at all -- so the one caller that changes the window's
+    /// size takes them first and hands them over.
+    fn shape(&mut self, how: Shaping, (held, thread_held): Anchors) {
         // The composer is shaped first: it decides its own height, and the
         // stream gets what is left, so its width has to be settled before the
         // rows are laid out against it.
@@ -4421,14 +4470,18 @@ impl App {
         let stream = self.stream_rect();
         {
             let _shaping = matterless_view::timing::watch(
-                "shaping the channel",
+                how.of("shaping the channel", "  shaping what shows of it"),
                 self.stream.rows.len(),
                 "rows",
             );
-            self.stream.lay_out(&mut self.fonts, stream.width);
+            match how {
+                Shaping::WhatShows => self
+                    .stream
+                    .relay_seen(&mut self.fonts, stream.width, stream),
+                Shaping::Everything => self.stream.lay_out(&mut self.fonts, stream.width),
+            }
         }
-        self.stream.clamp(stream);
-        self.stream.hold(held, stream);
+        self.stream.anchored(held, stream);
 
         if let Some(pane) = self.thread_rect() {
             self.thread_composer.lay_out(&mut self.fonts, pane.width);
@@ -4436,11 +4489,18 @@ impl App {
         if let Some(within) = self.thread_stream_rect()
             && let Some(thread) = self.thread.as_mut()
         {
-            let _shaping =
-                matterless_view::timing::watch("shaping the thread", thread.rows.len(), "rows");
-            thread.lay_out(&mut self.fonts, within.width);
-            thread.clamp(within);
-            thread.hold(thread_held, within);
+            let _shaping = matterless_view::timing::watch(
+                how.of("shaping the thread", "  shaping what shows of the thread"),
+                thread.rows.len(),
+                "rows",
+            );
+            match how {
+                Shaping::WhatShows => thread.relay_seen(&mut self.fonts, within.width, within),
+                Shaping::Everything => thread.lay_out(&mut self.fonts, within.width),
+            }
+            if let Some(thread_held) = thread_held {
+                thread.anchored(thread_held, within);
+            }
         }
     }
 }
@@ -5256,6 +5316,35 @@ fn named(key: &winit::keyboard::Key) -> Option<Key> {
 
 /// What a thread panel answers to. Keyed by root so reopening the same thread
 /// can be told from opening a different one.
+/// Where the reader was in the conversation and in the thread beside it, if
+/// one is open. Taken before anything moves and handed to `shape`.
+type Anchors = (Anchor, Option<Anchor>);
+
+/// How much of the conversation a pass measures.
+///
+/// The only thing the two passes differ in. Both go through `shape`, so a
+/// drag and the settle that follows it cannot lay the window out differently:
+/// whatever was on screen while the edge moved is where it stays when the
+/// edge is let go, and the settle only fills in what was never looked at.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Shaping {
+    /// The rows on screen, for a width that is still changing. A channel is a
+    /// hundred and eighty messages of cosmic-text and a screenful is a dozen.
+    WhatShows,
+    /// All of it, once the edge has stopped.
+    Everything,
+}
+
+impl Shaping {
+    /// Picks the name this pass goes under in the timing table.
+    fn of(self, everything: &'static str, some: &'static str) -> &'static str {
+        match self {
+            Shaping::Everything => everything,
+            Shaping::WhatShows => some,
+        }
+    }
+}
+
 /// How long after the last size before the rest of the conversation is
 /// shaped. Short enough to feel like part of letting go of the edge.
 const SETTLE: std::time::Duration = std::time::Duration::from_millis(120);
