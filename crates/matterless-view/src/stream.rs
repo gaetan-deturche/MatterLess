@@ -1960,7 +1960,7 @@ impl Stream {
             let bottom = top + row.height;
             if bottom >= within.y && top <= within.bottom() {
                 if hovered == Some(index) {
-                    scene.fill(inner.x, top, inner.width, row.height, palette.surface);
+                    scene.fill(inner.x, top, inner.width, row.height, palette.hover);
                 }
                 {
                     let mut canvas = Canvas {

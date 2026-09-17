@@ -75,6 +75,13 @@ pub struct Palette {
     pub ground: [u8; 4],
     /// A panel raised off the ground: the sidebar, a card, a dialog.
     pub surface: [u8; 4],
+    /// Under the message the pointer is over, and nothing else.
+    ///
+    /// A step off the ground rather than a surface of its own. Drawn in
+    /// `surface` it was the same colour as a card or a panel, so a row lit
+    /// under the pointer read as having become one -- which is a great deal
+    /// louder than saying where the pointer is.
+    pub hover: [u8; 4],
     /// Raised again: a code block, a pill, a field inside a panel.
     pub raised: [u8; 4],
     /// What the eye should land on.
@@ -139,6 +146,9 @@ impl Default for Palette {
         Self {
             ground: [12, 18, 24, 255],
             surface: [20, 29, 38, 255],
+            // Halfway from the ground to a surface: enough to follow the
+            // pointer down a conversation, not enough to read as a thing.
+            hover: [16, 23, 31, 255],
             raised: [27, 39, 52, 255],
             ink: [227, 234, 241],
             soft: [148, 164, 179],
