@@ -1796,7 +1796,9 @@ fn listed(title: &str, store: &Store, list: PostList, me_id: &str) -> Update {
     println!("{title}: {} messages", posts.len());
     Update::Listed {
         title: title.to_string(),
-        found: crate::listing::found_for(store, posts, me_id),
+        // Nothing was searched for, so a preview is the opening of the
+        // message, which is what these lists have always shown.
+        found: crate::listing::found_for(store, posts, me_id, &[]),
     }
 }
 

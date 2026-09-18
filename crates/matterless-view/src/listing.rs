@@ -54,7 +54,149 @@ pub struct Found {
 /// In one place, because the alternative is each panel resolving a direct
 /// message's label slightly differently -- a DM has no display name of its
 /// own, so labelling one means looking up the other person.
-pub fn found_for(store: &Store, posts: Vec<matterless_core::Post>, me: &str) -> Vec<Found> {
+/// The words somebody is looking for, out of what they typed.
+///
+/// Modifiers are dropped: `from:ada` filters the answer rather than appearing
+/// in it, so lighting up the letters "from" in a message would be pointing at
+/// the wrong thing.
+pub fn wanted(query: &str) -> Vec<String> {
+    query
+        .split_whitespace()
+        .filter(|word| !word.contains(':'))
+        .map(|word| word.trim_matches('"').to_lowercase())
+        .filter(|word| !word.is_empty())
+        .collect()
+}
+
+/// A line split into the stretches that matched and the stretches that did
+/// not.
+///
+/// Split at word boundaries and compared word by word rather than by searching
+/// the line for the query: lowercasing can change how many bytes a character
+/// takes, so an offset found in a lowercased copy does not always point at the
+/// same place in the original. Whole words are also what the reader is looking
+/// at -- and matching a prefix is what the database did to find this row, so
+/// `budg` lighting up `budget` is the truth about why it is here.
+pub fn picked_out(text: &str, wanted: &[String]) -> Vec<(String, bool)> {
+    let mut out: Vec<(String, bool)> = Vec::new();
+    let mut word = String::new();
+    let mut between = String::new();
+
+    let push = |piece: &str, lit: bool, out: &mut Vec<(String, bool)>| {
+        if piece.is_empty() {
+            return;
+        }
+        match out.last_mut() {
+            Some((held, was)) if *was == lit => held.push_str(piece),
+            _ => out.push((piece.to_string(), lit)),
+        }
+    };
+
+    for character in text.chars() {
+        if character.is_alphanumeric() {
+            if !between.is_empty() {
+                push(&between, false, &mut out);
+                between.clear();
+            }
+            word.push(character);
+            continue;
+        }
+        if !word.is_empty() {
+            let lit = lights(&word, wanted);
+            push(&word, lit, &mut out);
+            word.clear();
+        }
+        between.push(character);
+    }
+    if !word.is_empty() {
+        let lit = lights(&word, wanted);
+        push(&word, lit, &mut out);
+    }
+    push(&between, false, &mut out);
+    out
+}
+
+fn lights(word: &str, wanted: &[String]) -> bool {
+    let word = word.to_lowercase();
+    wanted.iter().any(|term| word.starts_with(term.as_str()))
+}
+
+/// How much of the message to show either side of what was found.
+///
+/// A result row is one line, and a message is not: something matched deep in a
+/// long one used to leave the row showing its opening words, which say nothing
+/// about why it is a result at all.
+const AROUND: usize = 110;
+
+/// How much room to leave before the match, so it reads as a piece of a
+/// sentence rather than as the start of one.
+const LEAD: usize = 24;
+
+/// The part of a message worth showing, given what somebody was looking for.
+///
+/// With nothing to look for -- saved, pinned, a thread's own list -- it is the
+/// opening of the message, which is what it always was.
+pub fn preview_around(said: &str, wanted: &[String]) -> String {
+    let line: String = said
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let letters: Vec<char> = line.chars().collect();
+
+    let found = found_at(&line, wanted);
+    // Back off a little so the match has a run-up, and to a word boundary so
+    // the line does not start mid-word.
+    let from = match found {
+        Some(at) => back_to_a_space(&letters, at.saturating_sub(LEAD)),
+        None => 0,
+    };
+    let to = (from + AROUND).min(letters.len());
+    let mut out = String::new();
+    if from > 0 {
+        out.push('\u{2026}');
+    }
+    out.extend(&letters[from..to]);
+    if to < letters.len() {
+        out.push('\u{2026}');
+    }
+    out
+}
+
+/// Where the first word that matched starts, in characters.
+fn found_at(line: &str, wanted: &[String]) -> Option<usize> {
+    if wanted.is_empty() {
+        return None;
+    }
+    let mut at = 0;
+    for (piece, lit) in picked_out(line, wanted) {
+        if lit {
+            return Some(at);
+        }
+        at += piece.chars().count();
+    }
+    None
+}
+
+/// The last space at or before `at`, so a window starts on a word.
+fn back_to_a_space(letters: &[char], at: usize) -> usize {
+    if at == 0 {
+        return 0;
+    }
+    letters[..at]
+        .iter()
+        .rposition(|character| character.is_whitespace())
+        .map(|space| space + 1)
+        .unwrap_or(at)
+}
+
+pub fn found_for(
+    store: &Store,
+    posts: Vec<matterless_core::Post>,
+    me: &str,
+    wanted: &[String],
+) -> Vec<Found> {
     let mut people: Vec<String> = posts.iter().map(|post| post.user_id.clone()).collect();
     let mut channels: std::collections::HashMap<String, matterless_core::model::Channel> =
         std::collections::HashMap::new();
@@ -90,7 +232,18 @@ pub fn found_for(store: &Store, posts: Vec<matterless_core::Post>, me: &str) -> 
                 None => post.channel_id.clone(),
             },
             author: names.get(&post.user_id).cloned().unwrap_or(post.user_id),
-            preview: matterless_sync::notify::preview_of(&post.message),
+            // The message as it reads, not as it was written: a result row
+            // is one line of prose and the marks are instructions for a
+            // renderer -- a heading that came back as `### **Florent**:` was
+            // showing the reader the punctuation instead of the sentence. And
+            // the part of it worth showing, which is the part around what was
+            // found.
+            preview: preview_around(
+                &matterless_render::markdown::plain_lines(&matterless_render::markdown::parse(
+                    &post.message,
+                )),
+                wanted,
+            ),
             root_id: post.root_id,
             note: String::new(),
             post_id: post.id,
@@ -599,5 +752,125 @@ mod tests {
                 .any(|placed| placed.name == format!("{NAME}/close")),
             "no close button"
         );
+    }
+
+    /// A result has to say why it is a result, so what was searched for is
+    /// lit up in it.
+    #[test]
+    fn the_words_somebody_searched_for_are_picked_out() {
+        let looking = wanted("budget");
+        let split = picked_out("the budget looks wrong", &looking);
+        assert_eq!(
+            split,
+            vec![
+                ("the ".to_string(), false),
+                ("budget".to_string(), true),
+                (" looks wrong".to_string(), false),
+            ]
+        );
+    }
+
+    /// Whatever case it was said in, and a prefix counts: matching a prefix is
+    /// what the database did to find the row, so lighting one is the truth
+    /// about why it is here.
+    #[test]
+    fn a_prefix_in_any_case_lights_the_whole_word() {
+        let looking = wanted("Budg");
+        let split = picked_out("the BUDGET line", &looking);
+        assert_eq!(split[1], ("BUDGET".to_string(), true));
+    }
+
+    /// A modifier filters the answer rather than appearing in it, so lighting
+    /// up the letters of `from` would be pointing at the wrong thing.
+    #[test]
+    fn a_modifier_is_not_one_of_the_words() {
+        assert_eq!(wanted("from:ada in:dev budget"), vec!["budget".to_string()]);
+        let split = picked_out("from ada, the budget", &wanted("from:ada budget"));
+        assert_eq!(split[0], ("from ada, the ".to_string(), false));
+        assert_eq!(split[1], ("budget".to_string(), true));
+    }
+
+    /// Nothing typed lights nothing, and the line comes back whole rather than
+    /// in pieces -- one run, which is what it was before any of this.
+    #[test]
+    fn a_line_with_nothing_to_light_is_one_piece() {
+        let split = picked_out("the budget looks wrong", &wanted(""));
+        assert_eq!(split, vec![("the budget looks wrong".to_string(), false)]);
+    }
+
+    /// Splitting is by word rather than by searching the line, because
+    /// lowercasing can change how many bytes a character takes -- so an offset
+    /// found in a lowercased copy does not always point at the same place in
+    /// the original. Nothing may be lost or invented whatever is in the line.
+    #[test]
+    fn the_line_survives_being_split() {
+        for said in [
+            "the budget looks wrong",
+            "\u{c9}t\u{e9} 2026 -- le budget",
+            "\u{1f4a1} budget?",
+            "",
+            "   ",
+            "budget",
+        ] {
+            let whole: String = picked_out(said, &wanted("budget"))
+                .into_iter()
+                .map(|(piece, _)| piece)
+                .collect();
+            assert_eq!(whole, said, "for {said:?}");
+        }
+    }
+
+    /// A window onto the message rather than its opening.
+    ///
+    /// Something that matched deep in a long message used to leave the row
+    /// showing the first hundred characters, which say nothing about why it is
+    /// a result -- so the reader was handed a row whose own words disagreed
+    /// with the search that found it.
+    #[test]
+    fn the_preview_is_cut_around_what_was_found() {
+        let long = format!(
+            "{} the budget looks wrong {}",
+            "a word ".repeat(40),
+            "b".repeat(200)
+        );
+        let shown = preview_around(&long, &wanted("budget"));
+
+        assert!(shown.contains("budget"), "what was found is in it: {shown}");
+        assert!(shown.starts_with('\u{2026}'), "and it says it is a middle");
+        assert!(shown.ends_with('\u{2026}'), "at both ends");
+        assert!(
+            shown.chars().count() <= AROUND + 2,
+            "one line's worth: {}",
+            shown.chars().count()
+        );
+        // With a run-up, so it reads as a piece of a sentence.
+        assert!(
+            !shown.starts_with("\u{2026}budget"),
+            "the match has room before it: {shown}"
+        );
+    }
+
+    /// Nothing to look for -- saved, pinned, a thread's list -- is the opening
+    /// of the message, which is what those lists always showed.
+    #[test]
+    fn with_nothing_to_look_for_it_is_the_opening() {
+        let said = "the budget looks wrong";
+        assert_eq!(preview_around(said, &[]), said);
+        assert!(!preview_around(said, &[]).starts_with('\u{2026}'));
+    }
+
+    /// A short message is left whole rather than given ellipses it has not
+    /// earned.
+    #[test]
+    fn a_short_message_keeps_its_own_ends() {
+        let shown = preview_around("the budget looks wrong", &wanted("budget"));
+        assert_eq!(shown, "the budget looks wrong");
+    }
+
+    /// The lines of a message become one line, because a row is one line.
+    #[test]
+    fn a_message_written_in_lines_comes_back_as_one() {
+        let shown = preview_around("first line\n\nsecond line", &[]);
+        assert_eq!(shown, "first line second line");
     }
 }

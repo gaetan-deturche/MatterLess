@@ -393,3 +393,51 @@ fn command_backspace_rubs_out_a_word() {
     frame(&mut composer, &mut fonts, &mut input);
     assert_eq!(composer.text(), "hello ");
 }
+
+/// A field paints its box inside what it is given, so a caller with no room to
+/// spare has to hand over the room round the box rather than the box itself.
+///
+/// The app's header is 44 tall where a one-line field wants 46. Handing over
+/// the box's own rect squeezed everything inside it -- measured, a 240x28
+/// field came out as a 226x14 border with two pixels of room for a
+/// twenty-pixel line, so the words sat across the bottom edge and the box
+/// looked broken. `around` is the way back.
+#[test]
+fn a_field_paints_its_box_where_it_was_asked_to() {
+    let mut fonts = Fonts::new();
+    let mut field = Composer::new("query").plain();
+    field.lay_out(&mut fonts, 240.0);
+
+    // Where the app's header puts it: centred in a 44-tall strip.
+    let wanted = Rect::new(546.0, 6.0, 240.0, 32.0);
+    let within = field.around(wanted);
+    assert!(
+        within.height >= field.height(),
+        "the room round a 32-tall box is what a field needs: {within:?} against {}",
+        field.height()
+    );
+    assert_eq!(
+        field.box_height(),
+        wanted.height,
+        "and 32 is the box a one-line field paints"
+    );
+
+    // The strip itself has no room for that, which is the whole reason: the
+    // rect handed over reaches past the strip while the box lands inside it.
+    assert!(wanted.y >= 0.0 && wanted.bottom() <= 44.0, "the box fits");
+    assert!(within.height > 44.0, "the room round it does not");
+}
+
+/// The header's field is the height a one-line field paints, so the two agree
+/// without anybody doing arithmetic at the call site.
+#[test]
+fn the_headers_field_is_the_height_a_field_wants() {
+    let mut fonts = Fonts::new();
+    let mut field = Composer::new("query").plain();
+    field.lay_out(&mut fonts, 240.0);
+
+    let column = Rect::new(336.0, 0.0, 666.0, 792.0);
+    let offers = crate::header::offered(false);
+    let rect = crate::header::find(column, &offers).expect("a field on the strip");
+    assert_eq!(rect.height, field.box_height());
+}
