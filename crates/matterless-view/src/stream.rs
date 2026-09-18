@@ -197,6 +197,13 @@ fn names(row: &Row, post_id: &str) -> bool {
 
 /// What names a row across two plans of the same channel.
 ///
+/// What the unread mark is called in a plan.
+///
+/// Named here rather than spelled out wherever it is wanted: a caller that
+/// asked for the wrong string would look exactly like a channel with nothing
+/// unread in it.
+pub const DIVIDER: &str = "divider";
+
 /// Not an index: a page of older history arriving pushes every row down, and a
 /// cache that matched on position would miss all of them. Rows that have no id
 /// of their own are named by what they are, which is enough -- there is one
@@ -208,7 +215,7 @@ fn key_of(row: &Row) -> String {
         Row::DeletedRoot { post_id, .. } => format!("gone/{post_id}"),
         Row::ThreadFooter { root_id, .. } => format!("footer/{root_id}"),
         Row::DateSeparator { epoch_day } => format!("day/{epoch_day}"),
-        Row::UnreadDivider => "divider".to_string(),
+        Row::UnreadDivider => DIVIDER.to_string(),
     }
 }
 
@@ -1034,6 +1041,28 @@ impl Stream {
             true => Anchor::Start,
             false => Anchor::Row(self.holding(within)),
         }
+    }
+
+    /// Brings one row to `above` pixels below the panel's top edge.
+    ///
+    /// `false` when the plan has no such row, which the caller has to answer
+    /// for: a shortcut that scrolled somewhere arbitrary instead would be
+    /// worse than one that did not move.
+    ///
+    /// Not `hold`, which is for putting a reader back where they already were
+    /// and measures from the middle of the panel. This is the other errand --
+    /// taking somebody to a row they have asked for -- and a row asked for
+    /// belongs near the top, with what it follows still visible above it.
+    pub fn to_row(&mut self, key: &str, above: f32, within: Rect) -> bool {
+        let mut top = self.theme.pad_top;
+        for (index, laid) in self.laid.iter().enumerate() {
+            if self.rows.get(index).map(key_of).as_deref() == Some(key) {
+                self.scroll = (top - above).clamp(0.0, self.reach(within));
+                return true;
+            }
+            top += laid.height;
+        }
+        false
     }
 
     /// Puts them back there, after the rows have changed under them.
