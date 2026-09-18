@@ -1602,6 +1602,9 @@ impl App {
             true => self.search.in_pane(pane),
             false => self
                 .strip_field()
+                // The room round the box rather than the box, because the
+                // strip has none to spare -- see `Composer::around`.
+                .map(|field| self.search.query.around(field))
                 .unwrap_or_else(|| self.search.in_pane(pane)),
         }
     }
@@ -3194,7 +3197,7 @@ impl App {
         {
             boxes.extend(self.search.boxes(matterless_view::search::Shown {
                 pane: matterless_view::aside::rect(self.column_rect()),
-                field,
+                field: self.search.query.around(field),
             }));
         }
         if let Some(pane) = self.aside_rect() {
@@ -3743,14 +3746,18 @@ impl App {
             let store = self.store.clone();
             self.search.scrolled(&input, &boxes, pane);
             let field = self.search_field(pane);
+            let here = self.sidebar.selected.clone();
             let did = store.as_ref().and_then(|store| {
                 self.search.react(
                     &mut self.fonts,
                     &input,
                     matterless_view::search::Shown { pane, field },
                     &mut self.clipboard,
-                    store,
-                    &self.me,
+                    matterless_view::search::Against {
+                        store,
+                        me: &self.me,
+                        here: here.as_deref().unwrap_or_default(),
+                    },
                 )
             });
             if matches!(did, Some(matterless_view::search::Did::Close)) {
@@ -4382,7 +4389,8 @@ impl App {
         // is the box itself -- the one the reader clicked, with the caret in
         // it, where the caret used to appear on the far side of the window.
         if let Some(field) = strip_field.filter(|_| typed_in) {
-            self.search.query.draw(&mut canvas, field, true);
+            let within = self.search.query.around(field);
+            self.search.query.draw(&mut canvas, within, true);
         }
         drop(probe);
 

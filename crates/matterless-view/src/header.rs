@@ -208,11 +208,14 @@ pub fn find(within: Rect, offered: &[Act]) -> Option<Rect> {
     if room < FIND {
         return None;
     }
+    // Twelve, not sixteen: a one-line field paints a 32-tall box, and a rect
+    // any shorter than that has the box painted into a squeeze rather than
+    // drawn at the size it wants.
     Some(Rect::new(
         right - GAP * 3.0 - FIND,
-        strip.y + 8.0,
+        strip.y + 6.0,
         FIND,
-        strip.height - 16.0,
+        strip.height - 12.0,
     ))
 }
 
@@ -344,11 +347,15 @@ impl Header {
         // different box on the far side of the window.
         if let Some(rect) = find(within, &self.offered).filter(|_| !typed_in) {
             scene.rounded(rect.x, rect.y, rect.width, rect.height, palette.raised, 5.0);
+            // Where the field's own hint lands, and the same words, so clicking
+            // the box does not shift the writing in it. `Run::label` is an
+            // eighteen-tall line where the field's is twenty, so it is centred
+            // on that rather than sharing the field's six-pixel inset.
             let glyphs = painter.run(
                 fonts,
-                "Search messages...",
-                rect.x + 10.0,
-                rect.y + 4.0,
+                "Search messages",
+                rect.x + 6.0,
+                rect.y + (rect.height - 18.0) / 2.0,
                 Run::label(f32::MAX),
             );
             scene.glyphs(glyphs, palette.faint, palette.faint);

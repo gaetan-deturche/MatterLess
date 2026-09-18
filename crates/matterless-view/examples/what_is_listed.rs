@@ -72,7 +72,7 @@ fn show(
         .filter_map(|id| list.posts.get(id).cloned())
         .filter(|post| post.delete_at == 0)
         .collect();
-    let found = matterless_view::listing::found_for(store, posts, me_id);
+    let found = matterless_view::listing::found_for(store, posts, me_id, &[]);
     println!("{title}: {} messages", found.len());
     for one in &found {
         // The two things the resolution can get wrong, and nothing else.

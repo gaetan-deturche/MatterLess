@@ -40,6 +40,11 @@ const PADDING: f32 = aside::PADDING;
 /// panel is what Return is for.
 const UNDER: usize = 6;
 
+/// How tall the mark behind a word somebody searched for is. The line it sits
+/// on is eighteen, and a mark that fills it reads as a selection rather than
+/// as a highlight.
+const LIT: f32 = 16.0;
+
 /// The gap between the field and the list under it, so the list reads as a
 /// thing below the box rather than as part of it.
 const DROP: f32 = 4.0;
@@ -77,6 +82,55 @@ pub struct Shown {
     pub pane: Rect,
     /// The box the query is typed into.
     pub field: Rect,
+}
+
+/// One line of a result, with what was searched for lit up in it.
+///
+/// A stretch at a time, because a run of glyphs carries one colour: the only
+/// way to light part of a line is to measure what comes before it and start
+/// the next stretch there. A line with nothing to light comes out as one run,
+/// which is what it was before.
+fn draw_line(into: &mut Canvas<'_>, said: &str, at: (f32, f32), wanted: &[String]) {
+    let style = crate::listing::label(false);
+    let (mut x, y) = at;
+    for (piece, lit) in crate::listing::picked_out(said, wanted) {
+        let width = matterless_layout::extent_of(into.fonts, &piece, f32::MAX, style).width;
+        // Marked rather than tinted. The rest of the line is the faint ink, so
+        // a word merely recoloured inside it is a shade against a shade --
+        // what carries at a glance is the block of colour behind it and the
+        // full-strength ink on top.
+        if lit {
+            into.scene.rounded(
+                x - 2.0,
+                y + 1.0,
+                width + 4.0,
+                LIT,
+                into.palette.signal_soft,
+                3.0,
+            );
+        }
+        let glyphs = into
+            .painter
+            .run(into.fonts, &piece, x, y, Run::label(f32::MAX));
+        let ink = match lit {
+            true => into.palette.ink,
+            false => into.palette.faint,
+        };
+        into.scene.glyphs(glyphs, ink, into.palette.faint);
+        x += width;
+    }
+}
+
+/// What a query is answered against.
+///
+/// The three travel together and `react` was already at the argument clippy
+/// stops counting, so they are one thing rather than three more.
+#[derive(Clone, Copy)]
+pub struct Against<'a> {
+    pub store: &'a matterless_store::Store,
+    pub me: &'a str,
+    /// The conversation the reader is in, whose matches are shown first.
+    pub here: &'a str,
 }
 
 /// What a frame of input did to the pane.
@@ -342,8 +396,15 @@ impl Search {
         placed
     }
 
+    /// The words this query is looking for, which decide both what a
+    /// preview is cut around and what is lit up in it.
+    fn looking(&self) -> Vec<String> {
+        crate::listing::wanted(&self.query.text())
+    }
+
     /// Runs the query, if it has changed since the last one.
-    fn ask(&mut self, store: &matterless_store::Store, me: &str) {
+    fn ask(&mut self, against: Against<'_>) {
+        let Against { store, me, here } = against;
         let typed = self.query.text().trim().to_string();
         if typed == self.asked {
             return;
@@ -363,7 +424,7 @@ impl Search {
         // Names and conversation labels in one place, because a direct
         // message has no display name of its own: labelling one means looking
         // up the other person, and `found_for` is where that already happens.
-        self.found = crate::listing::found_for(store, posts, me)
+        self.found = crate::listing::found_for(store, posts, me, &self.looking())
             .into_iter()
             .map(|found| Hit {
                 author: found.author,
@@ -373,6 +434,17 @@ impl Search {
                 channel_id: found.channel_id,
             })
             .collect();
+        // Where the reader is, first. Most of what somebody goes looking for
+        // was said in the conversation they are looking from -- but a message
+        // three channels away is still worth having, and every row says which
+        // channel it is in, so this is an order rather than a filter and
+        // nothing has to be switched on to search everywhere.
+        //
+        // A sort rather than a second query: it reorders the page the store
+        // answered with, so a local match that fell outside the first `HITS`
+        // is still outside them. Scoping the question itself would cost a
+        // second read of the database per keystroke.
+        self.found.sort_by_key(|hit| hit.channel_id != here);
     }
 
     /// What a turn of the wheel or a drag of the bar does to the results.
@@ -402,8 +474,7 @@ impl Search {
         input: &Input,
         showing: Shown,
         clipboard: &mut String,
-        store: &matterless_store::Store,
-        me: &str,
+        against: Against<'_>,
     ) -> Option<Did> {
         if !self.busy() {
             return None;
@@ -438,7 +509,7 @@ impl Search {
             self.query.fill(&asking, fonts);
         }
         self.query.lay_out(fonts, field.width);
-        self.ask(store, me);
+        self.ask(against);
         // A query that answers with fewer results than the last one would
         // otherwise leave the reader scrolled past the end of the list.
         self.scroll = self.scroll.clamp(0.0, self.reach(pane));
@@ -482,6 +553,7 @@ impl Search {
             return;
         };
         let shown = self.shown();
+        let looking = crate::listing::wanted(&self.query.text());
         // Through the widget, which is what gives it the hairline a shadow
         // needs to fall away from.
         matterless_widgets::Panel::floating(list, 8.0, 12.0)
@@ -528,14 +600,17 @@ impl Search {
             scene.glyphs(who, palette.ink, palette.faint);
             let preview =
                 matterless_layout::elided(fonts, &hit.preview, room, crate::listing::label(false));
-            let what = painter.run(
-                fonts,
+            draw_line(
+                &mut Canvas {
+                    scene,
+                    painter,
+                    fonts,
+                    palette,
+                },
                 &preview,
-                row.x + PADDING,
-                row.y + 24.0,
-                Run::label(f32::MAX),
+                (row.x + PADDING, row.y + 24.0),
+                &looking,
             );
-            scene.glyphs(what, palette.faint, palette.faint);
         }
     }
 
@@ -576,6 +651,7 @@ impl Search {
         // Clipped to the body, so a result scrolled halfway off the top is cut
         // at the field rather than drawn across it.
         scene.clip_to(body.x, body.y, body.width, body.height);
+        let looking = crate::listing::wanted(&self.query.text());
         let room = body.width - PADDING * 2.0 - crate::scrollbar::TRACK;
         for (at, hit) in self.found.iter().enumerate() {
             let row = self.row_rect(pane, at);
@@ -600,14 +676,17 @@ impl Search {
             scene.glyphs(who, palette.ink, palette.faint);
             let preview =
                 matterless_layout::elided(fonts, &hit.preview, room, crate::listing::label(false));
-            let what = painter.run(
-                fonts,
+            draw_line(
+                &mut Canvas {
+                    scene,
+                    painter,
+                    fonts,
+                    palette,
+                },
                 &preview,
-                row.x + PADDING,
-                row.y + 26.0,
-                Run::label(f32::MAX),
+                (row.x + PADDING, row.y + 26.0),
+                &looking,
             );
-            scene.glyphs(what, palette.faint, palette.faint);
         }
         let mut canvas = Canvas {
             scene,
@@ -629,6 +708,14 @@ mod tests {
 
     fn pane() -> Rect {
         aside::rect(Rect::new(300.0, 0.0, 1000.0, 700.0))
+    }
+
+    fn against(store: &matterless_store::Store) -> Against<'_> {
+        Against {
+            store,
+            me: "",
+            here: "c1",
+        }
     }
 
     fn hits(count: usize) -> Vec<Hit> {
@@ -752,8 +839,7 @@ mod tests {
                 field,
             },
             &mut String::new(),
-            &store,
-            "",
+            against(&store),
         );
         assert_eq!(did, Some(Did::Widen));
 
@@ -785,8 +871,7 @@ mod tests {
                     field,
                 },
                 &mut String::new(),
-                &store,
-                "",
+                against(&store),
             )
         };
 
@@ -817,8 +902,7 @@ mod tests {
                     field,
                 },
                 &mut String::new(),
-                &store,
-                "",
+                against(&store),
             )
         };
 
@@ -861,6 +945,80 @@ mod tests {
         assert!(asked.droplist(field).is_some());
     }
 
+    /// Where the reader is, first.
+    ///
+    /// An order and not a filter: a message three channels away still comes
+    /// back, and every row says which channel it is in -- so searching
+    /// everywhere costs nothing to switch on, because nothing was switched
+    /// off. Within each of the two groups the store's own order is kept,
+    /// which is newest first.
+    #[test]
+    fn what_was_said_here_comes_first() {
+        let store = matterless_store::Store::open_in_memory().expect("a store");
+        let day = 86_400_000i64;
+        let said = |id: &str, channel: &str, at: i64| matterless_core::model::Post {
+            id: id.to_string(),
+            channel_id: channel.to_string(),
+            user_id: "amy".to_string(),
+            root_id: String::new(),
+            create_at: at,
+            update_at: at,
+            edit_at: 0,
+            delete_at: 0,
+            message: "the budget looks wrong".to_string(),
+            post_type: String::new(),
+            file_ids: Vec::new(),
+            props: serde_json::Value::Null,
+            metadata: matterless_core::model::PostMetadata::default(),
+            pending_post_id: String::new(),
+            is_pinned: false,
+        };
+        // Newest is elsewhere, so the store would answer with it first.
+        store
+            .upsert_posts(&[
+                said("here-old", "c1", 20_700 * day),
+                said("away-new", "c2", 20_702 * day),
+                said("here-new", "c1", 20_701 * day),
+            ])
+            .expect("posts");
+
+        let mut search = Search::new();
+        let mut fonts = Fonts::new();
+        search.showing = Where::Under;
+        search.query.fill("budget", &mut fonts);
+        search.ask(Against {
+            store: &store,
+            me: "",
+            here: "c1",
+        });
+
+        let order: Vec<&str> = search
+            .found
+            .iter()
+            .map(|hit| hit.post_id.as_str())
+            .collect();
+        assert_eq!(
+            order,
+            vec!["here-new", "here-old", "away-new"],
+            "this conversation first, newest first inside each"
+        );
+
+        // Standing somewhere else reorders the same answer rather than
+        // changing it.
+        search.asked.clear();
+        search.ask(Against {
+            store: &store,
+            me: "",
+            here: "c2",
+        });
+        let order: Vec<&str> = search
+            .found
+            .iter()
+            .map(|hit| hit.post_id.as_str())
+            .collect();
+        assert_eq!(order, vec!["away-new", "here-new", "here-old"]);
+    }
+
     /// A closed panel answers nothing and places nothing, whatever is typed.
     #[test]
     fn a_closed_search_answers_nothing() {
@@ -876,8 +1034,7 @@ mod tests {
             &Input::default(),
             showing,
             &mut String::new(),
-            &store,
-            "",
+            against(&store),
         );
         assert!(chosen.is_none());
         assert!(search.boxes(showing).is_empty());

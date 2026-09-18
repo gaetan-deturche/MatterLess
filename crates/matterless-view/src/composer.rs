@@ -212,6 +212,36 @@ impl Composer {
         self.box_of(within).inset(self.padding())
     }
 
+    /// What to hand `draw` and `react` so the box they paint lands exactly on
+    /// `field`.
+    ///
+    /// A field paints itself *inside* what it is given, with room left over
+    /// round it. Everywhere else that room is part of the panel the field sits
+    /// in, and the caller can hand over the whole strip. The app's header has
+    /// no room to spare -- it is 44 tall and a field wants 46 -- so there the
+    /// caller says where the box goes and this works back to the rect that
+    /// puts it there. Handing the box's own rect over instead squeezed
+    /// everything inside it: measured, a 240x28 field came out as a 226x14
+    /// border with two pixels of room for a twenty-pixel line, so the words
+    /// sat across the bottom edge.
+    pub fn around(&self, field: Rect) -> Rect {
+        let margin = self.margin();
+        Rect::new(
+            field.x - margin,
+            field.y - margin,
+            field.width + margin * 2.0,
+            field.height + margin * 2.0,
+        )
+    }
+
+    /// How tall a box this field paints, given the room to paint it in.
+    ///
+    /// The inverse of `around`, for a caller that has to reserve the room
+    /// before it knows where the box goes.
+    pub fn box_height(&self) -> f32 {
+        self.height() - self.margin() * 2.0
+    }
+
     /// Where the caret sits inside the box, if it has one to show.
     ///
     /// Answered here rather than worked out while drawing, so a test can ask.
