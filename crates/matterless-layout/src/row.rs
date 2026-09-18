@@ -990,22 +990,30 @@ pub fn lay_out_opened(fonts: &mut Fonts, row: &Row, theme: &Theme, opened: bool)
                 // anchors its replies.
                 _ => "Message deleted — its replies remain.".to_string(),
             };
+            // A line each. A merged run of comings and goings says one thing
+            // per kind of them, so the row is as tall as it has things to say
+            // -- almost always one, which is what it was before.
+            let said: Vec<&str> = text.split('\n').collect();
             return RowLayout {
-                height: theme.line_height + theme.row_padding * 2.0,
-                blocks: vec![Block {
-                    y: theme.row_padding,
-                    x: 0.0,
-                    height: theme.line_height,
-                    lines: 1,
-                    kind: Kind::Text,
-                    spans: vec![TextSpan {
-                        italic: true,
-                        faint: true,
-                        ..plain(text)
-                    }],
-                    size: theme.system_size,
-                    wrap: theme.text_width(),
-                }],
+                height: theme.line_height * said.len() as f32 + theme.row_padding * 2.0,
+                blocks: said
+                    .into_iter()
+                    .enumerate()
+                    .map(|(at, line)| Block {
+                        y: theme.row_padding + theme.line_height * at as f32,
+                        x: 0.0,
+                        height: theme.line_height,
+                        lines: 1,
+                        kind: Kind::Text,
+                        spans: vec![TextSpan {
+                            italic: true,
+                            faint: true,
+                            ..plain(line.to_string())
+                        }],
+                        size: theme.system_size,
+                        wrap: theme.text_width(),
+                    })
+                    .collect(),
             };
         }
         Row::Post { post } => (post.nodes.as_slice(), Some(post), true),
@@ -2311,6 +2319,42 @@ mod tests {
         let laid = lay_out(&mut fonts, &Row::DateSeparator { epoch_day: 20137 }, &theme);
         assert_eq!(laid.height, theme.separator_height);
         assert_eq!(laid.blocks.len(), 1);
+    }
+
+    /// A merged run of comings and goings says one thing per kind of them, so
+    /// the row has to be as tall as it has things to say. Reserving one line
+    /// for two would draw the second over whatever is under it.
+    #[test]
+    fn a_system_row_is_as_tall_as_it_has_things_to_say() {
+        let mut fonts = Fonts::new();
+        let theme = Theme::default();
+        let laid = lay_out(
+            &mut fonts,
+            &Row::System {
+                post_id: "p1".into(),
+                post_type: "system_combined_user_activity".into(),
+                nodes: Vec::new(),
+                text: "ada and bob joined the channel\ncal left the channel".into(),
+            },
+            &theme,
+        );
+
+        assert_eq!(laid.blocks.len(), 2, "a block each");
+        assert_eq!(
+            laid.blocks[0].spans[0].text,
+            "ada and bob joined the channel"
+        );
+        assert_eq!(laid.blocks[1].spans[0].text, "cal left the channel");
+        assert_eq!(
+            laid.blocks[1].y - laid.blocks[0].y,
+            theme.line_height,
+            "the second sits a line under the first"
+        );
+        assert_eq!(
+            laid.height,
+            theme.line_height * 2.0 + theme.row_padding * 2.0,
+            "and the row reserved room for both"
+        );
     }
 
     /// A system row says what happened, rather than reserving room for silence.

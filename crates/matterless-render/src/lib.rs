@@ -914,6 +914,139 @@ fn system_message(post: &Post) -> String {
     }
 }
 
+/// Somebody coming or going, which is the run worth merging.
+///
+/// Only these: a rename or a header change is a thing that happened to the
+/// channel, and folding one into a count reads as a message having gone
+/// missing rather than as nobody having said anything.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Movement {
+    JoinedChannel,
+    LeftChannel,
+    AddedToChannel,
+    RemovedFromChannel,
+    JoinedTeam,
+    LeftTeam,
+    AddedToTeam,
+    RemovedFromTeam,
+}
+
+fn a_coming_or_going(post_type: &str) -> Option<Movement> {
+    Some(match post_type {
+        "system_join_channel" => Movement::JoinedChannel,
+        "system_leave_channel" => Movement::LeftChannel,
+        "system_add_to_channel" => Movement::AddedToChannel,
+        "system_remove_from_channel" => Movement::RemovedFromChannel,
+        "system_join_team" => Movement::JoinedTeam,
+        "system_leave_team" => Movement::LeftTeam,
+        "system_add_to_team" => Movement::AddedToTeam,
+        "system_remove_from_team" => Movement::RemovedFromTeam,
+        _ => return None,
+    })
+}
+
+impl Movement {
+    /// Who the sentence is *about*, which for an add or a remove is not the
+    /// person who did it.
+    fn about(self, post: &Post) -> String {
+        let named = match self {
+            Movement::AddedToChannel | Movement::AddedToTeam => prop(&post.props, "addedUsername"),
+            Movement::RemovedFromChannel | Movement::RemovedFromTeam => {
+                prop(&post.props, "removedUsername")
+            }
+            _ => prop(&post.props, "username"),
+        };
+        named.unwrap_or_else(|| "Someone".to_string())
+    }
+
+    /// Who did it, when that is somebody other than the subject and worth
+    /// keeping. Only an add says it: the server does not name who removed.
+    fn by(self, post: &Post) -> Option<String> {
+        match self {
+            Movement::AddedToChannel | Movement::AddedToTeam => prop(&post.props, "username"),
+            _ => None,
+        }
+    }
+
+    /// The rest of the sentence, agreeing with how many it is about.
+    fn said(self, several: bool) -> &'static str {
+        match (self, several) {
+            (Movement::JoinedChannel, _) => "joined the channel",
+            (Movement::LeftChannel, _) => "left the channel",
+            (Movement::JoinedTeam, _) => "joined the team",
+            (Movement::LeftTeam, _) => "left the team",
+            (Movement::AddedToChannel, false) => "was added to the channel",
+            (Movement::AddedToChannel, true) => "were added to the channel",
+            (Movement::AddedToTeam, false) => "was added to the team",
+            (Movement::AddedToTeam, true) => "were added to the team",
+            (Movement::RemovedFromChannel, false) => "was removed from the channel",
+            (Movement::RemovedFromChannel, true) => "were removed from the channel",
+            (Movement::RemovedFromTeam, false) => "was removed from the team",
+            (Movement::RemovedFromTeam, true) => "were removed from the team",
+        }
+    }
+}
+
+/// Names as somebody would say them, counting the rest once there are too many
+/// to read at a glance.
+fn named(names: &[String]) -> String {
+    match names {
+        [] => "Someone".to_string(),
+        [one] => one.clone(),
+        [one, two] => format!("{one} and {two}"),
+        [one, two, three] => format!("{one}, {two} and {three}"),
+        [one, two, rest @ ..] => format!("{one}, {two} and {} others", rest.len()),
+    }
+}
+
+/// A run of comings and goings as one line per kind of them.
+///
+/// Grouped by kind rather than left in order, so eight people leaving is one
+/// line and not eight -- which is the whole point of merging. A kind keeps the
+/// place it first appeared, and a name repeated within a kind is said once: a
+/// reader who joined and left twice is still one person.
+fn merged(run: &[&Post]) -> String {
+    // Kind, who it was about, and who did it while they all agree.
+    let mut kinds: Vec<(Movement, Vec<String>, Option<String>)> = Vec::new();
+
+    for post in run {
+        let Some(movement) = a_coming_or_going(&post.post_type) else {
+            continue;
+        };
+        let about = movement.about(post);
+        let by = movement.by(post);
+        match kinds.iter_mut().find(|(kind, ..)| *kind == movement) {
+            Some((_, names, adder)) => {
+                if !names.contains(&about) {
+                    names.push(about);
+                }
+                // One name only while every add in the group shares it. Two
+                // people adding is "were added", full stop.
+                if *adder != by {
+                    *adder = None;
+                }
+            }
+            None => kinds.push((movement, vec![about], by)),
+        }
+    }
+
+    kinds
+        .into_iter()
+        .map(|(movement, names, adder)| {
+            let said = movement.said(names.len() > 1);
+            let who = named(&names);
+            match adder {
+                Some(adder) => format!("{who} {said} by {adder}"),
+                None => format!("{who} {said}"),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(
+            "
+",
+        )
+}
+
 fn build_post_row(post: &Post, options: &PlanOptions) -> PostRow {
     let attachments = parse_attachments(&post.props);
     let nodes = match options.parsed.get(&post.id) {
@@ -999,22 +1132,30 @@ pub fn plan_channel(
     // What a post contributes to the stream, decided before any separator is
     // emitted: a separator above a post that turns out to be invisible would
     // hang there with nothing under it.
+    #[derive(Clone, Copy)]
     enum Payload {
         DeletedRoot,
         System,
         Post,
     }
 
+    // Decided for every post before any of them is emitted, because a run of
+    // comings and goings is only visible from outside a loop over one post: a
+    // post that contributes nothing does not break the run, since nothing of
+    // it stands between them on screen.
+    let mut showing: Vec<(&Post, Payload)> = Vec::with_capacity(ordered.len());
     for post in ordered {
         // A reply belongs to its thread, not the stream, when threads collapse.
         if options.thread_mode == ThreadMode::Collapsed && post.is_reply() {
             continue;
         }
 
-        let summary = threads.get(&post.id);
         let payload = if post.is_deleted() {
             // Only a root still holding replies survives as a placeholder.
-            if summary.is_some_and(|thread| thread.reply_count > 0) {
+            if threads
+                .get(&post.id)
+                .is_some_and(|thread| thread.reply_count > 0)
+            {
                 Some(Payload::DeletedRoot)
             } else {
                 None
@@ -1025,7 +1166,58 @@ pub fn plan_channel(
             Some(Payload::Post)
         };
         let Some(payload) = payload else { continue };
+        showing.push((post, payload));
+    }
 
+    /// Where a run of comings and goings ends, from where it starts.
+    fn run_ends(showing: &[(&Post, Payload)], from: usize) -> usize {
+        let mut end = from;
+        while end < showing.len()
+            && matches!(showing[end].1, Payload::System)
+            && a_coming_or_going(&showing[end].0.post_type).is_some()
+        {
+            end += 1;
+        }
+        end
+    }
+
+    let mut at = 0;
+    while at < showing.len() {
+        let (post, payload) = showing[at];
+        at += 1;
+
+        // People coming and going, merged however many days the run spans.
+        //
+        // No separator above it, and the day is left where it was: the line
+        // summarises a span rather than an event on a date, and a run whose
+        // members are months apart earned a separator each -- which cost more
+        // height than the notices did, so merging under one heading per day
+        // would have saved nothing at all.
+        let ends = run_ends(&showing, at - 1);
+        if ends - (at - 1) > 1 {
+            let run: Vec<&Post> = showing[at - 1..ends]
+                .iter()
+                .map(|(post, _)| *post)
+                .collect();
+            let newest = run.last().expect("a run of at least two");
+            if !divider_placed && newest.create_at > options.last_viewed_at {
+                rows.push(Row::UnreadDivider);
+                divider_placed = true;
+            }
+            rows.push(Row::System {
+                post_id: post.id.clone(),
+                // Mattermost's own name for the same row, so a reader of this
+                // plan meets a familiar word rather than an invented one.
+                post_type: "system_combined_user_activity".to_string(),
+                nodes: Vec::new(),
+                text: merged(&run),
+            });
+            previous = None;
+            at = ends;
+            continue;
+        }
+
+        let summary = threads.get(&post.id);
         let day = epoch_day(post.create_at, options.utc_offset_minutes);
         let mut broke_run = false;
         if current_day != Some(day) {

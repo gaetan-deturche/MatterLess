@@ -950,6 +950,215 @@ fn system_messages_read_as_sentences() {
     }
 }
 
+/// Eight people leaving filled a whole window, and the date separators above
+/// them cost more height than the notices did: they are months apart, so each
+/// earned its own. Merging the notices under one heading per day would have
+/// saved nothing, which is why a run collapses straight across the days it
+/// spans and takes no separator of its own.
+#[test]
+fn a_run_of_comings_and_goings_becomes_one_line_with_a_count() {
+    let mut posts = vec![post("said", "amy", 1_000)];
+    for (at, who) in ["bob", "cal", "dot", "eve", "fay", "gus", "hal", "ivy"]
+        .into_iter()
+        .enumerate()
+    {
+        // A month apart each, so every one of them would earn a separator.
+        let mut left = with_props(
+            post(who, who, 2_000 + at as Timestamp * 30 * DAY),
+            serde_json::json!({ "username": who }),
+        );
+        left.post_type = "system_leave_channel".to_string();
+        left.message = String::new();
+        posts.push(left);
+    }
+    posts.push(post("after", "amy", 2_000 + 9 * 30 * DAY));
+
+    let rows = plan_channel(&posts, &HashMap::new(), &options(ThreadMode::Flat));
+    assert_eq!(
+        kinds(&rows),
+        vec!["sep", "post", "system", "sep", "post"],
+        "one row for the eight of them, and no separator over it"
+    );
+    assert_eq!(
+        system_text(&rows),
+        "bob, cal and 6 others left the channel",
+        "named as far as anybody would read, counted after that"
+    );
+}
+
+/// One of them is not a run. The common case has to be untouched: a single
+/// notice keeps its own separator and its own sentence.
+#[test]
+fn one_coming_or_going_is_left_exactly_as_it_was() {
+    let mut joined = with_props(
+        post("s1", "u1", 1_000),
+        serde_json::json!({ "username": "amy" }),
+    );
+    joined.post_type = "system_join_channel".to_string();
+    joined.message = String::new();
+
+    let rows = plan_channel(&[joined], &HashMap::new(), &options(ThreadMode::Flat));
+    assert_eq!(kinds(&rows), vec!["sep", "system"]);
+    assert_eq!(system_text(&rows), "amy joined the channel");
+}
+
+/// A run of mixed kinds says one thing per kind rather than one per post, and
+/// the row is as tall as it has things to say.
+#[test]
+fn a_mixed_run_says_one_thing_per_kind() {
+    let mut posts = Vec::new();
+    for (at, (who, what)) in [
+        ("amy", "system_join_channel"),
+        ("bob", "system_leave_channel"),
+        ("cal", "system_join_channel"),
+        ("dot", "system_leave_channel"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut moved = with_props(
+            post(who, who, 1_000 + at as Timestamp),
+            serde_json::json!({ "username": who }),
+        );
+        moved.post_type = what.to_string();
+        moved.message = String::new();
+        posts.push(moved);
+    }
+
+    let rows = plan_channel(&posts, &HashMap::new(), &options(ThreadMode::Flat));
+    assert_eq!(
+        kinds(&rows),
+        vec!["system"],
+        "still one row, and no heading over it"
+    );
+    assert_eq!(
+        system_text(&rows),
+        "amy and cal joined the channel\nbob and dot left the channel",
+        "grouped by kind, each keeping where it first appeared"
+    );
+}
+
+/// Only comings and goings merge. A rename is a thing that happened to the
+/// channel, and folding it into a count would read as a message having gone
+/// missing -- so it keeps its own row and breaks the run around it.
+#[test]
+fn something_that_is_not_a_coming_or_going_breaks_the_run() {
+    let mut posts = Vec::new();
+    for (at, (who, what)) in [
+        ("amy", "system_leave_channel"),
+        ("bob", "system_leave_channel"),
+        ("cal", "system_displayname_change"),
+        ("dot", "system_leave_channel"),
+        ("eve", "system_leave_channel"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut moved = with_props(
+            post(who, who, 1_000 + at as Timestamp),
+            serde_json::json!({ "username": who }),
+        );
+        moved.post_type = what.to_string();
+        moved.message = String::new();
+        posts.push(moved);
+    }
+
+    let rows = plan_channel(&posts, &HashMap::new(), &options(ThreadMode::Flat));
+    assert_eq!(
+        kinds(&rows),
+        vec!["system", "sep", "system", "system"],
+        "the rename is filed under its day; the runs around it are not"
+    );
+    let said: Vec<&str> = rows
+        .iter()
+        .filter_map(|row| match row {
+            Row::System { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        said,
+        vec![
+            "amy and bob left the channel",
+            "cal renamed the channel",
+            "dot and eve left the channel",
+        ]
+    );
+}
+
+/// Somebody who came and went twice is one person, not four names.
+#[test]
+fn a_name_said_twice_in_a_run_is_said_once() {
+    let mut posts = Vec::new();
+    for (at, who) in ["amy", "bob", "amy", "bob"].into_iter().enumerate() {
+        let mut left = with_props(
+            post(&format!("s{at}"), who, 1_000 + at as Timestamp),
+            serde_json::json!({ "username": who }),
+        );
+        left.post_type = "system_leave_channel".to_string();
+        left.message = String::new();
+        posts.push(left);
+    }
+
+    let rows = plan_channel(&posts, &HashMap::new(), &options(ThreadMode::Flat));
+    assert_eq!(system_text(&rows), "amy and bob left the channel");
+}
+
+/// One person adding several is the common shape, and who did it is worth
+/// keeping. Two people adding is not: "were added" is all that can be said
+/// without inventing a second line.
+#[test]
+fn an_add_keeps_who_did_it_only_while_they_all_agree() {
+    let added = |id: &str, by: &str, who: &str, at: Timestamp| {
+        let mut one = with_props(
+            post(id, by, at),
+            serde_json::json!({ "username": by, "addedUsername": who }),
+        );
+        one.post_type = "system_add_to_channel".to_string();
+        one.message = String::new();
+        one
+    };
+
+    let agreed = vec![
+        added("a1", "amy", "bob", 1_000),
+        added("a2", "amy", "cal", 1_001),
+    ];
+    let rows = plan_channel(&agreed, &HashMap::new(), &options(ThreadMode::Flat));
+    assert_eq!(
+        system_text(&rows),
+        "bob and cal were added to the channel by amy"
+    );
+
+    let disagreed = vec![
+        added("a1", "amy", "bob", 1_000),
+        added("a2", "dot", "cal", 1_001),
+    ];
+    let rows = plan_channel(&disagreed, &HashMap::new(), &options(ThreadMode::Flat));
+    assert_eq!(system_text(&rows), "bob and cal were added to the channel");
+}
+
+/// The watermark can fall inside a run. The divider belongs above the whole
+/// merged row: there is no longer a post in there for it to sit in front of.
+#[test]
+fn the_unread_divider_lands_above_a_merged_run() {
+    let mut posts = Vec::new();
+    for (at, who) in ["amy", "bob", "cal"].into_iter().enumerate() {
+        let mut left = with_props(
+            post(who, who, 1_000 + at as Timestamp * 1_000),
+            serde_json::json!({ "username": who }),
+        );
+        left.post_type = "system_leave_channel".to_string();
+        left.message = String::new();
+        posts.push(left);
+    }
+
+    let mut asked = options(ThreadMode::Flat);
+    // After the first of them, before the last.
+    asked.last_viewed_at = 1_500;
+    let rows = plan_channel(&posts, &HashMap::new(), &asked);
+    assert_eq!(kinds(&rows), vec!["unread", "system"]);
+}
+
 /// An unknown type must still read as English rather than as a slug: the shell
 /// was printing the raw type with its underscores swapped for spaces.
 #[test]
