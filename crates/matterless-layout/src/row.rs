@@ -1176,27 +1176,68 @@ pub fn lay_out_opened(fonts: &mut Fonts, row: &Row, theme: &Theme, opened: bool)
         // the planner already worked out, and reserving exactly them means a
         // picture arriving moves nothing.
         //
-        // One block per file, stacked. Laying them side by side is a gallery,
-        // which is a later decision about arrangement rather than about height.
+        // One block per file, in file order -- the nth block is the nth
+        // file, which both the drawing and the hit test rely on.
+        //
+        // Pictures are packed along a shelf and wrap onto the next when one
+        // will not take another: two screenshots stacked took two screenfuls
+        // where side by side they take one, which is the whole reason. Each
+        // keeps the size the server gave it rather than being squared off
+        // into a cell -- nothing is cropped and nothing is scaled, so the
+        // reserved height stays exactly right.
+        //
+        // A card is a line with a name on it rather than a thumbnail, so it
+        // takes a shelf to itself: two beside each other are two truncated
+        // names.
+        let room = theme.text_width();
+        // Where the next picture starts, and the tallest so far on this shelf.
+        let mut along = 0.0_f32;
+        let mut tallest = 0.0_f32;
+        let close_the_shelf = |y: &mut f32, along: &mut f32, tallest: &mut f32| {
+            if *tallest > 0.0 {
+                *y += *tallest + theme.block_gap;
+            }
+            *along = 0.0;
+            *tallest = 0.0;
+        };
         for file in post.map(|post| post.files.as_slice()).unwrap_or(&[]) {
-            let height = if file.image || file.video {
-                file.box_height.max(0) as f32
-            } else {
-                // A file card: a fixed row with a name and a size on it.
-                theme.card_height
-            };
+            if !(file.image || file.video) {
+                close_the_shelf(&mut y, &mut along, &mut tallest);
+                blocks.push(Block {
+                    y,
+                    x: 0.0,
+                    height: theme.card_height,
+                    lines: 0,
+                    kind: Kind::Attachment,
+                    spans: Vec::new(),
+                    size: theme.body_size,
+                    wrap: (file.box_width.max(0) as f32).min(room),
+                });
+                y += theme.card_height + theme.block_gap;
+                continue;
+            }
+
+            let width = (file.box_width.max(0) as f32).min(room);
+            let height = file.box_height.max(0) as f32;
+            // Never on an empty shelf: a picture as wide as the column has to
+            // go somewhere, and starting a shelf for it would never end.
+            if along > 0.0 && along + width > room {
+                close_the_shelf(&mut y, &mut along, &mut tallest);
+            }
             blocks.push(Block {
                 y,
-                x: 0.0,
+                x: along,
                 height,
                 lines: 0,
                 kind: Kind::Attachment,
                 spans: Vec::new(),
                 size: theme.body_size,
-                wrap: (file.box_width.max(0) as f32).min(theme.text_width()),
+                wrap: width,
             });
-            y += height + theme.block_gap;
+            along += width + theme.block_gap;
+            tallest = tallest.max(height);
         }
+        close_the_shelf(&mut y, &mut along, &mut tallest);
     }
 
     // What a webhook sent, which for a great many posts here *is* the message:
@@ -2436,10 +2477,11 @@ mod tests {
         assert!(laid.height >= block.y + block.height);
     }
 
-    /// Two pictures are two blocks, stacked, and the row is tall enough for
-    /// both.
+    /// Two pictures sit beside each other, because two stacked took two
+    /// screenfuls where side by side they take one. Each keeps the size the
+    /// server gave it, and the row is tall enough for the taller of them.
     #[test]
-    fn every_attachment_gets_its_own_room() {
+    fn pictures_share_a_shelf() {
         let mut fonts = Fonts::new();
         let theme = Theme::default();
         let mut with = post(vec![]);
@@ -2450,11 +2492,104 @@ mod tests {
             .iter()
             .filter(|block| block.kind == Kind::Attachment)
             .collect();
+
+        assert_eq!(blocks.len(), 2, "a block each, in file order");
+        assert_eq!((blocks[0].wrap, blocks[0].height), (300.0, 200.0));
+        assert_eq!((blocks[1].wrap, blocks[1].height), (120.0, 90.0));
+        assert_eq!(blocks[0].y, blocks[1].y, "the same shelf");
+        assert_eq!(blocks[0].x, 0.0);
+        assert_eq!(
+            blocks[1].x,
+            300.0 + theme.block_gap,
+            "the second starts where the first ends"
+        );
+        assert!(
+            laid.height >= blocks[0].y + 200.0,
+            "as tall as the taller of them"
+        );
+    }
+
+    /// A shelf that will not take another wraps, and the next one clears the
+    /// tallest above it rather than the last one along.
+    #[test]
+    fn a_shelf_that_is_full_wraps_under_the_tallest_on_it() {
+        let mut fonts = Fonts::new();
+        let theme = Theme::default();
+        let room = theme.text_width();
+        let wide = (room / 2.0) as i32 - 10;
+        let mut with = post(vec![]);
+        with.files = vec![
+            picture("f1", wide, 300),
+            picture("f2", wide, 80),
+            picture("f3", wide, 50),
+        ];
+        let laid = lay_out(&mut fonts, &Row::Post { post: with }, &theme);
+        let blocks: Vec<&Block> = laid
+            .blocks
+            .iter()
+            .filter(|block| block.kind == Kind::Attachment)
+            .collect();
+
+        assert_eq!(blocks[0].y, blocks[1].y, "two fit");
+        assert_eq!(
+            blocks[2].y,
+            blocks[0].y + 300.0 + theme.block_gap,
+            "the third clears the 300 above it, not the 80"
+        );
+        assert_eq!(blocks[2].x, 0.0, "and starts a shelf of its own");
+        assert!(laid.height >= blocks[2].y + 50.0);
+    }
+
+    /// A picture as wide as the column has to go somewhere: it takes a shelf
+    /// alone rather than looking for one it fits on and never finding it.
+    #[test]
+    fn a_picture_too_wide_to_share_still_gets_a_shelf() {
+        let mut fonts = Fonts::new();
+        let theme = Theme::default();
+        let mut with = post(vec![]);
+        with.files = vec![picture("f1", 4000, 100), picture("f2", 4000, 120)];
+        let laid = lay_out(&mut fonts, &Row::Post { post: with }, &theme);
+        let blocks: Vec<&Block> = laid
+            .blocks
+            .iter()
+            .filter(|block| block.kind == Kind::Attachment)
+            .collect();
+
         assert_eq!(blocks.len(), 2);
-        assert_eq!(blocks[0].height, 200.0);
-        assert_eq!(blocks[1].height, 90.0);
-        assert!(blocks[1].y >= blocks[0].y + blocks[0].height);
-        assert!(laid.height >= blocks[1].y + blocks[1].height);
+        for block in &blocks {
+            assert_eq!(block.x, 0.0);
+            assert_eq!(block.wrap, theme.text_width());
+        }
+        assert!(blocks[1].y >= blocks[0].y + 100.0, "one under the other");
+    }
+
+    /// A card is a line with a name on it rather than a thumbnail, so it takes
+    /// a shelf to itself: two beside each other are two truncated names.
+    #[test]
+    fn a_card_takes_a_shelf_to_itself() {
+        let mut fonts = Fonts::new();
+        let theme = Theme::default();
+        let mut document = picture("f2", 0, 0);
+        document.image = false;
+        document.name = "notes.pdf".into();
+        let mut with = post(vec![]);
+        with.files = vec![picture("f1", 200, 150), document, picture("f3", 200, 90)];
+        let laid = lay_out(&mut fonts, &Row::Post { post: with }, &theme);
+        let blocks: Vec<&Block> = laid
+            .blocks
+            .iter()
+            .filter(|block| block.kind == Kind::Attachment)
+            .collect();
+
+        assert_eq!(blocks.len(), 3);
+        assert!(blocks[1].y >= blocks[0].y + 150.0, "under the picture");
+        assert_eq!(blocks[1].x, 0.0);
+        assert_eq!(blocks[1].height, theme.card_height);
+        assert!(
+            blocks[2].y >= blocks[1].y + theme.card_height,
+            "and the picture after it starts again below the card"
+        );
+        assert_eq!(blocks[2].x, 0.0);
     }
 
     /// A picture wider than the column is drawn no wider than the column.

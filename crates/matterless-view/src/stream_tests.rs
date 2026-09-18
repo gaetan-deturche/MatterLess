@@ -987,6 +987,86 @@ fn a_picture_is_drawn_over_its_own_placeholder() {
     );
 }
 
+/// Two pictures are drawn beside each other, and each where its own block
+/// says.
+///
+/// The layout packs them along a shelf now; the drawing used to place every
+/// picture at the left edge of the column and would have stacked them on top
+/// of one another -- both drawn in the same place, and a press landing on
+/// whichever was tested first.
+#[test]
+fn two_pictures_are_drawn_side_by_side() {
+    use matterless_paint::{Painter, Palette, Piece, Scene};
+
+    let picture = |id: &str, width: i32, height: i32| matterless_render::FileRef {
+        id: id.into(),
+        name: format!("{id}.png"),
+        extension: "png".into(),
+        size: 4096,
+        mime_type: "image/png".into(),
+        width: 1280,
+        height: 720,
+        image: true,
+        video: false,
+        variant: matterless_render::ImageVariant::Thumb,
+        mini_preview: None,
+        box_width: width,
+        box_height: height,
+        archived: false,
+    };
+
+    let mut fonts = Fonts::new();
+    let mut painter = Painter::new();
+    let mut scene = Scene::default();
+    let mut shown = post("p1", "");
+    shown.files = vec![picture("f1", 120, 100), picture("f2", 90, 60)];
+
+    let mut stream = Stream::new("stream");
+    stream.rows = vec![Row::Post { post: shown }];
+    stream.lay_out(&mut fonts, panel().width);
+    stream.draw(
+        &mut crate::sidebar::Canvas {
+            scene: &mut scene,
+            painter: &mut painter,
+            fonts: &mut fonts,
+            palette: &Palette::default(),
+        },
+        panel(),
+        &Input::default(),
+        &std::collections::HashMap::new(),
+    );
+
+    let box_of = |wanted: &str| {
+        scene
+            .layers
+            .iter()
+            .flat_map(|layer| layer.pieces.iter())
+            .find_map(|piece| match piece {
+                Piece::Image {
+                    x,
+                    y,
+                    width,
+                    height,
+                    key,
+                    ..
+                } if key == wanted => Some((*x, *y, *width, *height)),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{wanted} is drawn"))
+    };
+
+    let (first_x, first_y, first_width, _) = box_of("thumb/f1");
+    let (second_x, second_y, second_width, _) = box_of("thumb/f2");
+
+    assert_eq!(first_y, second_y, "the same shelf");
+    assert!(
+        second_x >= first_x + first_width,
+        "the second starts where the first ends: {second_x} against {first_x} + {first_width}"
+    );
+    assert_eq!(first_width, 120.0);
+    assert_eq!(second_width, 90.0);
+}
+
 #[test]
 fn a_conversation_opens_at_the_bottom() {
     let mut fonts = Fonts::new();
