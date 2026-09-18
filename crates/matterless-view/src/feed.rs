@@ -46,6 +46,26 @@ pub fn open(path: &Path) -> Result<Store, String> {
 }
 
 /// The channel with the most recent message, which is the one worth opening.
+/// Where the reader was when the window last closed, if they can still go
+/// back there.
+///
+/// Checked rather than trusted: a channel left, archived or forgotten since is
+/// a channel this would open onto an old conversation nobody can post to. The
+/// membership is asked with the id the row was written by, because at this
+/// point in the start-up nobody has signed in and the window does not yet know
+/// who it is.
+///
+/// Answered from the store, so it costs no network at all -- which is the
+/// whole point of opening where somebody left off rather than a second later.
+fn where_they_were(store: &Store) -> Option<String> {
+    let (who, channel) = store.left_off().ok()??;
+    let still_there = store
+        .channel(&channel)
+        .ok()?
+        .is_some_and(|c| c.delete_at == 0);
+    (still_there && store.is_member(&channel, &who).unwrap_or(false)).then_some(channel)
+}
+
 fn busiest(store: &Store) -> Option<String> {
     // Every channel the reader is in, newest first. The user id is only used to
     // join the membership, and an unknown one simply finds nothing -- which is
@@ -197,7 +217,11 @@ pub fn rows_from(
         return Err(format!("{} is not a database", path.display()));
     }
     let store = Store::open(path).map_err(|error| format!("open {}: {error}", path.display()))?;
+    // An id on the command line beats everything: it is somebody saying which
+    // conversation to look at. Then where they left off, then the busiest
+    // channel, which is all a first run has to go on.
     let channel_id = channel_id
+        .or_else(|| where_they_were(&store))
         .or_else(|| busiest(&store))
         .ok_or_else(|| "no channel in the store; pass one as an argument".to_string())?;
 

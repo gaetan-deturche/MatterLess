@@ -86,7 +86,7 @@ const MIGRATION_7: &str = "
 ALTER TABLE posts ADD COLUMN is_pinned INTEGER NOT NULL DEFAULT 0;
 ";
 
-pub const TARGET_VERSION: i64 = 7;
+pub const TARGET_VERSION: i64 = 8;
 
 // Migration 1 is frozen: the shell now keeps a real database with real history,
 // so every change gets its own step from here.
@@ -271,7 +271,8 @@ fn missing_columns(connection: &Connection) -> rusqlite::Result<Vec<String>> {
 }
 
 fn missing_tables(connection: &Connection) -> rusqlite::Result<Vec<String>> {
-    const REQUIRED: [&str; 11] = [
+    const REQUIRED: [&str; 12] = [
+        "left_off",
         "posts",
         "channels",
         "channel_members",
@@ -308,6 +309,37 @@ pub fn prepare(connection: &Connection) -> rusqlite::Result<()> {
     connection.pragma_update(None, "busy_timeout", 5000)?;
     migrate(connection)
 }
+
+/// Where the reader left off, so the window opens there again.
+///
+/// Ours and not the server's, which took a measurement to establish. The
+/// obvious place was a Mattermost preference, and the server does send a
+/// `channel_open_time` for every conversation -- but counted against this
+/// account it is written for direct and group messages only, and its newest
+/// entry was four days stale while the window sat in a channel. It records
+/// when a direct message was *opened*, for deciding when to hide a quiet one,
+/// and it is not a record of where anybody was.
+///
+/// `channel_members.last_viewed_at` is no better: it is set to the newest post
+/// in the channel rather than to the moment of reading -- deliberately, so it
+/// can be compared against post times -- so the greatest of them is the
+/// channel with the newest message anybody has read, which in a quiet
+/// conversation is never the one just left.
+///
+/// So it is kept here. One row, because a window is in one place, and it holds
+/// the reader it belongs to so that a store handed to somebody else answers
+/// nothing rather than answering wrongly.
+const MIGRATION_8: &str = "
+CREATE TABLE IF NOT EXISTS left_off (
+    id         INTEGER PRIMARY KEY CHECK (id = 1),
+    user_id    TEXT NOT NULL DEFAULT '',
+    channel_id TEXT NOT NULL DEFAULT '',
+    -- Local milliseconds, and the only local clock in this database. Never
+    -- compared against a post time; it is here so that somebody reading the
+    -- file can see when the window last wrote it.
+    at         INTEGER NOT NULL DEFAULT 0
+);
+";
 
 fn migrate(connection: &Connection) -> rusqlite::Result<()> {
     let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
@@ -360,6 +392,9 @@ fn migrate(connection: &Connection) -> rusqlite::Result<()> {
     // is not idempotent, so asking first is the only safe form.
     if absent_columns.iter().any(|name| name == "posts.is_pinned") {
         connection.execute_batch(MIGRATION_7)?;
+    }
+    if version < 8 || missing.iter().any(|name| name == "left_off") {
+        connection.execute_batch(MIGRATION_8)?;
     }
     connection.pragma_update(None, "user_version", TARGET_VERSION)?;
     tracing::info!(from = version, to = TARGET_VERSION, "store migrated");

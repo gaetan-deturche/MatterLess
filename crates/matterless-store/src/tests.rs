@@ -1420,3 +1420,87 @@ fn a_local_search_honours_from_in_and_dates() {
     // And the FTS syntax hazard is still handled: this must run, not throw.
     assert!(found("say \"hello\" -Wall").is_empty());
 }
+
+/// Where the reader was, so the window opens there again.
+///
+/// Kept here rather than read from a Mattermost preference, which was the
+/// first plan and does not work: the server's `channel_open_time` is written
+/// for direct messages only and records when one was opened for the purpose of
+/// hiding a quiet one, and `channel_members.last_viewed_at` is set to the
+/// newest post in the channel rather than to the moment of reading -- so the
+/// greatest of them is the channel with the newest message anybody has read,
+/// which in a quiet conversation is never the one just left.
+#[test]
+fn the_window_remembers_where_it_was() {
+    let store = store();
+    assert_eq!(store.left_off().unwrap(), None, "a first run knows nothing");
+
+    store.leave_off("me", "c1", 1_000).unwrap();
+    assert_eq!(
+        store.left_off().unwrap(),
+        Some(("me".to_string(), "c1".to_string()))
+    );
+
+    // One row: a window is in one place, and the last one written is where it
+    // is.
+    store.leave_off("me", "c2", 2_000).unwrap();
+    assert_eq!(
+        store.left_off().unwrap(),
+        Some(("me".to_string(), "c2".to_string()))
+    );
+    let rows: i64 = store
+        .lock()
+        .query_row("SELECT COUNT(*) FROM left_off", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(rows, 1);
+}
+
+/// It carries who it belongs to, so a store opened by somebody else answers
+/// nothing rather than answering wrongly.
+#[test]
+fn what_was_left_off_says_whose_it_is() {
+    let store = store();
+    store.leave_off("ada", "c1", 1_000).unwrap();
+    let (who, _) = store.left_off().unwrap().expect("a row");
+    assert_eq!(who, "ada");
+}
+
+/// Being in a channel is not the same as the store having heard of it: the
+/// sidebar's own query is a LEFT JOIN over every channel there is, so it
+/// answers "exists" rather than "yours".
+#[test]
+fn membership_is_asked_of_the_member_rows() {
+    let store = store();
+    store
+        .upsert_channels(&[Channel {
+            id: "c1".into(),
+            team_id: "t1".into(),
+            channel_type: "O".into(),
+            name: "town".into(),
+            display_name: "Town Square".into(),
+            total_msg_count: 0,
+            total_msg_count_root: 0,
+            last_post_at: 0,
+            delete_at: 0,
+        }])
+        .unwrap();
+    assert!(
+        !store.is_member("c1", "me").unwrap(),
+        "heard of is not joined"
+    );
+
+    store
+        .upsert_channel_members(&[ChannelMember {
+            channel_id: "c1".into(),
+            user_id: "me".into(),
+            last_viewed_at: 0,
+            msg_count: 0,
+            msg_count_root: 0,
+            mention_count: 0,
+            mention_count_root: 0,
+            notify_props: HashMap::new(),
+        }])
+        .unwrap();
+    assert!(store.is_member("c1", "me").unwrap());
+    assert!(!store.is_member("c1", "somebody-else").unwrap());
+}
