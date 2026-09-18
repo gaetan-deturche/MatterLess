@@ -181,7 +181,9 @@ pub(crate) mod platform {
                 return None;
             }
             let into = std::slice::from_raw_parts_mut(bits as *mut u8, pixels.len());
-            for (out, pixel) in into.chunks_exact_mut(4).zip(pixels.chunks_exact(4)) {
+            let (into, _) = into.as_chunks_mut::<4>();
+            let (from, _) = pixels.as_chunks::<4>();
+            for (out, pixel) in into.iter_mut().zip(from) {
                 let alpha = u32::from(pixel[3]);
                 let premultiplied = |channel: u8| ((u32::from(channel) * alpha) / 255) as u8;
                 out[0] = premultiplied(pixel[2]);

@@ -125,9 +125,9 @@ fn a_conversation_is_drawn_where_it_was_measured() {
 
     // Something was actually drawn: a canvas of pure background means the
     // glyphs went somewhere else, which no height assertion would notice.
-    let drawn = canvas
-        .pixels
-        .chunks_exact(4)
+    let (pixels, _) = canvas.pixels.as_chunks::<4>();
+    let drawn = pixels
+        .iter()
         .filter(|pixel| pixel[0..3] != palette.ground[0..3])
         .count();
     assert!(
