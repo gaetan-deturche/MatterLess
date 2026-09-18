@@ -1452,6 +1452,9 @@ impl App {
             .collect();
         // Whoever is in view, in the conversation and in the thread beside it.
         wanted.extend(self.stream.who_is_here(self.stream_rect()));
+        // And whoever the switcher is offering, who may be somebody this
+        // reader has never written to and so is in no conversation at all.
+        wanted.extend(self.switcher.who_is_here());
         if let (Some(within), Some(thread)) = (self.thread_stream_rect(), self.thread.as_ref()) {
             wanted.extend(thread.who_is_here(within));
         }
@@ -2795,6 +2798,7 @@ impl App {
         wanted.extend(self.profile.wants());
         wanted.extend(self.rail.wants());
         wanted.extend(self.sidebar.wants());
+        wanted.extend(self.switcher.wants());
         for (key, width, height) in wanted {
             if self.asked.insert(key.clone()) {
                 link.send(matterless_view::live::Ask::Fetch { key, width, height });
@@ -4645,7 +4649,7 @@ impl App {
                 fonts: &mut self.fonts,
                 palette: &self.palette,
             };
-            self.switcher.draw(&mut canvas, stream);
+            self.switcher.draw(&mut canvas, stream, &self.presence);
             self.switcher.query.draw(&mut canvas, field, true);
         }
         if let Some(pane) = self.aside_rect() {

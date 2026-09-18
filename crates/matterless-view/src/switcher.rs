@@ -27,6 +27,15 @@ const PADDING: f32 = 10.0;
 const WIDTH: f32 = 560.0;
 /// What the stylesheet cuts a dialog's corners by.
 const PANEL: f32 = 8.0;
+/// A face on a row, and the presence dot on its corner with the ring that
+/// holds it there -- the sidebar's own shape, because the two lists show the
+/// same people and a face that changed size between them would read as two
+/// different pictures.
+const FACE: f32 = 20.0;
+const DOT: f32 = 7.0;
+const RING: f32 = 1.5;
+/// Where a name starts: past the face, or past the hash that stands in for one.
+const GUTTER: f32 = FACE + 8.0;
 
 /// How many letters before the server is asked. One or two match half a team,
 /// and the reader is still typing.
@@ -115,6 +124,20 @@ pub enum Chose {
     These(Vec<Match>),
 }
 
+/// The person a row is about, for the face and the dot beside their name.
+///
+/// One thing rather than two optional fields: a picture is named by who it is
+/// of *and* when they last changed it, and half of that is a picture nobody
+/// can ask for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Face {
+    pub user_id: String,
+    /// When they last changed their picture, which is part of what it is
+    /// called -- so a new photograph is a new name and nothing has to be
+    /// evicted by hand.
+    pub avatar_at: i64,
+}
+
 /// One match: what it names, how to say it, and what to do with it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Match {
@@ -122,6 +145,9 @@ pub struct Match {
     pub label: String,
     pub direct: bool,
     pub reach: Reach,
+    /// Whose face to show. `None` for a channel, and for a group message,
+    /// which has no single person to be around or not.
+    pub face: Option<Face>,
 }
 
 /// The quick switcher, open or shut.
@@ -215,6 +241,40 @@ impl Switcher {
     }
 
     /// The panel, centred across the top where the eye already is.
+    /// The faces this list needs, for whoever collects the frame's pictures.
+    ///
+    /// At the size the conversation asks for them: an atlas holds one picture
+    /// per name, so a second size here would mean whichever panel got there
+    /// first decided it for both.
+    pub fn wants(&self) -> Vec<(String, u32, u32)> {
+        self.showing()
+            .map(|face| {
+                (
+                    crate::stream::avatar_key(&face.user_id, face.avatar_at),
+                    crate::stream::AVATAR as u32,
+                    crate::stream::AVATAR as u32,
+                )
+            })
+            .collect()
+    }
+
+    /// Everybody this list is showing, so their presence can be asked for.
+    ///
+    /// Asked rather than left to what is already known: the sidebar's own
+    /// conversations are covered, but somebody found by searching the server
+    /// has no status held at all -- and a dot missing looks exactly like a dot
+    /// that is grey.
+    pub fn who_is_here(&self) -> Vec<String> {
+        self.showing().map(|face| face.user_id.clone()).collect()
+    }
+
+    fn showing(&self) -> impl Iterator<Item = &Face> {
+        self.found
+            .iter()
+            .chain(self.picked.iter())
+            .filter_map(|one| one.face.as_ref())
+    }
+
     pub fn rect(&self, within: Rect) -> Rect {
         let height = PADDING * 2.0
             + self.query.height()
@@ -242,7 +302,12 @@ impl Switcher {
             .filter(|_| self.asking.wants_channels())
             .filter_map(|entry| match entry {
                 Entry::Channel {
-                    id, label, direct, ..
+                    id,
+                    label,
+                    direct,
+                    counterpart,
+                    counterpart_avatar_at,
+                    ..
                 } => {
                     // An empty query lists the channels in the order the
                     // sidebar already put them, which is the reader's own.
@@ -258,6 +323,12 @@ impl Switcher {
                             label: label.clone(),
                             direct: *direct,
                             reach: Reach::Open,
+                            // The same name the sidebar and the conversation
+                            // ask for it under, so one fetch serves all three.
+                            face: counterpart.as_ref().map(|user_id| Face {
+                                user_id: user_id.clone(),
+                                avatar_at: *counterpart_avatar_at,
+                            }),
                         },
                     ))
                 }
@@ -401,7 +472,12 @@ impl Switcher {
         }
     }
 
-    pub fn draw(&self, into: &mut Canvas<'_>, within: Rect) {
+    pub fn draw(
+        &self,
+        into: &mut Canvas<'_>,
+        within: Rect,
+        presence: &std::collections::HashMap<String, String>,
+    ) {
         if !self.open {
             return;
         }
@@ -456,10 +532,59 @@ impl Switcher {
             if at == self.chosen {
                 scene.fill(panel.x, y, panel.width, ROW, palette.ground);
             }
+            let left = panel.x + PADDING + 4.0;
+            match &one.face {
+                // A person is their face. The `@` this used to draw said the
+                // same thing in one character, and said it about somebody the
+                // reader could not recognise.
+                Some(face) => {
+                    let box_of = Rect::new(left, y + (ROW - FACE) / 2.0, FACE, FACE);
+                    scene.extend([matterless_paint::Piece::Image {
+                        x: box_of.x,
+                        y: box_of.y,
+                        width: FACE,
+                        height: FACE,
+                        key: crate::stream::avatar_key(&face.user_id, face.avatar_at),
+                        // `border-radius: 50%`, which is half its side.
+                        radius: FACE / 2.0,
+                    }]);
+                    // After the face, because the scene is painted in the
+                    // order it is built and a dot drawn first is a dot the
+                    // picture lands on top of -- which the sidebar did once.
+                    if let Some(lit) = presence
+                        .get(&face.user_id)
+                        .and_then(|status| crate::sidebar::dot(status, palette))
+                    {
+                        let at = (box_of.x + FACE - DOT + 1.0, box_of.y + FACE - DOT + 1.0);
+                        scene.rounded(
+                            at.0 - RING,
+                            at.1 - RING,
+                            DOT + RING * 2.0,
+                            DOT + RING * 2.0,
+                            palette.surface,
+                            (DOT + RING * 2.0) / 2.0,
+                        );
+                        scene.rounded(at.0, at.1, DOT, DOT, lit, DOT / 2.0);
+                    }
+                }
+                // A channel keeps its hash, in the room a face would have
+                // taken: two kinds of row whose names do not line up reads as
+                // broken, which is why the sidebar indents its channels too.
+                None => {
+                    let glyphs = painter.run(
+                        fonts,
+                        "#",
+                        left + (FACE - 7.0) / 2.0,
+                        y + 6.0,
+                        Run::label(f32::MAX),
+                    );
+                    scene.glyphs(glyphs, palette.faint, palette.faint);
+                }
+            }
             let glyphs = painter.run(
                 fonts,
-                &format!("{} {}", if one.direct { "@" } else { "#" }, one.label),
-                panel.x + PADDING + 4.0,
+                &one.label,
+                left + GUTTER,
                 y + 6.0,
                 Run::label(f32::MAX),
             );
@@ -477,6 +602,204 @@ impl Switcher {
 #[cfg(test)]
 mod tests {
     /// What the reader is already in comes first, always. Somewhere they visit
+    /// The face and its dot are actually drawn, and in that order.
+    ///
+    /// A dot drawn before the picture is a dot the picture lands on top of --
+    /// the scene is painted in the order it is built, and the sidebar made
+    /// exactly this mistake once already.
+    #[test]
+    fn a_face_is_drawn_with_its_dot_over_it() {
+        use super::*;
+        use matterless_paint::{Painter, Palette, Piece, Scene};
+
+        let mut fonts = matterless_layout::Fonts::new();
+        let mut painter = Painter::new();
+        let mut scene = Scene::default();
+        let palette = Palette::default();
+        let mut switcher = Switcher::new();
+        switcher.open = true;
+        switcher.found = vec![
+            Match {
+                id: "u1".into(),
+                label: "ada".into(),
+                direct: true,
+                reach: Reach::Direct,
+                face: Some(Face {
+                    user_id: "u1".into(),
+                    avatar_at: 3,
+                }),
+            },
+            Match {
+                id: "c1".into(),
+                label: "dev".into(),
+                direct: false,
+                reach: Reach::Open,
+                face: None,
+            },
+        ];
+        let mut presence = std::collections::HashMap::new();
+        presence.insert("u1".to_string(), "online".to_string());
+
+        switcher.draw(
+            &mut Canvas {
+                scene: &mut scene,
+                painter: &mut painter,
+                fonts: &mut fonts,
+                palette: &palette,
+            },
+            Rect::new(0.0, 0.0, 900.0, 700.0),
+            &presence,
+        );
+
+        let pieces: Vec<&Piece> = scene
+            .layers
+            .iter()
+            .flat_map(|layer| layer.pieces.iter())
+            .collect();
+        let face = pieces
+            .iter()
+            .position(|piece| {
+                matches!(piece, Piece::Image { key, .. } if key == &crate::stream::avatar_key("u1", 3))
+            })
+            .expect("the face is drawn");
+        // The dot is the first round fill in the online colour after it.
+        let lit = crate::sidebar::dot("online", &palette).expect("online has a colour");
+        let dot = pieces
+            .iter()
+            .position(|piece| matches!(piece, Piece::Fill { colour, .. } if *colour == lit))
+            .expect("the dot is drawn");
+        assert!(
+            face < dot,
+            "the face is painted at {face} and the dot over it at {dot}"
+        );
+        assert_eq!(
+            pieces
+                .iter()
+                .filter(|piece| matches!(piece, Piece::Image { .. }))
+                .count(),
+            1,
+            "one face: the channel row has none"
+        );
+    }
+
+    /// A person's row carries their face, and a channel's carries none.
+    ///
+    /// Every row used to be one line of text with an `@` or a `#` in front of
+    /// it, which said person-or-channel in one character and said nothing
+    /// about *which* person -- the one thing a reader is looking for when they
+    /// open this.
+    #[test]
+    fn a_person_brings_their_face_and_a_channel_does_not() {
+        use super::*;
+        let mut switcher = Switcher::new();
+        switcher.narrow(&[
+            Entry::Channel {
+                id: "d1".into(),
+                label: "ada".into(),
+                unread: 0,
+                mentions: 0,
+                muted: false,
+                direct: true,
+                private: false,
+                counterpart: Some("u-ada".into()),
+                counterpart_avatar_at: 7,
+            },
+            Entry::Channel {
+                id: "c1".into(),
+                label: "dev".into(),
+                unread: 0,
+                mentions: 0,
+                muted: false,
+                direct: false,
+                private: false,
+                counterpart: None,
+                counterpart_avatar_at: 0,
+            },
+        ]);
+
+        let ada = switcher
+            .found
+            .iter()
+            .find(|one| one.id == "d1")
+            .expect("the person");
+        let face = ada.face.as_ref().expect("with a face");
+        assert_eq!(face.user_id, "u-ada");
+        assert_eq!(
+            face.avatar_at, 7,
+            "and when they last changed it, or the picture has no name"
+        );
+
+        let dev = switcher
+            .found
+            .iter()
+            .find(|one| one.id == "c1")
+            .expect("the channel");
+        assert!(dev.face.is_none(), "a channel has no single face");
+    }
+
+    /// A group message has no single person to be around or not, so it gets no
+    /// face either -- the sidebar draws a mark for the same reason.
+    #[test]
+    fn a_group_has_no_one_face() {
+        use super::*;
+        let mut switcher = Switcher::new();
+        switcher.narrow(&[Entry::Channel {
+            id: "g1".into(),
+            label: "ada, bob, cal".into(),
+            unread: 0,
+            mentions: 0,
+            muted: false,
+            // A group is direct without being one person.
+            direct: true,
+            private: false,
+            counterpart: None,
+            counterpart_avatar_at: 0,
+        }]);
+        assert!(switcher.found[0].face.is_none());
+    }
+
+    /// The pictures it needs, and the people to ask after -- both come out of
+    /// what it is showing.
+    ///
+    /// Asked rather than left to what the window already knows: somebody found
+    /// by searching the server is in no conversation, so nothing else would
+    /// ever ask for their status, and a dot missing looks exactly like a dot
+    /// that is grey.
+    #[test]
+    fn it_asks_for_the_faces_and_the_people_it_shows() {
+        use super::*;
+        let mut switcher = Switcher::new();
+        switcher.found = vec![
+            Match {
+                id: "u1".into(),
+                label: "ada".into(),
+                direct: true,
+                reach: Reach::Direct,
+                face: Some(Face {
+                    user_id: "u1".into(),
+                    avatar_at: 3,
+                }),
+            },
+            Match {
+                id: "c1".into(),
+                label: "dev".into(),
+                direct: false,
+                reach: Reach::Open,
+                face: None,
+            },
+        ];
+
+        assert_eq!(switcher.who_is_here(), vec!["u1".to_string()]);
+        let wanted = switcher.wants();
+        assert_eq!(wanted.len(), 1, "the channel asks for nothing");
+        assert_eq!(
+            wanted[0].0,
+            crate::stream::avatar_key("u1", 3),
+            "under the name the sidebar and the conversation use, so one fetch \
+             serves all three"
+        );
+    }
+
     /// every day must never be pushed down the list by a channel they have
     /// never opened.
     #[test]
@@ -488,6 +811,7 @@ mod tests {
             label: "dev far away -- join".into(),
             direct: false,
             reach: Reach::Join,
+            face: None,
         }];
         switcher.narrow(&[Entry::Channel {
             id: "near".into(),
@@ -516,6 +840,7 @@ mod tests {
             label: "something".into(),
             direct: false,
             reach: Reach::Join,
+            face: None,
         }];
         switcher.offer("cur", stale.clone());
         assert!(switcher.offered.is_empty());
@@ -679,6 +1004,11 @@ mod starting {
                 label: format!("person{at}"),
                 direct: true,
                 reach: Reach::Direct,
+                // Everybody the server finds has one; these stand in for them.
+                face: Some(Face {
+                    user_id: format!("u{at}"),
+                    avatar_at: 0,
+                }),
             })
             .collect()
     }

@@ -1993,6 +1993,8 @@ async fn discover(
                 label: format!("{} -- join", channel.display_name),
                 direct: false,
                 reach: crate::switcher::Reach::Join,
+                // A channel has no single face, whoever is in it.
+                face: None,
             });
             if found.len() >= DISCOVERED as usize {
                 break;
@@ -2020,10 +2022,14 @@ async fn discover(
             continue;
         }
         found.push(crate::switcher::Match {
-            id: person.id,
+            id: person.id.clone(),
             label: format!("@{} -- message", person.username),
             direct: true,
             reach: crate::switcher::Reach::Direct,
+            face: Some(crate::switcher::Face {
+                user_id: person.id,
+                avatar_at: person.last_picture_update,
+            }),
         });
     }
     found
