@@ -199,9 +199,10 @@ fn install_dir() -> Option<std::path::PathBuf> {
         if got.is_err() {
             return None;
         }
-        let wide: Vec<u16> = raw
-            .chunks_exact(2)
-            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+        let (pairs, _) = raw.as_chunks::<2>();
+        let wide: Vec<u16> = pairs
+            .iter()
+            .map(|pair| u16::from_le_bytes(*pair))
             .take_while(|unit| *unit != 0)
             .collect();
         Some(std::path::PathBuf::from(String::from_utf16_lossy(&wide)))
