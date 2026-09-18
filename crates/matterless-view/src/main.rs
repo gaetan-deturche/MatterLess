@@ -806,7 +806,7 @@ impl App {
     /// because they are all answers to "show me messages from somewhere else"
     /// and two of them side by side would be two answers to one question.
     fn aside_rect(&self) -> Option<Rect> {
-        (self.search.open || self.listing.open())
+        (self.search.open() || self.listing.open())
             .then(|| matterless_view::aside::rect(self.column_rect()))
     }
 
@@ -1581,6 +1581,31 @@ impl App {
     ///
     /// A direct message cannot be left -- the server would refuse -- so the
     /// button is not there rather than there and refused.
+    /// The field on the strip, when the strip is wide enough to hold one.
+    ///
+    /// `header::strip` takes the top of whatever it is given and is the same
+    /// rect applied twice, so asking from the column agrees with both the
+    /// drawing and the hit test.
+    fn strip_field(&self) -> Option<Rect> {
+        header::find(self.column_rect(), &self.header_offers())
+    }
+
+    /// Where the query is typed.
+    ///
+    /// The strip's own field while the list hangs under it, and the pane's
+    /// header once the pane is open -- because the pane covers the right of
+    /// the strip, measured: a 240-wide field at x 546 under a pane starting at
+    /// 682. A box a third hidden behind a panel is the bug this set out to
+    /// fix, wearing a different hat.
+    fn search_field(&self, pane: Rect) -> Rect {
+        match self.search.open() {
+            true => self.search.in_pane(pane),
+            false => self
+                .strip_field()
+                .unwrap_or_else(|| self.search.in_pane(pane)),
+        }
+    }
+
     fn header_offers(&self) -> Vec<header::Act> {
         let direct = self
             .sidebar
@@ -3162,9 +3187,22 @@ impl App {
             boxes.extend(self.thread_composer.boxes_in(body));
         }
         boxes.extend(self.picker.boxes(self.picked_near, self.picker_within()));
+        // The list under the strip has no pane of its own, so its boxes are
+        // placed from the column rather than from one.
+        if self.search.asking()
+            && let Some(field) = self.strip_field()
+        {
+            boxes.extend(self.search.boxes(matterless_view::search::Shown {
+                pane: matterless_view::aside::rect(self.column_rect()),
+                field,
+            }));
+        }
         if let Some(pane) = self.aside_rect() {
             boxes.extend(self.listing.boxes(pane));
-            boxes.extend(self.search.boxes(pane));
+            boxes.extend(self.search.boxes(matterless_view::search::Shown {
+                pane,
+                field: self.search_field(pane),
+            }));
         }
         boxes.extend(self.profile.boxes(self.stream_rect()));
         if let Some(row) = self.edited_row() {
@@ -3681,9 +3719,21 @@ impl App {
         // a result is a line out of context, and the context is the channel it
         // is read against. It keeps the keyboard while its own field has the
         // focus, and leaves the rest of the frame alone.
-        if self.search.open {
+        if self.search.busy() {
             let mut input = std::mem::take(&mut self.input);
             if input.struck(Key::Escape) {
+                self.search.hide(&mut input);
+                self.input = input;
+                return;
+            }
+            // A press anywhere but in the box or its list puts the list away.
+            // The reader is doing something else, and a panel hanging over the
+            // conversation they went back to is in the way.
+            if self.search.asking()
+                && let Some(pressed) = input.pressed()
+                && !pressed.starts_with(matterless_view::search::NAME)
+                && pressed != "header/find"
+            {
                 self.search.hide(&mut input);
                 self.input = input;
                 return;
@@ -3692,11 +3742,12 @@ impl App {
             let boxes = self.placed.clone();
             let store = self.store.clone();
             self.search.scrolled(&input, &boxes, pane);
+            let field = self.search_field(pane);
             let did = store.as_ref().and_then(|store| {
                 self.search.react(
                     &mut self.fonts,
                     &input,
-                    pane,
+                    matterless_view::search::Shown { pane, field },
                     &mut self.clipboard,
                     store,
                     &self.me,
@@ -3705,6 +3756,14 @@ impl App {
             if matches!(did, Some(matterless_view::search::Did::Close)) {
                 self.search.hide(&mut input);
                 self.input = input;
+                return;
+            }
+            // Return, with nothing picked out of the list: the rest of them.
+            if matches!(did, Some(matterless_view::search::Did::Widen)) {
+                self.search.widen(&mut input);
+                self.input = input;
+                self.react();
+                self.redraw();
                 return;
             }
             if let Some(matterless_view::search::Did::Open(hit)) = did {
@@ -4298,6 +4357,8 @@ impl App {
         // anything is said at the top of the sidebar now, where it belongs: it
         // is a fact about the connection rather than about the conversation.
         let on_strip = self.on_header();
+        let strip_field = self.strip_field();
+        let typed_in = self.search.asking() && strip_field.is_some();
         let mut header = Header::new(self.title());
         header.offered = self.header_offers();
         header.muted = self.muted();
@@ -4315,7 +4376,14 @@ impl App {
             fonts: &mut self.fonts,
             palette: &self.palette,
         };
-        header.draw(&mut canvas, strip, on_strip);
+        header.draw(&mut canvas, strip, on_strip, typed_in);
+        // Over the strip rather than in it. The strip draws a placeholder while
+        // the search is shut and leaves the room empty once it is open, so this
+        // is the box itself -- the one the reader clicked, with the caret in
+        // it, where the caret used to appear on the far side of the window.
+        if let Some(field) = strip_field.filter(|_| typed_in) {
+            self.search.query.draw(&mut canvas, field, true);
+        }
         drop(probe);
 
         let probe = matterless_view::timing::watch("  the stream", self.stream.rows.len(), "rows");
@@ -4377,7 +4445,9 @@ impl App {
                 fonts: &mut self.fonts,
                 palette: &self.palette,
             };
-            title.draw(&mut canvas, strip, on_strip);
+            // Never the box being typed into: the query is on the channel's
+            // own strip, and this one is the thread's title bar.
+            title.draw(&mut canvas, strip, on_strip, false);
 
             scene.clip_to(rows.x, rows.y, rows.width, rows.height);
             let mut canvas = Canvas {
@@ -4467,6 +4537,20 @@ impl App {
         drop(probe);
         let _probe = matterless_view::timing::watch("  the overlays", 0, "");
 
+        // The list under the strip's field, over the conversation: it hangs
+        // below a strip that clips its own drawing, so it is drawn out here
+        // where nothing cuts it off.
+        if let Some(field) = self.strip_field().filter(|_| self.search.asking()) {
+            scene.clip_to(0.0, 0.0, self.size.0 as f32, self.size.1 as f32);
+            let mut canvas = Canvas {
+                scene: &mut scene,
+                painter: &mut self.painter,
+                fonts: &mut self.fonts,
+                palette: &self.palette,
+            };
+            self.search.draw_droplist(&mut canvas, &self.input, field);
+        }
+
         // Last, and over the whole window: the switcher covers what it stands
         // in front of rather than sitting beside it.
         if self.switcher.open {
@@ -4491,9 +4575,9 @@ impl App {
                 palette: &self.palette,
             };
             self.listing.draw(&mut canvas, &self.input, pane);
-            let field = self.search.field(pane);
             self.search.draw(&mut canvas, &self.input, pane);
-            if self.search.open {
+            if self.search.open() {
+                let field = self.search.in_pane(pane);
                 self.search.query.draw(&mut canvas, field, true);
             }
         }
@@ -5235,7 +5319,13 @@ impl ApplicationHandler<Update> for App {
                 }
                 if down && self.input.chord(Key::Char('f')) {
                     let mut input = std::mem::take(&mut self.input);
-                    self.search.show(&mut self.fonts, &mut input);
+                    // The same thing the box does, when there is a box. On a
+                    // window too narrow for one there is nowhere to hang a
+                    // list, so the pane is the whole of the search.
+                    match self.strip_field().is_some() {
+                        true => self.search.peek(&mut self.fonts, &mut input),
+                        false => self.search.show(&mut self.fonts, &mut input),
+                    }
                     self.input = input;
                 }
                 if down {
@@ -5325,12 +5415,20 @@ impl ApplicationHandler<Update> for App {
                     .and_then(|name| name.strip_prefix("header/"))
                     .map(str::to_string)
                 {
-                    // The field opens the same panel the keystroke does, so
-                    // there is one search rather than two that drift.
+                    // The box on the strip is a real field: it takes the
+                    // keyboard and hangs what matched under it, and Return is
+                    // what asks for the pane. Somebody looking for one message
+                    // gets it without the window rearranging around them.
+                    //
+                    // Only while it is shut: a second click in it is a reader
+                    // putting the caret somewhere, and starting again would
+                    // throw away what they had typed.
                     if pressed == "find" {
-                        let mut input = std::mem::take(&mut self.input);
-                        self.search.show(&mut self.fonts, &mut input);
-                        self.input = input;
+                        if !self.search.busy() {
+                            let mut input = std::mem::take(&mut self.input);
+                            self.search.peek(&mut self.fonts, &mut input);
+                            self.input = input;
+                        }
                     } else if let Some(act) = header::Act::from_slug(&pressed) {
                         self.act_on_header(act);
                     }
