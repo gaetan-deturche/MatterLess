@@ -3952,6 +3952,28 @@ impl App {
             return;
         };
         let _open = matterless_view::timing::watch("opening a channel", 0, "");
+        // Written on the way in rather than on the way out, so a window that
+        // is killed still knows where somebody was. Nothing depends on it this
+        // run: it is read once, at the next start.
+        //
+        // Not before the session is known. The row carries who it belongs to
+        // and is checked against their membership when it is read back, so one
+        // written with nobody's id would be a row that can never be honoured
+        // -- and it would have written over the one from last time.
+        if !self.me.is_empty()
+            && channel != matterless_view::sidebar::THREADS
+            && let Err(error) = store.leave_off(
+                &self.me,
+                channel,
+                // Milliseconds, because every other time in this store is:
+                // `clock::now` answers seconds, and a column that quietly
+                // disagreed with the rest would read as 1970 to whoever
+                // looked at it next.
+                matterless_view::clock::now() * 1_000,
+            )
+        {
+            eprintln!("remembering where we are: {error}");
+        }
         self.recall_favourites();
         // A place in the conversation being left behind. The scroll check
         // would drop it anyway, and a row of one channel is not a row of

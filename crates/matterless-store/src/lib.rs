@@ -1905,6 +1905,52 @@ impl Store {
 
     // ---------------------------------------------------------- render cache
 
+    /// Remembers where the reader is, so the window can open there next time.
+    ///
+    /// Written on every channel opened rather than on the way out: a window
+    /// that is killed, or that crashes, still knows where somebody was.
+    pub fn leave_off(&self, user_id: &str, channel_id: &str, at: Timestamp) -> Result<()> {
+        let connection = self.lock();
+        connection.execute(
+            "INSERT INTO left_off (id, user_id, channel_id, at) VALUES (1, ?1, ?2, ?3)
+             ON CONFLICT(id) DO UPDATE SET
+                user_id = excluded.user_id,
+                channel_id = excluded.channel_id,
+                at = excluded.at",
+            params![user_id, channel_id, at],
+        )?;
+        Ok(())
+    }
+
+    /// Who was reading, and what they were reading, when this store was last
+    /// written to.
+    pub fn left_off(&self) -> Result<Option<(String, String)>> {
+        let connection = self.lock();
+        Ok(connection
+            .query_row(
+                "SELECT user_id, channel_id FROM left_off WHERE id = 1",
+                [],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?
+            .filter(|(_, channel_id)| !channel_id.is_empty()))
+    }
+
+    /// Whether this reader is in the channel.
+    ///
+    /// The sidebar's own query is a LEFT JOIN over every channel the store has
+    /// heard of, so it answers "exists" rather than "yours" -- which is the
+    /// wrong question for reopening somewhere.
+    pub fn is_member(&self, channel_id: &str, user_id: &str) -> Result<bool> {
+        let connection = self.lock();
+        let count: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM channel_members WHERE channel_id = ?1 AND user_id = ?2",
+            params![channel_id, user_id],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
     // --------------------------------------------------------- preferences
 
     pub fn upsert_preferences(&self, preferences: &[Preference]) -> Result<()> {
