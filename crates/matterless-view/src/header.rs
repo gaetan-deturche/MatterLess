@@ -251,7 +251,11 @@ impl Header {
     }
 
     /// Draws the strip and the rule beneath it.
-    pub fn draw(&self, into: &mut Canvas<'_>, within: Rect, hovered: Option<Act>) {
+    /// `typed_in` is true while the search is open and its box is drawn here
+    /// by whoever owns it. The placeholder below is what a *shut* search looks
+    /// like, and drawing it under a real field would print two hints in one
+    /// box.
+    pub fn draw(&self, into: &mut Canvas<'_>, within: Rect, hovered: Option<Act>, typed_in: bool) {
         let Canvas {
             scene,
             painter,
@@ -335,8 +339,10 @@ impl Header {
         scene.glyphs(name, palette.ink, palette.faint);
 
         // A field rather than a button: it is the only thing on the strip that
-        // takes words, and drawing it as anything else would hide that.
-        if let Some(rect) = find(within, &self.offered) {
+        // takes words, and drawing it as anything else would hide that. It is
+        // a real one now -- it used to look like this and put the caret in a
+        // different box on the far side of the window.
+        if let Some(rect) = find(within, &self.offered).filter(|_| !typed_in) {
             scene.rounded(rect.x, rect.y, rect.width, rect.height, palette.raised, 5.0);
             let glyphs = painter.run(
                 fonts,
