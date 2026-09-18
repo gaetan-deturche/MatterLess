@@ -695,10 +695,13 @@ impl Stream {
     }
 
     /// Where one picture sits on screen, so a press can land on it.
+    ///
+    /// `block.x` and not only the gutter: pictures share a shelf now, so the
+    /// second one along is not at the left edge.
     fn picture_rect(&self, index: usize, ordinal: usize, top: f32, left: f32) -> Option<Rect> {
         let (block, _) = self.pictured(index).into_iter().nth(ordinal)?;
         Some(Rect::new(
-            left + self.theme.gutter,
+            left + self.theme.gutter + block.x,
             top + block.y,
             block.wrap,
             block.height,
@@ -1460,7 +1463,7 @@ impl Stream {
             .filter(|(_, file)| file.image || file.video)
             .flat_map(|(block, file)| {
                 let at = Rect::new(
-                    left + self.theme.gutter,
+                    left + self.theme.gutter + block.x,
                     top + block.y,
                     block.wrap,
                     block.height,
