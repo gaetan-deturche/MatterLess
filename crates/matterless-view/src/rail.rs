@@ -30,6 +30,30 @@ const MENTION_PIP: f32 = 14.0;
 /// destination in the list that no team icon reaches.
 pub const DIRECTS: &str = "directs";
 
+/// What the unread button answers to.
+pub const UNREAD: &str = "unread";
+
+/// What a square on the rail is.
+///
+/// One state rather than a flag per kind. Two booleans with both set is a
+/// square nobody can draw, and each of these answers three questions at once
+/// -- what picture it carries, whether there is an icon to fetch for it, and
+/// whether it is somewhere to be.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    /// A team: an icon to fetch, and its initials until that arrives.
+    Team,
+    /// Direct messages, which are not a team and so have no icon of their own.
+    Directs,
+    /// Where the reader stopped reading in the conversation they have open.
+    ///
+    /// The one square here that is a thing to *do* rather than a place to be,
+    /// so it is never the chosen one and carries no count: what is waiting is
+    /// what it takes you to, and saying so twice on one square would be a dot
+    /// beside a picture of a dot.
+    Unread,
+}
+
 /// One square on the rail.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Tile {
@@ -38,8 +62,7 @@ pub struct Tile {
     /// What is waiting in it, which the corner shows as a dot or a count.
     pub unread: i64,
     pub mentions: i64,
-    /// True for the direct-messages button, which has no icon to fetch.
-    pub directs: bool,
+    pub kind: Kind,
 }
 
 /// The teams, and which one the reader is in.
@@ -96,7 +119,9 @@ impl Rail {
     pub fn wants(&self) -> Vec<(String, u32, u32)> {
         self.teams
             .iter()
-            .filter(|team| !team.directs)
+            // Only a team has a picture to fetch; the other two carry a
+            // glyph the font already has.
+            .filter(|team| team.kind == Kind::Team)
             .map(|team| (icon_key(&team.id), ICON_FETCHED, ICON_FETCHED))
             .collect()
     }
@@ -153,8 +178,7 @@ impl Rail {
             // else: a team that reduces to one sat right of centre, and the
             // envelope on the direct-messages button -- which is not initials
             // at all and is a different width again -- sat further right still.
-            let label = initials(&team.name);
-            let mark = mark_run();
+            let (label, mark) = face(team);
             let wide = matterless_layout::extent_of(
                 fonts,
                 &label,
@@ -179,7 +203,7 @@ impl Rail {
                 },
                 palette.faint,
             );
-            if !team.directs {
+            if team.kind == Kind::Team {
                 scene.extend([matterless_paint::Piece::Image {
                     x: rect.x + 1.0,
                     y: rect.y + 1.0,
@@ -242,10 +266,6 @@ pub fn icon_key(team_id: &str) -> String {
     format!("team/{team_id}")
 }
 
-/// What the direct-messages button shows: an envelope, because the one
-/// destination here that is not a team cannot borrow a team's initial.
-pub const ENVELOPE: &str = "✉";
-
 /// Where a tile's mark goes, from how wide it actually is.
 ///
 /// Measured rather than offset by a constant. Nine pixels in suited the two
@@ -259,9 +279,31 @@ fn mark_at(tile: Rect, wide: f32, tall: f32) -> (f32, f32) {
     )
 }
 
+/// The size a mark on a tile is drawn at.
+const MARK: f32 = 15.0;
+
 /// How the letter or mark on a tile is set.
 fn mark_run() -> Run {
     Run::label(f32::MAX).bold()
+}
+
+/// What a tile shows, and what it has to be set in.
+///
+/// A team is a letter and the unread button is a picture, and they come out of
+/// different fonts: asking the text font for a lucide codepoint draws the box
+/// that means "no such glyph", and asking the icon font for a letter draws
+/// nothing at all.
+fn face(tile: &Tile) -> (String, Run) {
+    use matterless_layout::marks;
+    match tile.kind {
+        // A conversation with somebody, because a direct message is who it
+        // is with rather than what it is about.
+        Kind::Directs => (marks::DIRECTS.to_string(), Run::mark(MARK)),
+        // A message with something on it, which is what the mark this goes
+        // to stands in front of.
+        Kind::Unread => (marks::TO_UNREAD.to_string(), Run::mark(MARK)),
+        Kind::Team => (initials(&tile.name), mark_run()),
+    }
 }
 
 /// A team name reduced to what fits on a square.
@@ -294,14 +336,14 @@ mod tests {
                     name: "Voyager".into(),
                     unread: 0,
                     mentions: 0,
-                    directs: false,
+                    kind: Kind::Team,
                 },
                 Tile {
                     id: "t2".into(),
                     name: "Northwind".into(),
                     unread: 3,
                     mentions: 1,
-                    directs: false,
+                    kind: Kind::Team,
                 },
             ],
             chosen: Some("t1".into()),
@@ -323,16 +365,28 @@ mod tests {
 
     /// Whatever a tile carries sits in the middle of it.
     ///
-    /// Including the envelope, which is not initials, is wider than any pair
-    /// of letters, and at the fixed offset this used to draw at began nine
-    /// pixels in and ended past the right edge of its own tile.
+    /// Every kind, because they are different widths and come out of different
+    /// fonts: at the fixed offset this used to draw at, a team that reduced to
+    /// one letter sat right of centre and the envelope -- wider than any pair
+    /// of them -- ended past the right edge of its own tile.
     #[test]
     fn a_tile_carries_its_mark_in_the_middle() {
         let mut fonts = matterless_layout::Fonts::new();
-        let run = mark_run();
         let tile = Rect::new(10.0, 40.0, TILE, TILE);
-        for name in [ENVELOPE, "Northwind", "Voyager Team"] {
-            let label = initials(name);
+        let shapes = [
+            (Kind::Team, "Northwind"),
+            (Kind::Team, "Voyager Team"),
+            (Kind::Directs, "Direct messages"),
+            (Kind::Unread, "Unread"),
+        ];
+        for (kind, name) in shapes {
+            let (label, run) = face(&Tile {
+                id: "x".into(),
+                name: name.into(),
+                unread: 0,
+                mentions: 0,
+                kind,
+            });
             let wide = matterless_layout::extent_of(
                 &mut fonts,
                 &label,
@@ -364,21 +418,76 @@ mod tests {
         }
     }
 
-    /// The envelope is not a team and has no icon to fetch: asking the server
-    /// for one would be a request that can only 404.
+    /// Neither the envelope nor the unread button is a team, and neither has
+    /// an icon to fetch: asking the server for one would be a request that can
+    /// only 404.
     #[test]
-    fn the_directs_button_asks_for_no_picture() {
+    fn only_a_team_asks_for_a_picture() {
         let mut rail = rail();
         rail.teams.push(Tile {
             id: DIRECTS.into(),
-            name: ENVELOPE.into(),
+            name: "Direct messages".into(),
             unread: 2,
             mentions: 0,
-            directs: true,
+            kind: Kind::Directs,
         });
+        rail.teams.insert(
+            0,
+            Tile {
+                id: UNREAD.into(),
+                name: "Unread".into(),
+                unread: 0,
+                mentions: 0,
+                kind: Kind::Unread,
+            },
+        );
         let wanted = rail.wants();
         assert_eq!(wanted.len(), 2, "only the two real teams");
-        assert!(wanted.iter().all(|(key, _, _)| key != "team/directs"));
+        assert!(
+            wanted
+                .iter()
+                .all(|(key, _, _)| key != "team/directs" && key != "team/unread")
+        );
+    }
+
+    /// Each kind of square is set in the font that has its picture. The
+    /// unread button borrowed `marks::UNREAD` first, which is an envelope --
+    /// beside the direct-messages button, which is also an envelope.
+    #[test]
+    fn each_square_is_set_in_the_font_that_has_it() {
+        let team = Tile {
+            id: "t1".into(),
+            name: "Voyager Team".into(),
+            unread: 0,
+            mentions: 0,
+            kind: Kind::Team,
+        };
+        let (label, run) = face(&team);
+        assert_eq!(label, "CT");
+        assert!(!run.icon, "a letter comes out of the text font");
+
+        let directs = Tile {
+            kind: Kind::Directs,
+            name: "Direct messages".into(),
+            ..team.clone()
+        };
+        let (label, run) = face(&directs);
+        assert_eq!(label, matterless_layout::marks::DIRECTS);
+        assert!(run.icon, "a mark comes out of the icon font");
+
+        let unread = Tile {
+            kind: Kind::Unread,
+            name: "Unread".into(),
+            ..team.clone()
+        };
+        let (label, run) = face(&unread);
+        assert_eq!(label, matterless_layout::marks::TO_UNREAD);
+        assert!(run.icon);
+        assert_ne!(
+            label,
+            face(&directs).0,
+            "and the two marks are not the same picture"
+        );
     }
 
     /// A name has to become something that fits on a square, whatever it is.

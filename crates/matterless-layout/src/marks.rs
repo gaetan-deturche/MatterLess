@@ -45,6 +45,17 @@ pub const REPLY: &str = "\u{e0a7}";
 pub const MORE: &str = "\u{e0b6}";
 /// Mark a conversation unread.  `mail`
 pub const UNREAD: &str = "\u{e10f}";
+/// The button that goes to where the reader stopped reading.  `message-square-dot`
+///
+/// A message with something on it, which is what the mark stands in front
+/// of. Not `UNREAD`: that envelope is the message menu's "mark unread", and
+/// on the rail it sat directly above a button that was also an envelope.
+pub const TO_UNREAD: &str = "\u{e56e}";
+/// The conversations that are with somebody rather than about a subject.  `messages-circle`
+///
+/// Qualified wherever it is used: the rail has a `DIRECTS` of its own, which
+/// is what that button answers to rather than what it looks like.
+pub const DIRECTS: &str = "\u{e773}";
 /// Keep a conversation at the top.  `star`
 pub const FAVOURITE: &str = "\u{e176}";
 /// Move it to another category.  `folder`

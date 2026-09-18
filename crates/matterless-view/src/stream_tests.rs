@@ -1300,3 +1300,76 @@ fn a_message_still_waiting_to_be_shaped_is_still_held() {
     assert!(stream.holds_any(&["p3".to_string()]));
     assert!(!stream.holds_any(&["p999".to_string()]));
 }
+
+/// The unread mark brought into view, a little below the top edge so what it
+/// follows is still visible: a divider hard against the top reads as the
+/// beginning of the channel rather than as a line drawn through it.
+#[test]
+fn the_unread_mark_can_be_scrolled_to() {
+    let mut fonts = Fonts::new();
+    let mut stream = Stream::new("stream");
+    let mut rows: Vec<Row> = (0..60)
+        .map(|at| Row::Post {
+            post: post(&format!("p{at}"), "something said"),
+        })
+        .collect();
+    rows.insert(40, Row::UnreadDivider);
+    stream.rows = rows;
+    stream.lay_out(&mut fonts, panel().width);
+
+    let within = panel();
+    assert!(stream.to_row(crate::stream::DIVIDER, 72.0, within));
+
+    // Where it landed: the mark's own top, 72 below the panel's.
+    let mark = stream
+        .laid
+        .iter()
+        .take(40)
+        .map(|laid| laid.height)
+        .sum::<f32>();
+    assert!(
+        (stream.scroll - (mark + stream.theme.pad_top - 72.0)).abs() < 0.5,
+        "the mark sits 72 below the top: scroll {} against {}",
+        stream.scroll,
+        mark + stream.theme.pad_top - 72.0
+    );
+}
+
+/// A channel with nothing unread has no mark in its plan, and says so rather
+/// than scrolling somewhere arbitrary -- which is what lets the caller decide
+/// to go to the end instead.
+#[test]
+fn a_channel_with_no_mark_says_so() {
+    let mut fonts = Fonts::new();
+    let mut stream = Stream::new("stream");
+    stream.rows = (0..20)
+        .map(|at| Row::Post {
+            post: post(&format!("p{at}"), "something said"),
+        })
+        .collect();
+    stream.lay_out(&mut fonts, panel().width);
+    let before = stream.scroll;
+
+    assert!(!stream.to_row(crate::stream::DIVIDER, 72.0, panel()));
+    assert_eq!(stream.scroll, before, "and nothing moved");
+}
+
+/// A mark near the top of a short history cannot be pushed 72 pixels down --
+/// there is nothing above it to scroll away -- so it clamps rather than
+/// scrolling to a negative offset.
+#[test]
+fn a_mark_at_the_top_clamps_rather_than_overscrolling() {
+    let mut fonts = Fonts::new();
+    let mut stream = Stream::new("stream");
+    let mut rows: Vec<Row> = (0..40)
+        .map(|at| Row::Post {
+            post: post(&format!("p{at}"), "something said"),
+        })
+        .collect();
+    rows.insert(0, Row::UnreadDivider);
+    stream.rows = rows;
+    stream.lay_out(&mut fonts, panel().width);
+
+    assert!(stream.to_row(crate::stream::DIVIDER, 72.0, panel()));
+    assert_eq!(stream.scroll, 0.0);
+}

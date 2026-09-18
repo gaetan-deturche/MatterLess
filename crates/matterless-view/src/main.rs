@@ -529,6 +529,10 @@ const THREADS: u32 = 200;
 /// The height kept for the "somebody is typing" line, above each composer.
 const TYPING: f32 = 16.0;
 
+/// How far below the top edge the unread mark is brought, so what it
+/// follows is still visible above it. About three lines.
+const ABOVE: f32 = 72.0;
+
 /// How many emoji names are asked about in one frame. A channel full of them
 /// must not turn one frame into fifty requests.
 const LOOKUPS: usize = 12;
@@ -2237,6 +2241,9 @@ impl App {
             if id == matterless_view::rail::DIRECTS {
                 return Some("Direct messages".to_string());
             }
+            if id == matterless_view::rail::UNREAD {
+                return Some("Where you stopped reading".to_string());
+            }
             return self
                 .rail
                 .teams
@@ -2461,7 +2468,7 @@ impl App {
                         },
                         unread: 0,
                         mentions: 0,
-                        directs: false,
+                        kind: matterless_view::rail::Kind::Team,
                     })
                     .collect()
             })
@@ -2471,10 +2478,12 @@ impl App {
         // a dot on the team is an interruption at one remove.
         let mut directs = matterless_view::rail::Tile {
             id: matterless_view::rail::DIRECTS.to_string(),
-            name: matterless_view::rail::ENVELOPE.to_string(),
+            // A name rather than a picture: the tile draws a mark of its own
+            // now, and this is what the tooltip and the tests read.
+            name: "Direct messages".to_string(),
             unread: 0,
             mentions: 0,
-            directs: true,
+            kind: matterless_view::rail::Kind::Directs,
         };
         if let Some(store) = self.store.as_ref() {
             for entry in &self.sidebar.entries {
@@ -2511,6 +2520,19 @@ impl App {
             }
         }
         teams.push(directs);
+        // Above the teams, because it is not one of them: it is the one square
+        // that does something to the conversation already open rather than
+        // taking the reader to another.
+        teams.insert(
+            0,
+            matterless_view::rail::Tile {
+                id: matterless_view::rail::UNREAD.to_string(),
+                name: "Unread".to_string(),
+                unread: 0,
+                mentions: 0,
+                kind: matterless_view::rail::Kind::Unread,
+            },
+        );
         self.rail.teams = teams;
         self.rail.chosen = self
             .sidebar
@@ -3946,6 +3968,36 @@ impl App {
         }
     }
 
+    /// Brings the unread mark into view.
+    ///
+    /// A little below the top edge rather than against it, so the tail of what
+    /// was already read stays visible: a divider hard against the top reads as
+    /// the beginning of the channel rather than as a line drawn through it.
+    ///
+    /// Nothing new to show is not nothing to do. With no mark in the plan the
+    /// place to be is the end of the conversation -- that is where the reader
+    /// has got to, and where the next message will arrive -- so the shortcut
+    /// always moves rather than sometimes doing nothing at all, which reads as
+    /// a key that does not work.
+    ///
+    /// This channel only. Walking on to the next unread *conversation* is a
+    /// different gesture, about the sidebar rather than about the page, and
+    /// folding it in here would mean a key that sometimes scrolls and
+    /// sometimes takes you somewhere else.
+    fn show_unread_mark(&mut self) {
+        let within = self.stream_rect();
+        // Three lines or so, and never more than a quarter of a short panel.
+        let above = ABOVE.min(within.height / 4.0);
+        if !self
+            .stream
+            .to_row(matterless_view::stream::DIVIDER, above, within)
+        {
+            self.stream.to_bottom(within);
+        }
+        self.react();
+        self.redraw();
+    }
+
     /// Reads a channel and lays it out, then shows its newest message.
     fn open_channel(&mut self, channel: &str) {
         let Some(store) = self.store.clone() else {
@@ -5337,6 +5389,11 @@ impl ApplicationHandler<Update> for App {
                         });
                     }
                 }
+                // Where the reader stopped reading, which is the one place
+                // in a long channel that is hard to find by hand.
+                if down && self.input.chord(Key::Char('u')) {
+                    self.show_unread_mark();
+                }
                 // Answered from the store, so it is filled the moment it
                 // opens rather than after a round trip.
                 if down && self.input.chord(Key::Char('t')) {
@@ -5417,9 +5474,16 @@ impl ApplicationHandler<Update> for App {
                 // sidebar to that team's heading and leaves the conversation
                 // they were reading open. Opening a channel they did not ask
                 // for would be answering a question they did not put.
-                if let Some(team) = self.rail.react(&self.input) {
-                    let within = self.sidebar_rect();
-                    self.sidebar.scroll_to(&team, within);
+                if let Some(pressed) = self.rail.react(&self.input) {
+                    // Every other square on the rail is somewhere to be, and
+                    // this one is something to do -- so it is answered before
+                    // the sidebar is scrolled to a heading that does not exist.
+                    if pressed == matterless_view::rail::UNREAD {
+                        self.show_unread_mark();
+                    } else {
+                        let within = self.sidebar_rect();
+                        self.sidebar.scroll_to(&pressed, within);
+                    }
                 }
                 // The one button in the list, before the rows: a press on it
                 // is not a press on the heading behind it.
