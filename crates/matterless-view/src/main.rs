@@ -539,6 +539,11 @@ struct App {
     /// One at a time and one field: a right-click on the sidebar while the
     /// message menu is open should replace it, not stack a second one over it.
     menu: matterless_view::menu::Menu,
+    /// The people or channels a half-typed name could mean.
+    ///
+    /// Not `offer`, which is a new version waiting to be installed. Two
+    /// things called the offer in one window is one too many.
+    naming: matterless_view::offer::Offer,
     /// The conversations this reader has been in, for the back button.
     visited: matterless_view::places::Places,
     /// Whether the channel being opened is a step through `visited` rather
@@ -737,6 +742,7 @@ impl App {
             said_typing: matterless_view::typing::Sending::default(),
             typing_names: std::collections::HashMap::new(),
             pane_width: matterless_view::aside::WIDTH,
+            naming: matterless_view::offer::Offer::default(),
             visited: matterless_view::places::Places::default(),
             stepping: false,
             presence: std::collections::HashMap::new(),
@@ -3571,6 +3577,9 @@ impl App {
         if let Some(body) = self.thread_body() {
             boxes.extend(self.thread_composer.boxes_in(body));
         }
+        if let Some((_, box_of, within)) = self.naming_in() {
+            boxes.extend(self.naming.boxes(box_of, within));
+        }
         boxes.extend(self.picker.boxes(self.picked_near, self.picker_within()));
         // The list under the strip has no pane of its own, so its boxes are
         // placed from the column rather than from one.
@@ -4017,6 +4026,128 @@ impl App {
         );
     }
 
+    /// The box a name is being typed into, and the panel it is drawn in.
+    ///
+    /// `None` when neither box has the keyboard, which is when nothing can
+    /// be being typed anywhere.
+    fn naming_in(&self) -> Option<(bool, Rect, Rect)> {
+        let channel = header::below(self.channel_rect());
+        match self.input.focus() {
+            Some(composer::NAME) => Some((false, self.composer.strip(channel), channel)),
+            Some(THREAD_COMPOSER) => {
+                let body = self.thread_body()?;
+                Some((true, self.thread_composer.strip(body), body))
+            }
+            _ => None,
+        }
+    }
+
+    /// Offers whatever the half-typed name at the caret could mean.
+    ///
+    /// Answered from the store alone, which is what makes it worth having:
+    /// a list that arrives after a round trip arrives after the next letter
+    /// has been typed, and a reader who has to wait for it will have finished
+    /// the name by hand.
+    fn offer_names(&mut self) {
+        let Some((threaded, _, _)) = self.naming_in() else {
+            self.naming.hide();
+            return;
+        };
+        let box_of = match threaded {
+            true => &self.thread_composer,
+            false => &self.composer,
+        };
+        let Some((sigil, said)) = box_of.being_named(&matterless_view::offer::SIGILS) else {
+            self.naming.hide();
+            return;
+        };
+        let Some(store) = self.store.as_ref() else {
+            return;
+        };
+        let found: Vec<matterless_view::offer::Suggestion> = match sigil {
+            matterless_view::offer::CHANNELS => store
+                .channels_matching(&said, 6)
+                .unwrap_or_default()
+                .into_iter()
+                // A direct message has no name anybody can type, so it is not
+                // something a `~` could ever mean.
+                .filter(|channel| channel.channel_type == "O" || channel.channel_type == "P")
+                .map(|channel| matterless_view::offer::Suggestion {
+                    insert: channel.name,
+                    label: channel.display_name,
+                    face: None,
+                })
+                .collect(),
+            _ => store
+                .users_matching(&said, 6)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|user| {
+                    // Read by their real name where there is one, and
+                    // mentioned by the name the server knows: a mention of
+                    // "Amy Jones" reaches nobody.
+                    let real = format!("{} {}", user.first_name, user.last_name);
+                    let real = real.trim().to_string();
+                    matterless_view::offer::Suggestion {
+                        label: match real.is_empty() {
+                            true => user.username.clone(),
+                            false => format!("{real}  {}", user.username),
+                        },
+                        face: Some(matterless_view::switcher::Face {
+                            user_id: user.id,
+                            avatar_at: user.last_picture_update,
+                        }),
+                        insert: user.username,
+                    }
+                })
+                .collect(),
+        };
+        self.naming.show(sigil, &said, found);
+    }
+
+    /// Answers the offer, and takes the keys it used off the box.
+    ///
+    /// Before the boxes see the keyboard. Return here means "this name", and
+    /// left to the box it would mean "send the message" -- which is the same
+    /// trap Up in an empty box was, and the reason `Input::took` exists.
+    fn answered_the_offer(&mut self) -> bool {
+        if !self.naming.open() {
+            return false;
+        }
+        let mut input = std::mem::take(&mut self.input);
+        let chose = self.naming.react(&input);
+        // Every key it claims, whether or not it acted on one: an arrow that
+        // walked the list must not also walk the caret.
+        for key in matterless_view::offer::Offer::CLAIMS {
+            input.took(key);
+        }
+        self.input = input;
+        match chose {
+            Some(matterless_view::offer::Chose::Name(one)) => {
+                let (threaded, _, _) = match self.naming_in() {
+                    Some(where_of) => where_of,
+                    None => return false,
+                };
+                let (sigil, said) = (self.naming.sigil, self.naming.said.clone());
+                let box_of = match threaded {
+                    true => &mut self.thread_composer,
+                    false => &mut self.composer,
+                };
+                box_of.name_it(&mut self.fonts, sigil, &said, &one.insert);
+                self.naming.hide();
+                self.relayout();
+                self.redraw();
+                true
+            }
+            Some(matterless_view::offer::Chose::Nothing) => {
+                self.naming.hide();
+                self.redraw();
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Goes to the next conversation with something waiting in it.
     ///
     /// The sidebar decides which -- it is the one that holds the list in the
@@ -4163,6 +4294,11 @@ impl App {
         // Before the boxes see the keyboard, because it takes the key off
         // them: Up in an empty box is the window's to answer.
         if self.edit_the_last_thing_said() {
+            return;
+        }
+        // And before them for the same reason: while a list of names is up,
+        // Return means "this one" rather than "send this".
+        if self.answered_the_offer() {
             return;
         }
         // Where the offer sits, before anything asks what is under the
@@ -4625,6 +4761,10 @@ impl App {
             None
         };
 
+        // After the boxes, because what is being typed is what they have
+        // just been told: the caret has moved by now and the run under it is
+        // what the list is a list of.
+        self.offer_names();
         // The two buttons in each box. Send does what return does, and attach
         // does what a drop does -- both exist for a reader who has not been
         // told about either.
@@ -5379,6 +5519,19 @@ impl App {
                 matterless_paint::Run::label(f32::MAX),
             );
             scene.glyphs(glyphs, palette.soft, palette.faint);
+        }
+
+        // Over both boxes, because it is in front of the one being typed in
+        // and has to be readable over the conversation behind it.
+        if let Some((_, box_of, within)) = self.naming_in() {
+            scene.clip_to(0.0, 0.0, self.size.0 as f32, self.size.1 as f32);
+            let mut canvas = Canvas {
+                scene: &mut scene,
+                painter: &mut self.painter,
+                fonts: &mut self.fonts,
+                palette: &self.palette,
+            };
+            self.naming.draw(&mut canvas, box_of, within, &self.input);
         }
 
         drop(probe);

@@ -301,6 +301,93 @@ fn the_box_leaves_a_band_of_ground_above_itself() {
     );
 }
 
+/// What counts as a name being typed, and what does not.
+///
+/// The awkward half of offering people when somebody types `@` is knowing
+/// when they are not: an email address is the case everybody hits, and a
+/// list of names halfway through `someone@example.com` is worse than no
+/// list at all.
+#[test]
+fn a_sigil_opens_a_name_only_where_one_could_start() {
+    let mut fonts = Fonts::new();
+    let sigils = ['@', '~'];
+    let named = |typed: &str, fonts: &mut Fonts| {
+        let mut composer = Composer::new(NAME);
+        composer.lay_out(fonts, panel().width);
+        composer.fill(typed, fonts);
+        composer.lay_out(fonts, panel().width);
+        composer.being_named(&sigils)
+    };
+
+    // Opened at the start of a line and after a space.
+    assert_eq!(named("@", &mut fonts), Some(('@', String::new())));
+    assert_eq!(named("@am", &mut fonts), Some(('@', "am".to_string())));
+    assert_eq!(
+        named("hello @am", &mut fonts),
+        Some(('@', "am".to_string()))
+    );
+    // A second sigil is its own question.
+    assert_eq!(named("~dev", &mut fonts), Some(('~', "dev".to_string())));
+
+    // Not in the middle of a word, which is what an address is.
+    assert_eq!(named("someone@example", &mut fonts), None);
+    assert_eq!(named("a@b", &mut fonts), None);
+
+    // Ended by a space: a name that has been finished is not being typed.
+    assert_eq!(named("@amy ", &mut fonts), None);
+    assert_eq!(named("@amy and", &mut fonts), None);
+
+    // And nothing at all is nothing.
+    assert_eq!(named("", &mut fonts), None);
+    assert_eq!(named("hello", &mut fonts), None);
+}
+
+/// Choosing a name puts it where what was typed was, and finishes it.
+#[test]
+fn choosing_a_name_replaces_what_was_typed_for_it() {
+    let mut fonts = Fonts::new();
+    let mut composer = Composer::new(NAME);
+    composer.lay_out(&mut fonts, panel().width);
+    composer.fill("hello @am", &mut fonts);
+    composer.lay_out(&mut fonts, panel().width);
+
+    let (sigil, said) = composer.being_named(&['@']).expect("a name being typed");
+    composer.name_it(&mut fonts, sigil, &said, "amy.jones");
+    assert_eq!(composer.text(), "hello @amy.jones ");
+    assert_eq!(
+        composer.being_named(&['@']),
+        None,
+        "the run is finished, so nothing is being typed any more"
+    );
+}
+
+/// It reads back from the caret, not forward from the sigil.
+///
+/// The question is "what is being typed here". Read forward, a caret parked
+/// at the end of a line would offer names for a sigil somewhere behind it.
+#[test]
+fn the_name_is_read_back_from_the_caret() {
+    let mut fonts = Fonts::new();
+    let (mut composer, mut input) = ready(&mut fonts);
+    for character in "@amy said".chars() {
+        input.apply(Event::Typed(character.to_string()), &[]);
+        frame(&mut composer, &mut fonts, &mut input);
+    }
+    assert_eq!(composer.text(), "@amy said");
+    assert_eq!(composer.being_named(&['@']), None, "the caret is past it");
+
+    // Walk the caret back into the name and it is being typed again.
+    for _ in 0..5 {
+        press(&mut input, Key::Left);
+        frame(&mut composer, &mut fonts, &mut input);
+    }
+    assert_eq!(
+        composer.being_named(&['@']),
+        Some(('@', "amy".to_string())),
+        "the caret is at the end of the name again"
+    );
+}
+
 /// Two boxes on screen at once, so a keystroke has to reach exactly one. The
 /// channel's composer and the thread's are the same widget under two names,
 /// and without the name they would both take every key.

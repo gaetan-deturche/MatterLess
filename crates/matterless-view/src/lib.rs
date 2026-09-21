@@ -28,6 +28,7 @@ pub mod identity;
 pub mod listing;
 pub mod live;
 pub mod menu;
+pub mod offer;
 pub mod open;
 pub mod picker;
 pub mod places;

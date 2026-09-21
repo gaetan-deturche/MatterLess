@@ -204,6 +204,67 @@ impl Composer {
         self
     }
 
+    /// The `@name` being typed at the caret, if one is.
+    ///
+    /// Answers the sigil that opened it and what has been typed after it, so
+    /// a caller can offer the people it might mean. `None` the moment the run
+    /// stops being one: a space ends it, moving the caret out of it ends it,
+    /// and so does deleting back past the sigil.
+    ///
+    /// The run is read *back* from the caret rather than forward from the
+    /// sigil, because that is the question being asked -- "what is being
+    /// typed here" -- and reading forward would offer names while the caret
+    /// sat at the far end of the line.
+    ///
+    /// A sigil needs whitespace before it or nothing at all. Without that,
+    /// an email address offers a list of people halfway through it, and so
+    /// does every `a@b` anybody writes.
+    pub fn being_named(&self, sigils: &[char]) -> Option<(char, String)> {
+        let cursor = self.editor.cursor();
+        let line = self.editor.with_buffer(|buffer| {
+            buffer
+                .lines
+                .get(cursor.line)
+                .map(|line| line.text().to_string())
+        })?;
+        let before = line.get(..cursor.index)?;
+        // Back to the first character that cannot be part of a name.
+        let (at, sigil) = before
+            .char_indices()
+            .rev()
+            .find(|(_, c)| c.is_whitespace() || sigils.contains(c))?;
+        if !sigils.contains(&sigil) {
+            return None;
+        }
+        // What sits in front of the sigil decides whether it opens anything.
+        let opens = before[..at]
+            .chars()
+            .next_back()
+            .is_none_or(char::is_whitespace);
+        if !opens {
+            return None;
+        }
+        Some((sigil, before[at + sigil.len_utf8()..].to_string()))
+    }
+
+    /// Puts `name` in place of the run `being_named` answered about.
+    ///
+    /// The whole run including its sigil, and a space after, because a name
+    /// chosen is a name finished -- and a caller that had to add the space
+    /// itself would be a caller that could forget.
+    pub fn name_it(&mut self, fonts: &mut Fonts, sigil: char, said: &str, name: &str) {
+        // Once per character of what was typed, plus the sigil, which is what
+        // the editor offers: it owns the undo history, and a text set behind
+        // its back is a step that cannot be reversed.
+        for _ in 0..said.chars().count() + 1 {
+            self.act(fonts, Action::Backspace);
+        }
+        for character in format!("{sigil}{name} ").chars() {
+            self.act(fonts, Action::Insert(character));
+        }
+        self.touched = true;
+    }
+
     /// The text as it stands.
     pub fn text(&self) -> String {
         self.editor.with_buffer(|buffer| {
