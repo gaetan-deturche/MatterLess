@@ -1124,6 +1124,70 @@ impl Composer {
 mod tests {
     use super::{Composer, Rect};
     use matterless_layout::Fonts;
+    /// The hint fits the box it is drawn in, at every width the box gets.
+    ///
+    /// Reported as the placeholder "not cropped properly at the new width".
+    /// Measured at five: it does fit. The first measurement said it did not,
+    /// because the probe asked at fifteen points where the box sets its
+    /// words at fourteen -- so the style is taken from the box's own
+    /// constants here rather than written out a second time.
+    #[test]
+    fn the_hint_fits_the_box_at_every_width() {
+        let mut fonts = Fonts::new();
+        let style = matterless_layout::Style {
+            size: super::SIZE,
+            line_height: super::LINE,
+            bold: false,
+            italic: false,
+            mono: false,
+        };
+        for width in [900.0_f32, 620.0, 400.0, 300.0, 200.0] {
+            let mut composer = Composer::new("composer");
+            composer.lay_out(&mut fonts, width);
+            let room = composer.inner(Rect::new(0.0, 0.0, width, 800.0)).width;
+            let said = composer.hint(&mut fonts, room);
+            let drawn = matterless_layout::extent_of(&mut fonts, &said, f32::MAX, style).width;
+            assert!(
+                drawn <= room,
+                "at {width} the hint is {drawn:.1} wide in {room:.1} of room: {said:?}"
+            );
+        }
+    }
+
+    /// A box narrowed is a box re-wrapped, and as tall as that makes it.
+    ///
+    /// The other half of the same report: the box "does not scale properly
+    /// when the window is resized or the thread pane opens". What that would
+    /// look like is a box still shaped for the width it used to have, so it
+    /// is compared against one built at the new width and nothing else.
+    #[test]
+    fn narrowing_the_box_reshapes_it_to_the_width_it_has_now() {
+        let mut fonts = Fonts::new();
+        let long = "the quick brown fox jumps over the lazy dog and keeps on going \
+                    well past the end of any one line in this box";
+
+        let mut narrowed = Composer::new("composer");
+        narrowed.lay_out(&mut fonts, 900.0);
+        narrowed.fill(long, &mut fonts);
+        narrowed.lay_out(&mut fonts, 900.0);
+        let wide_lines = narrowed.lines();
+        narrowed.lay_out(&mut fonts, 400.0);
+
+        let mut fresh = Composer::new("composer");
+        fresh.lay_out(&mut fonts, 400.0);
+        fresh.fill(long, &mut fonts);
+        fresh.lay_out(&mut fonts, 400.0);
+
+        assert!(
+            narrowed.lines() > wide_lines,
+            "narrowing did not re-wrap: {wide_lines} lines before and after"
+        );
+        assert_eq!(
+            (narrowed.lines(), narrowed.height()),
+            (fresh.lines(), fresh.height()),
+            "a box narrowed is not the box it would have been built as"
+        );
+    }
 
     /// A waiting attachment gives itself room, and gives it back.
     ///

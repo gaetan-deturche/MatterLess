@@ -229,6 +229,12 @@ fn it_stops_growing_at_the_cap() {
 
 /// The strip and the space above it tile the panel exactly, or a gap would
 /// show the ground through between the stream and the composer.
+///
+/// At the width it has now, and at the one it is given next. Opening the
+/// thread pane narrows this panel with a message already in the box, which
+/// re-wraps it and makes it taller -- and the stream is handed whatever is
+/// left, so a box measured for the old width either overlaps the
+/// conversation or leaves a band of ground under it.
 #[test]
 fn the_composer_and_the_stream_tile_the_panel() {
     let mut fonts = Fonts::new();
@@ -236,6 +242,30 @@ fn the_composer_and_the_stream_tile_the_panel() {
     composer.lay_out(&mut fonts, panel().width);
     assert_eq!(composer.above(panel()).bottom(), composer.strip(panel()).y);
     assert_eq!(composer.strip(panel()).bottom(), panel().bottom());
+
+    // A message long enough to wrap when the panel loses half its width,
+    // which is roughly what the thread pane costs.
+    composer.fill(
+        "the quick brown fox jumps over the lazy dog and keeps on going well \
+         past the end of any one line in this box",
+        &mut fonts,
+    );
+    composer.lay_out(&mut fonts, panel().width);
+    // Taken before the panel narrows: `strip` answers from the height the
+    // box has now, whatever rect it is handed, so asking it about the wide
+    // panel afterwards gives the narrow answer twice.
+    let wide = composer.strip(panel()).height;
+
+    let half = Rect::new(panel().x, panel().y, panel().width / 2.0, panel().height);
+    composer.lay_out(&mut fonts, half.width);
+    assert_eq!(composer.above(half).bottom(), composer.strip(half).y);
+    assert_eq!(composer.strip(half).bottom(), half.bottom());
+    assert!(
+        composer.strip(half).height > wide,
+        "the box did not grow when the panel narrowed under it: {} then {}",
+        wide,
+        composer.strip(half).height
+    );
 }
 
 /// Two boxes on screen at once, so a keystroke has to reach exactly one. The

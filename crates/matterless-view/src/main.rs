@@ -880,6 +880,21 @@ impl App {
         ))
     }
 
+    /// The channel's title bar, above its conversation.
+    ///
+    /// From `channel_rect`, which is the whole of the fix this replaced:
+    /// asking `column_rect` put the strip across the thread pane as well, and
+    /// `place` lays the buttons in from the *right* edge of what it is given
+    /// -- so opening a thread slid every one of them under the pane, where
+    /// the pane's own header was then drawn over them. Reported as the thread
+    /// header hiding the channel's buttons, which is exactly what it was.
+    ///
+    /// The strip, the conversation and the message box now all measure from
+    /// the same rect, which is the only way they can agree.
+    fn header_rect(&self) -> Rect {
+        header::strip(self.channel_rect())
+    }
+
     /// The channel's column: everything right of the sidebar that the list or
     /// the thread pane has not taken.
     fn channel_rect(&self) -> Rect {
@@ -1647,11 +1662,13 @@ impl App {
     /// button is not there rather than there and refused.
     /// The field on the strip, when the strip is wide enough to hold one.
     ///
-    /// `header::strip` takes the top of whatever it is given and is the same
-    /// rect applied twice, so asking from the column agrees with both the
-    /// drawing and the hit test.
+    /// From the channel's column, as the drawing and the hit test do. With a
+    /// thread open there is no room for a 240-wide field beside the buttons,
+    /// and `find` says so rather than squeezing it: a field crowded between
+    /// the name on its left and the buttons on its right is worse than a
+    /// keystroke.
     fn strip_field(&self) -> Option<Rect> {
-        header::find(self.column_rect(), &self.header_offers())
+        header::find(self.channel_rect(), &self.header_offers())
     }
 
     /// Where the query is typed.
@@ -1887,6 +1904,47 @@ impl App {
                         channel_id: channel,
                     });
                 }
+            }
+            // No field on the strip to type into, so the pane's own is what
+            // this opens. Which is where the query goes once the pane is up
+            // anyway -- the pane covers the right of the strip, so the two
+            // are never both in use.
+            header::Act::Search => {
+                let mut input = std::mem::take(&mut self.input);
+                self.search.widen(&mut input);
+                self.input = input;
+            }
+            // Whatever the strip could not hold, as a menu under the mark.
+            // Asked at the moment of the press rather than remembered: the
+            // window can have been resized since it was drawn, and a menu of
+            // what used to be folded would offer the wrong things.
+            header::Act::More => {
+                let strip = header::fit(self.channel_rect(), &self.header_offers());
+                let Some((_, under)) = strip
+                    .shown
+                    .iter()
+                    .find(|(act, _)| *act == header::Act::More)
+                else {
+                    return;
+                };
+                let muted = self.muted();
+                let items: Vec<matterless_view::menu::Item> = strip
+                    .folded
+                    .iter()
+                    .map(|act| {
+                        matterless_view::menu::Item::new(
+                            &format!("header.{}", act.slug()),
+                            act.explains(muted),
+                        )
+                        .marked(act.label(muted))
+                    })
+                    .collect();
+                self.menu.show(
+                    "header",
+                    matterless_view::menu::Anchor::Under(*under),
+                    matterless_view::menu::Style::channel(),
+                    items,
+                );
             }
             header::Act::Close => self.close_thread(),
             header::Act::Follow => {
@@ -2127,6 +2185,14 @@ impl App {
         use matterless_view::actions::Action;
         if let Some(rest) = chosen.strip_prefix("channel.") {
             self.act_on_channel_menu(about, rest);
+            return;
+        }
+        // The strip's own overflow, which does exactly what the button it
+        // stands in for would have done.
+        if let Some(rest) = chosen.strip_prefix("header.") {
+            if let Some(act) = header::Act::from_slug(rest) {
+                self.act_on_header(act);
+            }
             return;
         }
         // Answered by doing nothing, which is what keeping it means.
@@ -3453,7 +3519,7 @@ impl App {
         if let (Some(thread), Some(rect)) = (&self.thread, self.thread_stream_rect()) {
             boxes.extend(thread.boxes(rect, thread.hovered(&self.input)));
         }
-        boxes.extend(header::boxes(self.column_rect(), &self.header_offers()));
+        boxes.extend(header::boxes(self.channel_rect(), &self.header_offers()));
         if let Some(pane) = self.thread_rect() {
             boxes.extend(header::boxes(pane, &header::for_thread()));
         }
@@ -4745,7 +4811,15 @@ impl App {
     fn scene(&mut self) -> Scene {
         let mut scene = Scene::default();
         let sidebar = self.sidebar_rect();
-        let strip = header::strip(self.column_rect());
+        let strip = self.header_rect();
+        // No test can reach this one: it needs a window with a thread open in
+        // it. The strip's buttons are laid in from its right edge, so a strip
+        // that reaches under the pane puts every one of them there.
+        debug_assert!(
+            self.thread_rect()
+                .is_none_or(|pane| strip.right() <= pane.x + 0.5),
+            "the channel's strip runs under the thread pane"
+        );
         let stream = self.stream_rect();
 
         // Each piece of a frame, so the table says where one goes rather than

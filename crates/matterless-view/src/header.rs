@@ -52,6 +52,17 @@ const GAP: f32 = 4.0;
 /// The search field in the middle of the strip, which is where the app puts
 /// it and where a reader raised on any chat client will look.
 const FIND: f32 = 240.0;
+/// The narrowest it is worth typing into. Below this it becomes its mark.
+///
+/// A field has to show enough of what was typed to be worth typing in. Past
+/// that it is a box that swallows words, and the mark at least says what
+/// pressing it is for.
+const FIND_MIN: f32 = 120.0;
+/// What is kept for the conversation's name before anything else is placed.
+///
+/// The strip exists to say where the reader is, so the name is the last
+/// thing to give ground rather than the first.
+const NAME: f32 = 160.0;
 /// The follow button, which is a word and not a mark.
 const FOLLOW: f32 = 72.0;
 
@@ -78,6 +89,18 @@ pub enum Act {
     Follow,
     /// Shut the thread pane.
     Close,
+    /// Search this conversation.
+    ///
+    /// Offered like the rest, and drawn unlike them: `fit` gives it a field
+    /// to type in while there is room for one and this mark when there is
+    /// not. Offering it is how a strip says it has a search at all -- the
+    /// thread pane's does not, and so never grows one.
+    Search,
+    /// Everything that did not fit, behind one mark.
+    ///
+    /// Never offered: `fit` puts it on the row when it has had to fold
+    /// something away, so no caller has to know the strip's arithmetic.
+    More,
 }
 
 impl Act {
@@ -114,6 +137,8 @@ impl Act {
             (Act::Follow, false) => "follow",
             (Act::Follow, true) => "following",
             (Act::Close, _) => marks::CLOSE,
+            (Act::Search, _) => marks::SEARCH,
+            (Act::More, _) => marks::MORE,
         }
     }
 
@@ -135,6 +160,8 @@ impl Act {
             (Act::Follow, false) => "Follow thread",
             (Act::Follow, true) => "Unfollow thread",
             (Act::Close, _) => "Close thread",
+            (Act::Search, _) => "Search messages",
+            (Act::More, _) => "More",
         }
     }
 
@@ -150,6 +177,8 @@ impl Act {
             Act::Leave => "leave",
             Act::Follow => "follow",
             Act::Close => "close",
+            Act::Search => "search",
+            Act::More => "more",
         }
     }
 
@@ -163,6 +192,8 @@ impl Act {
             "leave" => Act::Leave,
             "follow" => Act::Follow,
             "close" => Act::Close,
+            "search" => Act::Search,
+            "more" => Act::More,
             _ => return None,
         })
     }
@@ -180,9 +211,19 @@ pub fn for_thread() -> Vec<Act> {
 /// be left, and the server would refuse. The rest are the reader's own lists
 /// and are the same everywhere.
 pub fn offered(direct: bool) -> Vec<Act> {
+    // Search first, which is both where it is drawn and where it stands in
+    // the order things are given up: it is the last to fold away, being the
+    // one a reader reaches for most.
+    //
     // Muting is offered everywhere, including a direct message: a conversation
     // that need not interrupt you is not only ever a channel.
-    let mut offered = vec![Act::Threads, Act::Saved, Act::Pinned, Act::Mute];
+    let mut offered = vec![
+        Act::Search,
+        Act::Threads,
+        Act::Saved,
+        Act::Pinned,
+        Act::Mute,
+    ];
     // Adding and leaving both belong to a channel. A direct message's
     // membership is the two people in it, and the server decides that.
     if !direct {
@@ -192,45 +233,116 @@ pub fn offered(direct: bool) -> Vec<Act> {
     offered
 }
 
-/// The search field, in the middle of the strip.
+/// What the strip can actually show, once everything has been asked to fit.
 ///
-/// `None` when the strip is too narrow to hold one without crowding the name
-/// on its left or the buttons on its right: a field squeezed between two
-/// things it collides with is worse than a keystroke.
-pub fn find(within: Rect, offered: &[Act]) -> Option<Rect> {
-    let strip = strip(within);
-    let buttons = place(within, offered);
-    let right = buttons
-        .first()
-        .map(|(_, rect)| rect.x)
-        .unwrap_or(strip.right());
-    let room = right - (strip.x + LEFT + SIGIL + 160.0);
-    if room < FIND {
-        return None;
+/// A strip narrows for two reasons -- the window shrinks, or the thread pane
+/// takes half the column -- and it gives ground in an order. The field goes
+/// first, because it is the widest thing on the strip and the only one that
+/// can be narrower and still itself: it shrinks to `FIND_MIN`, then becomes
+/// the mark it stands for, and only when that is not enough do the buttons
+/// fold away behind an ellipsis.
+///
+/// The name never gives ground: `NAME` is kept for it before anything else
+/// is placed. The strip exists to say where the reader is, and everything
+/// else on it is a convenience by comparison.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Strip {
+    /// The field, when there is room to type in one.
+    pub field: Option<Rect>,
+    /// The buttons on show, left to right. `Act::Search` is among them once
+    /// the field has become its mark, and `Act::More` is last whenever
+    /// anything is folded behind it.
+    pub shown: Vec<(Act, Rect)>,
+    /// What `Act::More` opens, in the order they were offered.
+    pub folded: Vec<Act>,
+}
+
+/// How wide one button is. Only one of them is a word.
+fn width_of(act: Act) -> f32 {
+    match act {
+        // "following" is a state, and a mark cannot hold one.
+        Act::Follow => FOLLOW,
+        _ => BUTTON,
     }
-    // Twelve, not sixteen: a one-line field paints a 32-tall box, and a rect
-    // any shorter than that has the box painted into a squeeze rather than
-    // drawn at the size it wants.
-    Some(Rect::new(
-        right - GAP * 3.0 - FIND,
-        strip.y + 6.0,
-        FIND,
-        strip.height - 12.0,
-    ))
+}
+
+/// Divides the strip up between the name, the field and the buttons.
+///
+/// `offered` is a priority order as well as a left-to-right one: folding
+/// takes from the end, so whatever is listed last is the first to go behind
+/// the ellipsis. Leaving a channel is last for that reason -- it is the
+/// rarest thing on the strip and the one worth a deliberate press.
+pub fn fit(within: Rect, offered: &[Act]) -> Strip {
+    let strip = strip(within);
+    let room = (strip.width - LEFT - SIGIL - NAME - GAP).max(0.0);
+    let cost = |act: Act| width_of(act) + GAP;
+
+    // The field is the one thing on the strip that is not a button, so it is
+    // taken out of the row and given whatever the buttons leave.
+    let searchable = offered.contains(&Act::Search);
+    let buttons: Vec<Act> = offered
+        .iter()
+        .copied()
+        .filter(|act| *act != Act::Search)
+        .collect();
+    let wanted: f32 = buttons.iter().copied().map(cost).sum();
+
+    // Every button, and a field with whatever is left over.
+    let spare = room - wanted;
+    if searchable && spare >= FIND_MIN {
+        let field = spare.min(FIND);
+        let placed = lay(strip, &buttons);
+        let right = placed
+            .first()
+            .map(|(_, rect)| rect.x)
+            .unwrap_or(strip.right());
+        return Strip {
+            // Twelve, not sixteen: a one-line field paints a 32-tall box, and
+            // a rect any shorter has the box painted into a squeeze rather
+            // than drawn at the size it wants.
+            field: Some(Rect::new(
+                right - GAP * 2.0 - field,
+                strip.y + 6.0,
+                field,
+                strip.height - 12.0,
+            )),
+            shown: placed,
+            folded: Vec::new(),
+        };
+    }
+
+    // The field becomes its mark, which joins the row where the field was.
+    let mut shown: Vec<Act> = offered.to_vec();
+    let mut folded: Vec<Act> = Vec::new();
+    while !shown.is_empty() {
+        let ellipsis = if folded.is_empty() {
+            0.0
+        } else {
+            cost(Act::More)
+        };
+        let taken: f32 = shown.iter().copied().map(cost).sum();
+        if taken + ellipsis <= room {
+            break;
+        }
+        // From the end, so the menu comes back out in the order it went in.
+        folded.insert(0, shown.pop().expect("a button to fold"));
+    }
+    if !folded.is_empty() {
+        shown.push(Act::More);
+    }
+    Strip {
+        field: None,
+        shown: lay(strip, &shown),
+        folded,
+    }
 }
 
 /// Where each button sits, laid out from the right edge inwards.
-pub fn place(within: Rect, offered: &[Act]) -> Vec<(Act, Rect)> {
-    let strip = strip(within);
+fn lay(strip: Rect, acts: &[Act]) -> Vec<(Act, Rect)> {
     let mut placed = Vec::new();
     let mut right = strip.right() - GAP;
-    for act in offered.iter().rev() {
-        // One of them is a word rather than a mark, because "following" is a
-        // state and a mark cannot hold one.
-        let width = match act {
-            Act::Follow => FOLLOW,
-            _ => BUTTON,
-        };
+    for act in acts.iter().rev() {
+        let width = width_of(*act);
         right -= width;
         placed.push((
             *act,
@@ -240,6 +352,21 @@ pub fn place(within: Rect, offered: &[Act]) -> Vec<(Act, Rect)> {
     }
     placed.reverse();
     placed
+}
+
+/// The search field, when the strip is wide enough to hold one.
+pub fn find(within: Rect, offered: &[Act]) -> Option<Rect> {
+    fit(within, offered).field
+}
+
+/// Where each button that is shown sits, left to right.
+pub fn place(within: Rect, offered: &[Act]) -> Vec<(Act, Rect)> {
+    fit(within, offered).shown
+}
+
+/// What the ellipsis on this strip would open, if it is on it at all.
+pub fn folded(within: Rect, offered: &[Act]) -> Vec<Act> {
+    fit(within, offered).folded
 }
 
 impl Header {
@@ -351,9 +478,18 @@ impl Header {
             // the box does not shift the writing in it. `Run::label` is an
             // eighteen-tall line where the field's is twenty, so it is centred
             // on that rather than sharing the field's six-pixel inset.
-            let glyphs = painter.run(
+            // Cut to the field, which is no longer always 240 wide: it
+            // narrows before it gives up and becomes a mark, and a hint
+            // running out of its own box reads as a broken field.
+            let said = matterless_layout::elided(
                 fonts,
                 "Search messages",
+                rect.width - 12.0,
+                crate::listing::label(false),
+            );
+            let glyphs = painter.run(
+                fonts,
+                &said,
                 rect.x + 6.0,
                 rect.y + (rect.height - 18.0) / 2.0,
                 Run::label(f32::MAX),
@@ -480,6 +616,130 @@ mod tests {
         assert!(last.1.right() <= strip.right());
         for (_, rect) in &placed {
             assert!(rect.y >= strip.y && rect.bottom() <= strip.bottom());
+        }
+    }
+
+    /// The buttons are laid in from the right edge of what they are given,
+    /// so which rect the caller hands over decides where they end up.
+    ///
+    /// Worth a test of its own because getting it wrong is invisible in this
+    /// module and fatal outside it: the window asked with the whole column,
+    /// thread pane included, and every button slid under the pane -- where
+    /// the pane's own header was then drawn over them. The buttons did not
+    /// move a pixel from where they were told to go.
+    #[test]
+    fn the_buttons_follow_the_right_edge_they_are_given() {
+        // Two widths that both show every button, so the only difference
+        // between them is the edge they were laid in from.
+        let whole = Rect::new(260.0, 0.0, 700.0, 600.0);
+        let short = Rect::new(260.0, 0.0, 600.0, 600.0);
+        let wide = place(whole, &offered(false));
+        let narrow = place(short, &offered(false));
+
+        assert_eq!(wide.len(), narrow.len());
+        for (one, two) in wide.iter().zip(narrow.iter()) {
+            assert!(
+                two.1.x < one.1.x,
+                "a narrower strip left {:?} where it was",
+                two.0
+            );
+        }
+        let last = narrow.last().expect("a button");
+        assert!(
+            last.1.right() <= short.right(),
+            "the last button is past the right edge of the strip it was given"
+        );
+    }
+
+    /// The strip gives ground in one direction, a step at a time.
+    ///
+    /// Walked rather than spot-checked, and asserted as a ladder rather than
+    /// against the constants: the field narrows, then becomes its mark, then
+    /// the buttons fold away behind the ellipsis -- and none of it ever goes
+    /// back the other way as the strip keeps shrinking. Written against the
+    /// order rather than the widths, so moving `FIND_MIN` or adding a button
+    /// needs this rerun rather than rewritten.
+    #[test]
+    fn the_strip_gives_ground_in_order() {
+        let offers = offered(false);
+        let mut field = f32::MAX;
+        let mut lost_the_field = false;
+        let mut folded = 0usize;
+
+        let mut width = 900.0_f32;
+        while width >= 120.0 {
+            let strip = fit(Rect::new(260.0, 0.0, width, 600.0), &offers);
+
+            if let Some(rect) = strip.field {
+                assert!(
+                    !lost_the_field,
+                    "at {width} the field came back after becoming a mark"
+                );
+                assert!(
+                    rect.width <= field + 0.01,
+                    "at {width} the field grew as the strip shrank"
+                );
+                assert!(rect.width >= FIND_MIN, "at {width} the field is unusable");
+                assert!(
+                    !strip.shown.iter().any(|(act, _)| *act == Act::Search),
+                    "at {width} there is a field and a search mark"
+                );
+                field = rect.width;
+            } else {
+                lost_the_field = true;
+                assert!(
+                    strip.shown.iter().any(|(act, _)| *act == Act::Search)
+                        || strip.folded.contains(&Act::Search),
+                    "at {width} the search went missing rather than becoming a mark"
+                );
+            }
+
+            assert!(
+                strip.folded.len() >= folded,
+                "at {width} something came back out of the ellipsis"
+            );
+            folded = strip.folded.len();
+            assert_eq!(
+                strip.folded.is_empty(),
+                !strip.shown.iter().any(|(act, _)| *act == Act::More),
+                "at {width} the ellipsis and what is behind it disagree"
+            );
+            width -= 5.0;
+        }
+
+        assert!(lost_the_field, "the field never gave way to its mark");
+        assert!(folded > 0, "nothing ever folded away");
+    }
+
+    /// Nothing drawn on the strip runs past it or into its neighbour.
+    ///
+    /// The field sits left of the buttons and neither may reach the other.
+    /// What the strip did before was drop the field outright the moment it
+    /// was under 240, and let the buttons run off the edge.
+    #[test]
+    fn nothing_on_the_strip_overlaps_or_overruns() {
+        let offers = offered(false);
+        let mut width = 900.0_f32;
+        while width >= 120.0 {
+            let within = Rect::new(260.0, 0.0, width, 600.0);
+            let laid = fit(within, &offers);
+            let edge = strip(within);
+            for pair in laid.shown.windows(2) {
+                assert!(
+                    pair[0].1.right() <= pair[1].1.x,
+                    "two buttons overlap at {width}"
+                );
+            }
+            if let Some((_, last)) = laid.shown.last() {
+                assert!(last.right() <= edge.right(), "a button runs past {width}");
+            }
+            if let (Some(field), Some((_, first))) = (laid.field, laid.shown.first()) {
+                assert!(
+                    field.right() <= first.x,
+                    "the field reaches the buttons at {width}"
+                );
+            }
+            width -= 5.0;
         }
     }
 

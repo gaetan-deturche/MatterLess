@@ -19,8 +19,13 @@
 /// What the font calls itself, which is how a run asks for it.
 pub const FAMILY: &str = "lucide";
 
-/// The followed threads, in the sidebar and on the strip.  `menu`
-pub const THREADS: &str = "\u{e115}";
+/// The followed threads, in the sidebar and on the strip.  `spool`
+///
+/// Not `menu`, which is what this was: three stacked lines is the hamburger,
+/// and in every other application it means "the menu is in here". A reader
+/// who has seen one before reads it as a menu that will not open. A spool is
+/// thread, which is what the list is a list of.
+pub const THREADS: &str = "\u{e677}";
 /// Messages pinned to this conversation.  `pin`
 pub const PINNED: &str = "\u{e259}";
 /// Messages this reader has kept.  `bookmark`
