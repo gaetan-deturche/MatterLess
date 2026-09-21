@@ -1936,6 +1936,50 @@ impl Store {
             .filter(|(_, channel_id)| !channel_id.is_empty()))
     }
 
+    /// Keeps what is half written in one conversation, or forgets it.
+    ///
+    /// An empty draft is a deletion rather than an empty row, because the
+    /// question anybody asks of this table is "which conversations have
+    /// something unfinished in them" and a row saying "nothing" would be a
+    /// wrong answer to it.
+    pub fn keep_draft(
+        &self,
+        user_id: &str,
+        conversation: &str,
+        message: &str,
+        at: Timestamp,
+    ) -> Result<()> {
+        let connection = self.lock();
+        if message.trim().is_empty() {
+            connection.execute(
+                "DELETE FROM drafts WHERE user_id = ?1 AND conversation = ?2",
+                params![user_id, conversation],
+            )?;
+            return Ok(());
+        }
+        connection.execute(
+            "INSERT INTO drafts (user_id, conversation, message, at) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(user_id, conversation) DO UPDATE SET
+                message = excluded.message,
+                at = excluded.at",
+            params![user_id, conversation, message, at],
+        )?;
+        Ok(())
+    }
+
+    /// Every conversation this reader has something unfinished in, newest
+    /// first -- which is the order anybody wants their unfinished business.
+    pub fn drafts(&self, user_id: &str) -> Result<Vec<(String, String)>> {
+        let connection = self.lock();
+        let mut statement = connection.prepare(
+            "SELECT conversation, message FROM drafts WHERE user_id = ?1 ORDER BY at DESC",
+        )?;
+        let rows = statement.query_map(params![user_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        Ok(rows.filter_map(std::result::Result::ok).collect())
+    }
+
     /// Whether this reader is in the channel.
     ///
     /// The sidebar's own query is a LEFT JOIN over every channel the store has

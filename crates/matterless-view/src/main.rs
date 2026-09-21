@@ -1197,6 +1197,9 @@ impl App {
     /// server said who the token belongs to.
     fn signed_in(&mut self, id: &str) {
         self.me = id.to_string();
+        // Before the channel is opened, so the box it opens with is filled
+        // from what was left rather than emptied and filled a frame later.
+        self.recall_drafts();
         self.rebuild_sidebar();
         // The counts were read from a store that may be a whole session old,
         // and nothing about them follows from the posts held here: they are
@@ -3828,10 +3831,51 @@ impl App {
         let Some(under) = under else {
             return;
         };
+        // To the store as well as to the window. Held only here they were
+        // thrown away by every restart -- and this window restarts itself to
+        // install an update, so somebody who had written three paragraphs and
+        // gone to lunch came back to nothing.
+        //
+        // Not before the reader is known: the row carries whose draft it is,
+        // and one written with nobody's id could never be honoured.
+        if !self.me.is_empty()
+            && let Some(store) = self.store.as_ref()
+            && let Err(error) = store.keep_draft(
+                &self.me,
+                &under,
+                &text,
+                matterless_view::clock::now() * 1_000,
+            )
+        {
+            eprintln!("keeping a draft: {error}");
+        }
         match text.trim().is_empty() {
             true => self.drafts.remove(&under),
             false => self.drafts.insert(under, text),
         };
+    }
+
+    /// Brings back everything left half written, from the last time.
+    ///
+    /// Once the reader is known, because the rows carry whose they are. Never
+    /// over what is already in hand: a draft parked this run is the newer of
+    /// the two, and the store is only a memory of what happened before.
+    fn recall_drafts(&mut self) {
+        let Some(store) = self.store.as_ref() else {
+            return;
+        };
+        let kept = store.drafts(&self.me).unwrap_or_default();
+        let mut brought = 0usize;
+        for (conversation, message) in kept {
+            if let std::collections::hash_map::Entry::Vacant(slot) = self.drafts.entry(conversation)
+            {
+                slot.insert(message);
+                brought += 1;
+            }
+        }
+        if brought > 0 {
+            println!("{brought} drafts came back");
+        }
     }
 
     /// Brings back what was left for this conversation, or empties the box.

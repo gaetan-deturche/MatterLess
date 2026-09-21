@@ -86,7 +86,7 @@ const MIGRATION_7: &str = "
 ALTER TABLE posts ADD COLUMN is_pinned INTEGER NOT NULL DEFAULT 0;
 ";
 
-pub const TARGET_VERSION: i64 = 8;
+pub const TARGET_VERSION: i64 = 9;
 
 // Migration 1 is frozen: the shell now keeps a real database with real history,
 // so every change gets its own step from here.
@@ -271,7 +271,8 @@ fn missing_columns(connection: &Connection) -> rusqlite::Result<Vec<String>> {
 }
 
 fn missing_tables(connection: &Connection) -> rusqlite::Result<Vec<String>> {
-    const REQUIRED: [&str; 12] = [
+    const REQUIRED: [&str; 13] = [
+        "drafts",
         "left_off",
         "posts",
         "channels",
@@ -341,6 +342,34 @@ CREATE TABLE IF NOT EXISTS left_off (
 );
 ";
 
+/// What is half written and not yet said, per conversation.
+///
+/// Kept here rather than in the window, which is where it was: a draft that
+/// lives in a `HashMap` is a draft that a restart throws away, and the window
+/// is restarted by every update it installs. Somebody who has written three
+/// paragraphs and gone to lunch should find them on the way back.
+///
+/// Keyed by conversation the way the window keys them, which is the channel
+/// for a message and the thread's own name for a reply -- a half-written
+/// reply and a half-written message in the channel behind it are two
+/// different things and neither should overwrite the other.
+///
+/// The reader it belongs to is on the row, as `left_off` has it and for the
+/// same reason: a store handed to somebody else should answer nothing rather
+/// than answer wrongly.
+const MIGRATION_9: &str = "
+CREATE TABLE IF NOT EXISTS drafts (
+    user_id      TEXT NOT NULL,
+    conversation TEXT NOT NULL,
+    message      TEXT NOT NULL,
+    -- Local milliseconds, like `left_off`. What it is for is ordering the
+    -- drafts when they are listed, newest first, which is the order anybody
+    -- wants to be shown their unfinished business in.
+    at           INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (user_id, conversation)
+);
+";
+
 fn migrate(connection: &Connection) -> rusqlite::Result<()> {
     let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
 
@@ -395,6 +424,9 @@ fn migrate(connection: &Connection) -> rusqlite::Result<()> {
     }
     if version < 8 || missing.iter().any(|name| name == "left_off") {
         connection.execute_batch(MIGRATION_8)?;
+    }
+    if version < 9 || missing.iter().any(|name| name == "drafts") {
+        connection.execute_batch(MIGRATION_9)?;
     }
     connection.pragma_update(None, "user_version", TARGET_VERSION)?;
     tracing::info!(from = version, to = TARGET_VERSION, "store migrated");

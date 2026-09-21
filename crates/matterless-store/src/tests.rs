@@ -1421,6 +1421,70 @@ fn a_local_search_honours_from_in_and_dates() {
     assert!(found("say \"hello\" -Wall").is_empty());
 }
 
+/// A half-written message survives the window being shut.
+///
+/// It lived in a `HashMap` in the window, and this window restarts itself to
+/// install an update -- so somebody who had written three paragraphs and gone
+/// to lunch came back to nothing.
+#[test]
+fn a_half_written_message_outlives_the_window() {
+    let store = store();
+    assert!(
+        store.drafts("me").unwrap().is_empty(),
+        "a first run has none"
+    );
+
+    store
+        .keep_draft("me", "c1", "half a thought", 1_000)
+        .unwrap();
+    store.keep_draft("me", "c2", "another", 2_000).unwrap();
+    assert_eq!(
+        store.drafts("me").unwrap(),
+        vec![
+            ("c2".to_string(), "another".to_string()),
+            ("c1".to_string(), "half a thought".to_string()),
+        ],
+        "newest first, which is the order anybody wants their unfinished business"
+    );
+
+    // One row per conversation: writing more is the same draft, not a second.
+    store
+        .keep_draft("me", "c1", "half a thought, continued", 3_000)
+        .unwrap();
+    assert_eq!(store.drafts("me").unwrap().len(), 2);
+    assert_eq!(
+        store
+            .drafts("me")
+            .unwrap()
+            .first()
+            .map(|(id, _)| id.as_str()),
+        Some("c1"),
+        "the one just written is the newest"
+    );
+
+    // Whose they are is on the row, as `left_off` has it: a store handed to
+    // somebody else answers nothing rather than answering wrongly.
+    assert!(store.drafts("somebody-else").unwrap().is_empty());
+}
+
+/// Clearing the box forgets the draft rather than keeping an empty one.
+///
+/// The question this table answers is "which conversations have something
+/// unfinished in them", and a row saying "nothing" is a wrong answer to it --
+/// which matters now that a sidebar row will count them.
+#[test]
+fn an_emptied_box_is_not_an_unfinished_message() {
+    let store = store();
+    store.keep_draft("me", "c1", "something", 1_000).unwrap();
+    assert_eq!(store.drafts("me").unwrap().len(), 1);
+
+    store.keep_draft("me", "c1", "   ", 2_000).unwrap();
+    assert!(
+        store.drafts("me").unwrap().is_empty(),
+        "whitespace is not a message anybody is still writing"
+    );
+}
+
 /// Where the reader was, so the window opens there again.
 ///
 /// Kept here rather than read from a Mattermost preference, which was the
