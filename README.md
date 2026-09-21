@@ -13,15 +13,23 @@ network at all.
 | | |
 |---|---|
 | Window | winit |
-| Renderer | wgpu on Vulkan |
+| Renderer | Direct3D 11, through the `windows` crate |
 | Text | cosmic-text shaping, swash rasterisation |
 | Core | Rust, tokio |
 | Local store | SQLite, WAL |
 | Auth | Session login |
 
-There is no web view and no JavaScript. The window is one Vulkan surface, and
-every glyph, avatar, picture and rounded rectangle on it is a quad in a single
-draw call against four texture atlases.
+There is no web view and no JavaScript. The window is one Direct3D swap chain,
+and every glyph, avatar, picture and rounded rectangle on it is a quad in a
+vertex buffer. Three texture atlases — letters, faces, pictures — are bound
+at once and each quad names the one it wants, so nothing about a frame splits
+it into separate draws except where one has to be clipped to a panel.
+
+Twelve crates, and the split is the point: `-core` speaks to the server,
+`-store` keeps the database, `-sync` folds what arrives into it, `-render`
+plans a conversation into rows, `-layout` shapes them, `-paint` turns them
+into quads, `-ui` answers the pointer, and `-widgets`, `-sidebar` and `-view`
+are the window. Nothing that draws knows what a request is.
 
 Four decisions do most of the work:
 
@@ -43,7 +51,8 @@ Four decisions do most of the work:
 
 ## Running it
 
-You need [Rust](https://rustup.rs) and a GPU with a Vulkan driver.
+You need [Rust](https://rustup.rs), Windows, and a GPU whose driver reaches
+Direct3D feature level 11.0 — which is anything made since about 2010.
 
 ```bash
 cargo run -p matterless-view
@@ -66,7 +75,8 @@ A dev build times its own hot paths and prints anything slow enough to be felt
 
 ```
 slow: shaping the channel took 81ms for 12 rows, 6.79ms each
-ready in 624ms, of which 215ms was Vulkan up to the device
+slow: drawing the frame took 13ms
+ready in 624ms
 shaped the rest of the channel behind the window: 251 rows in 1610ms
 ```
 
@@ -77,10 +87,19 @@ cargo run --release -p matterless-view --example what_opens    # per channel: pl
 cargo run --release -p matterless-layout --example what_shapes # where shaping time goes
 ```
 
+And `--snapshot <file>` draws a channel to a PNG through the same layout and
+the same draw list the window uses, with no window and no GPU — which is how
+the rendering gets compared against the official client on a machine with no
+display.
+
+```bash
+cargo run -p matterless-view -- --snapshot list.png
+```
+
 ## Tests
 
 ```bash
-cargo test --workspace          # 496 tests
+cargo test --workspace          # 675, and five more that need a server
 cargo clippy --workspace --all-targets
 cargo fmt --all --check
 ```

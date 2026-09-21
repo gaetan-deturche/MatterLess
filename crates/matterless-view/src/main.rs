@@ -1,4 +1,4 @@
-//! A window showing the message list, drawn on Vulkan.
+//! A window showing the message list, drawn on Direct3D 11.
 //!
 //! Standalone on purpose. It is the same layout and the same draw list the app
 //! will use, in a window of its own, so the rendering can be judged before it
@@ -5853,7 +5853,11 @@ impl ApplicationHandler<Update> for App {
             events
                 .create_window(
                     window_attributes()
-                        .with_title("MatterLess -- list on Vulkan")
+                        // The name and nothing else. It read "MatterLess -- list on Vulkan",
+                        // which was a note to whoever was porting the renderer -- it has not
+                        // been Vulkan since the Direct3D port, and a title bar is the one
+                        // piece of a window every screenshot carries.
+                        .with_title("MatterLess")
                         .with_window_icon(window_icon(SMALL_ICON))
                         .with_active(!quiet)
                         .with_visible(false)
@@ -6360,6 +6364,12 @@ fn snapshot(path: &std::path::Path, width: u32) -> Result<(), String> {
     let palette = Palette::default();
     let theme = Theme {
         width: width as f32,
+        // The reader's own clock, as the window uses. `Theme::default` carries
+        // an offset of zero, so a snapshot drew every time in UTC -- which is
+        // two hours out here, and the whole point of a snapshot is comparing
+        // it against a client that is not.
+        today: matterless_view::clock::today(),
+        utc_offset_minutes: matterless_view::clock::utc_offset_minutes(),
         ..Theme::default()
     };
     let (channel, rows) = App::feed();
