@@ -751,6 +751,27 @@ impl Painter {
                             radius: 0.0,
                             softness: 1.0,
                         });
+                        // A ground under the words, for the unread line
+                        // only. It takes no row of its own any more -- it is
+                        // a mark on the join between two messages rather than
+                        // one of them -- so it is drawn over whatever is
+                        // there, and words set straight onto a message read
+                        // as part of what somebody said.
+                        //
+                        // The day separator has a row to itself and nothing
+                        // behind its words to hide, so it gets none: a plate
+                        // under them would be a box drawn round nothing.
+                        if flagged {
+                            pieces.push(Piece::Fill {
+                                x: left - gap / 2.0,
+                                y: y + (block.height - theme.line_height) / 2.0 - 2.0,
+                                width: said + gap - 8.0,
+                                height: theme.line_height + 4.0,
+                                colour: palette.ground,
+                                radius: (theme.line_height + 4.0) / 2.0,
+                                softness: 1.0,
+                            });
+                        }
                         let (glyphs, _, _, _) = self.glyphs_of(
                             fonts,
                             block,
@@ -1436,6 +1457,59 @@ mod tests {
             following: false,
             previews,
         }
+    }
+
+    /// The unread line is drawn on the join, with a plate under its words.
+    ///
+    /// It takes no row of its own any more, so it is drawn over whatever is
+    /// there -- and words set straight onto a message read as part of what
+    /// somebody said. The day separator has a row to itself and nothing to
+    /// hide, so it gets no plate: a box drawn round nothing.
+    #[test]
+    fn the_unread_line_is_drawn_on_the_join_and_its_words_have_a_ground() {
+        let mut fonts = Fonts::new();
+        let mut painter = Painter::new();
+        let theme = Theme::default();
+        let palette = Palette::default();
+        let top = 400.0;
+
+        let plates = |row: &Row, painter: &mut Painter, fonts: &mut Fonts| {
+            let laid = lay_out(fonts, row, &theme);
+            let pieces = painter.pieces_of(fonts, &laid, top, &theme, &palette, &HashMap::new());
+            let rules: Vec<f32> = pieces
+                .iter()
+                .filter_map(|piece| match piece {
+                    // The rule either side of the words: one pixel tall.
+                    Piece::Fill { y, height, .. } if *height == 1.0 => Some(*y),
+                    _ => None,
+                })
+                .collect();
+            let grounds = pieces
+                .iter()
+                .filter(|piece| {
+                    matches!(piece, Piece::Fill { height, colour, .. }
+                        if *height > 1.0 && *colour == palette.ground)
+                })
+                .count();
+            (rules, grounds)
+        };
+
+        let (rules, grounds) = plates(&Row::UnreadDivider, &mut painter, &mut fonts);
+        assert!(!rules.is_empty(), "no rule was drawn at all");
+        for at in &rules {
+            assert_eq!(
+                *at, top,
+                "the rule is inside a message rather than on the join"
+            );
+        }
+        assert_eq!(grounds, 1, "the words have nothing behind them");
+
+        let (_, grounds) = plates(
+            &Row::DateSeparator { epoch_day: 20_137 },
+            &mut painter,
+            &mut fonts,
+        );
+        assert_eq!(grounds, 0, "the day separator got a plate it does not need");
     }
 
     fn same(left: &[PlacedGlyph], right: &[PlacedGlyph]) -> bool {

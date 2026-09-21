@@ -947,10 +947,23 @@ pub fn lay_out_opened(fonts: &mut Fonts, row: &Row, theme: &Theme, opened: bool)
             };
         }
         Row::UnreadDivider => {
+            // No height of its own, and a block lifted half its own depth so
+            // the rule lands exactly on the join between the two messages.
+            //
+            // It is not a part of the conversation, it is a mark on it -- so
+            // it must not move the conversation. As a row of `separator_height`
+            // it did: every message below it sat 34 lower while it was there,
+            // and it arrives and goes as messages are read, so the whole
+            // conversation stepped up and down under the eye for a line that
+            // nobody said.
+            //
+            // The date separator keeps its row. That one really is part of
+            // the conversation -- it says when what follows was said, and it
+            // belongs between the days rather than over them.
             return RowLayout {
-                height: theme.separator_height,
+                height: 0.0,
                 blocks: vec![Block {
-                    y: 0.0,
+                    y: -theme.separator_height / 2.0,
                     x: 0.0,
                     height: theme.separator_height,
                     lines: 1,
@@ -2356,6 +2369,38 @@ mod tests {
         );
     }
 
+    /// The unread line takes no room, so the conversation does not move
+    /// when it appears or goes.
+    ///
+    /// Reported: it was a row of `separator_height`, so every message below
+    /// it sat 34 lower while it was there -- and it arrives and goes as
+    /// messages are read, which stepped the whole conversation up and down
+    /// under the eye for a line nobody said.
+    ///
+    /// Its block is lifted half its own depth so the rule lands on the join
+    /// between the two messages rather than inside either of them.
+    #[test]
+    fn the_unread_line_costs_the_conversation_nothing() {
+        let mut fonts = Fonts::new();
+        let theme = Theme::default();
+        let laid = lay_out(&mut fonts, &Row::UnreadDivider, &theme);
+
+        assert_eq!(laid.height, 0.0, "it still pushes the conversation down");
+        let block = laid.blocks.first().expect("something to draw");
+        assert_eq!(block.kind, Kind::Unread);
+        assert!(
+            block.y < 0.0,
+            "the rule sits below the join rather than on it"
+        );
+        assert_eq!(
+            block.y + block.height / 2.0,
+            0.0,
+            "the rule is not centred on the join between the messages"
+        );
+    }
+
+    /// The day separator keeps its row, because it is part of what is being
+    /// read rather than a mark on it.
     #[test]
     fn a_separator_is_a_fixed_height() {
         let mut fonts = Fonts::new();
