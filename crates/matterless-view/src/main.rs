@@ -1714,6 +1714,11 @@ impl App {
     /// reader to wonder whether the press registered.
     fn pressed_in_composer(&mut self, button: composer::Button, root_id: &str) {
         match button {
+            // The editor's own two, which never reach here: it answers its
+            // buttons itself, because only it knows which message they are
+            // about. Named rather than caught by a wildcard, so adding a
+            // third button to a box is a compile error somebody has to read.
+            composer::Button::Save | composer::Button::Cancel => {}
             composer::Button::Send => {
                 let carrying = self.carrying(root_id);
                 let box_of = if root_id.is_empty() {
@@ -3301,10 +3306,7 @@ impl App {
                     eprintln!("{post_id}: no copy to edit");
                     return;
                 };
-                let mut input = std::mem::take(&mut self.input);
-                self.edit
-                    .show(&post_id, &said.message, &mut self.fonts, &mut input);
-                self.input = input;
+                self.open_the_editor(&post_id, &said.message);
             }
             Action::Link => match self.permalink(&post_id) {
                 Some(link) => {
@@ -3592,7 +3594,16 @@ impl App {
     /// Where the message being edited sits, if it is still on screen.
     fn edited_row(&self) -> Option<matterless_ui::Rect> {
         let post_id = self.edit.for_post.as_ref()?;
-        self.stream.row_rect(post_id, self.stream_rect())
+        // The room the row made, under its name: the editor goes *in* the
+        // conversation, so the header above it is the message's own.
+        self.stream
+            .editing_rect(post_id, self.stream_rect())
+            .or_else(|| {
+                self.thread
+                    .as_ref()
+                    .zip(self.thread_stream_rect())
+                    .and_then(|(thread, within)| thread.editing_rect(post_id, within))
+            })
     }
 
     /// Opens a thread beside the channel, or closes the one that is open.
@@ -3911,6 +3922,115 @@ impl App {
         Some(path)
     }
 
+    /// Opens the editor on a message, and re-shapes the row for it.
+    ///
+    /// The row gives up its words for the box's height, and `shape` is the
+    /// only thing that arranges that -- it runs from `relayout` and nowhere
+    /// else. Opening the editor without asking for one left the box floating
+    /// at the row's own height, over the name above it and the message
+    /// below, which is what was reported twice.
+    ///
+    /// A pair with `shut_the_editor`, so neither can be done without the
+    /// other half being done too.
+    fn open_the_editor(&mut self, post_id: &str, said: &str) {
+        let mut input = std::mem::take(&mut self.input);
+        self.edit.show(post_id, said, &mut self.fonts, &mut input);
+        self.input = input;
+        self.relayout();
+        self.redraw();
+    }
+
+    /// Shuts it, and gives the row its words back.
+    fn shut_the_editor(&mut self, input: &mut Input) {
+        self.edit.hide(input);
+        self.relayout();
+        self.redraw();
+    }
+
+    /// Up in an empty message box opens the last thing this reader said.
+    ///
+    /// Answered here rather than in the box, and the key is taken so the box
+    /// never sees it. `Composer::react` reads `Key::Up` as a caret move and
+    /// cannot tell whether it should be: it can reach neither the store nor
+    /// the conversation, and does not know who the reader is. The window is
+    /// the one that can see all three.
+    ///
+    /// Only Up on its own. Shift+Up selects and Ctrl+Up walks by word, and a
+    /// box being selected in is not an idle one.
+    ///
+    /// Only an empty box, and empty includes what is waiting to be sent: a
+    /// box with a pasted picture in it and nothing typed already sends on
+    /// Enter, so it is not idle either.
+    fn edit_the_last_thing_said(&mut self) -> bool {
+        if !self.input.mods().bare() || !self.input.struck(Key::Up) {
+            return false;
+        }
+        // Whichever box has the keyboard, and nothing if neither has.
+        let root_id = match self.input.focus() {
+            Some(composer::NAME) => String::new(),
+            Some(THREAD_COMPOSER) => self.open_root().unwrap_or_default(),
+            _ => return false,
+        };
+        let box_of = match root_id.is_empty() {
+            true => &self.composer,
+            false => &self.thread_composer,
+        };
+        if !box_of.text().trim().is_empty() || self.carrying(&root_id) {
+            return false;
+        }
+        let Some(post_id) = self.last_thing_i_said(&root_id) else {
+            return false;
+        };
+        // Taken only now that there is something to do with it: an empty box
+        // in a conversation this reader has never written in leaves Up alone
+        // rather than swallowing it to no effect.
+        self.input.took(Key::Up);
+        self.act(matterless_view::actions::Action::Edit, post_id, false);
+        true
+    }
+
+    /// The newest message in this conversation that this reader can edit.
+    ///
+    /// From the rows rather than the store: they are the conversation as it
+    /// is on screen, already in order and already without the deleted ones,
+    /// and the newest message is always among them -- a channel opens at its
+    /// end.
+    ///
+    /// The thread's own rows when a reply is being written, or the channel's.
+    /// Otherwise replying in a thread would open the last thing said in the
+    /// channel behind it, which is a different message and quite possibly a
+    /// different day.
+    ///
+    /// Only one the store has a copy of, which is the part worth the read. A
+    /// message still on its way is a row like any other -- `as_post` gives it
+    /// this reader's own `author_id` and its `pending_post_id` for an id --
+    /// and there is nothing to edit behind that id. Unchecked, sending a
+    /// message and pressing Up, which is exactly when somebody wants this,
+    /// would take the key and answer with a line in the log. So a post the
+    /// server has not confirmed is passed over for the one before it.
+    fn last_thing_i_said(&self, root_id: &str) -> Option<String> {
+        let rows = match root_id.is_empty() {
+            true => &self.stream.rows,
+            false => &self.thread.as_ref()?.rows,
+        };
+        let store = self.store.as_ref()?;
+        rows.iter()
+            .rev()
+            .filter_map(|row| match row {
+                matterless_render::Row::Post { post }
+                | matterless_render::Row::Continuation { post } => Some(post),
+                _ => None,
+            })
+            .filter(|post| post.author_id == self.me)
+            .find(|post| {
+                store
+                    .post(&post.post_id)
+                    .map(|held| held.is_some())
+                    .unwrap_or(false)
+            })
+            .map(|post| post.post_id.clone())
+    }
+
     /// Moves the pane's edge while its grip is held.
     ///
     /// Answered before anything else that reads the pointer: every rect in
@@ -3950,6 +4070,11 @@ impl App {
         // would answer this frame against the layout the drag has just
         // finished moving.
         if self.dragged_the_pane() {
+            return;
+        }
+        // Before the boxes see the keyboard, because it takes the key off
+        // them: Up in an empty box is the window's to answer.
+        if self.edit_the_last_thing_said() {
             return;
         }
         // Where the offer sits, before anything asks what is under the
@@ -4040,7 +4165,7 @@ impl App {
         if self.edit.open() {
             let mut input = std::mem::take(&mut self.input);
             if input.struck(Key::Escape) {
-                self.edit.hide(&mut input);
+                self.shut_the_editor(&mut input);
                 self.input = input;
                 return;
             }
@@ -4048,12 +4173,44 @@ impl App {
             let row = self
                 .edited_row()
                 .unwrap_or_else(|| matterless_ui::Rect::new(within.x, within.y, within.width, 0.0));
+            // The buttons in the box, before the box reads the frame: Cancel
+            // is a way out and must not also put a caret somewhere.
+            match self.edit.pressed(&input) {
+                Some(composer::Button::Cancel) => {
+                    self.shut_the_editor(&mut input);
+                    self.input = input;
+                    return;
+                }
+                // The same errand Enter runs, so there is one way of saving
+                // rather than a button that does nearly what the key does.
+                Some(composer::Button::Save) => {
+                    let message = self.edit.box_of.text();
+                    let post_id = self.edit.for_post.clone().unwrap_or_default();
+                    self.shut_the_editor(&mut input);
+                    self.input = input;
+                    if let Some(link) = self.link.as_ref() {
+                        link.send(matterless_view::live::Ask::Edit { post_id, message });
+                    }
+                    return;
+                }
+                _ => {}
+            }
+            let was = self.edit.height();
             let saved = self
                 .edit
                 .react(&mut self.fonts, &input, row, within, &mut self.clipboard);
+            // A message that wraps to another line is a row that has to make
+            // more room for it. Nothing else here re-shapes, so a box left to
+            // grow on its own grows over its neighbours.
+            if (self.edit.height() - was).abs() > 0.5 {
+                self.input = std::mem::take(&mut input);
+                self.relayout();
+                self.redraw();
+                return;
+            }
             if let Some(message) = saved {
                 let post_id = self.edit.for_post.clone().unwrap_or_default();
-                self.edit.hide(&mut input);
+                self.shut_the_editor(&mut input);
                 self.input = input;
                 if let Some(link) = self.link.as_ref() {
                     link.send(matterless_view::live::Ask::Edit { post_id, message });
@@ -4876,6 +5033,22 @@ impl App {
                 .is_none_or(|pane| strip.right() <= pane.x + 0.5),
             "the channel's strip runs under the thread pane"
         );
+        // An open editor whose row has not been told to make room for it.
+        //
+        // No test can reach this either, and it is the fault that got past
+        // two of them: the arithmetic for the row was right and correct in
+        // isolation, and nothing ever called it, because `Action::Edit`
+        // opened the editor without asking for a re-layout. What the tests
+        // checked was the order this file was *supposed* to use.
+        debug_assert!(
+            !self.edit.open()
+                || self.edit.for_post == self.stream.editing.as_ref().map(|(id, _)| id.clone())
+                || self
+                    .thread
+                    .as_ref()
+                    .is_some_and(|thread| thread.editing.is_some()),
+            "the editor is open and no row has made room for it"
+        );
         let stream = self.stream_rect();
 
         // Each piece of a frame, so the table says where one goes rather than
@@ -5176,7 +5349,7 @@ impl App {
                 fonts: &mut self.fonts,
                 palette: &self.palette,
             };
-            self.edit.draw(&mut canvas, row, stream);
+            self.edit.draw(&mut canvas, &self.input, row, stream);
         }
 
         // Over the conversation and under nothing: a card is the answer to a
@@ -5395,6 +5568,34 @@ impl App {
         // What each box is carrying, before it is measured: an attachment
         // waiting in it is a row of its height.
         self.show_what_is_attached();
+        // And which row has to make room for the editor, before the rows are
+        // laid out: the row gives up its words for the box's height, so the
+        // height has to be settled first.
+        //
+        // Which means shaping the box here, at the width it is about to be
+        // given. Its height is a number of lines and a number of lines is an
+        // answer about a width -- so asked before that, it is the height the
+        // box had in the column it used to be in. Measured: the row was told
+        // 116 where the box then drew 136, and nothing re-shaped it, so the
+        // box overlapped the name above it and the message below for as long
+        // as it was open. The width does not depend on the height, so there
+        // is no circle here to break.
+        if self.edit.open() {
+            let width = self
+                .edited_row()
+                .map(|room| room.width)
+                .unwrap_or_else(|| self.stream_rect().width);
+            self.edit.box_of.lay_out(&mut self.fonts, width);
+        }
+        let editing = self
+            .edit
+            .for_post
+            .clone()
+            .map(|post_id| (post_id, self.edit.height()));
+        self.stream.editing = editing.clone();
+        if let Some(thread) = self.thread.as_mut() {
+            thread.editing = editing;
+        }
         // The composer is shaped first: it decides its own height, and the
         // stream gets what is left, so its width has to be settled before the
         // rows are laid out against it.

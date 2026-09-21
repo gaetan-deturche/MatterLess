@@ -29,6 +29,8 @@ pub struct Composer {
     pub name: String,
     /// Drawn when there is nothing written, so the box says what it is for.
     pub placeholder: String,
+    /// What the row along the bottom offers.
+    pub tools_for: Tools,
     /// What is attached and waiting to go with the next message, by name.
     ///
     /// Set by the window, which is what holds the uploads and decides which
@@ -74,11 +76,29 @@ pub struct Composer {
     pub plain: bool,
 }
 
+/// What a box's row of buttons is for.
+///
+/// The row is the same shape either way -- a strip along the bottom of the
+/// box with something on each end -- and what is on it depends on whether the
+/// words in the box are on their way out or already said.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tools {
+    /// A paperclip and Send: a message being written.
+    Writing,
+    /// Save and Cancel: a message being changed.
+    Editing,
+}
+
 /// A button inside the box.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Button {
     /// Pick a file, for a reader who would rather not drag one.
     Attach,
+    /// Keep the change, for a reader editing a message.
+    Save,
+    /// Drop it, which is the button this box was missing: Escape cancels and
+    /// nothing on screen said so.
+    Cancel,
     /// Send what is typed, for a reader who would rather not press return.
     Send,
     /// Take one of the waiting attachments off again.
@@ -113,6 +133,11 @@ const DROP: f32 = 6.0;
 /// The buttons inside the box: one to attach, one to send.
 const BUTTON: f32 = 26.0;
 const SEND: f32 = 52.0;
+/// The way out of an edit, which is a word rather than a mark.
+///
+/// Wider than Send because "Cancel" is a longer word, and there is nothing
+/// gained by making two buttons the same width when the words in them differ.
+const CANCEL: f32 = 60.0;
 /// The row they sit on, along the bottom of the box.
 const TOOLS: f32 = 34.0;
 /// The row of waiting attachments, and the widest one of them.
@@ -162,6 +187,7 @@ impl Composer {
             name: name.into(),
             placeholder: "Write a message... (Enter to send, Shift+Enter for a new line)"
                 .to_string(),
+            tools_for: Tools::Writing,
             waiting: Vec::new(),
             touched: false,
             scroll: 0.0,
@@ -580,9 +606,35 @@ impl Composer {
     }
 
     /// Where the send button sits, inside the box on the right.
+    ///
+    /// The same place Save takes when the box is changing a message rather
+    /// than writing one: the button that does the thing is on the right in
+    /// both, so the reader does not have to look for it twice.
     pub fn send(&self, within: Rect) -> Rect {
         let tools = self.tools(within);
-        Rect::new(tools.right() - SEND - 6.0, tools.y + 4.0, SEND, BUTTON)
+        let width = match self.tools_for {
+            Tools::Writing => SEND,
+            Tools::Editing => SEND,
+        };
+        Rect::new(tools.right() - width - 6.0, tools.y + 4.0, width, BUTTON)
+    }
+
+    /// Where the way out sits: left of Save, and only while editing.
+    ///
+    /// `None` for a box a message is being written in. Nothing is being
+    /// abandoned there -- the words have not been said yet -- and a Cancel
+    /// beside Send would read as a way to unsay them.
+    pub fn cancel(&self, within: Rect) -> Option<Rect> {
+        if self.tools_for != Tools::Editing {
+            return None;
+        }
+        let send = self.send(within);
+        Some(Rect::new(
+            send.x - CHIP_GAP - CANCEL,
+            send.y,
+            CANCEL,
+            send.height,
+        ))
     }
 
     /// The two buttons, so a pointer can land on them.
@@ -600,18 +652,27 @@ impl Composer {
                 });
             }
         }
-        placed.extend([
-            Placed {
+        // The paperclip belongs to a message being written: there is
+        // nothing to attach to a message that has already been said.
+        if self.tools_for == Tools::Writing {
+            placed.push(Placed {
                 name: format!("{}/attach", self.name),
                 rect: self.attach(within),
                 depth: 3,
-            },
-            Placed {
-                name: format!("{}/send", self.name),
-                rect: self.send(within),
+            });
+        }
+        if let Some(cancel) = self.cancel(within) {
+            placed.push(Placed {
+                name: format!("{}/cancel", self.name),
+                rect: cancel,
                 depth: 3,
-            },
-        ]);
+            });
+        }
+        placed.push(Placed {
+            name: format!("{}/send", self.name),
+            rect: self.send(within),
+            depth: 3,
+        });
         placed
     }
 
@@ -620,7 +681,14 @@ impl Composer {
         let clicked = input.clicked()?;
         match clicked.strip_prefix(&format!("{}/", self.name))? {
             "attach" => Some(Button::Attach),
-            "send" => Some(Button::Send),
+            "cancel" => Some(Button::Cancel),
+            // One name for the button on the right, because it is one button
+            // in one place -- what it means is the box's business, not the hit
+            // test's.
+            "send" => Some(match self.tools_for {
+                Tools::Writing => Button::Send,
+                Tools::Editing => Button::Save,
+            }),
             other => other
                 .strip_prefix("unattach/")
                 .and_then(|at| at.parse().ok())
@@ -1073,17 +1141,41 @@ impl Composer {
         if self.plain {
             return;
         }
-        let attach = self.attach(within);
-        let clip = painter.run(
-            fonts,
-            CLIP,
-            attach.x + 5.0,
-            attach.y + 2.0,
-            // Larger than the words: a mark is a picture, and the font
-            // rasterises one at about two thirds of the size asked for.
-            Run::mark(16.0),
-        );
-        scene.glyphs(clip, palette.soft, palette.faint);
+        if self.tools_for == Tools::Writing {
+            let attach = self.attach(within);
+            let clip = painter.run(
+                fonts,
+                CLIP,
+                attach.x + 5.0,
+                attach.y + 2.0,
+                // Larger than the words: a mark is a picture, and the font
+                // rasterises one at about two thirds of the size asked for.
+                Run::mark(16.0),
+            );
+            scene.glyphs(clip, palette.soft, palette.faint);
+        }
+
+        // The way out, beside the way on. Quiet, because it is the one of the
+        // two that undoes something, and a way out drawn as loudly as the way
+        // on is an invitation to press the wrong one.
+        if let Some(cancel) = self.cancel(within) {
+            scene.rounded(
+                cancel.x,
+                cancel.y,
+                cancel.width,
+                cancel.height,
+                palette.raised,
+                5.0,
+            );
+            let label = painter.run(
+                fonts,
+                "Cancel",
+                cancel.x + 9.0,
+                cancel.y + 4.0,
+                Run::label(f32::MAX),
+            );
+            scene.glyphs(label, palette.soft, palette.faint);
+        }
 
         // Lit only when there is something to send: a button that does nothing
         // is a button that has to be tried to find out.
@@ -1103,7 +1195,10 @@ impl Composer {
         );
         let label = painter.run(
             fonts,
-            "Send",
+            match self.tools_for {
+                Tools::Writing => "Send",
+                Tools::Editing => "Save",
+            },
             send.x + 12.0,
             send.y + 4.0,
             Run::label(f32::MAX),

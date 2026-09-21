@@ -246,6 +246,23 @@ impl Input {
         self.keys.contains(&key)
     }
 
+    /// Takes a key, so whoever answers it is the only one who does.
+    ///
+    /// For a key that means one thing to a widget and another to the window
+    /// around it, where the window's meaning wins: Up in a message box moves
+    /// the caret, and in an *empty* message box it opens the last thing the
+    /// reader said. Only the window knows which -- it is the one that can see
+    /// the conversation -- and the box would otherwise move a caret in the
+    /// same frame the editor opened.
+    ///
+    /// Answers whether it was there at all, so the caller can say "if I took
+    /// it, it was mine".
+    pub fn took(&mut self, key: Key) -> bool {
+        let had = self.struck(key);
+        self.keys.retain(|held| *held != key);
+        had
+    }
+
     /// Which modifiers are held right now.
     pub fn mods(&self) -> Mods {
         self.mods
@@ -281,6 +298,39 @@ mod tests {
     use super::*;
     use crate::solve::solve;
     use crate::{Axis, Node, Rect, Size};
+
+    /// A key taken is a key the next reader of the frame does not see.
+    ///
+    /// Which is the whole of what it is for: Up in an empty message box
+    /// belongs to the window, and the box behind it must not also move its
+    /// caret in the same frame.
+    #[test]
+    fn a_taken_key_is_gone_for_everybody_else() {
+        let mut input = Input::default();
+        input.apply(
+            Event::Key {
+                key: Key::Up,
+                down: true,
+            },
+            &[],
+        );
+        input.apply(
+            Event::Key {
+                key: Key::Down,
+                down: true,
+            },
+            &[],
+        );
+
+        assert!(input.struck(Key::Up));
+        assert!(input.took(Key::Up), "it was there to take");
+        assert!(!input.struck(Key::Up), "the box can still see it");
+        assert!(
+            input.struck(Key::Down),
+            "taking one key took another with it"
+        );
+        assert!(!input.took(Key::Up), "taking it twice claimed it twice");
+    }
 
     fn shell() -> Vec<Placed> {
         let tree = Node::new("shell", Size::Grow(1.0))

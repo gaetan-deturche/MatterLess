@@ -11,7 +11,7 @@
 //! knowing which message the pointer is over.
 
 use matterless_layout::Fonts;
-use matterless_layout::row::{RowLayout, Theme};
+use matterless_layout::row::{Kind, RowLayout, Theme};
 use matterless_paint::Run;
 use matterless_render::Row;
 use matterless_ui::input::Input;
@@ -185,6 +185,17 @@ pub struct Stream {
     /// the answer changes only when somebody reacts, so the app hands it over
     /// rather than this reaching for it once a row.
     pub favourites: Vec<(String, String)>,
+    /// The message being edited in this panel, and the room its box wants.
+    ///
+    /// The row gives up what it says and takes that height instead, so the
+    /// editor sits *in* the conversation rather than over it: the name and
+    /// the time stay above it and everything below is pushed down, which is
+    /// what the official client does and what the reader expects of a row
+    /// that has changed size.
+    ///
+    /// Set by the window, which owns the editor and is the only thing that
+    /// knows how tall it has become.
+    pub editing: Option<(String, f32)>,
 }
 
 /// Whether this row is that message.
@@ -225,6 +236,7 @@ impl Stream {
             name: name.into(),
             rows: Vec::new(),
             laid: Vec::new(),
+            editing: None,
             theme: Theme::default(),
             scroll: 0.0,
             custom: std::collections::HashMap::new(),
@@ -314,6 +326,66 @@ impl Stream {
         self.kept = kept;
         self.kept_against = against;
         self.reused = reused;
+        self.open_the_edited_row();
+    }
+
+    /// Gives the row being edited the room its box needs, and takes away what
+    /// it says.
+    ///
+    /// After the cache is written and never before. A trimmed layout put in
+    /// the cache would come back as a short, wordless row the moment the
+    /// editor closed, and the cache is keyed on the row rather than on what
+    /// is being done to it.
+    ///
+    /// The header stays. The official client leaves the name and the time
+    /// above the box, and a box with no name over it reads as a message from
+    /// nobody -- a continuation has no header to keep, which is what makes it
+    /// a continuation.
+    fn open_the_edited_row(&mut self) {
+        let Some((post_id, height)) = self.editing.clone() else {
+            return;
+        };
+        for at in 0..self.rows.len() {
+            let theirs = matches!(
+                self.rows.get(at),
+                Some(Row::Post { post } | Row::Continuation { post })
+                    if post.post_id == post_id
+            );
+            if !theirs {
+                continue;
+            }
+            let Some(laid) = self.laid.get_mut(at) else {
+                continue;
+            };
+            laid.blocks.retain(|block| block.kind == Kind::Header);
+            laid.height = header_bottom(laid) + height;
+        }
+    }
+
+    /// Where the editor goes in the row being edited: under the name.
+    ///
+    /// Asked here rather than worked out by the window, because the blocks
+    /// are what say how tall a header is and they live here.
+    pub fn editing_rect(&self, post_id: &str, within: Rect) -> Option<Rect> {
+        let row = self.row_rect(post_id, within)?;
+        let under = self
+            .laid
+            .iter()
+            .zip(self.rows.iter())
+            .find(|(_, row)| {
+                matches!(
+                    row,
+                    Row::Post { post } | Row::Continuation { post } if post.post_id == post_id
+                )
+            })
+            .map(|(laid, _)| header_bottom(laid))
+            .unwrap_or(0.0);
+        Some(Rect::new(
+            row.x,
+            row.y + under,
+            row.width,
+            (row.height - under).max(0.0),
+        ))
     }
 
     /// How many rows the last layout reused.
@@ -367,6 +439,9 @@ impl Stream {
         // cache must not hand any of them back.
         self.kept.clear();
         self.kept_against = (f32::NAN, 0, 0);
+        // The edited row was just re-laid from its own words like any other,
+        // so it has to give them up again.
+        self.open_the_edited_row();
     }
 
     /// Takes a fresh plan.
@@ -2101,7 +2176,7 @@ impl Stream {
                     );
                     scene.extend([matterless_paint::Piece::Image {
                         x: inner.x + 2.0,
-                        y: top + 4.0,
+                        y: top + AVATAR_TOP,
                         width: AVATAR,
                         height: AVATAR,
                         key: avatar_key(&post.author_id, post.avatar_at),
@@ -2201,6 +2276,14 @@ impl Stream {
 
 /// The size a face is drawn at, and the room the gutter already leaves for it.
 pub const AVATAR: f32 = 28.0;
+/// How far below the row's top the face is drawn.
+///
+/// Named because two places need it and they must not drift: the painter
+/// puts the face here, and `header_bottom` has to know where it stops. It
+/// was a bare `4.0` at the one place that drew it, and the editor's box
+/// began nine pixels into the bottom of the face -- which is exactly the
+/// difference between the face's reach and the header block's.
+pub const AVATAR_TOP: f32 = 4.0;
 /// The presence dot on the corner of a face in the conversation.
 const STATUS: f32 = 9.0;
 /// The ring of row-coloured ground around it, which is what holds it to the
@@ -2504,5 +2587,29 @@ mod sizes {
         assert_eq!(size_of(474_000_000), "474.0 MB");
         // Never negative, whatever the server said.
         assert_eq!(size_of(-1), "-1 bytes");
+    }
+}
+
+/// How far down a row its own words start: under the name, and under the
+/// face beside it.
+///
+/// The face is the painter's and not the layout's, so no block accounts for
+/// it -- and it reaches `AVATAR_TOP + AVATAR` down, which is further than
+/// the twenty-pixel header block does. Measured on a screenshot: the
+/// editor's box began nine pixels into the bottom of the face, which is
+/// exactly that difference.
+///
+/// Zero for a continuation, which has neither a name nor a face -- that is
+/// what makes it a continuation.
+fn header_bottom(laid: &RowLayout) -> f32 {
+    let named = laid
+        .blocks
+        .iter()
+        .filter(|block| block.kind == Kind::Header)
+        .map(|block| block.y + block.height)
+        .fold(0.0, f32::max);
+    match named > 0.0 {
+        true => named.max(AVATAR_TOP + AVATAR),
+        false => 0.0,
     }
 }

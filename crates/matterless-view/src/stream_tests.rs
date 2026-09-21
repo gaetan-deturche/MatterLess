@@ -68,6 +68,148 @@ fn conversation(fonts: &mut Fonts) -> Stream {
     stream
 }
 
+/// The row being edited makes room, and gives up its words to do it.
+///
+/// Reported against the official client: there the row grows, the name and
+/// the time stay above the box, and the conversation below is pushed down.
+/// Here the editor floated at the row's own height, so it covered the name
+/// over it and the messages under it -- 4.5 of the screenshots.
+#[test]
+fn the_edited_row_makes_room_for_the_box() {
+    let mut fonts = Fonts::new();
+    let mut stream = conversation(&mut fonts);
+    let tall = 180.0_f32;
+    let was = stream.total();
+    let row_was = stream
+        .row_rect("root", panel())
+        .expect("the row is on screen")
+        .height;
+
+    stream.editing = Some(("root".to_string(), tall));
+    stream.lay_out(&mut fonts, panel().width);
+
+    let row = stream.row_rect("root", panel()).expect("still on screen");
+    assert!(
+        row.height > row_was,
+        "the row did not grow: {} then {}",
+        row_was,
+        row.height
+    );
+    assert!(
+        stream.total() > was,
+        "the conversation did not get taller, so nothing was pushed down"
+    );
+
+    // The editor's own space is under the name rather than over it.
+    let under = stream
+        .editing_rect("root", panel())
+        .expect("somewhere to put the box");
+    assert!(
+        under.y > row.y,
+        "the box would be drawn over the name and the time"
+    );
+    assert_eq!(under.bottom(), row.bottom());
+    assert!(
+        (under.height - tall).abs() < 0.01,
+        "{} of room for a box that asked for {tall}",
+        under.height
+    );
+}
+
+/// And it gives the room back, with its words, when the editor closes.
+///
+/// The layout cache is keyed on the row and not on what is being done to it,
+/// so a trimmed layout left in there would come back as a short, wordless
+/// row for the rest of the session.
+#[test]
+fn closing_the_editor_gives_the_row_its_words_back() {
+    let mut fonts = Fonts::new();
+    let mut stream = conversation(&mut fonts);
+    let was = stream.total();
+    let blocks = stream.laid[1].blocks.len();
+
+    stream.editing = Some(("root".to_string(), 180.0));
+    stream.lay_out(&mut fonts, panel().width);
+    stream.editing = None;
+    stream.lay_out(&mut fonts, panel().width);
+
+    assert_eq!(stream.total(), was, "the conversation kept the extra room");
+    assert_eq!(
+        stream.laid[1].blocks.len(),
+        blocks,
+        "the row came back out of the cache with its words missing"
+    );
+}
+
+/// The room the row makes is exactly the room the box takes, first time.
+///
+/// Reported twice. The arithmetic was right from the start -- room and panel
+/// agree to the pixel at any given height -- and the fault was the order:
+/// the row was told how tall the box was *before* the box had been laid out
+/// at the width it was about to get, and a height is a number of lines,
+/// which is an answer about a width. Measured, the row was told 116 where
+/// the box then drew 136, and nothing re-shaped it -- so the box sat 20
+/// pixels taller than its hole, over the name above it and the message
+/// below, for as long as it was open.
+///
+/// So this runs the window's order twice and insists the first pass is
+/// already right. A test that only checked the second would have passed
+/// against the bug.
+#[test]
+fn the_room_the_row_makes_is_the_room_the_box_takes() {
+    let mut fonts = Fonts::new();
+    let mut stream = conversation(&mut fonts);
+    let mut edit = crate::edit::Edit::new();
+    let mut input = Input::default();
+    edit.show(
+        "root",
+        "je l'avais review, mais il a change un truc la dessus apres parce \
+         qu'il setais plante sur un nom de methode",
+        &mut fonts,
+        &mut input,
+    );
+
+    let within = panel();
+    let mut first = None;
+    for pass in 0..2 {
+        // The width the box is about to get, then its height, then the row.
+        let width = stream
+            .editing_rect("root", within)
+            .or_else(|| stream.row_rect("root", within))
+            .map(|room| room.width)
+            .unwrap_or(within.width);
+        edit.box_of.lay_out(&mut fonts, width);
+        stream.editing = Some(("root".to_string(), edit.height()));
+        stream.lay_out(&mut fonts, within.width);
+
+        let row = stream.row_rect("root", within).expect("a row");
+        let room = stream.editing_rect("root", within).expect("room in it");
+        let panel_of = edit.rect(room, within);
+
+        assert_eq!(
+            (panel_of.y, panel_of.height),
+            (room.y, room.height),
+            "pass {pass}: the box is not the size of the hole made for it"
+        );
+        assert!(
+            room.y >= row.y + crate::stream::AVATAR_TOP + crate::stream::AVATAR,
+            "pass {pass}: the box starts inside the face beside the name"
+        );
+        assert!(
+            panel_of.bottom() <= row.bottom() + 0.01,
+            "pass {pass}: the box runs past the row, into the message below"
+        );
+        match first {
+            None => first = Some((room.y, room.height)),
+            Some(was) => assert_eq!(
+                was,
+                (room.y, room.height),
+                "the first pass was wrong and the second one settled it"
+            ),
+        }
+    }
+}
+
 /// A root is its own thread; a reply belongs to the root it hangs from.
 #[test]
 fn a_row_knows_which_thread_it_opens() {
