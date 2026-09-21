@@ -140,7 +140,8 @@ const RAIL: f32 = 48.0;
 /// The sidebar's width. Fixed, as it is in the app today.
 const SIDEBAR: f32 = 260.0;
 /// The thread pane's width when one is open.
-const THREAD: f32 = 420.0;
+/// What the side pane is called when the pointer is on its edge.
+const GRIP: &str = "pane-grip";
 /// What the thread pane's reply box answers to.
 const THREAD_COMPOSER: &str = "thread-composer";
 
@@ -538,6 +539,16 @@ struct App {
     /// One at a time and one field: a right-click on the sidebar while the
     /// message menu is open should replace it, not stack a second one over it.
     menu: matterless_view::menu::Menu,
+    /// How wide the side pane is, as the reader has left it.
+    ///
+    /// One number for the thread pane and for the list, because they are one
+    /// edge as far as anybody looking at the window is concerned -- only ever
+    /// one of them is up, and two that did not line up read as the window
+    /// having moved something while the reader was not looking.
+    ///
+    /// Held here rather than in either pane: it belongs to the window, so
+    /// searching after reading a thread finds the edge where it was left.
+    pane_width: f32,
 }
 
 /// How many followed threads the list holds. Well past what anybody reads in
@@ -705,6 +716,7 @@ impl App {
             typing: matterless_view::typing::Typing::default(),
             said_typing: matterless_view::typing::Sending::default(),
             typing_names: std::collections::HashMap::new(),
+            pane_width: matterless_view::aside::WIDTH,
             presence: std::collections::HashMap::new(),
             asked_about: Vec::new(),
             listing: matterless_view::listing::Listing::default(),
@@ -855,7 +867,7 @@ impl App {
     /// and two of them side by side would be two answers to one question.
     fn aside_rect(&self) -> Option<Rect> {
         (self.search.open() || self.listing.open())
-            .then(|| matterless_view::aside::rect(self.column_rect()))
+            .then(|| matterless_view::aside::rect(self.column_rect(), self.pane_width))
     }
 
     /// The thread pane's own column, when a thread is open.
@@ -869,15 +881,10 @@ impl App {
         if self.aside_rect().is_some() {
             return None;
         }
-        // Never more than half: on a narrow window a fixed pane would leave the
-        // conversation it belongs to too thin to read.
-        let width = THREAD.min(column.width * 0.5);
-        Some(Rect::new(
-            column.right() - width,
-            column.y,
-            width,
-            column.height,
-        ))
+        // The same edge the list uses, by the same rule: one pane at a time
+        // and one width between them, so opening a thread after a search does
+        // not move the edge the reader just placed.
+        Some(matterless_view::aside::rect(column, self.pane_width))
     }
 
     /// The channel's title bar, above its conversation.
@@ -3540,7 +3547,7 @@ impl App {
             && let Some(field) = self.strip_field()
         {
             boxes.extend(self.search.boxes(matterless_view::search::Shown {
-                pane: matterless_view::aside::rect(self.column_rect()),
+                pane: matterless_view::aside::rect(self.column_rect(), self.pane_width),
                 field: self.search.query.around(field),
             }));
         }
@@ -3550,6 +3557,16 @@ impl App {
                 pane,
                 field: self.search_field(pane),
             }));
+        }
+        // The edge itself, over whatever is drawn on either side of it: it
+        // is six pixels wide and everything it overlaps is something else's,
+        // so a shallower box would take every press that landed on it.
+        if let Some(pane) = self.aside_rect().or_else(|| self.thread_rect()) {
+            boxes.push(Placed {
+                name: GRIP.to_string(),
+                rect: matterless_view::aside::grip(pane),
+                depth: 6,
+            });
         }
         boxes.extend(self.profile.boxes(self.stream_rect()));
         if let Some(row) = self.edited_row() {
@@ -3894,8 +3911,47 @@ impl App {
         Some(path)
     }
 
+    /// Moves the pane's edge while its grip is held.
+    ///
+    /// Answered before anything else that reads the pointer: every rect in
+    /// the column is measured from this width, so a frame that reacted first
+    /// and resized second would answer the press against the layout the
+    /// reader has just finished moving.
+    ///
+    /// `pressed` rather than `hovered`, which is what makes it a drag: the
+    /// name sticks to the box the button went down on, so the pointer can
+    /// leave the six pixels it started in -- and it will, immediately.
+    fn dragged_the_pane(&mut self) -> bool {
+        if self.input.pressed() != Some(GRIP) {
+            return false;
+        }
+        let Some((x, _)) = self.input.pointer_at() else {
+            return false;
+        };
+        let column = self.column_rect();
+        // From the right edge of the column, because that is the edge the
+        // pane is pinned to. `aside::rect` does the clamping, so the width
+        // kept here is what the reader asked for rather than what fitted --
+        // widen the window again and they get the pane they dragged.
+        let wanted = (column.right() - x).max(0.0);
+        if (wanted - self.pane_width).abs() < 0.5 {
+            return false;
+        }
+        self.pane_width = wanted;
+        self.relayout();
+        self.redraw();
+        true
+    }
+
     /// Hands the frame's input to the widgets that want it.
     fn reacted(&mut self) {
+        // The pane's edge, before anything else reads the pointer: every
+        // rect in the column is measured from its width, so reacting first
+        // would answer this frame against the layout the drag has just
+        // finished moving.
+        if self.dragged_the_pane() {
+            return;
+        }
         // Where the offer sits, before anything asks what is under the
         // pointer: it is measured rather than computed per frame because
         // measuring needs the fonts and a hit test does not have them.
@@ -4058,7 +4114,7 @@ impl App {
                 self.input = input;
                 return;
             }
-            let pane = matterless_view::aside::rect(self.column_rect());
+            let pane = matterless_view::aside::rect(self.column_rect(), self.pane_width);
             let boxes = self.placed.clone();
             let did = self.listing.react(&input, &boxes, pane);
             if matches!(did, Some(matterless_view::listing::Did::Close)) {
@@ -4163,7 +4219,7 @@ impl App {
                 self.input = input;
                 return;
             }
-            let pane = matterless_view::aside::rect(self.column_rect());
+            let pane = matterless_view::aside::rect(self.column_rect(), self.pane_width);
             let boxes = self.placed.clone();
             let store = self.store.clone();
             self.search.scrolled(&input, &boxes, pane);
@@ -5236,10 +5292,15 @@ impl App {
         // the empty margin beside them were one flat surface, and the only way
         // to find out whether a thing could be pressed was to press it.
         let over = hovered.as_deref().is_some_and(|name| self.pressable(name));
+        // An edge that can be dragged says so with the arrows, not the hand:
+        // a hand means "this answers a press", and pressing the edge does
+        // nothing at all. The drag is the whole of what it is for.
+        let on_the_edge = hovered.as_deref() == Some(GRIP) || self.input.pressed() == Some(GRIP);
         if let Some(window) = self.window.as_ref() {
-            window.set_cursor(match over {
-                true => winit::window::CursorIcon::Pointer,
-                false => winit::window::CursorIcon::Default,
+            window.set_cursor(match (on_the_edge, over) {
+                (true, _) => winit::window::CursorIcon::ColResize,
+                (false, true) => winit::window::CursorIcon::Pointer,
+                (false, false) => winit::window::CursorIcon::Default,
             });
         }
         let at = self.input.pointer_at();

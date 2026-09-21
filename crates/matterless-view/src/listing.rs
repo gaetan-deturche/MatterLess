@@ -651,7 +651,7 @@ mod tests {
     }
 
     fn pane() -> Rect {
-        aside::rect(Rect::new(300.0, 0.0, 1000.0, 700.0))
+        aside::rect(Rect::new(300.0, 0.0, 1000.0, 700.0), aside::WIDTH)
     }
 
     /// A shut panel answers nothing and places nothing, whatever is pressed.

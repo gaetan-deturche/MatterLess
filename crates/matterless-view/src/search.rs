@@ -707,7 +707,7 @@ mod tests {
     use super::*;
 
     fn pane() -> Rect {
-        aside::rect(Rect::new(300.0, 0.0, 1000.0, 700.0))
+        aside::rect(Rect::new(300.0, 0.0, 1000.0, 700.0), aside::WIDTH)
     }
 
     fn against(store: &matterless_store::Store) -> Against<'_> {
