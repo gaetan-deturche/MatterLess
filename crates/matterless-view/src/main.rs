@@ -1095,6 +1095,15 @@ impl App {
                 .and_then(|store| store.thread_unread_totals().ok())
                 .unwrap_or((0, 0));
             entries.push(Entry::Threads { unread, mentions });
+            // Under it, and only when there are any. A row saying nought
+            // takes a line of the list to say nothing.
+            let drafts = store
+                .and_then(|store| store.drafts(me).ok())
+                .map(|kept| kept.len())
+                .unwrap_or(0);
+            if drafts > 0 {
+                entries.push(Entry::Drafts { count: drafts });
+            }
         }
         let row = |channel: matterless_sidebar::ChannelSummary| Entry::Channel {
             counterpart_avatar_at: channel
@@ -4887,6 +4896,70 @@ impl App {
         self.redraw();
     }
 
+    /// Shows what is half written, as a list beside the conversation.
+    ///
+    /// The same pane Saved and Pinned use. A draft has no message to go to,
+    /// and it does not need one: `Did::Open` takes the reader to the
+    /// conversation and the thread and never looks at the post id, so an
+    /// empty one is the right answer rather than a missing one.
+    fn open_drafts(&mut self) {
+        let Some(store) = self.store.clone() else {
+            return;
+        };
+        self.listing.expect("Drafts");
+        let named = |conversation: &str| -> (String, String) {
+            // A reply's conversation is the thread's own name, which carries
+            // the root it hangs from.
+            match conversation.strip_prefix(THREAD_PREFIX) {
+                Some(root) => (String::new(), root.to_string()),
+                None => (conversation.to_string(), String::new()),
+            }
+        };
+        let found: Vec<matterless_view::listing::Found> = store
+            .drafts(&self.me)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(conversation, message)| {
+                let (channel_id, root_id) = named(&conversation);
+                // A reply names the conversation its root is in, which needs
+                // the post: without it the row would say nothing about where
+                // the draft belongs.
+                let channel_id = match channel_id.is_empty() {
+                    false => channel_id,
+                    true => store
+                        .post(&root_id)
+                        .ok()
+                        .flatten()
+                        .map(|root| root.channel_id)
+                        .unwrap_or_default(),
+                };
+                let channel = store
+                    .channel(&channel_id)
+                    .ok()
+                    .flatten()
+                    .map(|channel| match channel.display_name.is_empty() {
+                        true => channel.name,
+                        false => channel.display_name,
+                    })
+                    .unwrap_or_else(|| "a conversation".to_string());
+                matterless_view::listing::Found {
+                    post_id: String::new(),
+                    channel_id,
+                    channel,
+                    author: String::new(),
+                    preview: matterless_sync::notify::preview_of(&message),
+                    note: match root_id.is_empty() {
+                        true => String::new(),
+                        false => "a reply".to_string(),
+                    },
+                    root_id,
+                }
+            })
+            .collect();
+        println!("Drafts: {} unfinished", found.len());
+        self.listing.fill(found);
+    }
+
     /// Reads a channel and lays it out, then shows its newest message.
     fn open_channel(&mut self, channel: &str) {
         let Some(store) = self.store.clone() else {
@@ -4930,6 +5003,15 @@ impl App {
                 &store, &self.me, THREADS,
             ));
             self.thread = None;
+            return;
+        }
+        // The drafts row is a place to go in the same sense, and opens the
+        // side pane rather than the column: what it lists are conversations
+        // to return to rather than messages to read, so choosing one takes
+        // the reader *away* from the list instead of filling the column with
+        // it. Which is what `Did::Open` already does for Saved and Pinned.
+        if channel == matterless_view::sidebar::DRAFTS {
+            self.open_drafts();
             return;
         }
         // What was being written here goes with the channel being left, and
@@ -6882,8 +6964,14 @@ impl Shaping {
 /// shaped. Short enough to feel like part of letting go of the edge.
 const SETTLE: std::time::Duration = std::time::Duration::from_millis(120);
 
+/// What a thread's conversation is called, and the one place it is spelled.
+///
+/// A draft's key is this for a reply and the channel's id for a message, so
+/// reading one back needs the prefix as well as the joining.
+const THREAD_PREFIX: &str = "thread/";
+
 fn thread_name(root_id: &str) -> String {
-    format!("thread/{root_id}")
+    format!("{THREAD_PREFIX}{root_id}")
 }
 
 /// Whether this reader wants unread conversations lifted into their own group.

@@ -338,7 +338,10 @@ impl Switcher {
                 | Entry::Team { .. }
                 | Entry::Me { .. }
                 // Not a conversation to jump to: it is every conversation at once.
-                | Entry::Threads { .. } => None,
+                | Entry::Threads { .. }
+                // Nor is this one: it is a list of what is half written, and
+                // what the switcher answers is "take me somewhere".
+                | Entry::Drafts { .. } => None,
             })
             .collect();
         // Stable, so equal scores keep the sidebar's order rather than

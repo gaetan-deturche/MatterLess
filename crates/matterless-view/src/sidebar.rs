@@ -48,6 +48,12 @@ pub enum Entry {
     /// threads a reply never touches its channel's counters, so without this
     /// the sidebar stays silent while the badge counts it.
     Threads { unread: i64, mentions: i64 },
+    /// The conversations this reader has left something half written in.
+    ///
+    /// Only there when there are any: a row saying nought takes a line to say
+    /// nothing, and this one is about the reader's own unfinished business
+    /// rather than about anything that has arrived.
+    Drafts { count: usize },
     Channel {
         id: String,
         label: String,
@@ -91,6 +97,12 @@ pub struct Sidebar {
 /// way, drawn the same way, and opens in the same column, so it should not need
 /// a second piece of state saying which kind of thing is open.
 pub const THREADS: &str = "threads";
+/// The same, for the row listing what is half written.
+///
+/// Held in the same `selected` as a channel for the reason `THREADS` is: it
+/// is chosen the same way and drawn the same way, and a second piece of state
+/// saying which kind of thing is open would be a second thing to keep right.
+pub const DRAFTS: &str = "drafts";
 
 /// A row's height, and a heading's. Fixed, because a channel name is one line
 /// and a list of five hundred of them must not need measuring to be scrolled.
@@ -119,6 +131,7 @@ impl Sidebar {
             Entry::Team { id, .. } => format!("sidebar/team/{id}"),
             Entry::Heading { .. } => format!("sidebar/heading/{index}"),
             Entry::Threads { .. } => format!("sidebar/channel/{THREADS}"),
+            Entry::Drafts { .. } => format!("sidebar/channel/{DRAFTS}"),
             Entry::Channel { id, .. } => format!("sidebar/channel/{id}"),
         }
     }
@@ -243,6 +256,7 @@ impl Sidebar {
             .position(|entry| match entry {
                 Entry::Channel { id, .. } => Some(id.as_str()) == self.selected.as_deref(),
                 Entry::Threads { .. } => self.selected.as_deref() == Some(THREADS),
+                Entry::Drafts { .. } => self.selected.as_deref() == Some(DRAFTS),
                 _ => false,
             })
             .unwrap_or(0);
@@ -275,6 +289,10 @@ impl Sidebar {
                 ..
             } if !muted && (*unread > 0 || *mentions > 0) => Some(id.as_str()),
             Entry::Threads { unread, mentions } if *unread > 0 || *mentions > 0 => Some(THREADS),
+            // Never walked to. A draft is this reader's own unfinished
+            // business rather than something somebody else is waiting on, and
+            // the key is for catching up on what has arrived.
+            Entry::Drafts { .. } => None,
             _ => None,
         }
     }
@@ -694,6 +712,42 @@ impl Sidebar {
                         );
                     }
                 }
+                // The same shape again, and quiet: what is half written is
+                // not news. It carries a plain count rather than an unread
+                // pill -- a draft is something the reader owes rather than
+                // something owed to them -- so it is never loud.
+                Entry::Drafts { count } => {
+                    let chosen = self.selected.as_deref() == Some(DRAFTS);
+                    if chosen || input.hovered() == Some(name.as_str()) {
+                        scene.fill(
+                            row.rect.x,
+                            row.rect.y,
+                            row.rect.width,
+                            row.rect.height,
+                            palette.ground,
+                        );
+                    }
+                    let ink = ink_of(palette, chosen, false, false);
+                    let glyph = painter.run(
+                        fonts,
+                        matterless_layout::marks::EDIT,
+                        row.rect.x + ICON_LEFT,
+                        row.rect.y + 5.0,
+                        Run::mark(13.0),
+                    );
+                    scene.glyphs(glyph, ink, palette.faint);
+                    let left = row.rect.x + GUTTER;
+                    let said = format!("Drafts  {count}");
+                    let named = matterless_layout::elided(
+                        fonts,
+                        &said,
+                        within.right() - TRACK - left,
+                        name_style(false),
+                    );
+                    let glyphs =
+                        painter.run(fonts, &named, left, row.rect.y + 4.0, Run::label(f32::MAX));
+                    scene.glyphs(glyphs, ink, palette.faint);
+                }
             }
         }
         let mut canvas = Canvas {
@@ -1015,7 +1069,7 @@ fn height_of(entry: &Entry) -> f32 {
         Entry::Me { .. } => ME,
         Entry::Team { .. } => TEAM,
         Entry::Heading { .. } => HEADING,
-        Entry::Channel { .. } | Entry::Threads { .. } => ROW,
+        Entry::Channel { .. } | Entry::Threads { .. } | Entry::Drafts { .. } => ROW,
     }
 }
 
@@ -1097,6 +1151,44 @@ mod tests {
         ]);
         sidebar.selected = Some(selected.into());
         sidebar
+    }
+
+    /// The drafts row is a place to go, and not a place to be walked to.
+    ///
+    /// Alt+Shift walks to what has *arrived*. A draft is the reader's own
+    /// unfinished business -- something they owe rather than something owed
+    /// to them -- so walking them to it would answer a question they did not
+    /// ask.
+    #[test]
+    fn the_drafts_row_is_chosen_but_never_walked_to() {
+        let mut sidebar = Sidebar::new(vec![
+            Entry::Drafts { count: 3 },
+            channel("quiet", 0, false),
+            channel("dev", 1, false),
+        ]);
+        sidebar.selected = Some("quiet".into());
+
+        assert_eq!(
+            sidebar.next_unread(true),
+            Some("dev"),
+            "the walk stopped at the drafts row"
+        );
+        sidebar.selected = Some("dev".into());
+        assert_eq!(
+            sidebar.next_unread(true),
+            Some("dev"),
+            "and wrapping past it found only the one waiting row"
+        );
+
+        // It is still a row with a place of its own, chosen like any other.
+        sidebar.selected = Some(DRAFTS.into());
+        let placed = sidebar.boxes(Rect::new(0.0, 0.0, 260.0, 600.0));
+        assert!(
+            placed
+                .iter()
+                .any(|one| one.name == format!("sidebar/channel/{DRAFTS}")),
+            "the row cannot be pressed"
+        );
     }
 
     /// The walk goes on from where the reader is, not from the top.
