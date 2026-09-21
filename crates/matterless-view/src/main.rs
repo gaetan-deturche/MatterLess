@@ -1329,6 +1329,7 @@ impl App {
                 eprintln!("staying offline: {why}");
             }
             Update::Changed(deltas) => {
+                self.read_what_arrived(&deltas);
                 self.announce(&deltas);
                 // The engine has already written every one of these. The only
                 // question left is whether anything on screen is now stale.
@@ -2692,6 +2693,83 @@ impl App {
     /// the app runs -- muting, mentions, the reader's own messages and their
     /// do-not-disturb are all already accounted for. Nothing is reconsidered
     /// here; the flag on the delta is the answer.
+    /// A message that lands in the conversation on screen has been read, so
+    /// the server is told.
+    ///
+    /// `open_channel` was the only place that ever said a channel had been
+    /// read, which marked it on the way *in* and never again: the badge lit
+    /// while somebody sat in the conversation watching the message arrive,
+    /// and stayed lit until they left and came back.
+    ///
+    /// The same bug, in a different path, was found once before -- the
+    /// channel the window starts on had never been through `open_channel`,
+    /// "so its unread count climbed for as long as the reader kept looking at
+    /// it". That one was cured by routing start-up through `open_channel`,
+    /// which left this one standing.
+    ///
+    /// The condition is `announce`'s, deliberately: the same open-and-focused
+    /// test that decides a message needs no notification *because the reader
+    /// can already see it*. If the two disagreed, a message could be both too
+    /// visible to interrupt anybody about and too unseen to count as read,
+    /// which is the worst of each.
+    ///
+    /// Any post, not only the ones worth a notification. `announce` walks
+    /// `notify: true` alone, and a message that does not interrupt -- the
+    /// reader's own, or one in a muted conversation -- is still a message
+    /// that has been read.
+    fn read_what_arrived(&mut self, deltas: &[matterless_sync::Delta]) {
+        // Focus is half of the rule: the same channel behind another window is
+        // not being read.
+        if !self.focused {
+            return;
+        }
+        let Some(open) = self.sidebar.selected.clone() else {
+            return;
+        };
+        // Once for the batch rather than once for each message in it: a busy
+        // conversation would otherwise be a request per post.
+        let arrived = deltas.iter().any(|delta| {
+            matches!(
+                delta,
+                matterless_sync::Delta::PostUpserted { channel_id, .. } if channel_id == &open
+            )
+        });
+        if arrived {
+            self.read_what_is_open();
+        }
+    }
+
+    /// Says the conversation on screen has been read, if anything in it has
+    /// not been.
+    ///
+    /// Asked of the store first so that sitting in a channel that is already
+    /// read costs nothing: this is reached from a focus change and from every
+    /// batch of messages, and a request each time would be traffic to say
+    /// what the server already believes.
+    fn read_what_is_open(&mut self) {
+        let (Some(store), Some(open), Some(link)) = (
+            self.store.as_ref(),
+            self.sidebar.selected.clone(),
+            self.link.as_ref(),
+        ) else {
+            return;
+        };
+        // The threads row fills the same column but is not a conversation, so
+        // there is nothing to mark.
+        if open == matterless_view::sidebar::THREADS {
+            return;
+        }
+        let waiting = store
+            .unread(&open, &self.me)
+            .ok()
+            .flatten()
+            .is_some_and(|unread| unread.messages > 0 || unread.mentions > 0);
+        if !waiting {
+            return;
+        }
+        link.send(matterless_view::live::Ask::MarkRead { channel_id: open });
+    }
+
     fn announce(&mut self, deltas: &[matterless_sync::Delta]) {
         let Some(store) = self.store.clone() else {
             return;
@@ -5308,6 +5386,13 @@ impl ApplicationHandler<Update> for App {
                     // even though whatever caused it may still be unread. The
                     // badge is what carries that, and it stays.
                     self.taskbar.calm(raw_window(self.window.as_ref()));
+                    // And what arrived behind the window has now been come
+                    // back to. Without this the badge stayed lit for as long
+                    // as somebody read, because nothing between opening a
+                    // channel and leaving it ever said it had been read --
+                    // and alt-tabbing away and back is the commonest way to
+                    // be handed messages you then sit and read.
+                    self.read_what_is_open();
                 }
                 // Which conversation counts as "being read" depends on this, so
                 // the socket thread has to hear about it.
