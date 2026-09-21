@@ -210,6 +210,75 @@ impl Sidebar {
     /// What the rail does: a team is not somewhere to be, it is somewhere in
     /// the list, and taking the reader there is different from opening a
     /// conversation they did not ask for.
+    /// The next conversation with something waiting in it, from where the
+    /// reader is standing.
+    ///
+    /// Three decisions, and each of them has a reason rather than a
+    /// preference behind it:
+    ///
+    /// **Muted rows are passed over.** Muted is the reader saying this
+    /// conversation should not interrupt them, and a key that walks them to
+    /// it is an interruption they asked not to have. The rail's dots already
+    /// leave them out, so counting them here would make the badge and the key
+    /// disagree about what is waiting.
+    ///
+    /// **It wraps.** Without it the last unread row is a dead end where the
+    /// key stops working, and nothing on screen says why.
+    ///
+    /// **Direct messages are in the same walk**, because they are rows of the
+    /// same list in the reader's own order. Two walks would need two gestures
+    /// for one question.
+    ///
+    /// Counted from where the reader *is* rather than from the last row
+    /// answered: they are usually standing in a conversation with nothing
+    /// waiting in it, having just read it.
+    pub fn next_unread(&self, on: bool) -> Option<&str> {
+        let many = self.entries.len();
+        if many == 0 {
+            return None;
+        }
+        let here = self
+            .entries
+            .iter()
+            .position(|entry| match entry {
+                Entry::Channel { id, .. } => Some(id.as_str()) == self.selected.as_deref(),
+                Entry::Threads { .. } => self.selected.as_deref() == Some(THREADS),
+                _ => false,
+            })
+            .unwrap_or(0);
+        // Every row once, starting with the one after this and ending with
+        // this one -- so a walk from the only waiting row comes back to it
+        // rather than answering nothing.
+        (1..=many).find_map(|step| {
+            let at = match on {
+                true => (here + step) % many,
+                // Twice the length keeps this positive without a signed cast,
+                // since `step` never exceeds it.
+                false => (here + many * 2 - step) % many,
+            };
+            self.waiting_at(at)
+        })
+    }
+
+    /// The row at `at`, if it is somewhere to go with something in it.
+    ///
+    /// The threads row counts. It is shaped like a channel because that is
+    /// what it is -- somewhere to go and read -- and it is the only row that
+    /// can say a reply is waiting under a collapsed thread.
+    fn waiting_at(&self, at: usize) -> Option<&str> {
+        match self.entries.get(at)? {
+            Entry::Channel {
+                id,
+                unread,
+                mentions,
+                muted,
+                ..
+            } if !muted && (*unread > 0 || *mentions > 0) => Some(id.as_str()),
+            Entry::Threads { unread, mentions } if *unread > 0 || *mentions > 0 => Some(THREADS),
+            _ => None,
+        }
+    }
+
     pub fn scroll_to(&mut self, wanted: &str, within: Rect) {
         let mut above = PADDING;
         for entry in &self.entries {
@@ -997,6 +1066,110 @@ pub fn dot(status: &str, palette: &matterless_paint::Palette) -> Option<[u8; 4]>
 #[cfg(test)]
 mod tests {
     use super::asking;
+    use super::{Entry, Sidebar, THREADS};
+
+    /// A channel row, said once so the walk's tests read as what they test.
+    fn channel(id: &str, unread: i64, muted: bool) -> Entry {
+        Entry::Channel {
+            id: id.into(),
+            label: id.into(),
+            unread,
+            mentions: 0,
+            muted,
+            direct: false,
+            private: false,
+            counterpart: None,
+            counterpart_avatar_at: 0,
+        }
+    }
+
+    fn list(selected: &str) -> Sidebar {
+        let mut sidebar = Sidebar::new(vec![
+            Entry::Heading {
+                label: "Channels".into(),
+                directs: false,
+            },
+            channel("quiet", 0, false),
+            channel("dev", 3, false),
+            channel("noisy", 9, true),
+            channel("here", 0, false),
+            channel("art", 1, false),
+        ]);
+        sidebar.selected = Some(selected.into());
+        sidebar
+    }
+
+    /// The walk goes on from where the reader is, not from the top.
+    ///
+    /// They are nearly always standing in a conversation with nothing in it,
+    /// having just read it -- so counting from the first waiting row would
+    /// answer the same one every time.
+    #[test]
+    fn the_walk_goes_on_from_where_the_reader_is() {
+        assert_eq!(list("here").next_unread(true), Some("art"));
+        assert_eq!(list("quiet").next_unread(true), Some("dev"));
+        // And backwards is the same question the other way.
+        assert_eq!(list("here").next_unread(false), Some("dev"));
+    }
+
+    /// A muted conversation is passed over.
+    ///
+    /// Muted is the reader saying it should not interrupt them, and a key
+    /// that walks them to it is an interruption they asked not to have. The
+    /// rail's dots already leave them out, so counting them here would make
+    /// the badge and the key disagree about what is waiting.
+    #[test]
+    fn a_muted_conversation_is_not_walked_to() {
+        // `noisy` has nine unread and sits between `dev` and `here`.
+        assert_eq!(list("dev").next_unread(true), Some("art"));
+        assert_eq!(list("here").next_unread(false), Some("dev"));
+    }
+
+    /// It wraps, or the last one is a dead end where the key stops working
+    /// and nothing on screen says why.
+    #[test]
+    fn the_walk_wraps_round_the_end_of_the_list() {
+        assert_eq!(list("art").next_unread(true), Some("dev"));
+        assert_eq!(list("dev").next_unread(false), Some("art"));
+    }
+
+    /// Standing on the only waiting row answers that row rather than nothing.
+    ///
+    /// A walk of every row that ends where it began is the honest answer:
+    /// there *is* somewhere with something in it, and it is here.
+    #[test]
+    fn the_only_waiting_row_answers_itself() {
+        let mut sidebar = Sidebar::new(vec![channel("quiet", 0, false), channel("dev", 2, false)]);
+        sidebar.selected = Some("dev".into());
+        assert_eq!(sidebar.next_unread(true), Some("dev"));
+    }
+
+    /// Nothing waiting is nothing to walk to, rather than the first row.
+    #[test]
+    fn a_list_with_nothing_in_it_answers_nothing() {
+        let mut sidebar = Sidebar::new(vec![channel("quiet", 0, false), channel("calm", 0, true)]);
+        sidebar.selected = Some("quiet".into());
+        assert_eq!(sidebar.next_unread(true), None);
+        assert_eq!(sidebar.next_unread(false), None);
+    }
+
+    /// The threads row is somewhere to go, so the walk stops at it.
+    ///
+    /// It is the only row that can say a reply is waiting under a collapsed
+    /// thread, so leaving it out would make the walk silent about exactly the
+    /// case nothing else reports.
+    #[test]
+    fn the_threads_row_is_walked_to_like_any_other() {
+        let mut sidebar = Sidebar::new(vec![
+            Entry::Threads {
+                unread: 1,
+                mentions: 0,
+            },
+            channel("quiet", 0, false),
+        ]);
+        sidebar.selected = Some("quiet".into());
+        assert_eq!(sidebar.next_unread(true), Some(THREADS));
+    }
 
     /// A presence dot goes on top of the face, not under it.
     ///

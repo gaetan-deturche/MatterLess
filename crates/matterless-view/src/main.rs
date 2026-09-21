@@ -4017,6 +4017,24 @@ impl App {
         );
     }
 
+    /// Goes to the next conversation with something waiting in it.
+    ///
+    /// The sidebar decides which -- it is the one that holds the list in the
+    /// reader's own order and knows what is muted. This opens it and scrolls
+    /// the list so the row can be seen, because arriving somewhere without
+    /// the list following reads as the window having jumped.
+    fn walk_to_unread(&mut self, on: bool) {
+        let Some(channel) = self.sidebar.next_unread(on).map(str::to_string) else {
+            println!("nothing unread to walk to");
+            return;
+        };
+        self.sidebar.selected = Some(channel.clone());
+        self.open_channel(&channel);
+        let within = self.sidebar_rect();
+        self.sidebar.scroll_to(&channel, within);
+        println!("walked to {channel}");
+    }
+
     /// Up in an empty message box opens the last thing this reader said.
     ///
     /// Answered here rather than in the box, and the key is taken so the box
@@ -6190,6 +6208,19 @@ impl ApplicationHandler<Update> for App {
                 // in a long channel that is hard to find by hand.
                 if down && self.input.chord(Key::Char('u')) {
                     self.show_unread_mark();
+                }
+                // On to the next conversation with something in it, which is
+                // the other half of the same errand and deliberately not the
+                // same gesture: one control that sometimes scrolls the page
+                // and sometimes takes you somewhere else is two controls
+                // wearing one coat. Alt+Shift, as the official client has it.
+                let mods = self.input.mods();
+                if down && mods.alt && mods.shift && !mods.command {
+                    for (key, on) in [(Key::Down, true), (Key::Up, false)] {
+                        if self.input.struck(key) {
+                            self.walk_to_unread(on);
+                        }
+                    }
                 }
                 // Answered from the store, so it is filled the moment it
                 // opens rather than after a round trip.
