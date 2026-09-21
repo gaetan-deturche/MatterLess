@@ -480,28 +480,51 @@ impl Laid {
         } = into;
         let primary = button.look == Look::Primary;
         let signal = [palette.signal[0], palette.signal[1], palette.signal[2], 255];
-        let edge = match primary {
-            true => signal,
-            false => palette.rule,
+        // What a spent primary is filled with: a fifth of the way from the
+        // panel towards the signal.
+        //
+        // It fades rather than keeping the signal and dimming only its label.
+        // Dimming the label alone is what `:disabled` does to a *plain*
+        // button, where the fill is already the panel -- on a filled one it
+        // left a button that still looked like the thing to press with
+        // writing on it nobody could read, which says "broken" rather than
+        // "not yet".
+        //
+        // A fifth, measured rather than picked: at a third the fill was still
+        // bright enough that the quiet grey on it came to 2.60:1.
+        let faded = palette.dimmed(palette.signal, 0.2);
+        let spent = [faded[0], faded[1], faded[2], 255];
+        let edge = match (primary, self.enabled) {
+            (true, true) => signal,
+            (true, false) => spent,
+            (false, _) => palette.rule,
         };
-        let ground = match (primary, under) {
-            (true, _) => signal,
-            (false, true) => palette.raised,
-            (false, false) => palette.surface,
+        let ground = match (primary, under, self.enabled) {
+            (true, _, true) => signal,
+            (true, _, false) => spent,
+            (false, true, _) => palette.raised,
+            (false, false, _) => palette.surface,
         };
         Panel::flat(rect, self.metrics.corner)
             .edge(edge)
             .fill(ground)
             .draw(scene);
-        let ink = match primary {
-            true => [255, 255, 255],
-            false => palette.ink,
-        };
-        // Dimmed when there is nothing to press, which is what `:disabled`
-        // does and the only thing saying a press was heard.
-        let ink = match self.enabled {
-            true => ink,
-            false => palette.dimmed(ink, 0.55),
+        // Dark on the signal, not white. The signal is a bright cyan -- the
+        // app's own, to the byte -- and white on it measures 1.90:1, which is
+        // a label you cannot read on the one button in a row that is meant to
+        // be the thing to press. The ground is what this palette has that is
+        // dark enough to sit on it.
+        //
+        // A spent primary goes the other way: its fill has faded back towards
+        // the panel, so dark ink on that would be just as unreadable, and it
+        // takes the same quiet grey a spent plain button does.
+        let ink = match (primary, self.enabled) {
+            (true, true) => [palette.ground[0], palette.ground[1], palette.ground[2]],
+            (true, false) => palette.dimmed(palette.ink, 0.55),
+            // Dimmed when there is nothing to press, which is what `:disabled`
+            // does and the only thing saying a press was heard.
+            (false, true) => palette.ink,
+            (false, false) => palette.dimmed(palette.ink, 0.55),
         };
         let glyphs = painter.run(
             fonts,
@@ -575,6 +598,97 @@ mod tests {
                 softness,
             } => (*x, *y, *width, *height, *colour, *radius, *softness),
             other => panic!("not a box: {other:?}"),
+        }
+    }
+
+    /// Relative luminance, so two colours can be compared for whether writing
+    /// in one of them on the other can be read at all.
+    fn luminance(colour: [u8; 3]) -> f32 {
+        let channel = |value: u8| {
+            let value = f32::from(value) / 255.0;
+            match value <= 0.03928 {
+                true => value / 12.92,
+                false => ((value + 0.055) / 1.055).powf(2.4),
+            }
+        };
+        0.2126 * channel(colour[0]) + 0.7152 * channel(colour[1]) + 0.0722 * channel(colour[2])
+    }
+
+    fn contrast(ink: [u8; 3], ground: [u8; 3]) -> f32 {
+        let (one, two) = (luminance(ink), luminance(ground));
+        let (lighter, darker) = match one > two {
+            true => (one, two),
+            false => (two, one),
+        };
+        (lighter + 0.05) / (darker + 0.05)
+    }
+
+    /// What a drawn row put on screen: every fill, and the ink of every run.
+    fn painted(enabled: bool) -> (Vec<[u8; 3]>, Vec<[u8; 3]>) {
+        let mut fonts = fonts();
+        let laid = Row::new("form", Rect::new(0.0, 0.0, 300.0, 30.0))
+            .enabled(enabled)
+            .button(Button::primary("go", "Sign in"))
+            .measure(&mut fonts);
+        let mut scene = Scene::default();
+        let mut painter = Painter::new();
+        let palette = Palette::default();
+        let mut canvas = Canvas {
+            scene: &mut scene,
+            painter: &mut painter,
+            fonts: &mut fonts,
+            palette: &palette,
+        };
+        laid.draw(&mut canvas, &Input::default());
+        let pieces: Vec<Piece> = scene
+            .layers
+            .iter()
+            .flat_map(|layer| layer.pieces.iter())
+            .cloned()
+            .collect();
+        let fills = pieces
+            .iter()
+            .filter_map(|piece| match piece {
+                Piece::Fill { colour, .. } => Some([colour[0], colour[1], colour[2]]),
+                _ => None,
+            })
+            .collect();
+        let inks = pieces
+            .iter()
+            .filter_map(|piece| match piece {
+                Piece::Text { ink, .. } => Some(*ink),
+                _ => None,
+            })
+            .collect();
+        (fills, inks)
+    }
+
+    /// A button nobody may press yet still has to say what it is.
+    ///
+    /// Both were unreadable before, and the live one was worse than it looked.
+    /// A primary button was white on the app's own signal, a bright cyan,
+    /// which measures 1.90:1; disabled, the fill stayed at that full signal
+    /// and only the label was dimmed, for 1.51:1. They are 9.91 and 3.33 now.
+    ///
+    /// Measured rather than eyeballed, because "dimmed" was exactly what the
+    /// code claimed to be doing.
+    #[test]
+    fn a_disabled_primary_button_can_still_be_read() {
+        for enabled in [true, false] {
+            let (fills, inks) = painted(enabled);
+            // The edge, then the fill inside it. The label is what goes on
+            // the fill, so that is the one to measure against.
+            let ground = *fills.last().expect("the button was filled");
+            let ink = *inks.first().expect("the button was labelled");
+            let ratio = contrast(ink, ground);
+            assert!(
+                ratio >= 3.0,
+                "a {} button reads its label at {ratio:.2}:1 against its own fill",
+                match enabled {
+                    true => "live",
+                    false => "spent",
+                }
+            );
         }
     }
 
