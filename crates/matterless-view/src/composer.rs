@@ -609,8 +609,8 @@ impl Composer {
                 // in a box that grows to eight lines is a different place.
                 Key::Home if mods.command => self.motion(fonts, Motion::BufferStart, mods.shift),
                 Key::End if mods.command => self.motion(fonts, Motion::BufferEnd, mods.shift),
-                Key::Home => self.motion(fonts, Motion::Home, mods.shift),
-                Key::End => self.motion(fonts, Motion::End, mods.shift),
+                Key::Home => self.along_the_row(fonts, false, mods.shift),
+                Key::End => self.along_the_row(fonts, true, mods.shift),
                 _ => {}
             }
         }
@@ -749,6 +749,37 @@ impl Composer {
             self.motion(fonts, motion, true);
         }
         self.act(fonts, Action::Backspace);
+    }
+
+    /// The start or end of the row the caret is on, rather than of the whole
+    /// paragraph it belongs to.
+    ///
+    /// `Motion::Home` reads as the one and is the other. Its body is
+    /// `cursor.index = 0` on the *logical* line -- byte for byte what
+    /// `ParagraphStart` does -- so on a soft-wrapped paragraph it leaves the
+    /// row the reader is on. Measured on a long message: Home moved the caret
+    /// four rows up the box, which reads as the text having jumped rather than
+    /// the caret having gone home.
+    ///
+    /// Every other editor puts Home at the start of the row under the caret.
+    /// Reaching the whole message is what Ctrl+Home and Ctrl+End are for, and
+    /// those already do it.
+    fn along_the_row(&mut self, fonts: &mut Fonts, end: bool, extend: bool) {
+        let cursor = self.editor.cursor();
+        let system = fonts.system_mut();
+        let Some(mut at) = self
+            .editor
+            .with_buffer_mut(|buffer| buffer.layout_cursor(system, cursor))
+        else {
+            return;
+        };
+        // Past the last glyph is the end of the row: `LayoutCursor` falls back
+        // to the row's own end when the index is not a glyph it holds.
+        at.glyph = match end {
+            true => usize::MAX,
+            false => 0,
+        };
+        self.motion(fonts, Motion::LayoutCursor(at), extend);
     }
 
     fn motion(&mut self, fonts: &mut Fonts, motion: Motion, extend: bool) {

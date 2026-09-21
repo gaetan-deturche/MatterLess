@@ -704,3 +704,90 @@ fn the_wheel_elsewhere_is_not_this_boxs() {
 
     assert_eq!(composer.caret(panel()).expect("a caret").1, before);
 }
+
+/// Home and End belong to the row the caret is on, and Ctrl to the whole
+/// message.
+///
+/// Reported as Home and End going "to the top/bottom of what the input shows,
+/// but not the actual top/bottom of the message", and they did neither:
+/// `Motion::Home` reads as the start of a line and its body is
+/// `cursor.index = 0` on the *logical* line, byte for byte what
+/// `ParagraphStart` does. On a soft-wrapped paragraph that leaves the row
+/// entirely -- measured at four rows up a full box -- which reads as the text
+/// having jumped rather than the caret having gone home.
+#[test]
+fn home_and_end_stay_on_the_row_the_caret_is_on() {
+    let mut fonts = Fonts::new();
+    let (mut composer, _, box_of) = holding_a_message(&mut fonts);
+    let mut input = Input::default();
+    input.focus_on(NAME);
+    let top = box_of.y + MARGIN + PADDING;
+
+    // `fill` leaves the caret at the very end, on the last row of a wrapped
+    // paragraph -- which is where the old Home jumped away from.
+    let (was_x, was_y) = composer.caret(panel()).expect("a caret");
+    assert!(was_y - top > LINE, "the caret is not on the first row");
+
+    holding(&mut input, Mods::default());
+    press(&mut input, Key::Home);
+    frame(&mut composer, &mut fonts, &mut input);
+    let (home_x, home_y) = composer.caret(panel()).expect("a caret");
+    assert_eq!(home_y, was_y, "Home stays on its row");
+    assert!(home_x < was_x, "and goes to the start of it");
+
+    press(&mut input, Key::End);
+    frame(&mut composer, &mut fonts, &mut input);
+    let (end_x, end_y) = composer.caret(panel()).expect("a caret");
+    assert_eq!(end_y, was_y, "and so does End");
+    assert_eq!(end_x, was_x, "which is where it started");
+}
+
+/// Ctrl reaches the ends of the whole message, and brings the window with it.
+#[test]
+fn ctrl_home_and_end_reach_the_ends_of_the_message() {
+    let mut fonts = Fonts::new();
+    let (mut composer, _, box_of) = holding_a_message(&mut fonts);
+    let mut input = Input::default();
+    input.focus_on(NAME);
+    let top = box_of.y + MARGIN + PADDING;
+
+    holding(&mut input, command());
+    press(&mut input, Key::Home);
+    frame(&mut composer, &mut fonts, &mut input);
+    let (_, y) = composer.caret(panel()).expect("a caret");
+    assert!(
+        (y - top).abs() < 1.0,
+        "the first row of the message, and the window scrolled to it: {}",
+        y - top
+    );
+
+    press(&mut input, Key::End);
+    frame(&mut composer, &mut fonts, &mut input);
+    let (_, y) = composer.caret(panel()).expect("a caret");
+    assert!(
+        y - top >= (MAX_LINES - 1) as f32 * LINE,
+        "and back to the last row: {}",
+        y - top
+    );
+}
+
+/// Shift+Home takes the row up to the caret with it, rather than the
+/// paragraph.
+#[test]
+fn shift_home_selects_back_along_the_row() {
+    let mut fonts = Fonts::new();
+    let (mut composer, _, _) = holding_a_message(&mut fonts);
+    let mut input = Input::default();
+    input.focus_on(NAME);
+
+    holding(&mut input, shift());
+    press(&mut input, Key::Home);
+    frame(&mut composer, &mut fonts, &mut input);
+
+    let picked = composer.selection().expect("something is selected");
+    assert!(!picked.is_empty());
+    assert!(
+        !picked.contains('\n'),
+        "one row, not the paragraph: {picked:?}"
+    );
+}
