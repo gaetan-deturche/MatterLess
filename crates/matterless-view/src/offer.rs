@@ -21,11 +21,6 @@ fn named() -> Named {
     Named::new(NAME)
 }
 
-/// Whether a hit box belongs to the offer, so a press elsewhere puts it away.
-pub fn owns(name: &str) -> bool {
-    name == NAME || named().slug(name).is_some()
-}
-
 /// What opens a list, and of what.
 ///
 /// Teams are not here on purpose: Mattermost has no way of naming one inside

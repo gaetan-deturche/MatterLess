@@ -3898,6 +3898,11 @@ impl App {
         let box_of = match box_of {
             Which::Channel => &mut self.composer,
             Which::Thread => &mut self.thread_composer,
+            // The editor keeps no draft: it is changing a message that has
+            // already been said, and what it opens with is that message.
+            // Asking it to resume one would put a draft from somewhere else
+            // over what somebody wrote.
+            Which::Editing => return,
         };
         match draft {
             Some(draft) => box_of.fill(&draft, fonts),
@@ -4081,15 +4086,26 @@ impl App {
 
     /// The box a name is being typed into, and the panel it is drawn in.
     ///
-    /// `None` when neither box has the keyboard, which is when nothing can
+    /// `None` when none of them has the keyboard, which is when nothing can
     /// be being typed anywhere.
-    fn naming_in(&self) -> Option<(bool, Rect, Rect)> {
+    ///
+    /// The editor counts. It is a composer like the other two -- the same
+    /// widget under a third name -- and a reader changing a message to name
+    /// somebody wants the same list they would have had writing it. Leaving
+    /// it out was not a decision, it was the two boxes being the only two
+    /// anybody thought of.
+    fn naming_in(&self) -> Option<(Which, Rect, Rect)> {
         let channel = header::below(self.channel_rect());
         match self.input.focus() {
-            Some(composer::NAME) => Some((false, self.composer.strip(channel), channel)),
+            Some(composer::NAME) => Some((Which::Channel, self.composer.strip(channel), channel)),
             Some(THREAD_COMPOSER) => {
                 let body = self.thread_body()?;
-                Some((true, self.thread_composer.strip(body), body))
+                Some((Which::Thread, self.thread_composer.strip(body), body))
+            }
+            Some(matterless_view::edit::NAME) => {
+                let stream = self.stream_rect();
+                let row = self.edited_row()?;
+                Some((Which::Editing, self.edit.field(row, stream), stream))
             }
             _ => None,
         }
@@ -4102,13 +4118,14 @@ impl App {
     /// has been typed, and a reader who has to wait for it will have finished
     /// the name by hand.
     fn offer_names(&mut self) {
-        let Some((threaded, _, _)) = self.naming_in() else {
+        let Some((which, _, _)) = self.naming_in() else {
             self.naming.hide();
             return;
         };
-        let box_of = match threaded {
-            true => &self.thread_composer,
-            false => &self.composer,
+        let box_of = match which {
+            Which::Channel => &self.composer,
+            Which::Thread => &self.thread_composer,
+            Which::Editing => &self.edit.box_of,
         };
         let Some((sigil, said)) = box_of.being_named(&matterless_view::offer::SIGILS) else {
             self.naming.hide();
@@ -4177,16 +4194,19 @@ impl App {
         self.input = input;
         match chose {
             Some(matterless_view::offer::Chose::Name(one)) => {
-                let (threaded, _, _) = match self.naming_in() {
-                    Some(where_of) => where_of,
-                    None => return false,
+                let Some((which, _, _)) = self.naming_in() else {
+                    return false;
                 };
                 let (sigil, said) = (self.naming.sigil, self.naming.said.clone());
-                let box_of = match threaded {
-                    true => &mut self.thread_composer,
-                    false => &mut self.composer,
+                // Split off so the box and the fonts are two borrows of two
+                // fields rather than one of the whole window.
+                let fonts = &mut self.fonts;
+                let box_of = match which {
+                    Which::Channel => &mut self.composer,
+                    Which::Thread => &mut self.thread_composer,
+                    Which::Editing => &mut self.edit.box_of,
                 };
-                box_of.name_it(&mut self.fonts, sigil, &said, &one.insert);
+                box_of.name_it(fonts, sigil, &said, &one.insert);
                 self.naming.hide();
                 self.relayout();
                 self.redraw();
@@ -6909,11 +6929,17 @@ fn named(key: &winit::keyboard::Key) -> Option<Key> {
 
 /// What a thread panel answers to. Keyed by root so reopening the same thread
 /// can be told from opening a different one.
-/// Which of the two message boxes a draft belongs to.
+/// Which box a message is being typed into.
+///
+/// Two of them keep a draft; the third is the editor, which is changing a
+/// message that has already been said and so has nothing to park. It is here
+/// because it is a composer like the other two and everything that asks "what
+/// is being typed" has to be able to name it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Which {
     Channel,
     Thread,
+    Editing,
 }
 
 /// Where the reader was in the conversation and in the thread beside it, if
