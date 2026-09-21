@@ -1371,6 +1371,16 @@ impl Stream {
         Some((index.parse().ok()?, crate::actions::Tool::from_slug(slug)?))
     }
 
+    #[cfg(test)]
+    pub fn favourites_at_for_test(
+        &self,
+        index: usize,
+        top: f32,
+        within: Rect,
+    ) -> Vec<(usize, Rect)> {
+        self.favourites(index, top, within)
+    }
+
     /// Where each of the reader's most-used sits on a row's strip.
     fn favourites(&self, index: usize, top: f32, within: Rect) -> Vec<(usize, Rect)> {
         let inner = self.inner(within);
@@ -1428,6 +1438,14 @@ impl Stream {
     /// one step further out: the emoji grid is anchored to a button on the
     /// toolbar, and a toolbar that went away the moment the grid appeared left
     /// the grid hanging off nothing.
+    ///
+    /// **Every** button, which is the whole of it: the three quick faces were
+    /// missing from this list while having boxes of their own, so the pointer
+    /// reaching one answered "no row" and took the toolbar away with it. The
+    /// pointer then landed on the row again, which brought the toolbar back,
+    /// under the pointer, which took it away -- a flicker on every frame, on
+    /// the first three buttons of the strip, which are the ones most likely
+    /// to be pressed.
     pub fn hovered(&self, input: &Input) -> Option<usize> {
         if let Some(post_id) = self.held.as_deref()
             && let Some(index) = self.index_of_post(post_id)
@@ -1437,6 +1455,7 @@ impl Stream {
         let name = input.hovered()?;
         self.index_of(name)
             .or_else(|| self.tool_at(name).map(|(index, _)| index))
+            .or_else(|| self.favourite_at(name).map(|(index, _)| index))
             .or_else(|| self.reaction_at(name).map(|(index, _)| index))
             .or_else(|| {
                 name.strip_prefix(&format!("{}/row/", self.name))?

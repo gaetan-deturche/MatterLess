@@ -245,6 +245,75 @@ fn click(stream: &mut Stream, name: &str) -> Option<Chose> {
     stream.react(&input, &placed, within)
 }
 
+/// The toolbar stays up under a pointer that is not moving.
+///
+/// Reported off a screen recording: the strip flickered on and off every
+/// frame while the pointer sat on it. The cause is a loop, and the loop is
+/// what this reproduces -- the toolbar exists only on the hovered row, so a
+/// button that does not count as its row takes the toolbar away the moment
+/// the pointer reaches it; the pointer then lands on the row again, which
+/// brings the toolbar back under the pointer, which takes it away.
+///
+/// The three quick faces were the ones missing from `hovered`, and they are
+/// the first three buttons on the strip -- the ones most likely to be
+/// pressed. So this walks *every* button rather than the one that was
+/// reported, because the next one added is the next one to be forgotten.
+#[test]
+fn the_toolbar_stays_up_under_a_still_pointer() {
+    let mut fonts = Fonts::new();
+    let mut stream = conversation(&mut fonts);
+    let within = panel();
+    stream.favourites = vec![
+        ("a".into(), "\u{1F44D}".into()),
+        ("b".into(), "\u{1F44C}".into()),
+        ("c".into(), "\u{1F382}".into()),
+    ];
+
+    let row = 1;
+    let mut top = within.y + stream.theme.pad_top - stream.scroll;
+    for laid in stream.laid.iter().take(row) {
+        top += laid.height;
+    }
+
+    let mut buttons: Vec<(String, Rect)> = stream
+        .favourites_at_for_test(row, top, within)
+        .into_iter()
+        .map(|(at, rect)| (format!("quick face {at}"), rect))
+        .collect();
+    buttons.extend(
+        stream
+            .tools(row, top, within)
+            .into_iter()
+            .map(|(tool, rect)| (format!("{tool:?}"), rect)),
+    );
+    assert!(
+        buttons.len() >= 4,
+        "a strip of {} is not enough to prove anything",
+        buttons.len()
+    );
+
+    for (what, rect) in buttons {
+        let at = (rect.x + rect.width / 2.0, rect.y + rect.height / 2.0);
+        let mut input = Input::default();
+        let mut hovered = None;
+        // Four frames of the window's own order -- boxes built from the hover
+        // it has, then the same pointer applied again -- which is enough for
+        // a two-frame oscillation to show itself.
+        for frame in 0..4 {
+            let placed = stream.boxes(within, hovered);
+            input.apply(Event::PointerMoved { x: at.0, y: at.1 }, &placed);
+            hovered = stream.hovered(&input);
+            assert_eq!(
+                hovered,
+                Some(row),
+                "frame {frame}: the pointer on {what} stopped counting as its row, \
+                 so the toolbar went out from under it (it was on {:?})",
+                input.hovered()
+            );
+        }
+    }
+}
+
 /// The footer is the way in, and the only one.
 #[test]
 fn the_footer_opens_the_thread() {

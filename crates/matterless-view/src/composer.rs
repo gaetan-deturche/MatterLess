@@ -584,7 +584,12 @@ impl Composer {
         if self.plain { FIELD_PADDING } else { PADDING }
     }
 
-    fn margin(&self) -> f32 {
+    /// The clear room between the box and the edges of its strip.
+    ///
+    /// Public because it is blank ground somebody else can use: the typing
+    /// pill sits in the band above the box, which belongs to the strip and
+    /// has nothing drawn in it.
+    pub fn margin(&self) -> f32 {
         if self.plain { FIELD_MARGIN } else { MARGIN }
     }
 

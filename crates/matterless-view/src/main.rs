@@ -560,6 +560,21 @@ struct App {
 /// one sitting, and the store answers instantly either way.
 const THREADS: u32 = 200;
 
+/// How far down the pill is allowed to reach, given the conversation above
+/// the box and the room that box keeps clear of itself.
+///
+/// The strip and the conversation tile exactly, so the conversation's bottom
+/// edge is the top of the composer's strip -- and the box starts a margin
+/// below that. Those pixels are ground with nothing in them, so the pill
+/// sits in them and covers that much less of what is being read. Measured:
+/// twelve of the pill's twenty-four.
+///
+/// It stops exactly where the box starts, so none of the box is covered
+/// however tall the box has grown.
+fn floor_of(above: Rect, margin: f32) -> f32 {
+    above.bottom() + margin
+}
+
 /// The pill saying somebody is writing: how tall, how far in, and the room
 /// inside it.
 ///
@@ -948,7 +963,12 @@ impl App {
     /// over the last message costs nothing when there is nothing to say.
     fn typing_rect(&self) -> Rect {
         let above = self.composer.above(header::below(self.channel_rect()));
-        Rect::new(above.x, above.bottom() - TYPING, above.width, TYPING)
+        Rect::new(
+            above.x,
+            floor_of(above, self.composer.margin()) - TYPING,
+            above.width,
+            TYPING,
+        )
     }
 
     /// The strip the composer sits in, at the foot of the channel's column.
@@ -972,7 +992,7 @@ impl App {
         let above = self.thread_composer.above(self.thread_body()?);
         Some(Rect::new(
             above.x,
-            above.bottom() - TYPING,
+            floor_of(above, self.thread_composer.margin()) - TYPING,
             above.width,
             TYPING,
         ))
@@ -1817,16 +1837,18 @@ impl App {
         }
         let style = matterless_view::listing::label(false);
         let said = matterless_layout::elided(fonts, said, room, style);
-        let width = matterless_layout::extent_of(fonts, &said, f32::MAX, style).width;
-        Some((
-            Rect::new(
-                strip.x + TYPING_INSET,
-                strip.y,
-                width + TYPING_PADDING * 2.0,
-                strip.height,
-            ),
-            said,
-        ))
+        let width = matterless_layout::extent_of(fonts, &said, f32::MAX, style).width
+            + TYPING_PADDING * 2.0;
+        // Centred, not left-aligned. It sat at `TYPING_INSET`, which is where
+        // the full-width band's words used to start -- right for a line
+        // running the width of the column, and wrong for a pill, which has
+        // two ends and reads as pinned to whichever one it touches.
+        //
+        // Never past its own margin on a column too narrow for it, which is
+        // what `max` is for: a centred thing wider than its room would be
+        // centred off both edges at once.
+        let left = (strip.x + (strip.width - width) / 2.0).max(strip.x + TYPING_INSET);
+        Some((Rect::new(left, strip.y, width, strip.height), said))
     }
 
     /// Looks one person up, if this window has not already.
@@ -5258,9 +5280,30 @@ impl App {
 
         drop(probe);
         let probe = matterless_view::timing::watch("  the composers", 0, "");
-        // A pill over the foot of each conversation. After the stream so it
-        // covers the last message rather than being covered by it, and before
-        // the composers so it never rides over the box being typed into.
+        // The message box, its own layer, so the caret and the box sit over
+        // the stream rather than under a message that scrolled into the
+        // strip. Not at all while the threads are up: there is nothing there
+        // to reply to.
+        if !self.on_threads() {
+            let composer = self.composer_rect();
+            scene.clip_to(composer.x, composer.y, composer.width, composer.height);
+            let focused = self.input.focus() == Some(composer::NAME);
+            let within = header::below(self.channel_rect());
+            let mut canvas = Canvas {
+                scene: &mut scene,
+                painter: &mut self.painter,
+                fonts: &mut self.fonts,
+                palette: &self.palette,
+            };
+            self.composer.draw(&mut canvas, within, focused);
+            self.composer.draw_over(&mut canvas, &self.input, within);
+        }
+
+        // A pill over the foot of each conversation, and partly over the
+        // blank the box keeps above itself -- which is why it is drawn after
+        // the boxes rather than before them: the composer fills its whole
+        // strip with ground, so a pill under it would be painted out. It
+        // ends exactly where the box begins, so none of the box is covered.
         let open = self.sidebar.selected.clone().unwrap_or_default();
         let lines = [
             (
@@ -5320,26 +5363,10 @@ impl App {
             scene.glyphs(glyphs, palette.soft, palette.faint);
         }
 
-        // Its own layer last, so the caret and the box sit over the stream
-        // rather than under a message that scrolled into the strip. Not at all
-        // while the threads are up: there is nothing there to reply to.
+        drop(probe);
         if self.on_threads() {
-            drop(probe);
             return scene;
         }
-        let composer = self.composer_rect();
-        scene.clip_to(composer.x, composer.y, composer.width, composer.height);
-        let focused = self.input.focus() == Some(composer::NAME);
-        let within = header::below(self.channel_rect());
-        let mut canvas = Canvas {
-            scene: &mut scene,
-            painter: &mut self.painter,
-            fonts: &mut self.fonts,
-            palette: &self.palette,
-        };
-        self.composer.draw(&mut canvas, within, focused);
-        self.composer.draw_over(&mut canvas, &self.input, within);
-        drop(probe);
         let _probe = matterless_view::timing::watch("  the overlays", 0, "");
 
         // The list under the strip's field, over the conversation: it hangs
@@ -6676,9 +6703,37 @@ mod tests {
             long.width < strip.width,
             "the pill took the whole column, which is the band again"
         );
-        assert_eq!(short.x, strip.x + TYPING_INSET);
         assert_eq!(short.y, strip.y);
         assert_eq!(short.height, strip.height);
+
+        // Centred: the same room to the left of it as to the right. It was
+        // pinned to `TYPING_INSET`, which is where a full-width band's words
+        // began -- right for a line and wrong for a pill, which has two ends
+        // and reads as stuck to whichever one it touches.
+        for pill in [short, long] {
+            let left = pill.x - strip.x;
+            let right = strip.right() - pill.right();
+            assert!(
+                (left - right).abs() < 0.01,
+                "{left} of room on the left and {right} on the right"
+            );
+        }
+    }
+
+    /// A pill too wide to centre keeps its margin rather than both edges.
+    ///
+    /// Centring a thing wider than its room puts it off both ends at once,
+    /// which on this strip means over the thread pane on one side.
+    #[test]
+    fn a_pill_with_no_room_to_centre_keeps_its_margin() {
+        let mut fonts = matterless_layout::Fonts::new();
+        let strip = Rect::new(100.0, 0.0, 240.0, TYPING);
+        let (pill, _) =
+            App::typing_pill(&mut fonts, strip, "amy, ben and cara are typing").expect("a pill");
+        assert!(
+            pill.x >= strip.x + TYPING_INSET - 0.01,
+            "the pill was centred off the left edge of the column"
+        );
     }
 
     /// A column too narrow for the sentence cuts it rather than overflowing.

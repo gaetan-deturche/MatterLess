@@ -268,6 +268,39 @@ fn the_composer_and_the_stream_tile_the_panel() {
     );
 }
 
+/// The box keeps a band of blank ground above itself, and says how wide.
+///
+/// The typing pill sits in that band, which is the whole of how it covers
+/// half as much of the conversation -- so the band has to be real, the box
+/// must not reach into it, and `margin` has to be the number that describes
+/// it. Asserted here rather than trusted, because the pill is measured from
+/// the conversation's bottom edge and the box is measured from the strip's
+/// top, and nothing else makes those two agree.
+#[test]
+fn the_box_leaves_a_band_of_ground_above_itself() {
+    let mut fonts = Fonts::new();
+    let mut composer = Composer::new(NAME);
+    composer.lay_out(&mut fonts, panel().width);
+
+    let band = composer.margin();
+    assert!(
+        band > 0.0,
+        "there is no room above the box to put anything in"
+    );
+
+    let strip = composer.strip(panel());
+    assert_eq!(
+        composer.above(panel()).bottom(),
+        strip.y,
+        "the conversation and the strip do not meet, so the band is not where the pill looks for it"
+    );
+    assert_eq!(
+        strip.height - composer.box_height(),
+        band * 2.0,
+        "the box does not sit a margin in from both edges of its strip"
+    );
+}
+
 /// Two boxes on screen at once, so a keystroke has to reach exactly one. The
 /// channel's composer and the thread's are the same widget under two names,
 /// and without the name they would both take every key.
