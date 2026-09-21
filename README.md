@@ -99,7 +99,7 @@ cargo run -p matterless-view -- --snapshot list.png
 ## Tests
 
 ```bash
-cargo test --workspace          # 675, and five more that need a server
+cargo test --workspace          # 713, and five more that need a server
 cargo clippy --workspace --all-targets
 cargo fmt --all --check
 ```
