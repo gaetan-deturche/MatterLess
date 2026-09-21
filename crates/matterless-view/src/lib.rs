@@ -30,6 +30,7 @@ pub mod live;
 pub mod menu;
 pub mod open;
 pub mod picker;
+pub mod places;
 pub mod profile;
 pub mod rail;
 pub mod rest;

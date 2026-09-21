@@ -539,6 +539,11 @@ struct App {
     /// One at a time and one field: a right-click on the sidebar while the
     /// message menu is open should replace it, not stack a second one over it.
     menu: matterless_view::menu::Menu,
+    /// The conversations this reader has been in, for the back button.
+    visited: matterless_view::places::Places,
+    /// Whether the channel being opened is a step through `visited` rather
+    /// than a new arrival, so a step does not record itself as one.
+    stepping: bool,
     /// How wide the side pane is, as the reader has left it.
     ///
     /// One number for the thread pane and for the list, because they are one
@@ -717,6 +722,8 @@ impl App {
             said_typing: matterless_view::typing::Sending::default(),
             typing_names: std::collections::HashMap::new(),
             pane_width: matterless_view::aside::WIDTH,
+            visited: matterless_view::places::Places::default(),
+            stepping: false,
             presence: std::collections::HashMap::new(),
             asked_about: Vec::new(),
             listing: matterless_view::listing::Listing::default(),
@@ -3947,6 +3954,47 @@ impl App {
         self.redraw();
     }
 
+    /// Notes that the reader has arrived somewhere, for the back button.
+    ///
+    /// Nothing is recorded while stepping. A step is a move *through* the
+    /// history, and a history that recorded its own steps could never be
+    /// walked backwards: every press would append the place it had just come
+    /// from and stand still.
+    fn remember_the_place(&mut self, channel: &str) {
+        if !self.stepping {
+            self.visited.arrived(channel);
+        }
+    }
+
+    /// Goes back a place, or on to one already visited.
+    ///
+    /// `on` rather than `forward`: `Action::Forward` already means forwarding
+    /// a message to somebody, and two things called forward in one window is
+    /// one too many.
+    fn stepped(&mut self, on: bool) {
+        let wanted = match on {
+            true => self.visited.on(),
+            false => self.visited.back(),
+        };
+        let Some(channel) = wanted.map(str::to_string) else {
+            return;
+        };
+        // Through the same `open_channel` a click takes, with a flag rather
+        // than an opener of its own: the two would otherwise drift about what
+        // opening a conversation involves, and it involves a dozen things.
+        self.stepping = true;
+        self.sidebar.selected = Some(channel.clone());
+        self.open_channel(&channel);
+        self.stepping = false;
+        println!(
+            "stepped {} to {channel}",
+            match on {
+                true => "on",
+                false => "back",
+            }
+        );
+    }
+
     /// Up in an empty message box opens the last thing this reader said.
     ///
     /// Answered here rather than in the box, and the key is taken so the box
@@ -4643,6 +4691,7 @@ impl App {
         {
             eprintln!("remembering where we are: {error}");
         }
+        self.remember_the_place(channel);
         self.recall_favourites();
         // A place in the conversation being left behind. The scroll check
         // would drop it anyway, and a row of one channel is not a row of
@@ -6158,6 +6207,20 @@ impl ApplicationHandler<Update> for App {
                     self.offer_channel_menu();
                     self.react();
                     self.redraw();
+                    return;
+                }
+                // The two buttons under the thumb, which every browser and
+                // the official client answer with the previous and next
+                // place. They were dropped here along with everything else
+                // that is not the left button.
+                if matches!(
+                    button,
+                    winit::event::MouseButton::Back | winit::event::MouseButton::Forward
+                ) {
+                    if state != winit::event::ElementState::Pressed {
+                        return;
+                    }
+                    self.stepped(button == winit::event::MouseButton::Forward);
                     return;
                 }
                 if button != winit::event::MouseButton::Left {
