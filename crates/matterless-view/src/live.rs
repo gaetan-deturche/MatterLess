@@ -52,6 +52,15 @@ pub enum Update {
     Updatable(crate::update::Offer),
     /// Installing the build the reader accepted did not work.
     UpdateFailed(String),
+    /// A file is on the server and waiting for a message to claim it.
+    ///
+    /// Boxed because a `FileInfo` is the largest thing this enum carries and
+    /// every other variant would be sized by it.
+    Attached {
+        channel_id: String,
+        root_id: String,
+        file: Box<matterless_core::model::FileInfo>,
+    },
     /// The tray icon was used.
     ///
     /// It arrives the same way, even though the shell delivers it on this very
@@ -115,6 +124,19 @@ pub enum Ask {
         channel_id: String,
         root_id: String,
         message: String,
+        /// Files already uploaded and waiting for this post to claim them.
+        file_ids: Vec<String>,
+    },
+    /// Put a file on the server and say so, without posting anything.
+    ///
+    /// Apart from `Upload`, which is the whole errand -- upload *and* post,
+    /// because a file dropped on the window is the message. A file pasted
+    /// into the box is not: it waits there with whatever is being written
+    /// until the reader sends both.
+    Attach {
+        channel_id: String,
+        root_id: String,
+        path: std::path::PathBuf,
     },
     /// Save, pin or delete one message.
     Act {
@@ -417,13 +439,13 @@ async fn run(
             ask = inbox.recv() => {
                 let Some(ask) = ask else { break };
                 match ask {
-                    Ask::Send { pending_post_id, channel_id, root_id, message } => {
+                    Ask::Send { pending_post_id, channel_id, root_id, message, file_ids } => {
                         let request = matterless_core::model::NewPost {
                             channel_id: &channel_id,
                             message: &message,
                             root_id: &root_id,
                             pending_post_id: &pending_post_id,
-                            file_ids: &[],
+                            file_ids: &file_ids,
                         };
                         let failed = match rest.create_post(&request).await {
                             Ok(post) => {
@@ -517,6 +539,19 @@ async fn run(
                         path,
                     } => {
                         upload(&rest, &engine, &context, &channel_id, &root_id, &path).await;
+                    }
+                    Ask::Attach {
+                        channel_id,
+                        root_id,
+                        path,
+                    } => {
+                        if let Some(file) = put(&rest, &channel_id, &path).await {
+                            wake.wake(Update::Attached {
+                                channel_id,
+                                root_id,
+                                file: Box::new(file),
+                            });
+                        }
                     }
                     Ask::Discover { query } => {
                         let found = discover(&rest, engine.store(), &me_id, &query).await;
@@ -2057,47 +2092,13 @@ pub async fn upload(
     root_id: &str,
     path: &std::path::Path,
 ) {
-    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-        eprintln!("that file has no name this window can send");
+    let Some(file) = put(rest, channel_id, path).await else {
         return;
     };
-    match std::fs::metadata(path) {
-        Ok(held) if held.len() > LARGEST => {
-            eprintln!(
-                "{name} is {} MB, which is too large",
-                held.len() / 1_048_576
-            );
-            return;
-        }
-        Err(error) => {
-            eprintln!("{name}: {error}");
-            return;
-        }
-        _ => {}
-    }
-    let bytes = match std::fs::read(path) {
-        Ok(bytes) => bytes,
-        Err(error) => {
-            eprintln!("{name}: {error}");
-            return;
-        }
-    };
-    println!("sending {name}, {} bytes", bytes.len());
-
-    let sent = match rest.upload_file(channel_id, name, &bytes, None).await {
-        Ok(sent) => sent,
-        Err(error) => {
-            eprintln!("uploading {name}: {error}");
-            return;
-        }
-    };
-    let file_ids: Vec<String> = sent.file_infos.into_iter().map(|file| file.id).collect();
-    if file_ids.is_empty() {
-        eprintln!("{name} uploaded but the server named no file");
-        return;
-    }
-    // No message of its own: the file is the message. A caption would need a
-    // composer that knows a drop is coming, which is a different feature.
+    let name = file.name.clone();
+    let file_ids = [file.id];
+    // No message of its own: a file dropped on the window *is* the message.
+    // A file pasted into the box waits there instead -- see `Ask::Attach`.
     let request = matterless_core::model::NewPost {
         channel_id,
         message: "",
@@ -2117,6 +2118,54 @@ pub async fn upload(
         }
         Err(error) => eprintln!("sending {name}: {error}"),
     }
+}
+
+/// Puts one file on the server and says what it became.
+///
+/// The half both errands share: dropping a file posts it at once and pasting
+/// one leaves it waiting, but each has to get the bytes up there first and
+/// each refuses the same things for the same reasons.
+async fn put(
+    rest: &matterless_core::rest::RestClient,
+    channel_id: &str,
+    path: &std::path::Path,
+) -> Option<matterless_core::model::FileInfo> {
+    let name = path.file_name().and_then(|name| name.to_str())?;
+    match std::fs::metadata(path) {
+        Ok(held) if held.len() > LARGEST => {
+            eprintln!(
+                "{name} is {} MB, which is too large",
+                held.len() / 1_048_576
+            );
+            return None;
+        }
+        Err(error) => {
+            eprintln!("{name}: {error}");
+            return None;
+        }
+        _ => {}
+    }
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            eprintln!("{name}: {error}");
+            return None;
+        }
+    };
+    println!("sending {name}, {} bytes", bytes.len());
+
+    let sent = match rest.upload_file(channel_id, name, &bytes, None).await {
+        Ok(sent) => sent,
+        Err(error) => {
+            eprintln!("uploading {name}: {error}");
+            return None;
+        }
+    };
+    let file = sent.file_infos.into_iter().next();
+    if file.is_none() {
+        eprintln!("{name} uploaded but the server named no file");
+    }
+    file
 }
 
 /// Where this machine keeps what a person downloads.

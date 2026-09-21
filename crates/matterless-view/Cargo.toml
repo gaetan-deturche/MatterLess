@@ -29,6 +29,9 @@ image = { version = "0.25", default-features = false, features = [
     "jpeg",
     "gif",
     "webp",
+    # Not for reading one: for the clipboard, which on Print Screen offers a
+    # bitmap and nothing else, and which is re-encoded before it is sent.
+    "bmp",
 ] }
 # The socket runs on a thread of its own, so the window never blocks on it.
 tokio = { version = "1", features = ["rt", "macros", "sync", "time"] }

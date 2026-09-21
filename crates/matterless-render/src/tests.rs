@@ -1488,6 +1488,65 @@ fn an_svg_is_a_file_card_unless_the_server_allows_it() {
     assert_eq!(post.files[0].variant, ImageVariant::Original);
 }
 
+/// A picture the server never measured is drawn as a file, not as nothing.
+///
+/// Measured from the server, not invented: a screen grab pasted as a bitmap
+/// came back `image/bmp`, 4451970 bytes, 0x0, no preview and no mini
+/// preview. Its mime type said "picture", so it was laid out as one and
+/// given a box of nothing by nothing -- the attachment drew as nothing, and
+/// the message arrived looking empty with four megabytes on it.
+#[test]
+fn a_picture_the_server_never_measured_gets_a_card() {
+    let mut bitmap = image_info("f7", 0, 0);
+    bitmap.mime_type = "image/bmp".into();
+    bitmap.extension = "bmp".into();
+    bitmap.has_preview_image = false;
+    bitmap.mini_preview = None;
+    bitmap.size = 4451970;
+    let mut carrier = post("p1", "amy", 1_000);
+    carrier.metadata.files = vec![bitmap];
+
+    let rows = plan_channel(&[carrier], &HashMap::new(), &options(ThreadMode::Flat));
+    let Some(Row::Post { post, .. }) = rows.iter().find(|row| matches!(row, Row::Post { .. }))
+    else {
+        panic!("no post row");
+    };
+    assert!(
+        !post.files[0].image,
+        "an unmeasured picture was laid out as one, so it draws in a box of nothing"
+    );
+    assert_eq!(
+        post.files[0].size, 4451970,
+        "and it is still the file it was, card or not"
+    );
+}
+
+/// One unmeasured picture beside a real one does not make a gallery.
+///
+/// The count that decides between one large picture and a row of thumbnails
+/// has to agree with what is actually drawn as a picture, or the real one is
+/// shrunk to a thumbnail to make room for a neighbour that is a card.
+#[test]
+fn a_card_beside_a_picture_leaves_it_the_room() {
+    let mut bitmap = image_info("f8", 0, 0);
+    bitmap.mime_type = "image/bmp".into();
+    bitmap.has_preview_image = false;
+    let mut carrier = post("p1", "amy", 1_000);
+    carrier.metadata.files = vec![bitmap, image_info("f9", 400, 400)];
+
+    let rows = plan_channel(&[carrier], &HashMap::new(), &options(ThreadMode::Flat));
+    let Some(Row::Post { post, .. }) = rows.iter().find(|row| matches!(row, Row::Post { .. }))
+    else {
+        panic!("no post row");
+    };
+    assert!(!post.files[0].image);
+    assert_eq!(
+        post.files[1].variant,
+        ImageVariant::Preview,
+        "the one picture on the post was thumbnailed as though it had company"
+    );
+}
+
 #[test]
 fn an_animation_is_always_drawn_from_the_file_itself() {
     // A preview of a GIF is one still frame, so it never takes a thumbnail --

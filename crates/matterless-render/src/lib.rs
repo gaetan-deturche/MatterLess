@@ -319,11 +319,8 @@ impl FileRef {
     /// uploaded file the same way the message list shows an attached one, and
     /// there should not be two answers to "how big is this drawn".
     pub fn from_info(file: &matterless_core::model::FileInfo, layout: FileLayout) -> Self {
-        // An image either has server-side previews or simply says so in its
-        // mime type -- an SVG has no thumbnail but is still a picture.
         let vector = file.mime_type == "image/svg+xml";
-        let image = (file.has_preview_image || file.mime_type.starts_with("image/"))
-            && !file.archived
+        let image = is_a_picture(file)
             // An SVG is a picture here only if the server allows it: `EnableSVGs`
             // is false on this one, and it is false because an SVG is a document
             // that can carry script and external references. The official client
@@ -401,10 +398,7 @@ fn files_of(post: &Post, options: &PlanOptions) -> Vec<FileRef> {
         .files
         .iter()
         .filter(|file| {
-            !file.archived
-                && (file.has_preview_image
-                    || file.mime_type.starts_with("image/")
-                    || file.mime_type.starts_with("video/"))
+            is_a_picture(file) || (!file.archived && file.mime_type.starts_with("video/"))
         })
         .count();
     let layout = FileLayout {
@@ -420,6 +414,26 @@ fn files_of(post: &Post, options: &PlanOptions) -> Vec<FileRef> {
         .iter()
         .map(|file| FileRef::from_info(file, layout))
         .collect()
+}
+
+/// Whether a file can be drawn as a picture at all.
+///
+/// An image either has server-side renditions or simply says so in its mime
+/// type -- an SVG has no thumbnail but is still a picture. What it must also
+/// have is a size.
+///
+/// The server measures every image it can decode and reports zeroes for the
+/// ones it declines: a pasted screen grab sent as a bitmap comes back
+/// `image/bmp`, 0x0, no preview and no mini preview. Taken at its mime type
+/// it was laid out as a picture and `fit_box` gave it a box of nothing wide
+/// by nothing high, so it drew as nothing at all -- not a broken image, not a
+/// card. The message arrived looking empty, with four megabytes attached to
+/// it. A picture nobody can draw is a file, and a file has a card.
+fn is_a_picture(file: &matterless_core::model::FileInfo) -> bool {
+    !file.archived
+        && (file.has_preview_image || file.mime_type.starts_with("image/"))
+        && file.width > 0
+        && file.height > 0
 }
 
 /// Scales `width` x `height` down into `limit`, preserving the aspect ratio. A

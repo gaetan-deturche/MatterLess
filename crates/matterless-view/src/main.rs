@@ -399,6 +399,16 @@ struct App {
     /// document, and one handed back a week after the window was last open
     /// would be a surprise rather than a convenience.
     drafts: std::collections::HashMap<String, String>,
+    /// Files already on the server, waiting for a message to carry them.
+    ///
+    /// Under the conversation they were pasted into, exactly as a draft is:
+    /// a picture meant for one channel makes no more sense in the next than
+    /// half a sentence does, and it should be there on the way back.
+    ///
+    /// The whole `FileInfo` rather than the id, because the guess row drawn
+    /// the moment a message is sent shows the attachments too, and only the
+    /// server's copy says how big a picture is.
+    attached: std::collections::HashMap<String, Vec<matterless_core::model::FileInfo>>,
     /// Where each box is writing to, so its text can be put away under the
     /// right name when the reader moves.
     ///
@@ -661,6 +671,7 @@ impl App {
                 reply
             },
             drafts: std::collections::HashMap::new(),
+            attached: std::collections::HashMap::new(),
             writing_to: None,
             replying_to: None,
             pressed_before: None,
@@ -1237,6 +1248,20 @@ impl App {
                     self.listing.fill(found);
                 }
             }
+            Update::Attached {
+                channel_id,
+                root_id,
+                file,
+            } => {
+                let under = match root_id.is_empty() {
+                    true => channel_id,
+                    false => thread_name(&root_id),
+                };
+                println!("{} is attached and waiting", file.name);
+                self.attached.entry(under).or_default().push(*file);
+                self.relayout();
+                self.redraw();
+            }
             Update::Discovered { query, found } => self.switcher.offer(&query, found),
             Update::Reached { channel_id } => {
                 self.sidebar.selected = Some(channel_id.clone());
@@ -1651,13 +1676,16 @@ impl App {
     fn pressed_in_composer(&mut self, button: composer::Button, root_id: &str) {
         match button {
             composer::Button::Send => {
+                let carrying = self.carrying(root_id);
                 let box_of = if root_id.is_empty() {
                     &mut self.composer
                 } else {
                     &mut self.thread_composer
                 };
                 let text = box_of.text().trim().to_string();
-                if text.is_empty() {
+                // An empty box with a picture waiting in it is worth sending:
+                // the picture is the message, which is what a drop does too.
+                if text.is_empty() && !carrying {
                     return;
                 }
                 box_of.clear(&mut self.fonts);
@@ -1666,9 +1694,57 @@ impl App {
                 }
             }
             composer::Button::Attach => {
-                println!("drop a file on the window to send it");
+                println!("drop a file on the window, or paste one into the box");
+            }
+            composer::Button::Unattach(at) => {
+                let under = match root_id.is_empty() {
+                    true => self.sidebar.selected.clone().unwrap_or_default(),
+                    false => thread_name(root_id),
+                };
+                // Off the message only. The upload stays on the server, where
+                // nothing claims it and nothing is served from it -- the same
+                // state a send that failed leaves behind.
+                if let Some(held) = self.attached.get_mut(&under)
+                    && at < held.len()
+                {
+                    let gone = held.remove(at);
+                    println!("{} is no longer going with this message", gone.name);
+                }
+                self.relayout();
             }
         }
+    }
+
+    /// Hands each box the names of what it is carrying.
+    ///
+    /// The window holds the uploads, because they belong to a conversation
+    /// rather than to a box -- the box is emptied and refilled every time the
+    /// reader moves, and what they pasted has to still be there when they
+    /// come back. So the names are copied down at the one point both boxes
+    /// are measured.
+    fn show_what_is_attached(&mut self) {
+        let named = |held: Option<&Vec<matterless_core::model::FileInfo>>| {
+            held.map(|files| files.iter().map(|file| file.name.clone()).collect())
+                .unwrap_or_default()
+        };
+        let channel = self.sidebar.selected.clone().unwrap_or_default();
+        self.composer.waiting = named(self.attached.get(&channel));
+        let thread = self.open_root().map(|root| thread_name(&root));
+        self.thread_composer.waiting = match thread {
+            Some(name) => named(self.attached.get(&name)),
+            None => Vec::new(),
+        };
+    }
+
+    /// Whether anything is waiting to be sent with the next message here.
+    fn carrying(&self, root_id: &str) -> bool {
+        let under = match root_id.is_empty() {
+            true => self.sidebar.selected.clone().unwrap_or_default(),
+            false => thread_name(root_id),
+        };
+        self.attached
+            .get(&under)
+            .is_some_and(|held| !held.is_empty())
     }
 
     /// The reader's own name, as the store knows it.
@@ -2661,6 +2737,14 @@ impl App {
     /// that waits for a round trip before showing what you typed feels broken
     /// on any connection worse than a good one.
     fn post_message(&mut self, channel_id: &str, root_id: &str, message: String) {
+        // Taken before anything is sent: whatever was pasted into this
+        // conversation goes with this message and with no other, and a send
+        // that fails carries them on its retry rather than losing them.
+        let under = match root_id.is_empty() {
+            true => channel_id.to_string(),
+            false => thread_name(root_id),
+        };
+        let files = self.attached.remove(&under).unwrap_or_default();
         let Some(link) = self.link.as_ref() else {
             eprintln!("offline, so nothing was sent");
             return;
@@ -2684,13 +2768,14 @@ impl App {
                 message: message.clone(),
                 create_at: now,
                 failed: false,
-                files: Vec::new(),
+                files: files.clone(),
             });
         link.send(matterless_view::live::Ask::Send {
             pending_post_id,
             channel_id: channel_id.to_string(),
             root_id: root_id.to_string(),
             message,
+            file_ids: files.iter().map(|file| file.id.clone()).collect(),
         });
         // Painted immediately, and pinned to the bottom: sending is the one
         // case where the reader definitely wants to be looking at the newest
@@ -2945,6 +3030,9 @@ impl App {
             channel_id: held.channel_id.clone(),
             root_id: held.root_id.clone(),
             message: held.message.clone(),
+            // The ones it already had: a retry claims the same uploads, which
+            // are still on the server whether or not the post ever landed.
+            file_ids: held.files.iter().map(|file| file.id.clone()).collect(),
         });
         let channel = held.channel_id.clone();
         self.reread_channel(&channel);
@@ -3580,16 +3668,94 @@ impl App {
     /// early in a dozen places -- a panel that covers the window answers the
     /// frame and nothing behind it gets a look.
     fn react(&mut self) {
-        if self.input.chord(Key::Char('v'))
-            && let Some(said) = matterless_view::clip::read()
-        {
-            self.clipboard = said;
+        // A picture or a file is attached rather than typed, and then the
+        // words the reader had copied before must not be poured into the box
+        // as well -- so they are put aside for the pass and given back after.
+        let mut aside = None;
+        if self.input.chord(Key::Char('v')) {
+            match matterless_view::clip::held() {
+                Some(matterless_view::clip::Held::Words(said)) => self.clipboard = said,
+                Some(held) => {
+                    self.attach_held(held);
+                    aside = Some(std::mem::take(&mut self.clipboard));
+                }
+                None => {}
+            }
         }
         let before = self.clipboard.clone();
         self.reacted();
         if self.clipboard != before {
             matterless_view::clip::write(&self.clipboard);
         }
+        if let Some(words) = aside {
+            self.clipboard = words;
+        }
+    }
+
+    /// Sends what was pasted to the conversation being written in.
+    ///
+    /// The box with the keyboard rather than the one under the pointer, which
+    /// is where a *drop* goes: a paste belongs to whoever is typing, and they
+    /// may well be reading somewhere else while they do it.
+    fn attach_held(&mut self, held: matterless_view::clip::Held) {
+        let Some(channel_id) = self.sidebar.selected.clone() else {
+            eprintln!("no conversation to attach that to");
+            return;
+        };
+        let root_id = match self.input.focus() == Some(THREAD_COMPOSER) {
+            true => self.open_root().unwrap_or_default(),
+            false => String::new(),
+        };
+        let paths = match held {
+            matterless_view::clip::Held::Files(paths) => paths,
+            matterless_view::clip::Held::Picture { bytes, extension } => {
+                match Self::spill(&bytes, extension) {
+                    Some(path) => vec![path],
+                    None => return,
+                }
+            }
+            // Handled by the caller, which is the only one that can put words
+            // where the keyboard is.
+            matterless_view::clip::Held::Words(_) => return,
+        };
+        let Some(link) = self.link.as_ref() else {
+            return;
+        };
+        for path in paths {
+            // Attached, not sent. A file dropped on the window is the whole
+            // message; one pasted into the box waits there with whatever is
+            // being written until the reader sends both.
+            link.send(matterless_view::live::Ask::Attach {
+                channel_id: channel_id.clone(),
+                root_id: root_id.clone(),
+                path,
+            });
+        }
+    }
+
+    /// Writes pasted bytes somewhere the uploader can read them.
+    ///
+    /// A picture on the clipboard has no file behind it and the uploader
+    /// names a file by its path, so one has to exist. In a directory of its
+    /// own so the name can be the plain `image.png` the official client
+    /// sends, rather than something with a clock in it -- what the reader
+    /// sees on the message is this name.
+    ///
+    /// Left where it lands. It is the temporary directory, which is the one
+    /// place on the machine that is swept without being asked.
+    fn spill(bytes: &[u8], extension: &str) -> Option<std::path::PathBuf> {
+        let now = matterless_view::clock::now();
+        let room = std::env::temp_dir().join(format!("matterless-paste-{now}"));
+        if let Err(error) = std::fs::create_dir_all(&room) {
+            eprintln!("keeping the pasted picture: {error}");
+            return None;
+        }
+        let path = room.join(format!("image.{extension}"));
+        if let Err(error) = std::fs::write(&path, bytes) {
+            eprintln!("keeping the pasted picture: {error}");
+            return None;
+        }
+        Some(path)
     }
 
     /// Hands the frame's input to the widgets that want it.
@@ -4664,7 +4830,7 @@ impl App {
                 };
                 self.thread_composer.draw(&mut canvas, body, focused);
                 self.thread_composer
-                    .draw_bar(&mut canvas, &self.input, body);
+                    .draw_over(&mut canvas, &self.input, body);
             }
         }
 
@@ -4730,7 +4896,7 @@ impl App {
             palette: &self.palette,
         };
         self.composer.draw(&mut canvas, within, focused);
-        self.composer.draw_bar(&mut canvas, &self.input, within);
+        self.composer.draw_over(&mut canvas, &self.input, within);
         drop(probe);
         let _probe = matterless_view::timing::watch("  the overlays", 0, "");
 
@@ -5001,6 +5167,9 @@ impl App {
     /// they say nothing at all -- so the one caller that changes the window's
     /// size takes them first and hands them over.
     fn shape(&mut self, how: Shaping, (held, thread_held): Anchors) {
+        // What each box is carrying, before it is measured: an attachment
+        // waiting in it is a row of its height.
+        self.show_what_is_attached();
         // The composer is shaped first: it decides its own height, and the
         // stream gets what is left, so its width has to be settled before the
         // rows are laid out against it.

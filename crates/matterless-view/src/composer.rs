@@ -29,6 +29,13 @@ pub struct Composer {
     pub name: String,
     /// Drawn when there is nothing written, so the box says what it is for.
     pub placeholder: String,
+    /// What is attached and waiting to go with the next message, by name.
+    ///
+    /// Set by the window, which is what holds the uploads and decides which
+    /// conversation they belong to. The box only has to say they are there
+    /// and offer to take one off -- a file waiting invisibly is worse than
+    /// one sent by accident, because nobody can undo what they cannot see.
+    pub waiting: Vec<String>,
     /// True once anything has been typed, so an empty buffer can be told from
     /// one the reader has emptied on purpose.
     pub touched: bool,
@@ -74,6 +81,8 @@ pub enum Button {
     Attach,
     /// Send what is typed, for a reader who would rather not press return.
     Send,
+    /// Take one of the waiting attachments off again.
+    Unattach(usize),
 }
 
 /// What the channel's own composer is called.
@@ -106,6 +115,12 @@ const BUTTON: f32 = 26.0;
 const SEND: f32 = 52.0;
 /// The row they sit on, along the bottom of the box.
 const TOOLS: f32 = 34.0;
+/// The row of waiting attachments, and the widest one of them.
+const WAITING: f32 = 26.0;
+const CHIP: f32 = 180.0;
+/// What is kept clear at the ends of that row, and between two of them.
+const CHIP_MARGIN: f32 = 6.0;
+const CHIP_GAP: f32 = 4.0;
 /// What the attach button shows.
 ///
 /// A sheet of paper rather than the paperclip every client uses, because there
@@ -147,6 +162,7 @@ impl Composer {
             name: name.into(),
             placeholder: "Write a message... (Enter to send, Shift+Enter for a new line)"
                 .to_string(),
+            waiting: Vec::new(),
             touched: false,
             scroll: 0.0,
             bar: crate::scrollbar::Scrollbar::default(),
@@ -382,25 +398,82 @@ impl Composer {
         }
     }
 
-    /// The bar down the side of the text, drawn.
+    /// The parts of a box that answer to where the pointer is: the bar down
+    /// the side of the text, and what is waiting to be sent with it.
     ///
-    /// Its own call rather than part of `draw`, because it is the one piece
-    /// of a box that answers to where the pointer is -- and six of the eight
-    /// boxes in this window are one-line fields with nothing to scroll and no
-    /// input to hand. The two that have a bar ask for it.
-    pub fn draw_bar(&self, into: &mut Canvas<'_>, input: &Input, within: Rect) {
+    /// Their own call rather than part of `draw`, because `draw` has no input
+    /// to hand and six of the eight boxes in this window are one-line fields
+    /// with nothing to scroll and nothing attached. The two that can have
+    /// either ask for it.
+    pub fn draw_over(&self, into: &mut Canvas<'_>, input: &Input, within: Rect) {
         let reach = self.reach();
-        if !self.bar.needed(reach) {
-            return;
+        if self.bar.needed(reach) {
+            self.bar.draw(
+                into,
+                &self.name,
+                input,
+                self.over(within),
+                self.scroll,
+                reach,
+            );
         }
-        self.bar.draw(
-            into,
-            &self.name,
-            input,
-            self.over(within),
-            self.scroll,
-            reach,
-        );
+        let Canvas {
+            scene,
+            painter,
+            fonts,
+            palette,
+        } = into;
+        // What is waiting to go with this message, above the tools. A press
+        // takes one off: the window holds the uploads, so this only says
+        // which one was pressed.
+        for at in 0..self.waiting.len() {
+            let Some(chip) = self.waiting_at(within, at) else {
+                continue;
+            };
+            let under = input.hovered() == Some(format!("{}/unattach/{at}", self.name).as_str());
+            scene.rounded(
+                chip.x,
+                chip.y,
+                chip.width,
+                chip.height,
+                if under { palette.hover } else { palette.raised },
+                5.0,
+            );
+            let room = (chip.width - 22.0).max(10.0);
+            let said = matterless_layout::elided(
+                fonts,
+                &self.waiting[at],
+                room,
+                matterless_layout::Style {
+                    size: 12.0,
+                    line_height: 16.0,
+                    bold: false,
+                    italic: false,
+                    mono: false,
+                },
+            );
+            let glyphs = painter.run(
+                fonts,
+                &said,
+                chip.x + 7.0,
+                chip.y + 2.0,
+                Run::label(f32::MAX),
+            );
+            scene.glyphs(glyphs, palette.soft, palette.faint);
+            // The way to take it off, on its own end of the chip.
+            let cross = painter.run(
+                fonts,
+                matterless_layout::marks::CLOSE,
+                chip.right() - 15.0,
+                chip.y + 3.0,
+                Run::mark(11.0),
+            );
+            scene.glyphs(
+                cross,
+                if under { palette.ink } else { palette.faint },
+                palette.faint,
+            );
+        }
     }
 
     /// The window the text is shown through: the lines on screen, and nothing
@@ -434,7 +507,50 @@ impl Composer {
     /// The height the strip needs, which grows with the message.
     pub fn height(&self) -> f32 {
         let tools = if self.plain { 0.0 } else { TOOLS };
-        self.lines() as f32 * LINE + self.padding() * 2.0 + self.margin() * 2.0 + tools
+        self.lines() as f32 * LINE
+            + self.padding() * 2.0
+            + self.margin() * 2.0
+            + tools
+            + self.held()
+    }
+
+    /// The room the waiting attachments take, which is a row or nothing.
+    ///
+    /// One row however many there are: they are names on a line and they run
+    /// out of width long before they run out of box, which is what the
+    /// eliding is for.
+    fn held(&self) -> f32 {
+        match self.plain || self.waiting.is_empty() {
+            true => 0.0,
+            false => WAITING,
+        }
+    }
+
+    /// Where the waiting attachments sit: between the words and the tools.
+    fn shelf(&self, within: Rect) -> Rect {
+        let tools = self.tools(within);
+        Rect::new(tools.x, tools.y - self.held(), tools.width, self.held())
+    }
+
+    /// Where one of them sits on that shelf.
+    ///
+    /// The gaps and the margins come out of the width before it is shared, so
+    /// that however many are waiting the last one ends inside the box: a chip
+    /// drawn past the edge can be neither read nor clicked off again.
+    fn waiting_at(&self, within: Rect, at: usize) -> Option<Rect> {
+        let shelf = self.shelf(within);
+        let count = self.waiting.len();
+        if shelf.height <= 0.0 || at >= count {
+            return None;
+        }
+        let room = (shelf.width - CHIP_MARGIN * 2.0 - CHIP_GAP * (count - 1) as f32).max(0.0);
+        let each = (room / count as f32).min(CHIP);
+        Some(Rect::new(
+            shelf.x + CHIP_MARGIN + at as f32 * (each + CHIP_GAP),
+            shelf.y + 2.0,
+            each,
+            WAITING - 6.0,
+        ))
     }
 
     /// Inside the box, and around it. Tighter on a field than on a message.
@@ -475,6 +591,15 @@ impl Composer {
             return Vec::new();
         }
         let mut placed = self.bar.boxes(&self.name, self.over(within), self.reach());
+        for at in 0..self.waiting.len() {
+            if let Some(chip) = self.waiting_at(within, at) {
+                placed.push(Placed {
+                    name: format!("{}/unattach/{at}", self.name),
+                    rect: chip,
+                    depth: 4,
+                });
+            }
+        }
         placed.extend([
             Placed {
                 name: format!("{}/attach", self.name),
@@ -496,7 +621,10 @@ impl Composer {
         match clicked.strip_prefix(&format!("{}/", self.name))? {
             "attach" => Some(Button::Attach),
             "send" => Some(Button::Send),
-            _ => None,
+            other => other
+                .strip_prefix("unattach/")
+                .and_then(|at| at.parse().ok())
+                .map(Button::Unattach),
         }
     }
 
@@ -588,7 +716,10 @@ impl Composer {
                 Key::Enter if mods.shift => self.act(fonts, Action::Enter),
                 Key::Enter => {
                     let text = self.text();
-                    if !text.trim().is_empty() {
+                    // An empty box with a file waiting in it is still worth
+                    // sending: the file is the message, and refusing it
+                    // strands the attachment with no way to get it out.
+                    if !text.trim().is_empty() || !self.waiting.is_empty() {
                         sent = Some(text);
                     }
                 }
@@ -991,8 +1122,79 @@ impl Composer {
 
 #[cfg(test)]
 mod tests {
-    use super::Composer;
+    use super::{Composer, Rect};
     use matterless_layout::Fonts;
+
+    /// A waiting attachment gives itself room, and gives it back.
+    ///
+    /// The box is measured before it is laid out, so a shelf that took no
+    /// height would draw its names over the tools underneath.
+    #[test]
+    fn what_is_waiting_makes_the_box_taller() {
+        let mut composer = Composer::new("composer");
+        let empty = composer.height();
+        composer.waiting = vec!["holiday.png".to_string()];
+        let carrying = composer.height();
+        assert!(
+            carrying > empty,
+            "{carrying} is no taller than {empty} with a file waiting"
+        );
+
+        composer.waiting.push("map.pdf".to_string());
+        assert_eq!(
+            composer.height(),
+            carrying,
+            "a second file asked for a second row"
+        );
+
+        composer.waiting.clear();
+        assert_eq!(composer.height(), empty, "the room was not given back");
+    }
+
+    /// Every chip sits on the shelf, side by side, however many there are.
+    ///
+    /// The one that matters is the crowded case: ten files share the width
+    /// rather than the tenth being drawn off the end of the box, where the
+    /// reader can neither read it nor take it off again.
+    #[test]
+    fn the_chips_stay_on_their_shelf() {
+        let mut composer = Composer::new("composer");
+        let within = Rect::new(0.0, 0.0, 600.0, composer.height());
+        for count in [1_usize, 3, 10] {
+            composer.waiting = (0..count).map(|at| format!("{at}.png")).collect();
+            let within = Rect::new(within.x, within.y, within.width, composer.height());
+            let shelf = composer.shelf(within);
+            assert!(
+                shelf.y >= composer.over(within).bottom(),
+                "the shelf of {count} sits over the words"
+            );
+            assert!(
+                shelf.bottom() <= composer.tools(within).y + 0.01,
+                "the shelf of {count} sits over the tools"
+            );
+            let mut edge = shelf.x;
+            for at in 0..count {
+                let chip = composer.waiting_at(within, at).expect("a chip to draw");
+                assert!(
+                    chip.x >= edge,
+                    "chip {at} of {count} overlaps the one before"
+                );
+                assert!(
+                    chip.x + chip.width <= shelf.x + shelf.width + 0.01,
+                    "chip {at} of {count} runs off the shelf"
+                );
+                assert!(
+                    chip.y >= shelf.y && chip.y + chip.height <= shelf.y + shelf.height + 0.01,
+                    "chip {at} of {count} sits off the shelf's row"
+                );
+                edge = chip.x + chip.width;
+            }
+            assert!(
+                composer.waiting_at(within, count).is_none(),
+                "a chip was offered past the last one"
+            );
+        }
+    }
 
     /// The hint is cut to the box, with an ellipsis where it was cut.
     ///
