@@ -3986,6 +3986,9 @@ impl App {
         // Both boxes are offered the frame. Each one checks whether it holds
         // focus, so only the one the reader is in takes the keystrokes.
         let within = header::below(self.channel_rect());
+        // Before it reacts, so a press on the bar does not also land in the
+        // words behind it.
+        self.composer.dragged(&self.input, within);
         let sent = self
             .composer
             .react(&mut self.fonts, &self.input, within, &mut self.clipboard);
@@ -3993,6 +3996,7 @@ impl App {
         self.composer.lay_out(&mut self.fonts, width);
 
         let replied = if let Some(body) = self.thread_body() {
+            self.thread_composer.dragged(&self.input, body);
             let replied =
                 self.thread_composer
                     .react(&mut self.fonts, &self.input, body, &mut self.clipboard);
@@ -4233,6 +4237,16 @@ impl App {
         // every other panel does.
         if self.aside_rect().is_some() || self.on_threads() {
             self.react();
+        }
+        // The message boxes are panels too, once one holds more than it
+        // shows. Answered here rather than in `react`, which a wheel turn
+        // does not reach unless a picker or a side pane happens to be open --
+        // so the box took the turn in two windows out of three and ignored it
+        // in the ordinary one.
+        let writing = header::below(self.channel_rect());
+        self.composer.wheeled(&self.input, &boxes, writing);
+        if let Some(body) = self.thread_body() {
+            self.thread_composer.wheeled(&self.input, &boxes, body);
         }
         let stream = self.stream_rect();
         self.stream.react(&self.input, &boxes, stream);
@@ -4633,6 +4647,8 @@ impl App {
                     palette: &self.palette,
                 };
                 self.thread_composer.draw(&mut canvas, body, focused);
+                self.thread_composer
+                    .draw_bar(&mut canvas, &self.input, body);
             }
         }
 
@@ -4698,6 +4714,7 @@ impl App {
             palette: &self.palette,
         };
         self.composer.draw(&mut canvas, within, focused);
+        self.composer.draw_bar(&mut canvas, &self.input, within);
         drop(probe);
         let _probe = matterless_view::timing::watch("  the overlays", 0, "");
 

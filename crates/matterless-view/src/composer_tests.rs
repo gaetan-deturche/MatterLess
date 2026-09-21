@@ -441,3 +441,266 @@ fn the_headers_field_is_the_height_a_field_wants() {
     let rect = crate::header::find(column, &offers).expect("a field on the strip");
     assert_eq!(rect.height, field.box_height());
 }
+
+/// Past the cap the box shows a window onto the text and follows the caret
+/// into it.
+///
+/// Reported as a box that "doesn't handle long text properly", and the
+/// screenshot showed why: the box stopped growing at `MAX_LINES` and the rest
+/// of the message carried on down the window, drawn over the Send button and
+/// out past the bottom edge. There was no window and no scroll -- `MAX_LINES`
+/// said the text scrolled inside the box and nothing ever scrolled it.
+#[test]
+fn a_message_past_the_cap_scrolls_inside_the_box() {
+    let mut fonts = Fonts::new();
+    let (mut composer, mut input) = ready(&mut fonts);
+
+    let tall = composer.height();
+    for _ in 0..(MAX_LINES * 2) {
+        holding(&mut input, shift());
+        press(&mut input, Key::Enter);
+        frame(&mut composer, &mut fonts, &mut input);
+    }
+
+    // The box stopped growing, as it always did.
+    assert_eq!(
+        composer.height(),
+        MAX_LINES as f32 * LINE + PADDING * 2.0 + MARGIN * 2.0 + 34.0,
+        "capped at {MAX_LINES} lines"
+    );
+    assert!(composer.height() > tall);
+
+    // And the caret came with it: it is inside the box rather than somewhere
+    // below the window.
+    let caret = composer.caret(panel()).expect("a caret");
+    let box_of = panel().bottom() - composer.height();
+    assert!(
+        caret.1 >= box_of && caret.1 + LINE <= panel().bottom(),
+        "the caret sits at {} in a box from {box_of} to {}",
+        caret.1,
+        panel().bottom()
+    );
+}
+
+/// Walking back up to the top brings the window with it, and walking down
+/// again takes it back.
+#[test]
+fn the_window_follows_the_caret_both_ways() {
+    let mut fonts = Fonts::new();
+    let (mut composer, mut input) = ready(&mut fonts);
+    for _ in 0..(MAX_LINES * 2) {
+        holding(&mut input, shift());
+        press(&mut input, Key::Enter);
+        frame(&mut composer, &mut fonts, &mut input);
+    }
+    let at_the_end = composer.caret(panel()).expect("a caret").1;
+
+    holding(&mut input, Mods::default());
+    for _ in 0..(MAX_LINES * 2) {
+        press(&mut input, Key::Up);
+        frame(&mut composer, &mut fonts, &mut input);
+    }
+    let at_the_top = composer.caret(panel()).expect("a caret").1;
+    let box_of = panel().bottom() - composer.height();
+    assert!(
+        at_the_top >= box_of && at_the_top + LINE <= panel().bottom(),
+        "walking to the top keeps the caret in the box, not at {at_the_top}"
+    );
+    assert!(
+        at_the_top < at_the_end + LINE,
+        "and it is higher in the box than it was at the end"
+    );
+
+    for _ in 0..(MAX_LINES * 2) {
+        press(&mut input, Key::Down);
+        frame(&mut composer, &mut fonts, &mut input);
+    }
+    let back = composer.caret(panel()).expect("a caret").1;
+    assert!(
+        back >= box_of && back + LINE <= panel().bottom(),
+        "and walking back down keeps it in too, not at {back}"
+    );
+}
+
+/// Sending empties the box, so the window on it goes back to the top -- a
+/// box of one line scrolled eight down would draw nothing at all.
+#[test]
+fn an_emptied_box_is_scrolled_back_to_the_top() {
+    let mut fonts = Fonts::new();
+    let (mut composer, mut input) = ready(&mut fonts);
+    for _ in 0..(MAX_LINES * 2) {
+        holding(&mut input, shift());
+        press(&mut input, Key::Enter);
+        frame(&mut composer, &mut fonts, &mut input);
+    }
+    composer.clear(&mut fonts);
+    composer.lay_out(&mut fonts, panel().width);
+
+    let caret = composer.caret(panel()).expect("a caret");
+    let box_of = panel().bottom() - composer.height();
+    assert!(
+        (caret.1 - (box_of + MARGIN + PADDING)).abs() < 1.0,
+        "the caret is on the first line at {}, box from {box_of}",
+        caret.1
+    );
+}
+
+/// A word picked out of a message is the only thing lit up.
+///
+/// Reported as a double-click selecting "some unrelated words", and it did:
+/// `LayoutRun::highlight` only knows about the two lines a selection ends on,
+/// and for any other line both of its tests short-circuit so every character
+/// comes back selected. Which lines are in range at all is the caller's to
+/// know. A box of one line was right and a box of several lit up every line
+/// except the one being selected on.
+#[test]
+fn a_selection_lights_only_the_lines_it_is_on() {
+    let mut fonts = Fonts::new();
+    let (mut composer, placed, box_of) = holding_a_message(&mut fonts);
+
+    // Into a word on the last line of the text.
+    let x = box_of.x + MARGIN + PADDING + 140.0;
+    let y = box_of.y + MARGIN + PADDING + LINE * 5.5;
+    let mut input = Input::default();
+    input.focus_on(NAME);
+    input.apply(Event::PointerMoved { x, y }, &placed);
+    input.apply(Event::PointerPressed, &placed);
+    input.apply(Event::PointerRepeated(2), &placed);
+    composer.react(&mut fonts, &input, panel(), &mut String::new());
+
+    let ((start, _), (end, _)) = composer.bounds().expect("a word is selected");
+    assert_eq!(start, end, "a word does not span lines");
+
+    let lit = composer.selection_marks(panel());
+    assert_eq!(
+        lit.len(),
+        1,
+        "one word, one mark -- not {:?}",
+        lit.iter().map(|(_, y, w)| (*y, *w)).collect::<Vec<_>>()
+    );
+    // And on the line it was clicked on, not somewhere up the box.
+    assert!(
+        (lit[0].1 - y).abs() < LINE,
+        "the mark is at {} and the click was at {y}",
+        lit[0].1
+    );
+}
+
+/// Nothing outside the selection's own lines is touched, however many lines
+/// the box holds.
+#[test]
+fn the_lines_around_a_selection_are_left_alone() {
+    let mut fonts = Fonts::new();
+    let (mut composer, placed, box_of) = holding_a_message(&mut fonts);
+
+    let x = box_of.x + MARGIN + PADDING + 140.0;
+    let y = box_of.y + MARGIN + PADDING + LINE * 5.5;
+    let mut input = Input::default();
+    input.focus_on(NAME);
+    input.apply(Event::PointerMoved { x, y }, &placed);
+    input.apply(Event::PointerPressed, &placed);
+    input.apply(Event::PointerRepeated(2), &placed);
+    composer.react(&mut fonts, &input, panel(), &mut String::new());
+
+    let ((start, _), (end, _)) = composer.bounds().expect("a word is selected");
+    for (_, at, width) in composer.selection_marks(panel()) {
+        assert!(width > 0.0);
+        let line = ((at - (box_of.y + MARGIN + PADDING)) / LINE).round() as usize;
+        assert!(
+            line <= end.saturating_sub(start) + 8,
+            "a mark landed on line {line}, well outside the selection"
+        );
+    }
+}
+
+/// A message several lines long, in a box that holds it.
+fn holding_a_message(fonts: &mut Fonts) -> (Composer, Vec<matterless_ui::Placed>, Rect) {
+    let mut composer = Composer::new(NAME);
+    composer.fill(
+        "clean.\nNot a specific launch flag.\nCaveat on reproducing it\n\nAll three \
+         occurrences were launches driven by the harness, which scripts the transitions \
+         to skip the start screen. That makes travel begin far earlier than in a normal \
+         boot, which plausibly widens this race considerably. It may be hard to repeat \
+         by hand and easy to repeat under automation, so a failure to repeat one by \
+         hand should not be taken as absence. The same harness has produced the \
+         other two, on machines sharing neither their drivers nor their memory.",
+        fonts,
+    );
+    composer.lay_out(fonts, panel().width);
+    let box_of = Rect::new(
+        panel().x,
+        panel().bottom() - composer.height(),
+        panel().width,
+        composer.height(),
+    );
+    let placed = vec![matterless_ui::Placed {
+        name: NAME.to_string(),
+        rect: box_of,
+        depth: 0,
+    }];
+    (composer, placed, box_of)
+}
+
+/// The wheel moves the window on the text.
+///
+/// Reported as "scroll doesn't react to mouse wheel". It did not: the window's
+/// wheel path only reacts to the frame when a picker or a side pane is open,
+/// so the box heard the turn in two windows out of three and never in the
+/// ordinary one.
+#[test]
+fn the_wheel_moves_the_window_on_the_text() {
+    let mut fonts = Fonts::new();
+    let (mut composer, placed, _) = holding_a_message(&mut fonts);
+    // Filled, so it sits at the bottom of its own text.
+    let at_the_end = composer.caret(panel()).expect("a caret").1;
+
+    let mut input = Input::default();
+    input.apply(
+        Event::PointerMoved {
+            x: placed[0].rect.x + 100.0,
+            y: placed[0].rect.y + 40.0,
+        },
+        &placed,
+    );
+    input.apply(Event::Wheel { x: 0.0, y: 60.0 }, &placed);
+    composer.wheeled(&input, &placed, panel());
+
+    let after = composer.caret(panel()).expect("a caret").1;
+    assert!(
+        after > at_the_end,
+        "turning the wheel back should move the text down past the caret: \
+         {at_the_end} then {after}"
+    );
+
+    // And it stops at the top rather than running on for ever.
+    for _ in 0..20 {
+        input.apply(Event::Wheel { x: 0.0, y: 60.0 }, &placed);
+        composer.wheeled(&input, &placed, panel());
+    }
+    let top = composer.caret(panel()).expect("a caret").1;
+    for _ in 0..5 {
+        input.apply(Event::Wheel { x: 0.0, y: 60.0 }, &placed);
+        composer.wheeled(&input, &placed, panel());
+    }
+    assert_eq!(
+        composer.caret(panel()).expect("a caret").1,
+        top,
+        "clamped at the first line"
+    );
+}
+
+/// The wheel belongs to the panel the pointer is over, like every other one.
+#[test]
+fn the_wheel_elsewhere_is_not_this_boxs() {
+    let mut fonts = Fonts::new();
+    let (mut composer, placed, _) = holding_a_message(&mut fonts);
+    let before = composer.caret(panel()).expect("a caret").1;
+
+    let mut input = Input::default();
+    // Well above the box, over the conversation.
+    input.apply(Event::PointerMoved { x: 500.0, y: 100.0 }, &placed);
+    input.apply(Event::Wheel { x: 0.0, y: 60.0 }, &placed);
+    composer.wheeled(&input, &placed, panel());
+
+    assert_eq!(composer.caret(panel()).expect("a caret").1, before);
+}

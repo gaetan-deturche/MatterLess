@@ -32,6 +32,20 @@ pub struct Composer {
     /// True once anything has been typed, so an empty buffer can be told from
     /// one the reader has emptied on purpose.
     pub touched: bool,
+    /// How far the text is scrolled inside the box, in pixels.
+    ///
+    /// A box that stops growing at `MAX_LINES` and holds more than that is
+    /// showing a window onto its text, and four things have to agree about
+    /// which window: the glyphs, the selection behind them, the caret, and the
+    /// press that puts the caret somewhere. Before this there was no window at
+    /// all -- the text ran on past the bottom edge and was drawn over whatever
+    /// happened to be under the box.
+    scroll: f32,
+    /// The bar down the side of the text, and what drags it.
+    ///
+    /// The same one the conversation and the lists use: a box holding more
+    /// than it shows has to say so, and say how much more.
+    bar: crate::scrollbar::Scrollbar,
     /// What has been done, and what has been undone, so both can be walked.
     ///
     /// Changes rather than copies of the text: `cosmic-text` hands back what
@@ -134,6 +148,8 @@ impl Composer {
             placeholder: "Write a message... (Enter to send, Shift+Enter for a new line)"
                 .to_string(),
             touched: false,
+            scroll: 0.0,
+            bar: crate::scrollbar::Scrollbar::default(),
             done: Vec::new(),
             undone: Vec::new(),
             plain: false,
@@ -184,6 +200,10 @@ impl Composer {
             buffer.set_size(Some(inner), None);
         });
         self.editor.shape_as_needed(fonts.system_mut(), false);
+        // The width just changed, which re-wraps: a caret that was on the last
+        // line of the window can be two lines below it now, with nobody having
+        // touched the keyboard.
+        self.follow_caret();
     }
 
     /// The placeholder, cut to the room there is.
@@ -250,14 +270,165 @@ impl Composer {
     pub fn caret(&self, within: Rect) -> Option<(f32, f32)> {
         let inner = self.inner(within);
         let (x, y) = self.editor.cursor_position()?;
-        Some((inner.x + x as f32, inner.y + y as f32))
+        Some((inner.x + x as f32, inner.y + y as f32 - self.scroll))
     }
 
     /// How many lines the text occupies, capped at what the box will show.
     fn lines(&self) -> usize {
+        self.written().clamp(1, MAX_LINES)
+    }
+
+    /// Every line the text takes, which past `MAX_LINES` is not the number
+    /// shown.
+    fn written(&self) -> usize {
         self.editor
             .with_buffer(|buffer| buffer.layout_runs().count())
-            .clamp(1, MAX_LINES)
+            .max(1)
+    }
+
+    /// How far the text can be scrolled inside the box.
+    fn reach(&self) -> f32 {
+        ((self.written() - self.lines()) as f32 * LINE).max(0.0)
+    }
+
+    /// Every run, for a test that has to see how the text is broken up.
+    #[cfg(test)]
+    pub fn runs(&self) -> Vec<(usize, f32, usize, String)> {
+        self.editor.with_buffer(|buffer| {
+            buffer
+                .layout_runs()
+                .map(|run| {
+                    (
+                        run.line_i,
+                        run.line_top,
+                        run.glyphs.len(),
+                        run.text.chars().take(24).collect::<String>(),
+                    )
+                })
+                .collect()
+        })
+    }
+
+    /// The selection's own bounds, for a test that has to see them.
+    #[cfg(test)]
+    pub fn bounds(&self) -> Option<((usize, usize), (usize, usize))> {
+        let (start, end) = self.editor.selection_bounds()?;
+        Some(((start.line, start.index), (end.line, end.index)))
+    }
+
+    /// Every rectangle the selection is drawn as: `(x, y, width)`, each one
+    /// line tall.
+    ///
+    /// Worked out here rather than in `draw` so that what a test reads is
+    /// what the window paints. The line filter below is the whole reason it
+    /// is worth having in one place.
+    pub fn selection_marks(&self, within: Rect) -> Vec<(f32, f32, f32)> {
+        let inner = self.inner(within);
+        let scroll = self.scroll;
+        let mut out = Vec::new();
+        if let Some((start, end)) = self.editor.selection_bounds() {
+            self.editor.with_buffer(|buffer| {
+                for run in buffer.layout_runs() {
+                    // `highlight` only knows about the two lines a selection
+                    // ends on: for any other line both of its tests
+                    // short-circuit and every character comes back selected.
+                    // Which lines are in range at all is the caller's to
+                    // know, so a box of one line was right and a box of
+                    // several lit up every line but the one being worked on.
+                    if run.line_i < start.line || run.line_i > end.line {
+                        continue;
+                    }
+                    for (x, width) in run.highlight(start, end) {
+                        out.push((inner.x + x, inner.y + run.line_top - scroll, width));
+                    }
+                }
+            });
+        }
+        out
+    }
+
+    /// What is selected, as text. `None` when nothing is.
+    pub fn selection(&self) -> Option<String> {
+        self.editor.copy_selection()
+    }
+
+    /// A drag of the bar down the side of the text.
+    ///
+    /// Apart from the wheel because the two arrive through different doors: a
+    /// drag is a pointer move with something held, which the window answers
+    /// by reacting to the frame; a wheel turn is an event of its own with a
+    /// path of its own. One method answering both was applied twice whenever
+    /// that path reacted as well, and scrolled at double speed.
+    ///
+    /// Only the message boxes call either: a field is one line and has
+    /// nowhere to scroll to.
+    pub fn dragged(&mut self, input: &Input, within: Rect) {
+        let reach = self.reach();
+        let over = self.over(within);
+        if let Some(scroll) = self.bar.react(&self.name, input, over, self.scroll, reach) {
+            self.scroll = scroll.clamp(0.0, reach);
+        }
+    }
+
+    /// A turn of the wheel over the box.
+    ///
+    /// The frame's boxes, because a wheel is answered by whichever panel the
+    /// pointer is over and only they can say which that is -- the same
+    /// question the conversation and the lists ask.
+    pub fn wheeled(&mut self, input: &Input, placed: &[Placed], within: Rect) {
+        let _ = within;
+        if let Some((_, y)) = input.wheel_over(placed, |name| name == self.name) {
+            self.scroll = (self.scroll - y).clamp(0.0, self.reach());
+        }
+    }
+
+    /// The bar down the side of the text, drawn.
+    ///
+    /// Its own call rather than part of `draw`, because it is the one piece
+    /// of a box that answers to where the pointer is -- and six of the eight
+    /// boxes in this window are one-line fields with nothing to scroll and no
+    /// input to hand. The two that have a bar ask for it.
+    pub fn draw_bar(&self, into: &mut Canvas<'_>, input: &Input, within: Rect) {
+        let reach = self.reach();
+        if !self.bar.needed(reach) {
+            return;
+        }
+        self.bar.draw(
+            into,
+            &self.name,
+            input,
+            self.over(within),
+            self.scroll,
+            reach,
+        );
+    }
+
+    /// The window the text is shown through: the lines on screen, and nothing
+    /// of the paperclip and Send below them.
+    fn over(&self, within: Rect) -> Rect {
+        let inner = self.inner(within);
+        Rect::new(inner.x, inner.y, inner.width, self.lines() as f32 * LINE)
+    }
+
+    /// Keeps the caret inside the window the box shows.
+    ///
+    /// Called wherever the text or the caret can have moved, rather than only
+    /// on a keystroke: a caret nobody can see is a box being typed into
+    /// blind, and re-wrapping at a new width moves one without anybody
+    /// touching the keyboard.
+    fn follow_caret(&mut self) {
+        let shown = self.lines() as f32 * LINE;
+        let Some((_, y)) = self.editor.cursor_position() else {
+            self.scroll = self.scroll.clamp(0.0, self.reach());
+            return;
+        };
+        let top = y as f32;
+        if top < self.scroll {
+            self.scroll = top;
+        } else if top + LINE > self.scroll + shown {
+            self.scroll = top + LINE - shown;
+        }
+        self.scroll = self.scroll.clamp(0.0, self.reach());
     }
 
     /// The height the strip needs, which grows with the message.
@@ -303,7 +474,8 @@ impl Composer {
         if self.plain {
             return Vec::new();
         }
-        vec![
+        let mut placed = self.bar.boxes(&self.name, self.over(within), self.reach());
+        placed.extend([
             Placed {
                 name: format!("{}/attach", self.name),
                 rect: self.attach(within),
@@ -314,7 +486,8 @@ impl Composer {
                 rect: self.send(within),
                 depth: 3,
             },
-        ]
+        ]);
+        placed
     }
 
     /// What a press on one of them means, if it landed on one.
@@ -384,7 +557,10 @@ impl Composer {
         if let Some((x, y)) = input.pointer_at()
             && input.pressed() == Some(self.name.as_str())
         {
-            let at = ((x - inner.x) as i32, (y - inner.y) as i32);
+            // Through the scroll: the point is where the pointer is on
+            // screen and the buffer counts from the first line of the text,
+            // not from the first line on show.
+            let at = ((x - inner.x) as i32, (y - inner.y + self.scroll) as i32);
             // The frame the button went down places the caret; every frame
             // after that drags a selection from it.
             // Two presses take the word under the pointer and three take the
@@ -490,6 +666,10 @@ impl Composer {
         if sent.is_some() {
             self.clear(fonts);
         }
+        // Last, after every way the text or the caret can have moved this
+        // frame: typing, deleting, pasting, undoing, or walking with the
+        // arrows.
+        self.follow_caret();
         sent
     }
 
@@ -594,6 +774,7 @@ impl Composer {
         // and the box would stay tall with nothing in it.
         self.editor.shape_as_needed(fonts.system_mut(), false);
         self.touched = false;
+        self.scroll = 0.0;
     }
 
     /// Puts text in it, with the caret at the end.
@@ -612,6 +793,10 @@ impl Composer {
         });
         self.editor.set_cursor(end);
         self.editor.set_selection(Selection::None);
+        // A draft comes back with the caret at its end, so the window on it
+        // has to be at the end too.
+        self.scroll = 0.0;
+        self.follow_caret();
         // Already said something, so an empty box reads as emptied on purpose
         // rather than never filled.
         self.touched = true;
@@ -678,26 +863,26 @@ impl Composer {
             scene.glyphs(glyphs, palette.faint, palette.faint);
         }
 
+        // Everything below is a window onto the text rather than the whole
+        // of it: a box of eight lines holding twenty has lines above and
+        // below, and nothing else says where the window ends.
+        scene.clip_to(inner.x, inner.y, inner.width, self.lines() as f32 * LINE);
+
         // The selection goes down first, or it would cover the letters it is
         // meant to be behind.
-        if let Some((start, end)) = self.editor.selection_bounds() {
-            self.editor.with_buffer(|buffer| {
-                for run in buffer.layout_runs() {
-                    for (x, width) in run.highlight(start, end) {
-                        scene.fill(
-                            inner.x + x,
-                            inner.y + run.line_top,
-                            width,
-                            LINE,
-                            [palette.ink[0], palette.ink[1], palette.ink[2], 60],
-                        );
-                    }
-                }
-            });
+        let scroll = self.scroll;
+        for (x, y, width) in self.selection_marks(within) {
+            scene.fill(
+                x,
+                y,
+                width,
+                LINE,
+                [palette.ink[0], palette.ink[1], palette.ink[2], 60],
+            );
         }
 
         self.editor.with_buffer(|buffer| {
-            let glyphs = matterless_paint::placed_glyphs(buffer, inner.x, inner.y);
+            let glyphs = matterless_paint::placed_glyphs(buffer, inner.x, inner.y - scroll);
             scene.glyphs(glyphs, palette.ink, palette.faint);
         });
 
@@ -712,6 +897,10 @@ impl Composer {
                 [palette.ink[0], palette.ink[1], palette.ink[2], 255],
             );
         }
+
+        // Back to the box itself, which is what the caller clipped to and
+        // what the marks below are drawn in.
+        scene.clip_to(strip.x, strip.y, strip.width, strip.height);
 
         // A paperclip and a Send, for the readers who would rather press a
         // button than learn that Enter sends and a drop attaches. Nothing here
