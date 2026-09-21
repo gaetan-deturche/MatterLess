@@ -39,6 +39,7 @@ pub mod scrollbar;
 pub mod search;
 pub mod sidebar;
 pub mod sidebar_feed;
+pub mod signin;
 pub mod stream;
 #[cfg(test)]
 mod stream_tests;

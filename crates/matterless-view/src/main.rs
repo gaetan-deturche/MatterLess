@@ -34,13 +34,26 @@ use winit::event::{MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Window, WindowId};
 
-fn post(author: &str, nodes: Vec<Node>) -> PostRow {
+/// The first day of the sample, as days since the epoch.
+///
+/// Fixed rather than "today": a sample that moves means a snapshot taken on
+/// one day and compared on the next differs in six date separators and
+/// nothing else.
+const SAMPLE_DAY: i64 = 20_340;
+
+fn post(author: &str, at: (i64, u32, u32), nodes: Vec<Node>) -> PostRow {
+    let (day, hour, minute) = at;
     PostRow {
-        post_id: format!("p-{author}-{}", nodes.len()),
+        // The day and the time are in it because they are what makes it one
+        // of six. Named after the author and the length of what was said, it
+        // was the same id on all six days -- and the stream keys a row by its
+        // id, so hovering one of them meant hovering all six.
+        post_id: format!("p-{author}-{day}-{hour}{minute:02}"),
         root_id: String::new(),
         author_id: format!("u-{author}"),
         author_name: author.into(),
-        create_at: 0,
+        create_at: ((SAMPLE_DAY + day) * 86_400 + i64::from(hour) * 3_600 + i64::from(minute) * 60)
+            * 1_000,
         update_at: 0,
         edited: false,
         nodes: Arc::new(nodes),
@@ -73,68 +86,149 @@ fn para(text: &str) -> Node {
 /// configuration they were discussing -- pasted in as convenient test data
 /// and then compiled into a public repository and shipped inside an
 /// installer. Sample data is published data. Nothing here names anybody.
+///
+/// Two exchanges over six days rather than one over six. A window with no
+/// store shows this and nothing else, and the same words under six different
+/// dates do not read as six days of a conversation; they read as a window
+/// drawing the same day over and over, which is a bug report waiting to
+/// happen. Both carry every shape, so what each is here to exercise is on
+/// screen either way.
 fn conversation() -> Vec<Row> {
     let mut rows = Vec::new();
     for day in 0..6 {
         rows.push(Row::DateSeparator {
-            epoch_day: 20_340 + day,
+            epoch_day: SAMPLE_DAY + day,
         });
-        rows.push(Row::Post {
-            post: post("ada", vec![para("Morning!")]),
-        });
-        rows.push(Row::Continuation {
-            post: post(
-                "ada",
-                vec![para(
-                    "Could we raise the cache size the test runner is allowed, to a couple of \
-                     gigabytes or so? It looks as though it is set in the file beside the \
-                     runner rather than anywhere obvious, and I would rather not guess at it \
-                     on a machine everybody shares.",
-                )],
-            ),
-        });
-        rows.push(Row::Post {
-            post: post(
-                "ben",
-                vec![
-                    Node::Paragraph {
-                        children: vec![
-                            Node::Text {
-                                value: "that is ".into(),
-                            },
-                            Node::Strong {
-                                children: vec![Node::Text {
-                                    value: "a fair question".into(),
-                                }],
-                            },
-                            Node::Text {
-                                value: " -- ask ".into(),
-                            },
-                            Node::UserMention {
-                                username: "cara".into(),
-                                everyone: false,
-                            },
-                            Node::Text {
-                                value: ", she set it up".into(),
-                            },
-                        ],
-                    },
-                    Node::List {
-                        ordered: false,
-                        items: vec![
-                            vec![para("we can reach the runner itself")],
-                            vec![para("but not the box its cache lives on")],
-                        ],
-                    },
-                    Node::CodeBlock {
-                        language: Some("toml".into()),
-                        value: "cache_size = \"2GiB\"\nkeep_days = 14".into(),
-                    },
-                ],
-            ),
-        });
+        match day % 2 {
+            0 => cache_day(&mut rows, day),
+            _ => hardware_day(&mut rows, day),
+        }
     }
     rows
+}
+
+/// One day of the sample: a question about a machine everybody shares.
+fn cache_day(rows: &mut Vec<Row>, day: i64) {
+    rows.push(Row::Post {
+        post: post("ada", (day, 9, 14), vec![para("Morning!")]),
+    });
+    rows.push(Row::Continuation {
+        post: post(
+            "ada",
+            (day, 9, 15),
+            vec![para(
+                "Could we raise the cache size the test runner is allowed, to a couple of \
+                 gigabytes or so? It looks as though it is set in the file beside the \
+                 runner rather than anywhere obvious, and I would rather not guess at it \
+                 on a machine everybody shares.",
+            )],
+        ),
+    });
+    rows.push(Row::Post {
+        post: post(
+            "ben",
+            (day, 9, 31),
+            vec![
+                Node::Paragraph {
+                    children: vec![
+                        Node::Text {
+                            value: "that is ".into(),
+                        },
+                        Node::Strong {
+                            children: vec![Node::Text {
+                                value: "a fair question".into(),
+                            }],
+                        },
+                        Node::Text {
+                            value: " -- ask ".into(),
+                        },
+                        Node::UserMention {
+                            username: "cara".into(),
+                            everyone: false,
+                        },
+                        Node::Text {
+                            value: ", she set it up".into(),
+                        },
+                    ],
+                },
+                Node::List {
+                    ordered: false,
+                    items: vec![
+                        vec![para("we can reach the runner itself")],
+                        vec![para("but not the box its cache lives on")],
+                    ],
+                },
+                Node::CodeBlock {
+                    language: Some("toml".into()),
+                    value: "cache_size = \"2GiB\"\nkeep_days = 14".into(),
+                },
+            ],
+        ),
+    });
+}
+
+/// The other day of the sample: a machine slower than it was.
+fn hardware_day(rows: &mut Vec<Row>, day: i64) {
+    rows.push(Row::Post {
+        post: post(
+            "cara",
+            (day, 10, 2),
+            vec![para("Is anyone else seeing this?")],
+        ),
+    });
+    rows.push(Row::Continuation {
+        post: post(
+            "cara",
+            (day, 10, 3),
+            vec![para(
+                "The overnight run took two hours and forty minutes, against fifty-odd \
+                 minutes for the same commit last week. Nothing in the tree explains it, \
+                 so I would rather rule the machine out before anybody starts bisecting a \
+                 slowdown that is not in the code at all.",
+            )],
+        ),
+    });
+    rows.push(Row::Post {
+        post: post(
+            "ben",
+            (day, 10, 18),
+            vec![
+                Node::Paragraph {
+                    children: vec![
+                        Node::Text {
+                            value: "that will be the disk -- it has been ".into(),
+                        },
+                        Node::Strong {
+                            children: vec![Node::Text {
+                                value: "read-only since Tuesday".into(),
+                            }],
+                        },
+                        Node::Text {
+                            value: ", which ".into(),
+                        },
+                        Node::UserMention {
+                            username: "ada".into(),
+                            everyone: false,
+                        },
+                        Node::Text {
+                            value: " found the hard way".into(),
+                        },
+                    ],
+                },
+                Node::List {
+                    ordered: false,
+                    items: vec![
+                        vec![para("every write falls back to the network share")],
+                        vec![para("and the share is a long way from that rack")],
+                    ],
+                },
+                Node::CodeBlock {
+                    language: Some("toml".into()),
+                    value: "scratch = \"/mnt/local/build\"\nfallback = \"//store/build\"".into(),
+                },
+            ],
+        ),
+    });
 }
 
 /// The strip of teams down the far left.
@@ -446,6 +540,10 @@ struct App {
     /// Decoded pictures waiting to go into the atlas, which only the thread
     /// that owns the GPU may touch.
     arrived: Vec<(String, u32, u32, Vec<u8>)>,
+    /// The way in, when there is no session. Kept rather than made when it is
+    /// needed: a refused sign-in has to keep what was typed, and a form built
+    /// fresh each frame would not.
+    signin: matterless_view::signin::SignIn,
     /// What a clicked notification does. Held once and shared with every toast,
     /// because each one outlives the call that raised it.
     clicked: Option<Arc<matterless_view::toast::Clicked>>,
@@ -753,6 +851,7 @@ impl App {
             outstanding: Arc::new(matterless_render::pending::PendingPosts::default()),
             asked: std::collections::HashSet::new(),
             arrived: Vec::new(),
+            signin: matterless_view::signin::SignIn::default(),
             clicked: None,
             switcher: matterless_view::switcher::Switcher::default(),
             search: matterless_view::search::Search::default(),
@@ -979,8 +1078,16 @@ impl App {
     }
 
     /// The stream, between the header above it and the composer below.
+    ///
+    /// All of it when there is no box: room kept for something that is not
+    /// drawn is a band of ground along the bottom of the conversation, and
+    /// the conversation is the only thing on screen in that case.
     fn stream_rect(&self) -> Rect {
-        self.composer.above(header::below(self.channel_rect()))
+        let within = header::below(self.channel_rect());
+        match self.can_write() {
+            true => self.composer.above(within),
+            false => within,
+        }
     }
 
     /// Where the pill saying somebody is writing floats.
@@ -1037,6 +1144,14 @@ impl App {
         if self.on_threads() {
             return "Threads".to_string();
         }
+        // What is on screen with no store is the invented sample, and it is
+        // not a channel: it is in nobody's sidebar, on no server, and named
+        // after the fallback rather than after a place. Called "sample"
+        // behind a hash it read as a channel by that name, which is the one
+        // reading of it that is not true.
+        if self.store.is_none() {
+            return "Sample conversation".to_string();
+        }
         let Some(open) = self.sidebar.selected.as_deref() else {
             return String::new();
         };
@@ -1047,8 +1162,8 @@ impl App {
                 Entry::Channel { id, label, .. } if id == open => Some(label.clone()),
                 _ => None,
             })
-            // The sample feed has no sidebar row behind it, and an id is a poor
-            // name but better than an empty strip.
+            // A channel the sidebar has not caught up with yet. An id is a
+            // poor name but better than an empty strip.
             .unwrap_or_else(|| open.to_string())
     }
 
@@ -1488,6 +1603,41 @@ impl App {
                 self.connected = false;
                 eprintln!("staying offline: {why}");
             }
+            Update::SessionOpened {
+                token,
+                user_id,
+                username,
+                server,
+            } => {
+                match self.opened_a_session(&token, &user_id, &username, &server) {
+                    // Straight on to the socket, with the session that has
+                    // just been made: the reader signed in to read something,
+                    // and a window that then sat there until it was restarted
+                    // would have asked for a password to do nothing with.
+                    Ok(()) => {
+                        if let Some(waker) = self.waker.clone() {
+                            self.connect(waker);
+                        }
+                    }
+                    Err(why) => {
+                        eprintln!("the session could not be kept: {why}");
+                        self.signin.trying = false;
+                        self.signin.failed = Some(why);
+                    }
+                }
+            }
+            Update::SignInRefused { why, needs_a_code } => {
+                eprintln!("sign-in refused: {why}");
+                self.signin.trying = false;
+                match needs_a_code {
+                    true => {
+                        let mut input = std::mem::take(&mut self.input);
+                        self.signin.ask_for_a_code(&mut input);
+                        self.input = input;
+                    }
+                    false => self.signin.failed = Some(why),
+                }
+            }
             Update::Changed(deltas) => {
                 self.read_what_arrived(&deltas);
                 self.announce(&deltas);
@@ -1781,6 +1931,17 @@ impl App {
     }
 
     fn header_offers(&self) -> Vec<header::Act> {
+        // Nothing, when there is no store to answer any of them. Search
+        // searches it, Saved and Pinned and Threads are lists out of it, and
+        // muting or leaving is a message to a server this window has not
+        // reached. A row of buttons that do nothing is worse than an empty
+        // strip: it takes a press each to find that out.
+        //
+        // The field goes with them. `fit` offers one only when `Search` is
+        // among the acts, so this is the whole of it.
+        if self.store.is_none() {
+            return Vec::new();
+        }
         let direct = self
             .sidebar
             .selected
@@ -1788,6 +1949,20 @@ impl App {
             .and_then(|id| self.store.as_ref()?.channel(id).ok().flatten())
             .is_some_and(|channel| channel.channel_type == "D" || channel.channel_type == "G");
         header::offered(direct)
+    }
+
+    /// Whether there is anywhere to write.
+    ///
+    /// No store is no conversation: what is on screen then is the sample,
+    /// which is something to look at rather than somewhere to talk. And the
+    /// threads list has nothing to reply to, which is the case this already
+    /// had.
+    ///
+    /// A box that cannot send is worse than no box. It invites a message,
+    /// takes it, lights its own Send button, and then swallows the lot with a
+    /// line in a console nobody is reading.
+    fn can_write(&self) -> bool {
+        self.store.is_some() && !self.on_threads()
     }
 
     /// Does what a button inside a composer says.
@@ -2894,14 +3069,115 @@ impl App {
         self.sidebar.scroll = scroll;
     }
 
-    /// Records why the window stayed offline, and puts it on screen.
+    /// Records why the window stayed offline, and puts the way in on screen.
     ///
-    /// The sidebar is where it goes, under the reader's name, because that is
-    /// the one place in this window that already says whether it is hearing
-    /// anything -- and two places saying it would be two places to disagree.
+    /// The reason still goes in the sidebar, under the reader's name, for the
+    /// moment a session is lost rather than never had. What a reader sees on
+    /// a cold start with nothing at all is the sign-in screen, which is the
+    /// only one of the two they can do anything about.
     fn stayed_offline(&mut self, why: &'static str) {
         self.offline = Some(why);
         self.rebuild_sidebar();
+        self.signin.start(&mut self.input);
+        // Whatever is already there is filled in, so a reader who has been
+        // here before is only asked for what is actually missing.
+        if let Some(path) = matterless_view::feed::default_store()
+            && let Some(server) = matterless_view::live::stored_server(&path)
+        {
+            self.signin.server.set(&server);
+        }
+        self.want_the_logo();
+        self.pretend_typed();
+    }
+
+    /// Fills the form in, in a dev build, when asked.
+    ///
+    /// The same argument `pretend_offered` makes: a form has states nobody
+    /// working on it can see without a real account on a real server -- the
+    /// button live rather than spent, the field for a one-time code, the line
+    /// under it that says what went wrong. `MATTERLESS_SIGNIN=host|login|word`
+    /// puts something in each box.
+    ///
+    /// A dev build only, and the password is whatever was put on a command
+    /// line: this is for looking at the screen, not for signing in.
+    fn pretend_typed(&mut self) {
+        let Ok(said) = std::env::var("MATTERLESS_SIGNIN") else {
+            return;
+        };
+        if !cfg!(debug_assertions) {
+            eprintln!("MATTERLESS_SIGNIN is ignored outside a dev build");
+            return;
+        }
+        let mut parts = said.split('|');
+        if let Some(server) = parts.next() {
+            self.signin.server.set(server);
+        }
+        if let Some(login) = parts.next() {
+            self.signin.login.set(login);
+        }
+        if let Some(password) = parts.next() {
+            self.signin.password.set(password);
+        }
+        self.signin.wants_code = std::env::var("MATTERLESS_SIGNIN_CODE").is_ok();
+        self.signin.failed = std::env::var("MATTERLESS_SIGNIN_FAILED").ok();
+    }
+
+    /// Whether the window is asking to be signed in rather than drawing a
+    /// conversation.
+    fn signing_in(&self) -> bool {
+        self.offline.is_some()
+    }
+
+    /// Puts the greyscale mark in the queue the atlas is filled from.
+    ///
+    /// Through `arrived` like every other picture, because the thread that
+    /// owns the GPU is the only one that may touch the atlas -- and counted in
+    /// `asked`, so it is decoded once rather than on every frame it is
+    /// visible.
+    fn want_the_logo(&mut self) {
+        let key = matterless_view::signin::LOGO_KEY.to_string();
+        if self.asked.insert(key.clone())
+            && let Some((width, height, rgba)) = matterless_view::signin::logo()
+        {
+            self.arrived.push((key, width, height, rgba));
+        }
+    }
+
+    /// Takes the session a sign-in came back with.
+    ///
+    /// Everything here is the first run this window never had: the database
+    /// it will keep messages in does not exist yet, nor the folder round it,
+    /// nor the file naming the server. `feed::open` refuses a path that is not
+    /// already a file, which is why the store is opened here rather than
+    /// through it.
+    fn opened_a_session(
+        &mut self,
+        token: &matterless_core::auth::AuthToken,
+        user_id: &str,
+        username: &str,
+        server: &str,
+    ) -> Result<(), String> {
+        let path = matterless_view::feed::default_store()
+            .ok_or_else(|| "there is nowhere to keep a message store".to_string())?;
+        let folder = path
+            .parent()
+            .ok_or_else(|| format!("{} has no folder", path.display()))?;
+        std::fs::create_dir_all(folder)
+            .map_err(|error| format!("could not make {}: {error}", folder.display()))?;
+        let store = matterless_store::Store::open(&path)
+            .map_err(|error| format!("could not open {}: {error}", path.display()))?;
+        matterless_view::live::remember_server(&path, server)?;
+        matterless_view::live::remember_token(token.bearer())?;
+        println!("signed in as {username}, store at {}", path.display());
+        self.store = Some(Arc::new(store));
+        self.me = user_id.to_string();
+        self.signin.trying = false;
+        self.signin.failed = None;
+        // The password is not kept a moment past the request it was for.
+        self.signin.password.set("");
+        self.offline = None;
+        self.rebuild_sidebar();
+        Ok(())
     }
 
     /// Says when the local copy of a channel is behind what the server says.
@@ -3621,6 +3897,9 @@ impl App {
     /// be tested against the same boxes, and building them separately is how
     /// the two come to disagree about what is under the pointer.
     fn targets(&self) -> Vec<Placed> {
+        if self.signing_in() {
+            return self.signin.boxes(self.window_rect());
+        }
         let mut boxes = self.shell();
         boxes.extend(self.rail.boxes(self.rail_rect()));
         boxes.extend(self.sidebar.boxes(self.sidebar_rect()));
@@ -3642,7 +3921,7 @@ impl App {
             // Deeper than the conversation's own rows, which are not drawn --
             // and shallower than anything that floats over the column.
             boxes.extend(self.followed.boxes_in(self.followed_rect(), 3));
-        } else {
+        } else if self.can_write() {
             boxes.extend(self.composer.boxes_in(header::below(self.channel_rect())));
         }
         if let Some(body) = self.thread_body() {
@@ -4009,6 +4288,29 @@ impl App {
         if let Some(words) = aside {
             self.clipboard = words;
         }
+    }
+
+    /// Tries the sign-in the reader asked for.
+    fn sign_in(&mut self) {
+        let Some(waker) = self.waker.clone() else {
+            self.signin.failed = Some("this window has no way to hear back".to_string());
+            return;
+        };
+        let server = self.signin.server_url();
+        let code = self
+            .signin
+            .wants_code
+            .then(|| self.signin.code.text.trim().to_string());
+        self.signin.trying = true;
+        self.signin.failed = None;
+        println!("signing in to {server}");
+        matterless_view::live::sign_in(
+            server,
+            self.signin.login.text.trim().to_string(),
+            self.signin.password.text.clone(),
+            code,
+            Proxy(waker),
+        );
     }
 
     /// Sends what was pasted to the conversation being written in.
@@ -4416,6 +4718,16 @@ impl App {
 
     /// Hands the frame's input to the widgets that want it.
     fn reacted(&mut self) {
+        // Before everything, and alone: with no session this is the whole
+        // window, and nothing behind it is drawn for a press to reach.
+        if self.signing_in() {
+            let window = self.window_rect();
+            self.signin.measure(&mut self.fonts, window);
+            if self.signin.react(&mut self.input).is_some() {
+                self.sign_in();
+            }
+            return;
+        }
         // The pane's edge, before anything else reads the pointer: every
         // rect in the column is measured from its width, so reacting first
         // would answer this frame against the layout the drag has just
@@ -4873,14 +5185,24 @@ impl App {
         // Both boxes are offered the frame. Each one checks whether it holds
         // focus, so only the one the reader is in takes the keystrokes.
         let within = header::below(self.channel_rect());
-        // Before it reacts, so a press on the bar does not also land in the
-        // words behind it.
-        self.composer.dragged(&self.input, within);
-        let sent = self
-            .composer
-            .react(&mut self.fonts, &self.input, within, &mut self.clipboard);
-        let width = self.channel_rect().width;
-        self.composer.lay_out(&mut self.fonts, width);
+        // Not when there is nowhere to write. The box holds focus from the
+        // first frame, so that a chat window takes typing without a click
+        // first; with no box drawn, that focus would swallow every keystroke
+        // into somewhere the reader cannot see.
+        let sent = match self.can_write() {
+            false => None,
+            true => {
+                // Before it reacts, so a press on the bar does not also land
+                // in the words behind it.
+                self.composer.dragged(&self.input, within);
+                let sent =
+                    self.composer
+                        .react(&mut self.fonts, &self.input, within, &mut self.clipboard);
+                let width = self.channel_rect().width;
+                self.composer.lay_out(&mut self.fonts, width);
+                sent
+            }
+        };
 
         let replied = if let Some(body) = self.thread_body() {
             self.thread_composer.dragged(&self.input, body);
@@ -4900,7 +5222,9 @@ impl App {
         // The two buttons in each box. Send does what return does, and attach
         // does what a drop does -- both exist for a reader who has not been
         // told about either.
-        if let Some(button) = self.composer.pressed(&self.input) {
+        if self.can_write()
+            && let Some(button) = self.composer.pressed(&self.input)
+        {
             self.pressed_in_composer(button, "");
         }
         if self.thread_body().is_some()
@@ -5454,8 +5778,31 @@ impl App {
         self.input.settle();
     }
 
+    /// The sign-in screen, and nothing behind it.
+    ///
+    /// Its own scene rather than a panel over the usual one: with no session
+    /// there is no sidebar, no channel and no conversation -- what would be
+    /// behind it is the invented sample, and a sign-in box floating over that
+    /// says the sample is the reader's.
+    fn signin_scene(&mut self) -> Scene {
+        let mut scene = Scene::default();
+        let window = self.window_rect();
+        self.signin.measure(&mut self.fonts, window);
+        let mut canvas = Canvas {
+            scene: &mut scene,
+            painter: &mut self.painter,
+            fonts: &mut self.fonts,
+            palette: &self.palette,
+        };
+        self.signin.draw(&mut canvas, &self.input, window);
+        scene
+    }
+
     /// Everything the frame draws, in one scene.
     fn scene(&mut self) -> Scene {
+        if self.signing_in() {
+            return self.signin_scene();
+        }
         let mut scene = Scene::default();
         let sidebar = self.sidebar_rect();
         let strip = self.header_rect();
@@ -5484,6 +5831,15 @@ impl App {
             "the editor is open and no row has made room for it"
         );
         let stream = self.stream_rect();
+        // With nowhere to write, the conversation has the column down to the
+        // bottom edge. Room kept for a box that is not drawn is a band of bare
+        // ground under the last message, and on the window this guards -- no
+        // store, so the sample and nothing else -- that band is most of what
+        // there is to look at.
+        debug_assert!(
+            self.can_write() || (stream.bottom() - self.channel_rect().bottom()).abs() < 0.5,
+            "no message box, and the conversation still stops short of the bottom"
+        );
 
         // Each piece of a frame, so the table says where one goes rather than
         // only that it was slow. Two spaces in front of the name because they
@@ -5534,6 +5890,11 @@ impl App {
             // Threads.
             header.sigil = matterless_layout::marks::THREADS;
             header.sigil_is_mark = true;
+        }
+        if self.store.is_none() {
+            // Nothing, for the same reason the name changed: a hash says
+            // "public channel on a server", and there is no server.
+            header.sigil = "";
         }
         scene.clip_to(strip.x, strip.y, strip.width, strip.height);
         let mut canvas = Canvas {
@@ -5645,9 +6006,9 @@ impl App {
         let probe = matterless_view::timing::watch("  the composers", 0, "");
         // The message box, its own layer, so the caret and the box sit over
         // the stream rather than under a message that scrolled into the
-        // strip. Not at all while the threads are up: there is nothing there
-        // to reply to.
-        if !self.on_threads() {
+        // strip. Not at all while the threads are up, and not at all with no
+        // store: neither is somewhere to write.
+        if self.can_write() {
             let composer = self.composer_rect();
             scene.clip_to(composer.x, composer.y, composer.width, composer.height);
             let focused = self.input.focus() == Some(composer::NAME);

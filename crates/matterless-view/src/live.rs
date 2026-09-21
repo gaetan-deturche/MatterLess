@@ -30,6 +30,25 @@ pub enum Update {
     Changed(Vec<Delta>),
     /// The connection could not be made at all, with the reason.
     Failed(String),
+    /// A sign-in came back with a session.
+    ///
+    /// The token is an `AuthToken` rather than a `String` so that it keeps its
+    /// redacted `Debug`: this enum derives one, and every other variant is
+    /// something it is fine to print.
+    SessionOpened {
+        token: AuthToken,
+        user_id: String,
+        username: String,
+        /// The server it is a session on, as the window will store it.
+        server: String,
+    },
+    /// A sign-in was refused, in the server's own words where there are any.
+    SignInRefused {
+        why: String,
+        /// The account has MFA on and the code is what was missing, which is a
+        /// different thing to say than "that did not work".
+        needs_a_code: bool,
+    },
     /// Who the token belongs to. The window needs this to count unreads and to
     /// tell which half of a direct message is the reader, and asking the server
     /// is the only way to know it without being told.
@@ -343,12 +362,131 @@ fn minted_token() -> Option<String> {
     None
 }
 
+/// Keeps the session, so the next run does not ask again.
+///
+/// The keychain rather than a file beside the database: it is a thirty-day
+/// bearer credential for somebody's account, and the database's own folder is
+/// somewhere anything running as this user can read.
+pub fn remember_token(token: &str) -> Result<(), String> {
+    keyring::Entry::new("matterless", "session")
+        .map_err(|error| format!("no keychain entry: {error}"))?
+        .set_password(token)
+        .map_err(|error| format!("the keychain refused the session: {error}"))
+}
+
+/// Keeps the server, beside the database, where `stored_server` reads it.
+pub fn remember_server(database: &std::path::Path, server: &str) -> Result<(), String> {
+    let directory = database
+        .parent()
+        .ok_or_else(|| format!("{} has no folder", database.display()))?;
+    std::fs::create_dir_all(directory)
+        .map_err(|error| format!("could not make {}: {error}", directory.display()))?;
+    std::fs::write(directory.join("server.txt"), server)
+        .map_err(|error| format!("could not write server.txt: {error}"))
+}
+
 /// The server this install is pointed at, from the file beside the database.
 pub fn stored_server(database: &std::path::Path) -> Option<String> {
     let directory = database.parent()?;
     let held = std::fs::read_to_string(directory.join("server.txt")).ok()?;
     let trimmed = held.trim().to_string();
     (!trimmed.is_empty()).then_some(trimmed)
+}
+
+/// Signs in, on a thread of its own, and reports what came back.
+///
+/// Returns immediately, like `start`. A login is a network round trip against
+/// a host somebody has just typed, which is the one request in this program
+/// most likely to take the full thirty-second timeout -- doing it on the
+/// thread that owns the window would freeze the form mid-keystroke, on the
+/// one screen where the reader has no other way to tell it is working.
+///
+/// The password is taken by value and dropped with the thread: nothing here
+/// holds it past the one request it is for.
+pub fn sign_in(
+    server: String,
+    login: String,
+    password: String,
+    code: Option<String>,
+    wake: impl Wake,
+) {
+    std::thread::spawn(move || {
+        let runtime = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(runtime) => runtime,
+            Err(error) => {
+                wake.wake(Update::SignInRefused {
+                    why: format!("no runtime: {error}"),
+                    needs_a_code: false,
+                });
+                return;
+            }
+        };
+        runtime.block_on(async move {
+            let client = match RestClient::new(&server) {
+                Ok(client) => client,
+                Err(error) => {
+                    wake.wake(Update::SignInRefused {
+                        why: said_plainly(&error),
+                        needs_a_code: false,
+                    });
+                    return;
+                }
+            };
+            let who = match client.login(&login, &password, code.as_deref()).await {
+                Ok(who) => who,
+                Err(error) => {
+                    wake.wake(Update::SignInRefused {
+                        why: said_plainly(&error),
+                        needs_a_code: matches!(error, matterless_core::Error::MfaRequired),
+                    });
+                    return;
+                }
+            };
+            let Some(token) = client.token() else {
+                // `login` sets the token from the response header and fails
+                // without one, so this cannot happen -- but the alternative to
+                // saying so is an `expect` on a network response.
+                wake.wake(Update::SignInRefused {
+                    why: "the server signed us in without a session token".to_string(),
+                    needs_a_code: false,
+                });
+                return;
+            };
+            wake.wake(Update::SessionOpened {
+                token,
+                user_id: who.id,
+                username: who.username,
+                server,
+            });
+        });
+    });
+}
+
+/// What to put under the form when a sign-in did not work.
+///
+/// The `Display` on these is written for a log: "api 401 [store.sql_user.get_for_login.app_error]"
+/// is exact and says nothing to somebody who has just mistyped a password. The
+/// cases a reader can actually do something about get a sentence; everything
+/// else keeps the original, because a wrong guess at what went wrong is worse
+/// than an ugly true one.
+fn said_plainly(error: &matterless_core::Error) -> String {
+    use matterless_core::Error;
+    match error {
+        Error::Url(_) => "That does not look like a server address.".to_string(),
+        Error::MfaRequired => "That account needs its one-time code.".to_string(),
+        Error::SessionExpired => "That login or password was not accepted.".to_string(),
+        Error::RateLimited { retry_after_secs } => {
+            format!("Too many attempts. Try again in {retry_after_secs}s.")
+        }
+        Error::Transport(inner) if inner.is_connect() || inner.is_timeout() => {
+            format!("Could not reach that server: {inner}")
+        }
+        Error::Api(envelope, _) if !envelope.message.is_empty() => envelope.message.clone(),
+        other => other.to_string(),
+    }
 }
 
 /// Opens the socket on a thread of its own and reports what arrives.
