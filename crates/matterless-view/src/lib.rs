@@ -150,6 +150,7 @@ pub fn vertices_of(
                 width,
                 height,
                 colour,
+                solid,
             } => {
                 let rgba = [
                     colour[0] as f32 / 255.0,
@@ -157,15 +158,21 @@ pub fn vertices_of(
                     colour[2] as f32 / 255.0,
                     colour[3] as f32 / 255.0,
                 ];
-                // Transparent at the top, the colour itself at the bottom.
                 // Straight alpha, so the see-through end keeps the colour and
-                // only loses its opacity.
+                // only loses its opacity. Blended the other way it would fade
+                // towards black, which on this palette is nearly the ground
+                // and so looks right until it is drawn over a picture.
+                let gone = [rgba[0], rgba[1], rgba[2], 0.0];
+                let (top, bottom) = match solid {
+                    matterless_paint::Solid::Top => (rgba, gone),
+                    matterless_paint::Solid::Bottom => (gone, rgba),
+                };
                 fading(
                     into,
                     [*x, *y, *x + *width, *y + *height],
                     [solid_uv[0], solid_uv[1], solid_uv[0], solid_uv[1]],
-                    [rgba[0], rgba[1], rgba[2], 0.0],
-                    rgba,
+                    top,
+                    bottom,
                     Sheet::Letters as u32,
                     0.0,
                     1.0,

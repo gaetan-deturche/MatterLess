@@ -2257,6 +2257,48 @@ impl Stream {
             top = bottom;
         }
         self.presses = presses;
+        // The ends of the conversation, once the rows are down and before
+        // anything that floats over them: a list cut off square at the top of
+        // its panel says nothing about whether there is more above it, and
+        // the one thing a reader wants to know about a wall of text is which
+        // way it goes on.
+        //
+        // A gradient rather than a band, because here it is the same cost --
+        // the fragment interpolates whatever the corners carry, so a fade is
+        // one quad. Over a picture a band would read as a bar laid across it.
+        for (y, solid) in [
+            (within.y, matterless_paint::Solid::Top),
+            (within.bottom() - FADE, matterless_paint::Solid::Bottom),
+        ] {
+            // Only the end that has something past it. Both at once on a
+            // conversation that fills the panel exactly would be two shadows
+            // cast by nothing.
+            let past = match solid {
+                matterless_paint::Solid::Top => self.scroll,
+                matterless_paint::Solid::Bottom => self.behind(within),
+            };
+            if past <= 1.0 {
+                continue;
+            }
+            // Short of its full strength while there is less than a fade's
+            // worth left, so the last pixels of a scroll do not end with a
+            // band appearing from nowhere.
+            let ground = palette.ground;
+            let strength = (past / FADE).min(1.0);
+            scene.extend([matterless_paint::Piece::Fade {
+                x: within.x,
+                y,
+                width: within.width,
+                height: FADE,
+                colour: [
+                    ground[0],
+                    ground[1],
+                    ground[2],
+                    (ground[3] as f32 * strength) as u8,
+                ],
+                solid,
+            }]);
+        }
         if let Some(rect) = self.to_newest(within) {
             let lit = input.hovered() == Some(format!("{}/newest", self.name).as_str());
             scene.rounded(
@@ -2292,6 +2334,12 @@ impl Stream {
         );
     }
 }
+
+/// How far the ends of a conversation trail off.
+///
+/// Deep enough to read as the list continuing rather than as an edge with a
+/// smudge on it, and short enough that it never hides a whole line.
+const FADE: f32 = 28.0;
 
 /// The size a face is drawn at, and the room the gutter already leaves for it.
 pub const AVATAR: f32 = 28.0;
@@ -2415,12 +2463,14 @@ fn shift(piece: matterless_paint::Piece, by: f32) -> matterless_paint::Piece {
             width,
             height,
             colour,
+            solid,
         } => Piece::Fade {
             x: x + by,
             y,
             width,
             height,
             colour,
+            solid,
         },
         Piece::Fill {
             x,

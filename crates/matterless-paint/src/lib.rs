@@ -247,20 +247,33 @@ pub fn placed_glyphs(buffer: &Buffer, x: f32, y: f32) -> Vec<PlacedGlyph> {
 /// Kept as a list rather than drawn directly so the snapshot and the window
 /// draw the same thing. Two renderers walking the layout separately is exactly
 /// how the browser and the virtualiser came to disagree.
+/// Which end of a fade carries the colour.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Solid {
+    /// Opaque at the top, see-through at the bottom.
+    Top,
+    /// See-through at the top, opaque at the bottom.
+    Bottom,
+}
+
 #[derive(Debug, Clone)]
 pub enum Piece {
-    /// A rectangle that fades from nothing at its top into `colour` at its
-    /// bottom.
+    /// A rectangle that is `colour` at one end and see-through at the other.
     ///
     /// What a cut code block trails off into, so the reader can see that the
-    /// last line they are shown is not the last line there is. One quad: the
-    /// fragment already interpolates whatever the corners carry.
+    /// last line they are shown is not the last line there is -- and what the
+    /// ends of a conversation trail off into, for the same reason. One quad:
+    /// the fragment already interpolates whatever the corners carry.
     Fade {
         x: f32,
         y: f32,
         width: f32,
         height: f32,
         colour: [u8; 4],
+        /// Which end is the colour. A cut listing is solid at its bottom; the
+        /// top of a scrolled list is solid at its top, because what it is
+        /// hiding is above it.
+        solid: Solid,
     },
     Fill {
         x: f32,
@@ -870,6 +883,7 @@ impl Painter {
                         width: theme.text_width(),
                         height: block.height,
                         colour: palette.raised,
+                        solid: Solid::Bottom,
                     });
                 }
                 // A rule written in the message, dividing one section of a
@@ -1044,6 +1058,7 @@ impl Painter {
                     width,
                     height,
                     colour,
+                    ..
                 } => canvas.fill(
                     *x as i32,
                     *y as i32,

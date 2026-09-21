@@ -314,6 +314,82 @@ fn the_toolbar_stays_up_under_a_still_pointer() {
     }
 }
 
+/// A conversation trails off at whichever end has more past it.
+///
+/// A list cut off square at the top of its panel says nothing about whether
+/// there is anything above it, and the one thing a reader wants to know
+/// about a wall of text is which way it goes on. But only the end that has
+/// something past it: both at once on a conversation that fits the panel
+/// would be two shadows cast by nothing.
+#[test]
+fn the_conversation_trails_off_at_the_end_that_has_more() {
+    use matterless_paint::{Painter, Palette, Piece, Scene, Solid};
+
+    let mut fonts = Fonts::new();
+    let within = panel();
+
+    // Enough rows to overflow the panel several times over.
+    let ends = |stream: &mut Stream, fonts: &mut Fonts| {
+        let mut painter = Painter::new();
+        let mut scene = Scene::default();
+        stream.draw(
+            &mut crate::sidebar::Canvas {
+                scene: &mut scene,
+                painter: &mut painter,
+                fonts,
+                palette: &Palette::default(),
+            },
+            within,
+            &Input::default(),
+            &std::collections::HashMap::new(),
+        );
+        let mut top = false;
+        let mut bottom = false;
+        for layer in &scene.layers {
+            for piece in &layer.pieces {
+                if let Piece::Fade { solid, height, .. } = piece
+                    // The cut-listing fade is a block inside a row and is
+                    // never the full depth of an end.
+                    && *height >= 20.0
+                {
+                    match solid {
+                        Solid::Top => top = true,
+                        Solid::Bottom => bottom = true,
+                    }
+                }
+            }
+        }
+        (top, bottom)
+    };
+
+    let mut stream = wordy(&mut fonts, within.width);
+    assert!(
+        stream.reach(within) > 0.0,
+        "the fixture fits the panel, so there is no end to trail off"
+    );
+
+    stream.scroll = 0.0;
+    assert_eq!(
+        ends(&mut stream, &mut fonts),
+        (false, true),
+        "at the top of the list: nothing above, more below"
+    );
+
+    stream.to_bottom(within);
+    assert_eq!(
+        ends(&mut stream, &mut fonts),
+        (true, false),
+        "at the end of the list: more above, nothing below"
+    );
+
+    stream.scroll = stream.reach(within) / 2.0;
+    assert_eq!(
+        ends(&mut stream, &mut fonts),
+        (true, true),
+        "in the middle: it goes on both ways"
+    );
+}
+
 /// The footer is the way in, and the only one.
 #[test]
 fn the_footer_opens_the_thread() {
