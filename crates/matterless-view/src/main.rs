@@ -455,6 +455,14 @@ struct App {
     /// Who is typing, and when this window last said that it was.
     typing: matterless_view::typing::Typing,
     said_typing: matterless_view::typing::Sending,
+    /// What to call each person heard typing, by id.
+    ///
+    /// Filled once, the first time somebody is heard from, and read on every
+    /// frame the line is up. Typing is the loudest signal on the socket --
+    /// between 72% and 93% of it -- but a person repeats it every three
+    /// seconds while they keep going, so a lookup per person costs one read
+    /// per typing run rather than one per signal.
+    typing_names: std::collections::HashMap<String, String>,
     /// Who is around, and the set last asked about.
     presence: std::collections::HashMap<String, String>,
     asked_about: Vec<String>,
@@ -536,8 +544,16 @@ struct App {
 /// one sitting, and the store answers instantly either way.
 const THREADS: u32 = 200;
 
-/// The height kept for the "somebody is typing" line, above each composer.
-const TYPING: f32 = 16.0;
+/// The pill saying somebody is writing: how tall, how far in, and the room
+/// inside it.
+///
+/// Taller than the sixteen the strip used to be, because nothing is reserved
+/// for it any more -- it floats over the conversation, so its height costs
+/// nothing and a thirteen-point line wants the room.
+const TYPING: f32 = 24.0;
+const TYPING_INSET: f32 = 24.0;
+const TYPING_PADDING: f32 = 10.0;
+const TYPING_DROP: f32 = 8.0;
 
 /// How far below the top edge the unread mark is brought, so what it
 /// follows is still visible above it. About three lines.
@@ -688,6 +704,7 @@ impl App {
             edit: matterless_view::edit::Edit::default(),
             typing: matterless_view::typing::Typing::default(),
             said_typing: matterless_view::typing::Sending::default(),
+            typing_names: std::collections::HashMap::new(),
             presence: std::collections::HashMap::new(),
             asked_about: Vec::new(),
             listing: matterless_view::listing::Listing::default(),
@@ -889,14 +906,17 @@ impl App {
 
     /// The stream, between the header above it and the composer below.
     fn stream_rect(&self) -> Rect {
-        let above = self.composer.above(header::below(self.channel_rect()));
-        Rect::new(above.x, above.y, above.width, above.height - TYPING)
+        self.composer.above(header::below(self.channel_rect()))
     }
 
-    /// The line above the composer saying somebody is writing.
+    /// Where the pill saying somebody is writing floats.
     ///
-    /// Reserved whether or not anybody is, so the conversation does not jump a
-    /// line every time somebody starts and stops.
+    /// Over the foot of the conversation rather than in a strip of its own.
+    /// The strip was reserved whether or not anybody was typing, so that the
+    /// conversation would not jump a line when somebody started -- which
+    /// bought that at the price of a line of the conversation, always, in
+    /// every channel, for a line that is up for seconds at a time. A pill
+    /// over the last message costs nothing when there is nothing to say.
     fn typing_rect(&self) -> Rect {
         let above = self.composer.above(header::below(self.channel_rect()));
         Rect::new(above.x, above.bottom() - TYPING, above.width, TYPING)
@@ -915,13 +935,7 @@ impl App {
 
     /// The thread's replies, above its reply box.
     fn thread_stream_rect(&self) -> Option<Rect> {
-        let above = self.thread_composer.above(self.thread_body()?);
-        Some(Rect::new(
-            above.x,
-            above.y,
-            above.width,
-            above.height - TYPING,
-        ))
+        Some(self.thread_composer.above(self.thread_body()?))
     }
 
     /// The same line, for the thread pane.
@@ -1418,6 +1432,7 @@ impl App {
                             // talks to whom.
                             let before = self.typing.count(channel_id, root_id);
                             self.typing.note(channel_id, root_id, user_id);
+                            self.learn_a_name(user_id);
                             let now = self.typing.count(channel_id, root_id);
                             if now != before {
                                 println!("{now} typing in {channel_id}");
@@ -1745,6 +1760,61 @@ impl App {
         self.attached
             .get(&under)
             .is_some_and(|held| !held.is_empty())
+    }
+
+    /// The pill for one line: where it sits, and what fits in it.
+    ///
+    /// Measured rather than given the width of the column. A pill is only a
+    /// pill if it ends where the sentence does -- run the full width and it
+    /// is the band this replaced, wearing a rounded corner.
+    ///
+    /// `None` when there is no room to draw one at all, which is a column
+    /// narrower than its own margins.
+    fn typing_pill(
+        fonts: &mut matterless_layout::Fonts,
+        strip: Rect,
+        said: &str,
+    ) -> Option<(Rect, String)> {
+        let room = strip.width - TYPING_INSET * 2.0 - TYPING_PADDING * 2.0;
+        if room <= 0.0 {
+            return None;
+        }
+        let style = matterless_view::listing::label(false);
+        let said = matterless_layout::elided(fonts, said, room, style);
+        let width = matterless_layout::extent_of(fonts, &said, f32::MAX, style).width;
+        Some((
+            Rect::new(
+                strip.x + TYPING_INSET,
+                strip.y,
+                width + TYPING_PADDING * 2.0,
+                strip.height,
+            ),
+            said,
+        ))
+    }
+
+    /// Looks one person up, if this window has not already.
+    ///
+    /// Kept rather than asked for again because the line is drawn every
+    /// frame: the read belongs to the signal arriving, not to the drawing.
+    /// A miss is not recorded, so somebody the store has not heard of yet is
+    /// asked about again next time rather than being nameless for the run.
+    fn learn_a_name(&mut self, user_id: &str) {
+        if self.typing_names.contains_key(user_id) {
+            return;
+        }
+        let known = self
+            .store
+            .as_ref()
+            .and_then(|store| {
+                store
+                    .users_by_ids(std::slice::from_ref(&user_id.to_string()))
+                    .ok()
+            })
+            .and_then(|known| known.get(user_id).map(|user| user.username.clone()));
+        if let Some(name) = known {
+            self.typing_names.insert(user_id.to_string(), name);
+        }
     }
 
     /// The reader's own name, as the store knows it.
@@ -4836,26 +4906,39 @@ impl App {
 
         drop(probe);
         let probe = matterless_view::timing::watch("  the composers", 0, "");
-        // The line above each composer. Drawn before the composers so it is
-        // under them, which is where a reserved strip belongs.
+        // A pill over the foot of each conversation. After the stream so it
+        // covers the last message rather than being covered by it, and before
+        // the composers so it never rides over the box being typed into.
         let open = self.sidebar.selected.clone().unwrap_or_default();
-        let root = self.open_root().unwrap_or_default();
         let lines = [
-            (self.typing_rect(), self.typing.line(&open, "")),
+            (
+                self.typing_rect(),
+                self.typing.line(&open, "", &self.typing_names),
+            ),
             (
                 self.thread_typing_rect()
                     .unwrap_or(Rect::new(0.0, 0.0, 0.0, 0.0)),
                 self.open_root()
-                    .and_then(|root| self.typing.line(&open, &root)),
+                    .and_then(|root| self.typing.line(&open, &root, &self.typing_names)),
             ),
         ];
-        let _ = root;
-        for (rect, said) in lines {
+        for (strip, said) in lines {
             let Some(said) = said else { continue };
-            if rect.width <= 0.0 {
+            if strip.width <= 0.0 {
                 continue;
             }
-            scene.clip_to(rect.x, rect.y, rect.width, rect.height);
+            let Some((pill, said)) = Self::typing_pill(&mut self.fonts, strip, &said) else {
+                continue;
+            };
+            // Wide enough for the shadow, which reaches past the pill on
+            // every side. Clipped to the strip alone it is cut off square,
+            // which is the one thing a shadow must not be.
+            scene.clip_to(
+                strip.x,
+                strip.y - TYPING_DROP,
+                strip.width,
+                strip.height + TYPING_DROP * 2.0,
+            );
             let mut canvas = Canvas {
                 scene: &mut scene,
                 painter: &mut self.painter,
@@ -4868,14 +4951,21 @@ impl App {
                 fonts,
                 palette,
             } = &mut canvas;
+            // A floating panel, not a fill: it sits over a message now, and
+            // what says a thing is in front of the window rather than part of
+            // it is the hairline, not the darkness under it.
+            matterless_widgets::Panel::floating(pill, pill.height / 2.0, TYPING_DROP)
+                .edge(palette.rule)
+                .fill(palette.surface)
+                .draw(scene);
             let glyphs = painter.run(
                 fonts,
                 &said,
-                rect.x + 24.0,
-                rect.y,
+                pill.x + TYPING_PADDING,
+                pill.y + (pill.height - 18.0) / 2.0,
                 matterless_paint::Run::label(f32::MAX),
             );
-            scene.glyphs(glyphs, palette.faint, palette.faint);
+            scene.glyphs(glyphs, palette.soft, palette.faint);
         }
 
         // Its own layer last, so the caret and the box sit over the stream
@@ -6148,7 +6238,69 @@ fn lifts_unreads(store: &matterless_store::Store, me: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{Act, Driver};
+    use super::{Act, App, Driver, Rect, TYPING, TYPING_INSET, TYPING_PADDING};
+
+    /// The pill ends where the sentence does.
+    ///
+    /// Which is the whole of what makes it a pill rather than the band it
+    /// replaced: given the width of the column it would be the same strip
+    /// wearing a rounded corner, and it floats over a message now, so every
+    /// pixel of it that is not words is a pixel of the conversation covered
+    /// for nothing.
+    #[test]
+    fn the_pill_is_as_wide_as_what_it_says() {
+        let mut fonts = matterless_layout::Fonts::new();
+        let strip = Rect::new(100.0, 400.0, 600.0, TYPING);
+
+        let (short, _) = App::typing_pill(&mut fonts, strip, "amy is typing")
+            .expect("a pill in a column with room");
+        let (long, _) = App::typing_pill(&mut fonts, strip, "amy, ben and cara are typing")
+            .expect("a pill in a column with room");
+
+        assert!(
+            long.width > short.width,
+            "{} is no wider than {} for a longer sentence",
+            long.width,
+            short.width
+        );
+        assert!(
+            long.width < strip.width,
+            "the pill took the whole column, which is the band again"
+        );
+        assert_eq!(short.x, strip.x + TYPING_INSET);
+        assert_eq!(short.y, strip.y);
+        assert_eq!(short.height, strip.height);
+    }
+
+    /// A column too narrow for the sentence cuts it rather than overflowing.
+    ///
+    /// The pill is drawn over the conversation, so one running past the edge
+    /// of the column would sit over the thread pane beside it.
+    #[test]
+    fn a_narrow_column_cuts_the_sentence() {
+        let mut fonts = matterless_layout::Fonts::new();
+        let wide = Rect::new(0.0, 0.0, 600.0, TYPING);
+        let narrow = Rect::new(0.0, 0.0, 200.0, TYPING);
+        let said = "amy, ben and cara are typing";
+
+        let (_, whole) = App::typing_pill(&mut fonts, wide, said).expect("a pill");
+        let (pill, cut) = App::typing_pill(&mut fonts, narrow, said).expect("a pill");
+
+        assert_eq!(whole, said, "a column with room should not cut anything");
+        assert!(cut.len() < said.len(), "{cut:?} was not cut to the column");
+        assert!(
+            pill.right() <= narrow.right(),
+            "the pill runs past the column it is drawn in"
+        );
+    }
+
+    /// A column narrower than the pill's own margins draws no pill at all.
+    #[test]
+    fn a_column_with_no_room_draws_nothing() {
+        let mut fonts = matterless_layout::Fonts::new();
+        let none = Rect::new(0.0, 0.0, TYPING_INSET * 2.0 + TYPING_PADDING * 2.0, TYPING);
+        assert!(App::typing_pill(&mut fonts, none, "amy is typing").is_none());
+    }
 
     /// A driver with no window, wound by hand.
     fn driver(each: u32) -> Driver {

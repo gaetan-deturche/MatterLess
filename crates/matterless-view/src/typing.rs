@@ -105,17 +105,74 @@ impl Typing {
         (after < before, next)
     }
 
+    /// Everyone still typing in one conversation, by id.
+    ///
+    /// Sorted, because the answer is drawn: a `HashMap` walks in a different
+    /// order every time it is asked, so two people typing would swap places
+    /// on the line from one frame to the next.
+    pub fn who(&self, channel_id: &str, root_id: &str) -> Vec<&str> {
+        let mut who: Vec<&str> = self
+            .seen
+            .get(&(channel_id.to_string(), root_id.to_string()))
+            .map(|who| {
+                who.iter()
+                    .filter(|(_, at)| at.elapsed() < FOR)
+                    .map(|(id, _)| id.as_str())
+                    .collect()
+            })
+            .unwrap_or_default();
+        who.sort_unstable();
+        who
+    }
+
     /// What the line says, or nothing when it should not be there.
     ///
-    /// Counted rather than named: resolving ids to names costs a store read on
-    /// the most frequent signal there is, and "two people" answers the question
-    /// the line exists for.
-    pub fn line(&self, channel_id: &str, root_id: &str) -> Option<String> {
-        match self.count(channel_id, root_id) {
-            0 => None,
-            1 => Some("someone is typing…".to_string()),
-            many => Some(format!("{many} people are typing…")),
+    /// Named from what the caller already knows rather than from a store read
+    /// here: typing is the most frequent signal there is, and this is asked on
+    /// every frame the line is up. The window looks an id up once, when it
+    /// first hears that person typing, and hands the answers back.
+    ///
+    /// All of them or none. A set that is only half resolved would read as
+    /// "Amy and someone are typing", which says less than the count does and
+    /// reads like a bug -- so an unknown face among them drops the whole line
+    /// back to counting.
+    pub fn line(
+        &self,
+        channel_id: &str,
+        root_id: &str,
+        named: &HashMap<String, String>,
+    ) -> Option<String> {
+        let who = self.who(channel_id, root_id);
+        let names: Vec<&str> = who
+            .iter()
+            .filter_map(|id| named.get(*id).map(String::as_str))
+            .collect();
+        match names.len() == who.len() {
+            true => phrase(&names),
+            false => match who.len() {
+                0 => None,
+                1 => Some("someone is typing…".to_string()),
+                many => Some(format!("{many} people are typing…")),
+            },
         }
+    }
+}
+
+/// How the line reads, given who is on it.
+///
+/// Three by name at the outside. Past that the line is longer than the
+/// message being written and nobody reads a list of four to learn that the
+/// conversation is busy -- which is the same place the official client stops.
+///
+/// Free of `Typing` so the wording can be read back without a clock or a
+/// conversation, and public because the wording is the feature.
+pub fn phrase(names: &[&str]) -> Option<String> {
+    match names {
+        [] => None,
+        [one] => Some(format!("{one} is typing…")),
+        [one, two] => Some(format!("{one} and {two} are typing…")),
+        [one, two, three] => Some(format!("{one}, {two} and {three} are typing…")),
+        _ => Some("several people are typing…".to_string()),
     }
 }
 
@@ -149,6 +206,68 @@ mod tests {
 
     use super::*;
 
+    /// The wording, all the way up to where it gives up naming.
+    ///
+    /// Three is the last one worth reading. A list of four is longer than
+    /// most of the messages being written, and by then the only thing the
+    /// line is telling anybody is that the conversation is busy.
+    #[test]
+    fn the_line_names_up_to_three_and_then_counts() {
+        assert_eq!(phrase(&[]), None);
+        assert_eq!(phrase(&["amy"]).unwrap(), "amy is typing\u{2026}");
+        assert_eq!(
+            phrase(&["amy", "ben"]).unwrap(),
+            "amy and ben are typing\u{2026}"
+        );
+        assert_eq!(
+            phrase(&["amy", "ben", "cara"]).unwrap(),
+            "amy, ben and cara are typing\u{2026}"
+        );
+        assert_eq!(
+            phrase(&["amy", "ben", "cara", "dev"]).unwrap(),
+            "several people are typing\u{2026}"
+        );
+    }
+
+    /// Two people keep their order between one frame and the next.
+    ///
+    /// They are held in a `HashMap`, which walks in a different order every
+    /// time it is asked -- so unsorted, two people typing would swap places
+    /// on the line while nobody did anything.
+    #[test]
+    fn who_is_typing_comes_back_in_the_same_order() {
+        let mut typing = Typing::default();
+        for id in ["u3", "u1", "u2"] {
+            typing.note("c1", "", id);
+        }
+        assert_eq!(typing.who("c1", ""), vec!["u1", "u2", "u3"]);
+    }
+
+    /// A face nobody can put a name to drops the whole line back to counting.
+    ///
+    /// Half a set named reads as "amy and someone are typing", which says
+    /// less than the count does and reads like a bug.
+    #[test]
+    fn a_line_is_named_only_when_everybody_on_it_is() {
+        let mut typing = Typing::default();
+        typing.note("c1", "", "u1");
+        typing.note("c1", "", "u2");
+
+        let mut named = HashMap::new();
+        named.insert("u1".to_string(), "amy".to_string());
+        assert_eq!(
+            typing.line("c1", "", &named).unwrap(),
+            "2 people are typing\u{2026}",
+            "one name short and it should still be counting"
+        );
+
+        named.insert("u2".to_string(), "ben".to_string());
+        assert_eq!(
+            typing.line("c1", "", &named).unwrap(),
+            "amy and ben are typing\u{2026}"
+        );
+    }
+
     /// A reply being typed in a thread must not put the line under the channel
     /// behind it: the signal arrives on the thread's channel either way.
     #[test]
@@ -169,7 +288,7 @@ mod tests {
         typing.note("c1", "", "u2");
         assert_eq!(typing.count("c1", ""), 2);
         assert_eq!(
-            typing.line("c1", "").as_deref(),
+            typing.line("c1", "", &HashMap::new()).as_deref(),
             Some("2 people are typing…")
         );
     }
@@ -178,7 +297,7 @@ mod tests {
     #[test]
     fn silence_says_nothing() {
         let mut typing = Typing::default();
-        assert!(typing.line("c1", "").is_none());
+        assert!(typing.line("c1", "", &HashMap::new()).is_none());
         assert_eq!(typing.forget_stale(), (false, None));
     }
 
