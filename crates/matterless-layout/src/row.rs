@@ -1217,8 +1217,11 @@ pub fn lay_out_opened(fonts: &mut Fonts, row: &Row, theme: &Theme, opened: bool)
                 continue;
             }
 
-            let width = (file.box_width.max(0) as f32).min(room);
-            let height = file.box_height.max(0) as f32;
+            // Both sides together: clamping the width alone to a narrower
+            // column flattens the picture rather than shrinking it.
+            // Both sides together: clamping the width alone to a narrower
+            // column flattens the picture rather than shrinking it.
+            let (width, height) = file.drawn_in(room);
             // Never on an empty shelf: a picture as wide as the column has to
             // go somewhere, and starting a shelf for it would never end.
             if along > 0.0 && along + width > room {
@@ -2560,7 +2563,13 @@ mod tests {
             assert_eq!(block.x, 0.0);
             assert_eq!(block.wrap, theme.text_width());
         }
-        assert!(blocks[1].y >= blocks[0].y + 100.0, "one under the other");
+        // Past the first rather than past the height it was given: a
+        // picture as wide as the column is scaled down to fit it, so the
+        // hundred it arrived with is not the room it takes.
+        assert!(
+            blocks[1].y >= blocks[0].y + blocks[0].height,
+            "one under the other"
+        );
     }
 
     /// A card is a line with a name on it rather than a thumbnail, so it takes
@@ -2592,7 +2601,14 @@ mod tests {
         assert_eq!(blocks[2].x, 0.0);
     }
 
-    /// A picture wider than the column is drawn no wider than the column.
+    /// A picture wider than the column is drawn no wider than the column --
+    /// and no taller than that leaves it.
+    ///
+    /// The width was clamped on its own, so a column narrower than the
+    /// picture did not shrink it, it flattened it: reported by opening the
+    /// thread pane, where the same screenshot went from 444x95 to 279x95.
+    /// The reserved height is what the drawing stretches the picture into,
+    /// so the ratio has to be settled here.
     #[test]
     fn an_attachment_never_runs_past_the_column() {
         let mut fonts = Fonts::new();
@@ -2606,6 +2622,12 @@ mod tests {
             .find(|block| block.kind == Kind::Attachment)
             .expect("an attachment block");
         assert_eq!(block.wrap, theme.text_width());
+        let wanted = 100.0 * theme.text_width() / 4000.0;
+        assert!(
+            (block.height - wanted).abs() < 0.01,
+            "{} tall where the ratio wants {wanted}",
+            block.height
+        );
     }
 
     /// Something that is not a picture is a card, and a card has a fixed row of

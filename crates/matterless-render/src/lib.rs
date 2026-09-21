@@ -387,6 +387,33 @@ impl FileRef {
     }
 }
 
+impl FileRef {
+    /// The box this is actually drawn in, given the column it lands in.
+    ///
+    /// `box_width` and `box_height` are worked out against `IMAGE_BOX`, which
+    /// is wider than a column that has had to make room for something: open a
+    /// thread and the channel loses half its width. The width was clamped to
+    /// what was left and the height was taken as it stood, which is not a
+    /// smaller picture but a flatter one -- measured on a screenshot, 444x95
+    /// became 279x95 the moment the thread pane opened.
+    ///
+    /// So both sides move together. Here rather than at either end of the
+    /// journey, because the layout reserves the height and the atlas decodes
+    /// to the width, and a picture whose reserved box and decoded size
+    /// disagree is either stretched into its block or leaves a gap under it.
+    pub fn drawn_in(&self, room: f32) -> (f32, f32) {
+        let width = self.box_width.max(0) as f32;
+        let height = self.box_height.max(0) as f32;
+        if width <= 0.0 || width <= room {
+            return (width, height);
+        }
+        // Never to nothing: a picture in a column too narrow to show it is
+        // still a row of the conversation, and a block of no height is a
+        // press that lands on the message behind it.
+        (room, (height * room / width).max(1.0))
+    }
+}
+
 /// Every attachment on a post, laid out as the post as a whole calls for.
 fn files_of(post: &Post, options: &PlanOptions) -> Vec<FileRef> {
     // Everything that draws at its own size rather than as a card, which is what

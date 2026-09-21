@@ -1488,6 +1488,61 @@ fn an_svg_is_a_file_card_unless_the_server_allows_it() {
     assert_eq!(post.files[0].variant, ImageVariant::Original);
 }
 
+/// A picture in a narrower column is smaller, not flatter.
+///
+/// Reported by comparing two screenshots of the same message: with the
+/// channel full width the picture was 444x95, and with the thread pane open
+/// it was 279x95. The width followed the column and the height did not, so
+/// it was stretched flat -- and 279 wide at the right ratio is 60 tall, not
+/// 95.
+#[test]
+fn a_narrow_column_scales_a_picture_rather_than_squashing_it() {
+    let mut wide = image_info("f10", 888, 190);
+    wide.has_preview_image = true;
+    let mut carrier = post("p1", "amy", 1_000);
+    carrier.metadata.files = vec![wide];
+
+    let rows = plan_channel(&[carrier], &HashMap::new(), &options(ThreadMode::Flat));
+    let Some(Row::Post { post, .. }) = rows.iter().find(|row| matches!(row, Row::Post { .. }))
+    else {
+        panic!("no post row");
+    };
+    let file = &post.files[0];
+    let (full_width, full_height) = file.drawn_in(f32::MAX);
+    assert!(full_width > 0.0 && full_height > 0.0);
+
+    // Half the room, which is roughly what opening the thread pane costs.
+    let room = full_width / 2.0;
+    let (width, height) = file.drawn_in(room);
+    assert_eq!(width, room, "the width should still fill what is left");
+    let before = full_width / full_height;
+    let after = width / height;
+    assert!(
+        (before - after).abs() < 0.01,
+        "{width}x{height} is {after:.3} where the picture is {before:.3}"
+    );
+}
+
+/// A column with room changes nothing at all.
+///
+/// The clamp must not creep into the ordinary case: a picture that already
+/// fits is the size the server worked out, to the pixel, or the height the
+/// layout reserved stops matching what arrives.
+#[test]
+fn a_column_with_room_leaves_a_picture_alone() {
+    let file =
+        super::FileRef::from_info(&image_info("f11", 300, 200), super::FileLayout::default());
+    assert_eq!(
+        file.drawn_in(f32::MAX),
+        (file.box_width as f32, file.box_height as f32)
+    );
+    assert_eq!(
+        file.drawn_in(file.box_width as f32),
+        (file.box_width as f32, file.box_height as f32),
+        "a column exactly as wide as the picture is not a narrower one"
+    );
+}
+
 /// A picture the server never measured is drawn as a file, not as nothing.
 ///
 /// Measured from the server, not invented: a screen grab pasted as a bitmap

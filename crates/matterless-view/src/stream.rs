@@ -1448,13 +1448,15 @@ impl Stream {
                 {
                     for file in &post.files {
                         if file.image || file.video {
-                            // The box the layout reserved, so the picture is
-                            // scaled once on the way in rather than every frame
-                            // on the way out.
+                            // The box the layout reserved, worked out the
+                            // same way, so the picture is scaled once on the
+                            // way in rather than every frame on the way out --
+                            // and so the decoded size is the reserved one.
+                            let (width, height) = file.drawn_in(self.theme.text_width());
                             wanted.push((
                                 picture_key(file),
-                                (file.box_width.max(1) as f32).min(self.theme.text_width()) as u32,
-                                file.box_height.max(1) as u32,
+                                (width as u32).max(1),
+                                (height as u32).max(1),
                             ));
                         }
                     }
