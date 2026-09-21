@@ -734,9 +734,25 @@ impl App {
                         Size::Fixed(self.composer.height()),
                     )),
             );
-        if self.thread.is_some() {
+        // Whichever pane has the right of the column, at the width it is
+        // actually drawn at -- the same choice `channel_rect` makes when it
+        // decides how much room the conversation has left.
+        //
+        // A pane that is drawn and not in here leaves every box in the channel
+        // running on underneath it: the wheel over a list of search results
+        // scrolled the message box behind it, because `wheel_over` asks
+        // whether a matching box is under the pointer rather than whether it
+        // is the topmost one. And a pane in here that is not drawn narrows
+        // them for nothing, which is what a thread did while a list was open
+        // over it.
+        if let Some(pane) = self.aside_rect() {
+            row = row.with(Boxed::new("aside-panel", Size::Fixed(pane.width)));
+        } else if let Some(pane) = self.thread_rect() {
             row = row.with(
-                Boxed::new("thread-panel", Size::Fixed(THREAD))
+                // Its own width, not `THREAD`: a narrow window gives a thread
+                // half the column and no more, and a box built from the
+                // constant would hang off the edge of the one on screen.
+                Boxed::new("thread-panel", Size::Fixed(pane.width))
                     .axis(Axis::Column)
                     .with(Boxed::new("thread-header", Size::Fixed(header::HEIGHT)))
                     .with(Boxed::new("thread", Size::Grow(1.0)))
