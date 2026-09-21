@@ -2008,7 +2008,7 @@ mod tests {
     fn a_continuation_is_shorter_by_its_header() {
         let mut fonts = Fonts::new();
         let theme = Theme::default();
-        let body = vec![text("Yo!")];
+        let body = vec![text("Morning!")];
         let first = lay_out(
             &mut fonts,
             &Row::Post {

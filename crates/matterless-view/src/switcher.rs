@@ -959,7 +959,7 @@ mod tests {
     /// they know where they are going and not how it is spelled.
     #[test]
     fn a_query_matches_letters_that_are_not_adjacent() {
-        let switcher = typed("curdev");
+        let switcher = typed("voydev");
         assert_eq!(
             switcher.found.first().map(|one| one.label.as_str()),
             Some("Voyager | Dev")

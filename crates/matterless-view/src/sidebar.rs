@@ -31,6 +31,12 @@ pub enum Entry {
         name: String,
         status: String,
         live: bool,
+        /// Why it is hearing nothing, when it is not.
+        ///
+        /// "Offline" alone fits a fresh install, a dead network and a session
+        /// that has expired, and helps with none of them -- so whichever of
+        /// those it is, it says so here.
+        offline: Option<String>,
     },
     /// A team's name, above the groups that belong to it.
     Team { id: String, label: String },
@@ -395,7 +401,12 @@ impl Sidebar {
                 // Who the reader is, said once at the top rather than in a
                 // channel's title: whether this window is hearing anything has
                 // nothing to do with which conversation is open.
-                Entry::Me { name, status, live } => {
+                Entry::Me {
+                    name,
+                    status,
+                    live,
+                    offline,
+                } => {
                     let who = painter.run(
                         fonts,
                         name,
@@ -416,11 +427,12 @@ impl Sidebar {
                     }
                     let said = painter.run(
                         fonts,
-                        &format!(
-                            "{}{}",
-                            spoken(status),
-                            if *live { "" } else { " -- offline" }
-                        ),
+                        &match (*live, offline.as_deref()) {
+                            (true, _) => spoken(status).to_string(),
+                            // The reason, when there is one to give.
+                            (false, Some(why)) => format!("offline -- {why}"),
+                            (false, None) => format!("{} -- offline", spoken(status)),
+                        },
                         row.rect.x + 4.0 + DOT + 6.0,
                         row.rect.y + 28.0,
                         Run::label(f32::MAX),

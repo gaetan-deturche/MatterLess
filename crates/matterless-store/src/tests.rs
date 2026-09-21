@@ -954,7 +954,15 @@ fn categories_come_back_in_sidebar_order_with_their_channels() {
             "t1",
             &[
                 category("fav1", "t1", "favorites", "Favorites", 0, "manual", &["c3"]),
-                category("cus1", "t1", "custom", "Meridian", 10, "manual", &["c1", "c2"]),
+                category(
+                    "cus1",
+                    "t1",
+                    "custom",
+                    "Meridian",
+                    10,
+                    "manual",
+                    &["c1", "c2"],
+                ),
             ],
         )
         .unwrap();
@@ -1204,7 +1212,7 @@ mod completion {
             .upsert_users(&[
                 person("u1", "gaetan.deturche", "Gaetan", "Deturche"),
                 person("u2", "guillaume.dupont", "Guillaume", "Dupont"),
-                person("u3", "cara.hollis", "Arthur", "Hollis"),
+                person("u3", "cara.hollis", "Cara", "Hollis"),
             ])
             .expect("users");
 
@@ -1217,7 +1225,7 @@ mod completion {
         );
 
         // A real prefix still lands on the obvious answer.
-        let prefix = store.users_matching("arth", 8).expect("query runs");
+        let prefix = store.users_matching("holl", 8).expect("query runs");
         assert_eq!(
             prefix.first().map(|user| user.username.as_str()),
             Some("cara.hollis")

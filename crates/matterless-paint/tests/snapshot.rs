@@ -50,11 +50,15 @@ fn text(value: &str) -> Node {
 
 /// The conversation drawn by the snapshot: plain text, a wrap, mixed weight,
 /// a mention, a list and a code block.
+///
+/// Invented, and deliberately so: this was a real exchange between real
+/// colleagues, pasted in as convenient test data and then compiled into a
+/// public repository. Sample data is published data.
 fn conversation() -> Vec<Row> {
     vec![
         Row::DateSeparator { epoch_day: 20_340 },
         Row::Post {
-            post: post("ada", vec![para(vec![text("Yo!")])]),
+            post: post("ada", vec![para(vec![text("Morning!")])]),
         },
         Row::Continuation {
             post: post(
@@ -90,8 +94,8 @@ fn conversation() -> Vec<Row> {
                         ],
                     },
                     Node::CodeBlock {
-                        language: Some("php".into()),
-                        value: "cache_size = "2GiB"\nkeep_days = 14".into(),
+                        language: Some("toml".into()),
+                        value: "cache_size = \"2GiB\"\nkeep_days = 14".into(),
                     },
                 ],
             ),

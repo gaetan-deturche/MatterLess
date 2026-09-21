@@ -65,8 +65,14 @@ fn para(text: &str) -> Node {
     }
 }
 
-/// Enough rows to scroll through, with the shapes that used to be mismeasured:
-/// long wraps, mixed weight, mentions, lists and code.
+/// Enough rows to scroll through, with the shapes that used to be
+/// mismeasured: long wraps, mixed weight, mentions, lists and code.
+///
+/// Invented, and deliberately so. This was a real exchange between real
+/// colleagues -- their usernames, what they were asking each other, and the
+/// configuration they were discussing -- pasted in as convenient test data
+/// and then compiled into a public repository and shipped inside an
+/// installer. Sample data is published data. Nothing here names anybody.
 fn conversation() -> Vec<Row> {
     let mut rows = Vec::new();
     for day in 0..6 {
@@ -74,7 +80,7 @@ fn conversation() -> Vec<Row> {
             epoch_day: 20_340 + day,
         });
         rows.push(Row::Post {
-            post: post("ada", vec![para("Yo!")]),
+            post: post("ada", vec![para("Morning!")]),
         });
         rows.push(Row::Continuation {
             post: post(
@@ -121,8 +127,8 @@ fn conversation() -> Vec<Row> {
                         ],
                     },
                     Node::CodeBlock {
-                        language: Some("php".into()),
-                        value: "cache_size = "2GiB"\nkeep_days = 14".into(),
+                        language: Some("toml".into()),
+                        value: "cache_size = \"2GiB\"\nkeep_days = 14".into(),
                     },
                 ],
             ),
@@ -539,6 +545,13 @@ struct App {
     /// One at a time and one field: a right-click on the sidebar while the
     /// message menu is open should replace it, not stack a second one over it.
     menu: matterless_view::menu::Menu,
+    /// Why this window is not talking to a server, when it is not.
+    ///
+    /// Each of these was a line printed to a console nobody sees, and the
+    /// window said "offline" and nothing else -- so a fresh install looked
+    /// exactly like a slow connection, and there was no way to tell from the
+    /// screen which of three quite different things was missing.
+    offline: Option<&'static str>,
     /// The people or channels a half-typed name could mean.
     ///
     /// Not `offer`, which is a new version waiting to be installed. Two
@@ -670,7 +683,15 @@ impl App {
             store.as_deref(),
             &me,
             matterless_core::model::ThreadMode::Collapsed,
-            ("", "", false),
+            // Nothing is known yet -- not the reader, not whether there is a
+            // server to reach. `connect` settles it on the first frame and
+            // rebuilds this.
+            Who {
+                name: "",
+                status: "",
+                live: false,
+                offline: None,
+            },
         );
         let sidebar = Sidebar::new(entries);
         drop(listing);
@@ -742,6 +763,9 @@ impl App {
             said_typing: matterless_view::typing::Sending::default(),
             typing_names: std::collections::HashMap::new(),
             pane_width: matterless_view::aside::WIDTH,
+            // Until `connect` says otherwise, which it does on the first
+            // frame: a window that has not tried yet is not offline.
+            offline: None,
             naming: matterless_view::offer::Offer::default(),
             visited: matterless_view::places::Places::default(),
             stepping: false,
@@ -1043,7 +1067,7 @@ impl App {
         store: Option<&matterless_store::Store>,
         me: &str,
         threads: matterless_core::model::ThreadMode,
-        who: (&str, &str, bool),
+        who: Who<'_>,
     ) -> Vec<Entry> {
         let groups = store
             .map(|store| matterless_view::sidebar_feed::groups(store, me, threads))
@@ -1052,7 +1076,12 @@ impl App {
         // with each channel's *total* message count -- which looks like an
         // unread badge of four thousand.
         let counted = !me.is_empty();
-        let (name, status, live) = who;
+        let Who {
+            name,
+            status,
+            live,
+            offline,
+        } = who;
         // When each of these people last changed their picture, in one query
         // rather than one per row: a hundred and fifteen conversations is a
         // hundred and fifteen round trips to answer the same question, and it
@@ -1086,6 +1115,7 @@ impl App {
             name: name.to_string(),
             status: status.to_string(),
             live,
+            offline: offline.map(str::to_string),
         }];
         // First in the list, because with collapsed threads a reply never
         // touches its channel's counters: this is the only row in the sidebar
@@ -1244,21 +1274,29 @@ impl App {
         // urgent, and asking again mid-session would interrupt reading to talk
         // about the client rather than about anything the reader came for.
         let looking = matterless_view::update::asks();
+        // Each of these is said on screen as well as here. They are three
+        // different problems with three different answers, and "offline" on
+        // its own is the one word that fits all of them and helps with none.
         let Some(store) = self.store.clone() else {
             println!("no database, so nothing to keep up to date");
+            self.stayed_offline("no message store");
             return;
         };
         let Some(path) = matterless_view::feed::default_store() else {
+            self.stayed_offline("nowhere to keep a message store");
             return;
         };
         let Some(server) = matterless_view::live::stored_server(&path) else {
             println!("no server.txt beside the database; staying offline");
+            self.stayed_offline("no server to talk to");
             return;
         };
         let Some(token) = matterless_view::live::stored_token() else {
             println!("no session in the keychain; staying offline");
+            self.stayed_offline("no session to sign in with");
             return;
         };
+        self.offline = None;
         // The click handler is built here because it needs the same proxy the
         // socket thread wakes the window with: a toast fires its callback on a
         // thread of its own, and this is how the answer gets home.
@@ -2833,16 +2871,37 @@ impl App {
             .map(|channel| channel.team_id);
         let open = self.sidebar.selected.clone();
         let scroll = self.sidebar.scroll;
-        let name = self.my_name();
+        // "Signing in" is only true while something is: with no session and
+        // no server there is nothing to sign in to, and a window that says it
+        // is trying for ever is worse than one that says what is missing.
+        let name = match self.offline {
+            Some(_) if self.me.is_empty() => "Not signed in".to_string(),
+            _ => self.my_name(),
+        };
         let status = self.presence.get(&self.me).cloned().unwrap_or_default();
         self.sidebar = Sidebar::new(Self::entries(
             self.store.as_deref(),
             &self.me,
             self.threads,
-            (&name, &status, self.connected),
+            Who {
+                name: &name,
+                status: &status,
+                live: self.connected,
+                offline: self.offline,
+            },
         ));
         self.sidebar.selected = open;
         self.sidebar.scroll = scroll;
+    }
+
+    /// Records why the window stayed offline, and puts it on screen.
+    ///
+    /// The sidebar is where it goes, under the reader's name, because that is
+    /// the one place in this window that already says whether it is hearing
+    /// anything -- and two places saying it would be two places to disagree.
+    fn stayed_offline(&mut self, why: &'static str) {
+        self.offline = Some(why);
+        self.rebuild_sidebar();
     }
 
     /// Says when the local copy of a channel is behind what the server says.
@@ -6929,6 +6988,21 @@ fn named(key: &winit::keyboard::Key) -> Option<Key> {
 
 /// What a thread panel answers to. Keyed by root so reopening the same thread
 /// can be told from opening a different one.
+/// What the row at the top of the sidebar says about the reader.
+///
+/// A struct rather than a tuple of three strings and a flag: it gained a
+/// fourth field and the call site was already four positional arguments of
+/// which two were `&str`, which is the shape where an argument quietly goes
+/// in the wrong slot.
+struct Who<'a> {
+    name: &'a str,
+    status: &'a str,
+    /// Whether this window is hearing anything.
+    live: bool,
+    /// Why it is not, when it is not.
+    offline: Option<&'static str>,
+}
+
 /// Which box a message is being typed into.
 ///
 /// Two of them keep a draft; the third is the editor, which is changing a

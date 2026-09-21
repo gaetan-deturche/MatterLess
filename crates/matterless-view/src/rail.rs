@@ -463,7 +463,7 @@ mod tests {
             kind: Kind::Team,
         };
         let (label, run) = face(&team);
-        assert_eq!(label, "CT");
+        assert_eq!(label, "VT");
         assert!(!run.icon, "a letter comes out of the text font");
 
         let directs = Tile {
@@ -493,8 +493,8 @@ mod tests {
     /// A name has to become something that fits on a square, whatever it is.
     #[test]
     fn a_name_becomes_something_that_fits() {
-        assert_eq!(initials("Northwind"), "S");
-        assert_eq!(initials("Voyager Team"), "CT");
+        assert_eq!(initials("Northwind"), "N");
+        assert_eq!(initials("Voyager Team"), "VT");
         assert_eq!(initials("one two three"), "OT");
         // Never empty: a blank square says nothing about which team it is, and
         // a team without a name is still a team the reader can press.

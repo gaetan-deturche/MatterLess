@@ -488,7 +488,9 @@ mod tests {
     #[test]
     fn a_direct_message_borrows_a_team() {
         let store = Store::open_in_memory().expect("a store");
-        store.upsert_teams(&[team("t2", "northwind")]).expect("teams");
+        store
+            .upsert_teams(&[team("t2", "northwind")])
+            .expect("teams");
         stored(&store, "c1", "");
         assert_eq!(
             permalink(&store, "https://chat.invalid", "p1").as_deref(),
