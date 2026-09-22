@@ -53,14 +53,12 @@ impl Taskbar {
         true
     }
 
-    /// Asks for attention: the taskbar button flashes.
+    /// Asks for attention: the taskbar button is lit until it is looked at.
     ///
-    /// `urgent` keeps it flashing until the window is looked at, which is right
-    /// for something that named the reader; otherwise it is a single nudge.
     /// Only meaningful while the window is unfocused, which the caller decides:
     /// asking for attention you already have is how an app becomes irritating.
-    pub fn ask_for_attention(&mut self, window: RawWindow, urgent: bool) {
-        platform::flash(window, urgent);
+    pub fn ask_for_attention(&mut self, window: RawWindow) {
+        platform::flash(window);
         self.flashing = true;
     }
 
@@ -73,6 +71,15 @@ impl Taskbar {
         self.flashing = false;
     }
 }
+
+/// How many times the button blinks before it settles into being lit.
+///
+/// Three, which is about four and a half seconds at the rate the shell blinks
+/// at here -- long enough to catch an eye that was elsewhere, short enough to
+/// stop before it is something to be annoyed by. What is left afterwards is
+/// the lit button, which is the part that has to survive: the message is still
+/// waiting whether or not anybody saw the blinking.
+const BLINKS: u32 = 3;
 
 /// A window handle, in the one form this needs it.
 ///
@@ -94,8 +101,8 @@ pub(crate) mod platform {
     };
     use windows::Win32::UI::Shell::{ITaskbarList3, TaskbarList};
     use windows::Win32::UI::WindowsAndMessaging::{
-        CreateIconIndirect, DestroyIcon, FLASHW_ALL, FLASHW_STOP, FLASHW_TIMERNOFG, FLASHWINFO,
-        FlashWindowEx, HICON, ICONINFO,
+        CreateIconIndirect, DestroyIcon, FLASHW_STOP, FLASHW_TRAY, FLASHWINFO, FlashWindowEx,
+        HICON, ICONINFO,
     };
     use windows::core::HSTRING;
 
@@ -209,18 +216,35 @@ pub(crate) mod platform {
         }
     }
 
-    pub fn flash(window: RawWindow, urgent: bool) {
+    /// Lights the taskbar button, and leaves it lit.
+    ///
+    /// The button rather than the window. `FLASHW_ALL` is the caption as well,
+    /// and `FLASHW_TIMERNOFG` means "until it is looked at" -- so the title bar
+    /// of a window with an unread message inverted twice a second for as long
+    /// as it was left alone, which is something moving in the corner of the eye
+    /// rather than a message waiting.
+    ///
+    /// A count, and not `FLASHW_TIMERNOFG`, which means "flash until the window
+    /// is looked at" -- and the shell's own flash count on this machine is
+    /// twelve hundred, so that is a button blinking for the rest of the day.
+    ///
+    /// What a counted flash then leaves behind was worth measuring rather than
+    /// reasoning about, twice. Sampling this machine's taskbar four times a
+    /// second for fourteen seconds after `FLASHW_TRAY`, three counts: it
+    /// alternates between lit and unlit until about four and a half seconds in,
+    /// and from five seconds onwards it holds at the lit value and stays there.
+    /// The official client's own button sits at the same level beside it.
+    ///
+    /// A single grab cannot tell those apart -- it lands on whichever half of a
+    /// blink it lands on, and that is how this was got wrong the first time.
+    pub fn flash(window: RawWindow) {
         let info = FLASHWINFO {
             cbSize: std::mem::size_of::<FLASHWINFO>() as u32,
             hwnd: HWND(window as *mut _),
-            // Until it is looked at for something that named the reader; once
-            // for anything else.
-            dwFlags: if urgent {
-                FLASHW_ALL | FLASHW_TIMERNOFG
-            } else {
-                FLASHW_ALL
-            },
-            uCount: if urgent { 0 } else { 1 },
+            dwFlags: FLASHW_TRAY,
+            uCount: super::BLINKS,
+            // The shell's own rate, which is a flash every second and a half
+            // here rather than the half-second the name suggests.
             dwTimeout: 0,
         };
         unsafe {
@@ -253,7 +277,7 @@ mod platform {
 
     /// No taskbar overlay exists off Windows.
     pub fn set_overlay(_window: RawWindow, _overlay: Option<&Overlay>, _description: &str) {}
-    pub fn flash(_window: RawWindow, _urgent: bool) {}
+    pub fn flash(_window: RawWindow) {}
     pub fn calm(_window: RawWindow) {}
 }
 
@@ -316,7 +340,7 @@ mod tests {
         let mut taskbar = Taskbar::default();
         assert!(!taskbar.flashing);
         taskbar.calm(1);
-        taskbar.ask_for_attention(1, true);
+        taskbar.ask_for_attention(1);
         assert!(taskbar.flashing);
         taskbar.calm(1);
         assert!(!taskbar.flashing, "and it knows it has stopped");

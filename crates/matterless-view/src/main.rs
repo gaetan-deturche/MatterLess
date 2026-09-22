@@ -3584,7 +3584,6 @@ impl App {
             String::new()
         };
         let mut asked = false;
-        let mut named = false;
         for delta in deltas {
             let matterless_sync::Delta::PostUpserted {
                 post_id,
@@ -3608,20 +3607,19 @@ impl App {
                 said.resolved
             );
             asked = true;
-            named |= said.resolved;
             let Some(clicked) = self.clicked.clone() else {
                 continue;
             };
             matterless_view::toast::raise(channel_id, &title, &body, clicked);
         }
-        // The button flashes for the same things the toast fires for, and only
+        // The button lights for the same things the toast fires for, and only
         // while the window is not being looked at: asking for attention you
-        // already have is how an app becomes irritating. Something that named
-        // the reader keeps flashing until it is seen; anything else is one
-        // nudge.
+        // already have is how an app becomes irritating. Whether the reader
+        // was named is the badge's to say -- the button has one state, and
+        // "lit twice as hard" is not a thing a taskbar can do.
         if asked && !self.focused {
             self.taskbar
-                .ask_for_attention(raw_window(self.window.as_ref()), named);
+                .ask_for_attention(raw_window(self.window.as_ref()));
         }
         // Whatever arrived changed what is waiting.
         self.update_badge();
