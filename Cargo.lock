@@ -1425,6 +1425,7 @@ version = "0.1.0"
 dependencies = [
  "cosmic-text",
  "matterless-render",
+ "unicode-script",
 ]
 
 [[package]]

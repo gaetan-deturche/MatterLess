@@ -8,4 +8,8 @@ edition = "2024"
 # row's height stops being predicted and becomes computed, which is what the
 # browser would never tell us before it had already drawn.
 cosmic-text = "0.19"
+# Only for one type: the fallback trait names a `Script` per writing system,
+# and implementing that trait means naming it too. Pinned to what cosmic-text
+# itself depends on, because a different major would be a different type.
+unicode-script = "0.5.8"
 matterless-render = { path = "../matterless-render" }

@@ -51,6 +51,62 @@ pub fn mono_family() -> Family<'static> {
     }
 }
 
+/// What the bundled emoji face calls itself, which is what steers a run to it.
+pub const EMOJI_FAMILY: &str = "Noto Color Emoji";
+
+/// The shaper's fallback chain, with the bundled emoji face put ahead of the
+/// machine's own.
+///
+/// Nothing in this window asks for an emoji face by name -- an emoji is a
+/// character in a sentence, and the face it comes out of is whichever the
+/// shaper's fallback finds covers it. Loading a second emoji face therefore
+/// changes nothing on its own: the chain still names the machine's first.
+///
+/// Taking the machine's *out* of the database was tried and is worse than it
+/// sounds: the chain's next name is Segoe UI Symbol, which covers the same
+/// codepoints as outlines, so every emoji came back a monochrome silhouette.
+/// The list is the thing to change, not what is in the drawer.
+///
+/// One insertion into the common list and nothing else. A fallback face is
+/// consulted only for a character the run's own font does not carry, and where
+/// in the order it sits decides which characters those are -- which is not a
+/// small detail. See `common_fallback`.
+struct EmojiFirst;
+
+impl cosmic_text::Fallback for EmojiFirst {
+    fn common_fallback(&self) -> &[&'static str] {
+        // In front of the machine's emoji face and nowhere else. The platform's
+        // own list is `["Segoe UI", "Segoe UI Emoji", "Segoe UI Symbol", "Segoe
+        // UI Historic"]`, and the first name in it is the general text face --
+        // put ahead of *that*, this face answers for the space and the digit as
+        // well, both of which it has and neither of which it has at the width
+        // text is set in. Every word in the window stood a third of a space too
+        // far from the next one.
+        static ORDER: std::sync::OnceLock<Vec<&'static str>> = std::sync::OnceLock::new();
+        ORDER.get_or_init(|| {
+            let theirs = cosmic_text::PlatformFallback.common_fallback();
+            let at = theirs
+                .iter()
+                .position(|name| name.to_lowercase().contains("emoji"))
+                .unwrap_or(theirs.len());
+            let mut names = theirs[..at].to_vec();
+            names.push(EMOJI_FAMILY);
+            names.extend_from_slice(&theirs[at..]);
+            names
+        })
+    }
+
+    fn forbidden_fallback(&self) -> &[&'static str] {
+        cosmic_text::PlatformFallback.forbidden_fallback()
+    }
+
+    fn script_fallback(&self, script: unicode_script::Script, locale: &str) -> &[&'static str] {
+        // Scripts are the platform's business: which face draws Devanagari is
+        // a question about the machine, and this crate has no better answer.
+        cosmic_text::PlatformFallback.script_fallback(script, locale)
+    }
+}
+
 impl Default for Fonts {
     fn default() -> Self {
         Self::new()
@@ -90,7 +146,29 @@ impl Fonts {
         system
             .db_mut()
             .load_font_data(include_bytes!("../resources/fonts/lucide.ttf").to_vec());
-        Self { system }
+        // Emoji, bundled for the same reason and for one more: what the
+        // machine has is Segoe UI Emoji, whose colour glyphs are outlines, and
+        // an outline rasterised at the thirteen pixels a message is set in is
+        // thirteen pixels of detail. Noto's build carries bitmap strikes at a
+        // hundred and thirty-six, and the rasteriser picks the nearest strike
+        // and filters it down -- so the same emoji arrives with the detail of
+        // a picture rather than the detail of a very small drawing.
+        //
+        // Not its COLRv1 build, which is a fifth the size and would be the
+        // obvious choice: swash cannot render COLRv1 and hands back a
+        // monochrome mask, so every emoji in this window would be a grey
+        // silhouette. Measured, not assumed -- it was tried first.
+        system
+            .db_mut()
+            .load_font_data(include_bytes!("../resources/fonts/NotoColorEmoji.ttf").to_vec());
+        // Rebuilt rather than constructed this way to begin with, because
+        // scanning the machine's font directories is the slow part of all of
+        // this and doing it twice would double the window's opening cost. The
+        // database and the locale are carried over whole.
+        let (locale, db) = system.into_locale_and_db();
+        Self {
+            system: FontSystem::new_with_locale_and_db_and_fallback(locale, db, EmojiFirst),
+        }
     }
 }
 
