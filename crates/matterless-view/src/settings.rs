@@ -384,10 +384,17 @@ impl Settings {
     }
 
     /// A look has gone out: the button is spent until it comes back.
+    ///
+    /// What was measured is kept, though it is now a card of the wrong height.
+    /// Dropping it is what a widget wants to do -- the placement is stale the
+    /// moment the words change -- but nothing measures a panel except the
+    /// window, and only when something is pressed. A dropped placement is a
+    /// card that is not drawn at all until the next press, which is the panel
+    /// blinking out under the hand that pressed it. A card one frame out of
+    /// date is a card nobody can see is out of date.
     pub fn looking(&mut self) {
         self.looking = true;
         self.said = "Asking for the newest build...".to_string();
-        self.placed = None;
     }
 
     /// And it came back, with whatever there is to say about it.
@@ -398,7 +405,6 @@ impl Settings {
     pub fn looked(&mut self, said: impl Into<String>) {
         self.looking = false;
         self.said = said.into();
-        self.placed = None;
     }
 
     fn laid(&self) -> Option<&Card> {
@@ -834,6 +840,15 @@ mod tests {
         press(&mut input, &boxes, look);
         assert_eq!(settings.react(&mut input), Some(Did::Look));
         assert!(settings.open(), "asking is not leaving");
+        // Still drawable on the very frame it was asked on. Nothing measures
+        // a panel except the window, and only when something is pressed -- so
+        // a panel that drops its placement when its words change is a panel
+        // that is not drawn at all until the next press, which is what a
+        // reader sees as it blinking out under their hand.
+        assert!(
+            settings.laid().is_some(),
+            "the card went missing on the press that asked"
+        );
 
         settings.measure(&mut fonts, window());
         let card = settings.laid().expect("measured");

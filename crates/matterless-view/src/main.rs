@@ -1818,22 +1818,31 @@ impl App {
                 // Answered where it was asked, and then handed on: a build
                 // that is there is a build the strip along the top should
                 // offer, whoever went looking for it.
-                match found {
+                let newer = match found {
                     Ok(Some(offer)) => {
                         self.settings
                             .looked(format!("MatterLess {} is ready to install.", offer.version));
-                        self.apply(Update::Updatable(offer));
-                        return;
+                        Some(offer)
                     }
-                    Ok(None) => self.settings.looked("This is the newest build."),
+                    Ok(None) => {
+                        self.settings.looked("This is the newest build.");
+                        None
+                    }
                     Err(why) => {
                         eprintln!("could not look for an update: {why}");
                         self.settings
                             .looked("Could not reach the place builds are kept.");
+                        None
                     }
-                }
+                };
+                // Before the offer is handed on, because that path relays out
+                // the whole window: the panel has just dropped its placement
+                // and would be missing from the frame in between.
                 let window = self.window_rect();
                 self.settings.measure(&mut self.fonts, window);
+                if let Some(offer) = newer {
+                    self.apply(Update::Updatable(offer));
+                }
             }
             Update::UpdateFailed(why) => {
                 self.offered.failed(&why);
@@ -5059,6 +5068,12 @@ impl App {
                     matterless_view::settings::Did::Close => {}
                 }
                 self.input = Input::default();
+                // Answering changes what the card says and therefore how tall
+                // it is, and the panel drops its placement when that happens.
+                // Nothing else measures it -- a draw draws what was measured
+                // -- so without this the card is not there at all until the
+                // next press, which reads as the panel blinking.
+                self.settings.measure(&mut self.fonts, window);
             }
             return;
         }
