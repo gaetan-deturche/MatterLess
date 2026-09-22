@@ -639,6 +639,80 @@ fn a_live_post_moves_the_unread_count() {
     assert_eq!(reported.messages, 1, "someone else posting is one unread");
 }
 
+/// Somebody joining is not somebody saying something.
+///
+/// The notification policy has always refused a system post, but the unread
+/// counters are the other half of "there is something to read" and they were
+/// still counting it: a channel went bold, the badge ticked up and the taskbar
+/// button lit, all because somebody walked in. The server does not count one
+/// towards the channel's total either, so counting it here also put this
+/// window out of step with the next refresh that overwrites it.
+#[test]
+fn a_join_is_not_an_unread_message() {
+    let engine = engine();
+    let context = SyncContext::new(me(), ThreadMode::Flat);
+    engine
+        .store()
+        .upsert_channels(&[Channel {
+            id: "c1".into(),
+            team_id: "t1".into(),
+            channel_type: "O".into(),
+            name: "c1".into(),
+            display_name: "c1".into(),
+            total_msg_count: 10,
+            total_msg_count_root: 10,
+            last_post_at: 100,
+            delete_at: 0,
+        }])
+        .unwrap();
+    engine
+        .store()
+        .upsert_channel_members(&[ChannelMember {
+            channel_id: "c1".into(),
+            user_id: "me".into(),
+            last_viewed_at: 0,
+            msg_count: 10,
+            msg_count_root: 10,
+            mention_count: 0,
+            mention_count_root: 0,
+            notify_props: HashMap::new(),
+        }])
+        .unwrap();
+
+    let mut joined = post("somebody-arrived", 200, "");
+    joined.post_type = "system_join_channel".into();
+    joined.message = "someone joined the channel".into();
+    let deltas = engine
+        .apply_event(
+            &Event::Posted {
+                post: Box::new(joined),
+                channel_id: "c1".into(),
+            },
+            &context,
+        )
+        .unwrap();
+
+    assert_eq!(
+        engine.store().unread("c1", "me").unwrap().unwrap().messages,
+        0,
+        "a join left an unread message behind it"
+    );
+    assert!(
+        !deltas
+            .iter()
+            .any(|delta| matches!(delta, Delta::PostUpserted { notify: true, .. })),
+        "and it must not notify either"
+    );
+    // Still stored and still drawn: it is a line in the conversation, just not
+    // a message waiting to be read.
+    assert!(deltas.iter().any(|delta| matches!(
+        delta,
+        Delta::PostUpserted {
+            in_stream: true,
+            ..
+        }
+    )));
+}
 /// Sending is reading: the server advances both counters, and mirroring only one
 /// would leave a phantom unread for every message sent.
 #[test]

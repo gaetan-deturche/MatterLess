@@ -244,7 +244,16 @@ impl SyncEngine {
                     return Ok(Vec::new());
                 }
                 let delta = self.post_delta(post, change, Arrival::Live, true, context);
-                if change == PostChange::Inserted {
+                // A join, a leave, a changed header: something happened in the
+                // channel, and nobody said anything. The server does not count
+                // one towards the channel's total either, so counting it here
+                // both invents an unread message and puts this window out of
+                // step with the next refresh that overwrites it.
+                //
+                // The notification policy has always refused these. The
+                // counters are the other half of saying "there is something to
+                // read", and they were still saying it.
+                if change == PostChange::Inserted && !post.is_system() {
                     // Keeps the counters unread and the badge are derived from
                     // in step with the server between REST refreshes. The
                     // mention verdict is the one the notification policy just
