@@ -61,6 +61,16 @@ pub enum Kind {
     Settings,
 }
 
+impl Kind {
+    /// Whether this square belongs at the foot of the strip.
+    ///
+    /// Everything above the line is somewhere to go. This is about the
+    /// program itself, which is not one of the places in it.
+    fn at_the_foot(self) -> bool {
+        matches!(self, Kind::Settings)
+    }
+}
+
 /// One square on the rail.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Tile {
@@ -81,22 +91,47 @@ pub struct Rail {
 
 impl Rail {
     /// Where each square sits.
+    ///
+    /// Two stacks rather than one: the places to go fill down from the top,
+    /// and whatever belongs to the program rather than to a conversation
+    /// fills up from the foot. The gear sat under the last team, where it read
+    /// as one more place to be -- and every client that has one puts it at the
+    /// bottom for that reason.
     pub fn place(&self, within: Rect) -> Vec<(&Tile, Rect)> {
-        self.teams
+        let square = |y: f32| Rect::new(within.x + (within.width - TILE) / 2.0, y, TILE, TILE);
+        let feet = self
+            .teams
             .iter()
-            .enumerate()
-            .map(|(at, team)| {
-                (
-                    team,
-                    Rect::new(
-                        within.x + (within.width - TILE) / 2.0,
-                        within.y + TOP + at as f32 * (TILE + GAP),
-                        TILE,
-                        TILE,
-                    ),
-                )
-            })
-            .collect()
+            .filter(|team| team.kind.at_the_foot())
+            .count();
+        let mut top = within.y + TOP;
+        // Where the first of the foot squares goes, so the last of them ends
+        // one padding off the bottom.
+        let mut foot =
+            within.bottom() - TOP - TILE * feet as f32 - GAP * feet.saturating_sub(1) as f32;
+        let mut placed = Vec::with_capacity(self.teams.len());
+        for team in &self.teams {
+            if team.kind.at_the_foot() {
+                // Never above what came down from the top: on a strip too
+                // short for both, the foot gives way rather than the two
+                // stacks being drawn over each other.
+                let y = foot.max(top);
+                placed.push((team, square(y)));
+                foot = y + TILE + GAP;
+            } else {
+                placed.push((team, square(top)));
+                top += TILE + GAP;
+            }
+        }
+        placed
+    }
+
+    /// Where the foot squares begin, for the rule drawn over them.
+    fn foot_begins(&self, within: Rect) -> Option<f32> {
+        self.place(within)
+            .into_iter()
+            .find(|(team, _)| team.kind.at_the_foot())
+            .map(|(_, rect)| rect.y)
     }
 
     pub fn boxes(&self, within: Rect) -> Vec<Placed> {
@@ -157,6 +192,17 @@ impl Rail {
             within.height,
             palette.rule_soft,
         );
+        // A line over the foot, so the gear reads as a group of its own
+        // rather than as the last team with a lot of air above it.
+        if let Some(begins) = self.foot_begins(within) {
+            scene.fill(
+                within.x + (within.width - TILE) / 2.0,
+                (begins - GAP * 2.0).round(),
+                TILE,
+                1.0,
+                palette.rule_soft,
+            );
+        }
 
         for (team, rect) in placed {
             let here = self.chosen.as_deref() == Some(team.id.as_str());
@@ -186,20 +232,7 @@ impl Rail {
             // envelope on the direct-messages button -- which is not initials
             // at all and is a different width again -- sat further right still.
             let (label, mark) = face(team);
-            let wide = matterless_layout::extent_of(
-                fonts,
-                &label,
-                f32::MAX,
-                matterless_layout::Style {
-                    size: mark.size,
-                    line_height: mark.line_height,
-                    bold: mark.bold,
-                    italic: false,
-                    mono: mark.mono,
-                },
-            )
-            .width;
-            let (at_x, at_y) = mark_at(rect, wide, mark.line_height);
+            let (at_x, at_y) = mark_at(painter, fonts, rect, &label, mark);
             let glyphs = painter.run(fonts, &label, at_x, at_y, mark);
             scene.glyphs(
                 glyphs,
@@ -273,16 +306,49 @@ pub fn icon_key(team_id: &str) -> String {
     format!("team/{team_id}")
 }
 
-/// Where a tile's mark goes, from how wide it actually is.
+/// Where a tile's mark goes, from where its ink actually lands.
 ///
 /// Measured rather than offset by a constant. Nine pixels in suited the two
 /// letters most team names reduce to and nothing else: one letter sat right of
 /// centre, and the envelope on the direct-messages button is wider than either
 /// and ran off the edge of its tile.
-fn mark_at(tile: Rect, wide: f32, tall: f32) -> (f32, f32) {
+///
+/// And the ink rather than the advance box, which was the next version of the
+/// same mistake: measured off the screen, the gear sat a pixel and a half left
+/// of centre in a square whose reserved room was centred exactly. Where a
+/// picture sits inside the room it reserves is the glyph's own business.
+///
+/// Falls back to the advance when there is no ink to find -- a mark the font
+/// does not have, which would otherwise be placed by a measurement of nothing.
+fn mark_at(
+    painter: &mut matterless_paint::Painter,
+    fonts: &mut matterless_layout::Fonts,
+    tile: Rect,
+    label: &str,
+    mark: Run,
+) -> (f32, f32) {
+    if let Some(ink) = painter.ink_of(fonts, label, mark) {
+        return (
+            (tile.x + (tile.width - ink.width) / 2.0 - ink.x).round(),
+            (tile.y + (tile.height - ink.height) / 2.0 - ink.y).round(),
+        );
+    }
+    let wide = matterless_layout::extent_of(
+        fonts,
+        label,
+        f32::MAX,
+        matterless_layout::Style {
+            size: mark.size,
+            line_height: mark.line_height,
+            bold: mark.bold,
+            italic: false,
+            mono: mark.mono,
+        },
+    )
+    .width;
     (
         (tile.x + (tile.width - wide) / 2.0).round(),
-        (tile.y + (tile.height - tall) / 2.0).round(),
+        (tile.y + (tile.height - mark.line_height) / 2.0).round(),
     )
 }
 
@@ -371,21 +437,88 @@ mod tests {
         }
     }
 
+    /// The gear goes to the foot, under everything that is a place to be.
+    ///
+    /// It was pushed on the end of the list and so drawn directly under the
+    /// last team, where it read as one more team.
+    #[test]
+    fn the_gear_sits_at_the_foot() {
+        let strip = Rect::new(0.0, 0.0, 48.0, 800.0);
+        let mut rail = rail();
+        rail.teams.push(Tile {
+            id: SETTINGS.into(),
+            name: "Settings".into(),
+            unread: 0,
+            mentions: 0,
+            kind: Kind::Settings,
+        });
+        let placed = rail.place(strip);
+        let gear = placed
+            .iter()
+            .find(|(team, _)| team.kind == Kind::Settings)
+            .expect("placed")
+            .1;
+        assert!(
+            (gear.bottom() - (strip.bottom() - TOP)).abs() < 0.5,
+            "the gear sits at {} on a strip ending at {}",
+            gear.bottom(),
+            strip.bottom()
+        );
+        // And well clear of the teams, which still stack from the top.
+        for (team, rect) in &placed {
+            if team.kind != Kind::Settings {
+                assert!(rect.bottom() <= gear.y, "{} runs into the gear", team.id);
+                assert!(rect.y < strip.height / 2.0, "{} left the top", team.id);
+            }
+        }
+    }
+
+    /// A strip too short for both stacks gives way at the foot rather than
+    /// drawing one square over another.
+    #[test]
+    fn a_short_strip_stacks_rather_than_overlaps() {
+        let strip = Rect::new(0.0, 0.0, 48.0, 80.0);
+        let mut rail = rail();
+        rail.teams.push(Tile {
+            id: SETTINGS.into(),
+            name: "Settings".into(),
+            unread: 0,
+            mentions: 0,
+            kind: Kind::Settings,
+        });
+        let placed = rail.place(strip);
+        for pair in placed.windows(2) {
+            assert!(
+                pair[0].1.bottom() <= pair[1].1.y,
+                "{} sits on {}",
+                pair[1].0.id,
+                pair[0].0.id
+            );
+        }
+    }
+
     /// Whatever a tile carries sits in the middle of it.
     ///
     /// Every kind, because they are different widths and come out of different
     /// fonts: at the fixed offset this used to draw at, a team that reduced to
     /// one letter sat right of centre and the envelope -- wider than any pair
     /// of them -- ended past the right edge of its own tile.
+    ///
+    /// The *ink*, which is the second version of this test. Measured against
+    /// the advance box it passed while the gear sat a pixel and a half left of
+    /// centre on screen, because the box was centred and the picture inside it
+    /// was not. Nothing a reader can see was being asked about.
     #[test]
     fn a_tile_carries_its_mark_in_the_middle() {
         let mut fonts = matterless_layout::Fonts::new();
+        let mut painter = matterless_paint::Painter::new();
         let tile = Rect::new(10.0, 40.0, TILE, TILE);
         let shapes = [
             (Kind::Team, "Northwind"),
             (Kind::Team, "Voyager Team"),
             (Kind::Directs, "Direct messages"),
             (Kind::Unread, "Unread"),
+            (Kind::Settings, "Settings"),
         ];
         for (kind, name) in shapes {
             let (label, run) = face(&Tile {
@@ -395,33 +528,24 @@ mod tests {
                 mentions: 0,
                 kind,
             });
-            let wide = matterless_layout::extent_of(
-                &mut fonts,
-                &label,
-                f32::MAX,
-                matterless_layout::Style {
-                    size: run.size,
-                    line_height: run.line_height,
-                    bold: run.bold,
-                    italic: false,
-                    mono: run.mono,
-                },
-            )
-            .width;
-            let (x, y) = mark_at(tile, wide, run.line_height);
-            let (left, right) = (x - tile.x, tile.right() - (x + wide));
+            let (x, y) = mark_at(&mut painter, &mut fonts, tile, &label, run);
+            let ink = painter
+                .ink_of(&mut fonts, &label, run)
+                .expect("a mark with ink in it");
+            let (left, right) = (x + ink.x - tile.x, tile.right() - (x + ink.x + ink.width));
             assert!(
                 (left - right).abs() <= 1.0,
-                "{label:?} sits {left} from the left and {right} from the right"
+                "{name} sits {left} from the left and {right} from the right"
             );
             assert!(
                 left >= 0.0 && right >= 0.0,
-                "{label:?} is {wide} wide and runs off a {TILE} tile"
+                "{name} is {} wide and runs off a {TILE} tile",
+                ink.width
             );
-            let (top, bottom) = (y - tile.y, tile.bottom() - (y + run.line_height));
+            let (top, bottom) = (y + ink.y - tile.y, tile.bottom() - (y + ink.y + ink.height));
             assert!(
                 (top - bottom).abs() <= 1.0,
-                "{label:?} sits {top} from the top and {bottom} from the bottom"
+                "{name} sits {top} from the top and {bottom} from the bottom"
             );
         }
     }
@@ -510,3 +634,4 @@ mod tests {
         assert_eq!(initials("   "), "?");
     }
 }
+
