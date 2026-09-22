@@ -1510,6 +1510,14 @@ impl App {
                 let moved = self.threads != mode;
                 self.threads = mode;
                 self.rebuild_sidebar();
+                // A window that has just signed in for the first time is still
+                // showing the invented sample, and `sample` is not a channel
+                // any server has: it went out as a channel id in everything
+                // the open conversation asks for and came back 400. This is
+                // the moment there are real channels to show instead.
+                if self.left_the_sample() {
+                    return;
+                }
                 // The counts are not the only thing the mode decides: a reply
                 // is a row in the channel under one and not under the other,
                 // so the conversation is replanned when it does change.
@@ -3122,6 +3130,42 @@ impl App {
         self.signin.failed = std::env::var("MATTERLESS_SIGNIN_FAILED").ok();
     }
 
+    /// Opens a real conversation, if the one on screen is not one.
+    ///
+    /// Answers whether it did. What a window shows before it has ever signed
+    /// in is the sample, under a channel id no server knows -- and signing in
+    /// does not by itself change which conversation is open, so without this
+    /// the reader watched 116 channels arrive into the sidebar beside a
+    /// conversation that was still invented.
+    ///
+    /// The first channel the sidebar offers, rather than a fresh guess at the
+    /// busiest: the sidebar is already the reader's own arrangement, and with
+    /// unread conversations lifted to the top its first row is the one most
+    /// worth opening.
+    fn left_the_sample(&mut self) -> bool {
+        let Some(store) = self.store.clone() else {
+            return false;
+        };
+        let real = self
+            .sidebar
+            .selected
+            .as_deref()
+            .is_some_and(|id| matches!(store.channel(id), Ok(Some(_))));
+        if real {
+            return false;
+        }
+        let Some(first) = self.sidebar.entries.iter().find_map(|entry| match entry {
+            Entry::Channel { id, .. } => Some(id.clone()),
+            _ => None,
+        }) else {
+            return false;
+        };
+        println!("leaving the sample for {first}");
+        self.sidebar.selected = Some(first.clone());
+        self.open_channel(&first);
+        true
+    }
+
     /// Whether the window is asking to be signed in rather than drawing a
     /// conversation.
     fn signing_in(&self) -> bool {
@@ -4723,7 +4767,11 @@ impl App {
         if self.signing_in() {
             let window = self.window_rect();
             self.signin.measure(&mut self.fonts, window);
-            if self.signin.react(&mut self.input).is_some() {
+            if self
+                .signin
+                .react(&mut self.fonts, &mut self.input, &mut self.clipboard)
+                .is_some()
+            {
                 self.sign_in();
             }
             return;

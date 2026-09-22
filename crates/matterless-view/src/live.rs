@@ -954,6 +954,9 @@ async fn run(
                         root_id,
                     } => handle.typing(&channel_id, &root_id),
                     Ask::Refresh { channel_id } => {
+                        if !known(engine.store(), &channel_id) {
+                            continue;
+                        }
                         match rest.posts(&channel_id, RECENT).await {
                             Ok(list) => {
                                 // A backfill, so nothing in it can notify:
@@ -1030,6 +1033,9 @@ async fn run(
                         context.window_focused = true;
                     }
                     Ask::MarkRead { channel_id } => {
+                        if !known(engine.store(), &channel_id) {
+                            continue;
+                        }
                         if let Err(error) = rest.view_channel(&me_id, &channel_id).await {
                             // Not worth surfacing: the next look at the channel
                             // tries again.
@@ -2074,6 +2080,17 @@ async fn moved(
         .await
 }
 
+/// Whether this is a conversation the store has heard of.
+///
+/// The window can be showing one the server has never had: with no session it
+/// draws an invented sample under an invented id, and it goes on showing that
+/// for the moment between signing in and the channel list arriving. Asking a
+/// server to mark `sample` read, or for its recent posts, is a round trip that
+/// can only come back 400 -- which is exactly what a first sign-in did, twice.
+fn known(store: &Store, channel_id: &str) -> bool {
+    matches!(store.channel(channel_id), Ok(Some(_)))
+}
+
 async fn membership(
     rest: &matterless_core::rest::RestClient,
     store: &Store,
@@ -2090,6 +2107,23 @@ async fn membership(
             }
         }
         members.extend(rest.my_channel_members(&team.id).await?);
+        // How this reader arranged that team: their Favorites, their
+        // Channels, whatever they made themselves, and the order inside each.
+        //
+        // Never fetched here before. The window read the categories out of
+        // the store and nothing in the window ever put them there, so a store
+        // that had not been filled by some other tool arranged every
+        // conversation under one heading called "Other" -- which is what a
+        // first sign-in got, because a first sign-in is the one case where
+        // nothing else has been near the database.
+        match rest.sidebar_categories(me_id, &team.id).await {
+            Ok(held) => {
+                if let Err(error) = store.upsert_sidebar(&team.id, &held.categories) {
+                    eprintln!("storing the categories for {}: {error}", team.id);
+                }
+            }
+            Err(error) => eprintln!("the categories for {}: {error}", team.id),
+        }
     }
     let counted = channels.len();
     if let Err(error) = store
@@ -2105,6 +2139,16 @@ async fn membership(
     // -- so this has to be asked for rather than assumed.
     let config = rest.client_config().await.unwrap_or_default();
     let preferences = rest.preferences(me_id).await.unwrap_or_default();
+    // Kept, not just read. These were fetched only to work the thread mode out
+    // of and then dropped on the floor -- so every other preference the window
+    // asks the store for came back empty. Two that matter: the one that lifts
+    // unread conversations into their own group at the top, and the order the
+    // teams go in. Without the first there is no Unreads heading at all and
+    // every unread channel stays where it lives, which reads as the heading
+    // having missed them.
+    if let Err(error) = store.upsert_preferences(&preferences) {
+        eprintln!("storing the preferences: {error}");
+    }
     Ok((
         counted,
         matterless_core::resolve_thread_mode(&config, &preferences),
