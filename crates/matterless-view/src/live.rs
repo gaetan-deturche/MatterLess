@@ -516,7 +516,21 @@ where
     });
 }
 
-/// Asks the release host whether there is a newer build.
+/// How long between one look for a newer build and the next.
+///
+/// This window is left open for days, so looking once at start-up means an
+/// install can be a week behind and never hear about it. Two hours puts a
+/// build released in the morning in front of somebody before they go home,
+/// and costs twelve requests a day for a manifest of about three kilobytes.
+///
+/// The reason it is not shorter is the reason it used to be once only: an
+/// update is not urgent, and a client that keeps raising the subject is a
+/// client talking about itself rather than about anything the reader came
+/// for. A version already refused is never raised again, which is what makes
+/// a repeating check bearable at all -- see `put_off` in the window.
+pub const HOW_OFTEN: std::time::Duration = std::time::Duration::from_secs(2 * 60 * 60);
+
+/// Asks the release host whether there is a newer build, now and then again.
 ///
 /// Nothing to do with the session. `looked` builds a client of its own
 /// precisely because this is a request to a release host and has no business
@@ -524,17 +538,25 @@ where
 /// does not exist until there is a store, a server and a session. So the one
 /// install most in need of an update, the one that cannot sign in, was the
 /// only one that never asked. It never failed a check; it never made one.
-pub fn look_for_update(wake: impl Wake) {
+///
+/// One thread that sleeps, rather than a timer the window has to hold: the
+/// window draws when something happens, and nothing happening is exactly the
+/// state this has to work in.
+pub fn look_for_updates(every: std::time::Duration, wake: impl Wake) {
     apart("look for an update", move || async move {
-        match looked().await {
-            Ok(Some(offer)) => {
-                println!("{} is available", offer.version);
-                wake.wake(Update::Updatable(offer));
+        loop {
+            match looked().await {
+                Ok(Some(offer)) => {
+                    println!("{} is available", offer.version);
+                    wake.wake(Update::Updatable(offer));
+                }
+                Ok(None) => println!("already the newest build"),
+                // A failed check is not a failed start, and not a reason to
+                // stop looking: the client runs perfectly well on the build it
+                // has, and the next look is two hours away.
+                Err(error) => eprintln!("could not look for an update: {error}"),
             }
-            Ok(None) => println!("already the newest build"),
-            // A failed check is not a failed start: the client runs perfectly
-            // well on the build it has.
-            Err(error) => eprintln!("could not look for an update: {error}"),
+            tokio::time::sleep(every).await;
         }
     });
 }

@@ -544,6 +544,18 @@ struct App {
     /// needed: a refused sign-in has to keep what was typed, and a form built
     /// fresh each frame would not.
     signin: matterless_view::signin::SignIn,
+    /// A version the reader has already said no to.
+    ///
+    /// Kept because the looking repeats now. "Not now" has to mean it, or a
+    /// window left open all day asks again every two hours about the build it
+    /// was told to stop asking about -- which is worse than never looking
+    /// twice, and is why it only ever looked once.
+    put_off: Option<String>,
+    /// Whether the looking has been started.
+    ///
+    /// `connect` runs again after a sign-in, and a second call would leave two
+    /// threads asking the same question for as long as the window is open.
+    watching: bool,
     /// The session this run holds, once somebody has signed in.
     ///
     /// Held here rather than read back out of the keychain, because signing in
@@ -863,6 +875,8 @@ impl App {
             asked: std::collections::HashSet::new(),
             arrived: Vec::new(),
             signin: matterless_view::signin::SignIn::default(),
+            put_off: None,
+            watching: false,
             session: None,
             clicked: None,
             switcher: matterless_view::switcher::Switcher::default(),
@@ -1406,11 +1420,17 @@ impl App {
         // line -- no store, no server, no session -- took the update check
         // away with it. An install that cannot sign in is the one that most
         // needs a newer build, and it was the only one that never asked.
-        if matterless_view::update::asks() {
-            matterless_view::live::look_for_update(Proxy(proxy.clone()));
-        } else {
-            println!("no update check in a dev build");
-            self.pretend_offered();
+        if !self.watching {
+            self.watching = true;
+            if matterless_view::update::asks() {
+                matterless_view::live::look_for_updates(
+                    matterless_view::live::HOW_OFTEN,
+                    Proxy(proxy.clone()),
+                );
+            } else {
+                println!("no update check in a dev build");
+                self.pretend_offered();
+            }
         }
         // Each of these is said on screen as well as here. They are three
         // different problems with three different answers, and "offline" on
@@ -1763,6 +1783,14 @@ impl App {
                 }
             }
             Update::Updatable(offer) => {
+                // Said no to already. The looking repeats, so this arrives
+                // again every couple of hours until the reader either takes it
+                // or a newer one comes along -- and re-raising something
+                // somebody has dismissed is how a client becomes the thing
+                // being read rather than the thing it is read in.
+                if !worth_raising(self.put_off.as_deref(), &offer.version) {
+                    return;
+                }
                 self.offered.offer(&offer.version, &offer.notes);
                 self.offer = Some(offer);
                 let notice = self.notice_rect();
@@ -4411,6 +4439,7 @@ impl App {
             }
             Some(matterless_view::updater_bar::Chose::Later) => {
                 println!("the update was put off");
+                self.put_off = self.offer.as_ref().map(|offer| offer.version.clone());
                 self.offer = None;
                 // The strip has given its row back, so everything under it is
                 // taller than it was.
@@ -7561,6 +7590,19 @@ fn thread_name(root_id: &str) -> String {
     format!("{THREAD_PREFIX}{root_id}")
 }
 
+/// Whether an offer is worth putting on screen, given what was refused.
+///
+/// Only the same version is held back. A reader who says "not now" to one
+/// build has said nothing about the next, and treating it as "stop telling me
+/// about updates" would quietly strand them on whatever they happened to
+/// refuse -- which, with the looking now repeating, is the difference between
+/// a client that respects an answer and one that has been switched off.
+///
+/// Whether it is newer at all is settled before this, in `update::offered`.
+fn worth_raising(put_off: Option<&str>, version: &str) -> bool {
+    put_off != Some(version)
+}
+
 /// Whether this reader wants unread conversations lifted into their own group.
 ///
 /// A preference rather than a choice made here: the app reads the same one,
@@ -7577,7 +7619,26 @@ fn lifts_unreads(store: &matterless_store::Store, me: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{Act, App, Driver, Rect, TYPING, TYPING_INSET, TYPING_PADDING};
+    use super::{Act, App, Driver, Rect, TYPING, TYPING_INSET, TYPING_PADDING, worth_raising};
+
+    /// "Not now" means this one, and only this one.
+    ///
+    /// The looking repeats every couple of hours now, so an offer the reader
+    /// has dismissed would otherwise come back all day. The other half matters
+    /// as much: refusing one build must not stop the next from being offered,
+    /// or a reader who said "not now" once is never told about anything again.
+    #[test]
+    fn a_refused_version_is_not_raised_again_and_a_newer_one_is() {
+        assert!(worth_raising(None, "0.3.5"), "nothing was refused");
+        assert!(
+            !worth_raising(Some("0.3.5"), "0.3.5"),
+            "the version just dismissed came straight back"
+        );
+        assert!(
+            worth_raising(Some("0.3.5"), "0.3.6"),
+            "refusing one build silenced every build after it"
+        );
+    }
 
     /// The pill ends where the sentence does.
     ///
