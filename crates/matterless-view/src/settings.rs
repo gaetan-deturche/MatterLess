@@ -9,10 +9,11 @@
 //! Modal in the one sense that matters, as `whats_new` is: a press anywhere
 //! outside shuts it, so there is no way to leave it open and forget it.
 
+use matterless_layout::{Fonts, Style};
 use matterless_paint::Run;
 use matterless_ui::input::{Input, Key};
 use matterless_ui::{Placed, Rect};
-use matterless_widgets::{Canvas, Named, Panel};
+use matterless_widgets::{Button, Canvas, Laid, Named, Panel, Row};
 
 pub const NAME: &str = "settings";
 
@@ -22,18 +23,29 @@ fn named() -> Named {
     Named::new(NAME)
 }
 
-const WIDTH: f32 = 460.0;
+const WIDTH: f32 = 440.0;
 const PAD: f32 = 20.0;
 const CORNER: f32 = 10.0;
 const DROP: f32 = 16.0;
-const TITLE_SIZE: f32 = 16.0;
+const TITLE_SIZE: f32 = 15.0;
+/// The heading over a group of choices.
+const GROUP_SIZE: f32 = 11.5;
+/// What one choice is called, and the line under it.
 const LABEL_SIZE: f32 = 13.0;
 const SAID_SIZE: f32 = 12.0;
-/// One choice: its name, the line under it, and the room it takes.
-const CHOICE_HEIGHT: f32 = 46.0;
 const GAP: f32 = 14.0;
-/// The mark that says which one is chosen, and the room kept for it.
-const TICK: f32 = 18.0;
+/// Between two choices in the same group.
+const ROW_GAP: f32 = 4.0;
+/// Inside one choice, around what it says.
+const ROW_PAD_X: f32 = 10.0;
+const ROW_PAD_Y: f32 = 9.0;
+const ROW_CORNER: f32 = 7.0;
+/// The mark saying which one is chosen, and the column kept for it.
+const DOT: f32 = 16.0;
+const DOT_COLUMN: f32 = DOT + 12.0;
+/// How tall the row at the foot is. What the button in it is set in comes
+/// from `matterless_widgets::Metrics`, as everywhere else.
+const BUTTON_HEIGHT: f32 = 26.0;
 
 /// How text is drawn, which is the one thing in here so far.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -132,13 +144,32 @@ impl Default for Text {
     }
 }
 
+/// One choice, measured: where it sits, and where the two lines in it do.
+#[derive(Debug, Clone, Copy)]
+struct Choice {
+    which: Text,
+    rect: Rect,
+    /// Where the name goes, and where the line under it does.
+    title: Rect,
+    said: Rect,
+}
+
+/// The card and everything in it, measured together.
+#[derive(Debug, Clone)]
+struct Card {
+    rect: Rect,
+    /// The heading over the group of choices.
+    group: Rect,
+    choices: Vec<Choice>,
+    foot: Laid,
+}
+
 /// The panel, when it is up.
 #[derive(Debug, Default)]
 pub struct Settings {
     shown: bool,
     pub text: Text,
-    /// The card and where each choice sits in it.
-    placed: Option<(Rect, Vec<(Text, Rect)>)>,
+    placed: Option<Card>,
 }
 
 /// What the window should do about what just happened in here.
@@ -148,6 +179,25 @@ pub enum Did {
     /// whatever holds the glyphs.
     Text(Text),
     Close,
+}
+
+/// How a run of this panel's text is set, for measuring it.
+///
+/// The same arithmetic `Run::sized` does, because a height measured against
+/// one line spacing and drawn at another is a description that runs into the
+/// choice below it -- which is what a fixed row height did here.
+fn style(size: f32) -> Style {
+    Style {
+        size,
+        line_height: size * 1.4,
+        bold: false,
+        italic: false,
+        mono: false,
+    }
+}
+
+fn tall(fonts: &mut Fonts, text: &str, wrap: f32, size: f32) -> f32 {
+    matterless_layout::extent_of(fonts, text, wrap, style(size)).height
 }
 
 impl Settings {
@@ -165,58 +215,110 @@ impl Settings {
         self.placed = None;
     }
 
-    fn height() -> f32 {
-        PAD + TITLE_SIZE * 1.5 + GAP + CHOICE_HEIGHT * 2.0 + LABEL_SIZE * 1.5 + GAP + PAD
+    pub fn measure(&mut self, fonts: &mut Fonts, window: Rect) {
+        self.placed = self.shown.then(|| self.place(fonts, window));
     }
 
-    pub fn measure(&mut self, window: Rect) {
-        if !self.shown {
-            self.placed = None;
-            return;
-        }
+    /// The card, grown to whatever its own words come out as.
+    ///
+    /// Every height here is measured. A description is two lines on this
+    /// window and one on a wider one, and a constant tall enough for the first
+    /// is a gap on the second -- or, as it was, a constant tall enough for
+    /// neither, with the second line of one choice printed over the name of
+    /// the next.
+    fn place(&self, fonts: &mut Fonts, window: Rect) -> Card {
         let width = WIDTH.min(window.width - PAD * 2.0).max(0.0);
-        let height = Self::height();
-        let card = Rect::new(
+        let inner = (width - PAD * 2.0).max(0.0);
+        let wrap = (inner - ROW_PAD_X * 2.0 - DOT_COLUMN).max(0.0);
+
+        let head = tall(fonts, "Settings", inner, TITLE_SIZE);
+        let heading = tall(fonts, "Text", inner, GROUP_SIZE);
+
+        // Each choice is sized before any of them is placed: the card's height
+        // is the sum of them and cannot be known before they are.
+        let sizes: Vec<(Text, f32, f32)> = Text::both()
+            .into_iter()
+            .map(|which| {
+                (
+                    which,
+                    tall(fonts, which.title(), wrap, LABEL_SIZE),
+                    tall(fonts, which.said(), wrap, SAID_SIZE),
+                )
+            })
+            .collect();
+        let rows: f32 = sizes
+            .iter()
+            .map(|(_, title, said)| ROW_PAD_Y * 2.0 + title + said)
+            .sum::<f32>()
+            + ROW_GAP * (sizes.len().saturating_sub(1) as f32);
+
+        let height = PAD + head + GAP + heading + ROW_GAP + rows + GAP + BUTTON_HEIGHT + PAD;
+        let rect = Rect::new(
             window.x + (window.width - width) / 2.0,
             window.y + ((window.height - height) / 2.0).max(PAD),
             width,
             height,
         );
-        // Under the heading for the group, one row each.
-        let mut y = card.y + PAD + TITLE_SIZE * 1.5 + GAP + LABEL_SIZE * 1.5;
-        let mut rows = Vec::new();
-        for one in Text::both() {
-            rows.push((
-                one,
-                Rect::new(card.x + PAD, y, width - PAD * 2.0, CHOICE_HEIGHT),
-            ));
-            y += CHOICE_HEIGHT;
+
+        let group = Rect::new(rect.x + PAD, rect.y + PAD + head + GAP, inner, heading);
+        let mut y = group.bottom() + ROW_GAP;
+        let mut choices = Vec::with_capacity(sizes.len());
+        for (which, title, said) in sizes {
+            let row = Rect::new(rect.x + PAD, y, inner, ROW_PAD_Y * 2.0 + title + said);
+            let text_x = row.x + ROW_PAD_X + DOT_COLUMN;
+            choices.push(Choice {
+                which,
+                rect: row,
+                title: Rect::new(text_x, row.y + ROW_PAD_Y, wrap, title),
+                said: Rect::new(text_x, row.y + ROW_PAD_Y + title, wrap, said),
+            });
+            y = row.bottom() + ROW_GAP;
         }
-        self.placed = Some((card, rows));
+
+        let foot = Row::new(
+            NAME,
+            Rect::new(
+                rect.x,
+                rect.bottom() - PAD - BUTTON_HEIGHT,
+                rect.width,
+                BUTTON_HEIGHT,
+            ),
+        )
+        .pad(PAD)
+        .depth(63)
+        .button(Button::primary("done", "Done"))
+        .measure(fonts);
+
+        Card {
+            rect,
+            group,
+            choices,
+            foot,
+        }
     }
 
-    fn laid(&self) -> Option<(Rect, &[(Text, Rect)])> {
-        let (card, rows) = self.placed.as_ref()?;
-        Some((*card, rows))
+    fn laid(&self) -> Option<&Card> {
+        self.placed.as_ref()
     }
 
     pub fn boxes(&self, window: Rect) -> Vec<Placed> {
-        let Some((card, rows)) = self.laid() else {
+        let Some(card) = self.laid() else {
             return Vec::new();
         };
         // The window first, so a press beside the card shuts it; the card over
-        // it, so a press inside does not; then each choice.
+        // it, so a press inside does not; then each choice, then the foot.
         let mut placed = vec![
             Placed {
                 name: NAME.to_string(),
                 rect: window,
                 depth: 60,
             },
-            named().at("card", card, 61),
+            named().at("card", card.rect, 61),
         ];
-        for (one, rect) in rows {
-            placed.push(named().at(one.slug(), *rect, 62));
+        for choice in &card.choices {
+            placed.push(named().at(choice.which.slug(), choice.rect, 62));
         }
+        placed.extend(card.foot.boxes());
         placed
     }
 
@@ -228,8 +330,16 @@ impl Settings {
             self.hide();
             return Some(Did::Close);
         }
-        let pressed = named().clicked(input).map(str::to_string);
-        if let Some(slug) = pressed.as_deref() {
+        if self
+            .laid()
+            .and_then(|card| card.foot.clicked(input))
+            .is_some()
+        {
+            self.hide();
+            return Some(Did::Close);
+        }
+        let clicked = input.clicked()?.to_string();
+        if let Some(slug) = named().slug(&clicked) {
             for one in Text::both() {
                 if slug == one.slug() {
                     // Chosen even when it is already the one in use: the
@@ -241,9 +351,15 @@ impl Settings {
                 }
             }
         }
-        // A press on the card is somebody reading it. A press beside it is
-        // somebody done.
-        if input.clicked() == Some(NAME) {
+        // A press on the card is somebody reading it. A press on the window
+        // behind it is somebody done.
+        //
+        // By that exact name, not "anything this widget cannot name": the
+        // press that opens the panel is the gear's, and the frame it opens on
+        // hands that same press straight back to here. Anything looser shut
+        // the panel on the click that asked for it, so it never appeared at
+        // all.
+        if clicked == NAME {
             self.hide();
             return Some(Did::Close);
         }
@@ -251,100 +367,169 @@ impl Settings {
     }
 
     pub fn draw(&self, into: &mut Canvas<'_>, input: &Input, window: Rect) {
-        let Some((card, rows)) = self.laid() else {
+        let Some(card) = self.laid() else {
             return;
         };
-        let rows: Vec<(Text, Rect)> = rows.to_vec();
+        let card = card.clone();
         let chosen = self.text;
-        let Canvas {
-            scene,
-            painter,
-            fonts,
-            palette,
-        } = into;
-        // Dimmed rather than hidden: this is a decision about how what is
-        // behind it looks, so covering it entirely takes away what the reader
-        // is deciding about.
-        scene.fill(
-            window.x,
-            window.y,
-            window.width,
-            window.height,
-            [0, 0, 0, 160],
-        );
-        Panel::floating(card, CORNER, DROP)
-            .edge(palette.rule)
-            .fill(palette.surface)
-            .draw(scene);
+        {
+            let Canvas {
+                scene,
+                painter,
+                fonts,
+                palette,
+            } = into;
+            // Dimmed rather than hidden: this is a decision about how what is
+            // behind it looks, so covering it entirely takes away what the
+            // reader is deciding about.
+            scene.fill(
+                window.x,
+                window.y,
+                window.width,
+                window.height,
+                [0, 0, 0, 160],
+            );
+            Panel::floating(card.rect, CORNER, DROP)
+                .edge(palette.rule)
+                .fill(palette.surface)
+                .draw(scene);
 
-        let glyphs = painter.run(
-            fonts,
-            "Settings",
-            card.x + PAD,
-            card.y + PAD,
-            Run::label(card.width - PAD * 2.0).sized(TITLE_SIZE).bold(),
-        );
-        scene.glyphs(glyphs, palette.ink, palette.faint);
-
-        let glyphs = painter.run(
-            fonts,
-            "Text",
-            card.x + PAD,
-            card.y + PAD + TITLE_SIZE * 1.5 + GAP,
-            Run::label(card.width - PAD * 2.0).sized(LABEL_SIZE),
-        );
-        scene.glyphs(glyphs, palette.soft, palette.faint);
-
-        for (one, rect) in rows {
-            let under = named().under(input, one.slug());
-            let picked = one == chosen;
-            if under || picked {
-                scene.rounded(
-                    rect.x,
-                    rect.y,
-                    rect.width,
-                    rect.height - 4.0,
-                    match picked {
-                        true => palette.signal_soft,
-                        false => palette.hover,
-                    },
-                    6.0,
-                );
-            }
-            // The tick, so which one is in use survives the row being hovered.
-            if picked {
-                let tick = painter.run(
-                    fonts,
-                    matterless_layout::marks::SAVED,
-                    rect.right() - PAD - TICK,
-                    rect.y + 8.0,
-                    Run::mark(TICK),
-                );
-                scene.glyphs(tick, palette.signal, palette.signal);
-            }
             let glyphs = painter.run(
                 fonts,
-                one.title(),
-                rect.x + 10.0,
-                rect.y + 5.0,
-                Run::label(rect.width - TICK - PAD * 2.0).sized(LABEL_SIZE),
+                "Settings",
+                card.rect.x + PAD,
+                card.rect.y + PAD,
+                Run::label(card.rect.width - PAD * 2.0)
+                    .sized(TITLE_SIZE)
+                    .bold(),
             );
             scene.glyphs(glyphs, palette.ink, palette.faint);
+
             let glyphs = painter.run(
                 fonts,
-                one.said(),
-                rect.x + 10.0,
-                rect.y + 5.0 + LABEL_SIZE * 1.4,
-                Run::label(rect.width - TICK - PAD * 2.0).sized(SAID_SIZE),
+                "Text",
+                card.group.x,
+                card.group.y,
+                Run::label(card.group.width).sized(GROUP_SIZE),
             );
             scene.glyphs(glyphs, palette.faint, palette.faint);
+
+            for choice in &card.choices {
+                let under = named().under(input, choice.which.slug());
+                let picked = choice.which == chosen;
+                // The chosen one is a card of its own with the signal on its
+                // edge, the way a chosen square on the rail is. Filled with
+                // the signal colour it was the loudest thing on the panel, and
+                // all it has to say is "this is the one in use".
+                let behind = match (picked, under) {
+                    (true, _) => palette.raised,
+                    (false, true) => palette.hover,
+                    (false, false) => palette.surface,
+                };
+                if picked {
+                    Panel::flat(choice.rect, ROW_CORNER)
+                        .edge([palette.signal[0], palette.signal[1], palette.signal[2], 255])
+                        .fill(behind)
+                        .draw(scene);
+                } else if under {
+                    scene.rounded(
+                        choice.rect.x,
+                        choice.rect.y,
+                        choice.rect.width,
+                        choice.rect.height,
+                        behind,
+                        ROW_CORNER,
+                    );
+                }
+                dot(
+                    scene,
+                    Rect::new(
+                        choice.rect.x + ROW_PAD_X,
+                        choice.title.y + (choice.title.height - DOT) / 2.0,
+                        DOT,
+                        DOT,
+                    ),
+                    picked,
+                    behind,
+                    palette,
+                );
+                let glyphs = painter.run(
+                    fonts,
+                    choice.which.title(),
+                    choice.title.x,
+                    choice.title.y,
+                    Run::label(choice.title.width).sized(LABEL_SIZE),
+                );
+                scene.glyphs(glyphs, palette.ink, palette.faint);
+                let glyphs = painter.run(
+                    fonts,
+                    choice.which.said(),
+                    choice.said.x,
+                    choice.said.y,
+                    Run::label(choice.said.width).sized(SAID_SIZE),
+                );
+                scene.glyphs(glyphs, palette.faint, palette.faint);
+            }
         }
+        card.foot.draw(into, input);
+    }
+}
+
+/// The mark saying which choice is in use.
+///
+/// A ring with a dot in it rather than a tick: these two are one choice with
+/// two answers, and a tick beside one of them says nothing about what pressing
+/// the other would do. It was drawn with the bookmark mark, which said less
+/// still.
+fn dot(
+    scene: &mut matterless_paint::Scene,
+    at: Rect,
+    picked: bool,
+    behind: [u8; 4],
+    palette: &matterless_paint::Palette,
+) {
+    let ring = match picked {
+        true => [palette.signal[0], palette.signal[1], palette.signal[2], 255],
+        false => palette.rule,
+    };
+    scene.rounded(at.x, at.y, at.width, at.height, ring, at.width / 2.0);
+    let inset = 1.5;
+    scene.rounded(
+        at.x + inset,
+        at.y + inset,
+        at.width - inset * 2.0,
+        at.height - inset * 2.0,
+        behind,
+        (at.width - inset * 2.0) / 2.0,
+    );
+    if picked {
+        let inset = 4.5;
+        scene.rounded(
+            at.x + inset,
+            at.y + inset,
+            at.width - inset * 2.0,
+            at.height - inset * 2.0,
+            ring,
+            (at.width - inset * 2.0) / 2.0,
+        );
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn window() -> Rect {
+        Rect::new(0.0, 0.0, 1002.0, 792.0)
+    }
+
+    fn shown() -> (Settings, Fonts) {
+        let mut settings = Settings::default();
+        let mut fonts = Fonts::new();
+        settings.show();
+        settings.measure(&mut fonts, window());
+        (settings, fonts)
+    }
 
     #[test]
     fn a_setting_survives_being_written_and_read() {
@@ -364,23 +549,136 @@ mod tests {
     /// Every choice has a box, and they do not sit on each other.
     #[test]
     fn the_choices_tile_the_card() {
-        let mut settings = Settings::default();
-        settings.show();
-        let window = Rect::new(0.0, 0.0, 1002.0, 792.0);
-        settings.measure(window);
-        let (card, rows) = settings.laid().expect("measured");
-        assert_eq!(rows.len(), 2);
-        let mut floor = card.y;
-        for (one, rect) in rows {
-            assert!(rect.y >= floor - 0.5, "{:?} sits on the row above", one);
+        let (settings, _fonts) = shown();
+        let card = settings.laid().expect("measured");
+        assert_eq!(card.choices.len(), 2);
+        let mut floor = card.group.bottom();
+        for choice in &card.choices {
             assert!(
-                rect.bottom() <= card.bottom() - PAD + 0.5,
-                "{:?} runs out of the card",
-                one
+                choice.rect.y >= floor - 0.5,
+                "{:?} sits on what is above it",
+                choice.which
             );
-            floor = rect.bottom();
+            floor = choice.rect.bottom();
         }
-        // And a box for each, plus the card and the window behind it.
-        assert_eq!(settings.boxes(window).len(), 2 + rows.len());
+        // A box for each, plus the card, the window behind it, and the foot.
+        assert_eq!(settings.boxes(window()).len(), 3 + card.choices.len());
+    }
+
+    /// What a choice says stays inside the choice.
+    ///
+    /// The fault this panel shipped with: a row was a constant 46 tall and the
+    /// description under "Smooth" wraps to two lines, so its second line was
+    /// printed across the name of the choice below it.
+    #[test]
+    fn what_a_choice_says_stays_inside_it() {
+        let (settings, mut fonts) = shown();
+        let card = settings.laid().expect("measured");
+        for choice in &card.choices {
+            let said = tall(
+                &mut fonts,
+                choice.which.said(),
+                choice.said.width,
+                SAID_SIZE,
+            );
+            assert!(
+                said > SAID_SIZE * 1.4 * 1.5,
+                "{:?} fits on one line here, so this proves nothing",
+                choice.which
+            );
+            assert!(
+                choice.said.y + said <= choice.rect.bottom() + 0.5,
+                "{:?} says {said} of text with {} of room",
+                choice.which,
+                choice.rect.bottom() - choice.said.y
+            );
+        }
+    }
+
+    /// A press beside the card shuts it, and a press on it does not.
+    #[test]
+    fn it_shuts_from_outside_and_stays_from_within() {
+        let (mut settings, _fonts) = shown();
+        let boxes = settings.boxes(window());
+        let card = settings.laid().expect("measured").rect;
+
+        // On the card but not on a choice: the heading, which is somebody
+        // reading rather than somebody answering.
+        let mut input = Input::default();
+        press(
+            &mut input,
+            &boxes,
+            Rect::new(card.x + 4.0, card.y + 4.0, 2.0, 2.0),
+        );
+        assert_eq!(settings.react(&mut input), None, "a press on it shut it");
+        assert!(settings.open());
+
+        // Beside it: the whole-window box underneath.
+        let mut input = Input::default();
+        press(&mut input, &boxes, Rect::new(2.0, 2.0, 1.0, 1.0));
+        assert_eq!(settings.react(&mut input), Some(Did::Close));
+        assert!(!settings.open());
+
+        // And the button, which is the obvious way.
+        let (mut settings, _fonts) = shown();
+        let boxes = settings.boxes(window());
+        let done = settings
+            .laid()
+            .expect("measured")
+            .foot
+            .rect("done")
+            .expect("placed");
+        let mut input = Input::default();
+        press(&mut input, &boxes, done);
+        assert_eq!(settings.react(&mut input), Some(Did::Close));
+        assert!(!settings.open());
+    }
+
+    /// The press that opens it does not also shut it.
+    ///
+    /// The gear is pressed, the panel opens, and the same frame hands that
+    /// press back to the panel -- so a rule of "anything this widget cannot
+    /// name shuts it" shuts it on the click that asked for it, and the panel
+    /// never appears at all.
+    #[test]
+    fn the_press_that_opened_it_does_not_shut_it() {
+        let (mut settings, _fonts) = shown();
+        let gear = vec![Placed {
+            name: "rail/settings".to_string(),
+            rect: Rect::new(0.0, 0.0, 40.0, 40.0),
+            depth: 2,
+        }];
+        let mut input = Input::default();
+        press(&mut input, &gear, gear[0].rect);
+        assert_eq!(settings.react(&mut input), None);
+        assert!(settings.open(), "it shut on the press that opened it");
+    }
+
+    fn press(input: &mut Input, boxes: &[Placed], rect: Rect) {
+        input.apply(
+            matterless_ui::input::Event::PointerMoved {
+                x: rect.x + rect.width / 2.0,
+                y: rect.y + rect.height / 2.0,
+            },
+            boxes,
+        );
+        input.apply(matterless_ui::input::Event::PointerPressed, boxes);
+        input.apply(matterless_ui::input::Event::PointerReleased, boxes);
+    }
+
+    /// And the card holds everything measured into it.
+    #[test]
+    fn nothing_runs_out_of_the_card() {
+        let (settings, _fonts) = shown();
+        let card = settings.laid().expect("measured");
+        let done = card.foot.rect("done").expect("placed");
+        let last = card.choices.last().expect("a choice").rect;
+        assert!(card.group.y > card.rect.y + PAD);
+        assert!(last.bottom() <= done.y, "the choices reach the button");
+        assert!(
+            done.bottom() <= card.rect.bottom() - PAD + 0.5,
+            "the button reaches past the foot of the card"
+        );
+        assert!(card.rect.right() <= window().right() && card.rect.bottom() <= window().bottom());
     }
 }

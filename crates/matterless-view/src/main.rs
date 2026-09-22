@@ -5007,16 +5007,22 @@ impl App {
         // are: it covers the window, so nothing behind it may take the press.
         if self.settings.open() {
             let window = self.window_rect();
-            self.settings.measure(window);
+            self.settings.measure(&mut self.fonts, window);
             let mut input = std::mem::take(&mut self.input);
             let did = self.settings.react(&mut input);
             self.input = input;
-            match did {
-                Some(matterless_view::settings::Did::Text(mode)) => self.draw_text_as(mode),
-                Some(matterless_view::settings::Did::Close) => {}
-                None => {}
+            // Only once the panel has actually answered something, which is
+            // the whole of why it could not be pressed: clearing the frame's
+            // input unconditionally threw away the box the button went *down*
+            // on, so when the button came up there was nothing for the release
+            // to agree with -- and a click is a press and a release agreeing.
+            // Every press in here died on the frame it was made.
+            if let Some(did) = did {
+                if let matterless_view::settings::Did::Text(mode) = did {
+                    self.draw_text_as(mode);
+                }
+                self.input = Input::default();
             }
-            self.input = Input::default();
             return;
         }
         // The panel over everything, first and alone: it covers the window,
@@ -7353,7 +7359,7 @@ impl ApplicationHandler<Update> for App {
                     } else if pressed == matterless_view::rail::SETTINGS {
                         self.settings.show();
                         let window = self.window_rect();
-                        self.settings.measure(window);
+                        self.settings.measure(&mut self.fonts, window);
                     } else {
                         let within = self.sidebar_rect();
                         self.sidebar.scroll_to(&pressed, within);
