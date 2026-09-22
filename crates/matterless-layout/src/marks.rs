@@ -26,6 +26,13 @@ pub const FAMILY: &str = "lucide";
 /// who has seen one before reads it as a menu that will not open. A spool is
 /// thread, which is what the list is a list of.
 pub const THREADS: &str = "\u{e677}";
+/// What this copy of the program has been told to do.  `settings`
+///
+/// The gear, which is the one picture every application agrees on. The
+/// codepoint was read out of the font's own tables rather than guessed:
+/// `settings` is not `settings-2`, `cog` or `sliders`, and four hex digits
+/// typed by hand is a wrong icon that compiles.
+pub const SETTINGS: &str = "\u{e154}";
 /// Messages pinned to this conversation.  `pin`
 pub const PINNED: &str = "\u{e259}";
 /// Messages this reader has kept.  `bookmark`

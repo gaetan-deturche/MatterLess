@@ -37,6 +37,7 @@ pub mod rail;
 pub mod rest;
 pub mod scrollbar;
 pub mod search;
+pub mod settings;
 pub mod sidebar;
 pub mod sidebar_feed;
 pub mod signin;
@@ -257,7 +258,11 @@ pub fn vertices_of(
                 };
                 let (loud, quiet, followed) = (shade(ink), shade(faint), shade(signal));
                 for glyph in glyphs {
-                    let Some(slot) = atlas.slot(gpu, fonts, cache, glyph.key) else {
+                    // A mark is rasterised at twice the size it is drawn and
+                    // filtered down, and a third of a pixel does not survive
+                    // being halved -- so those stay flat whatever the setting.
+                    let banded = atlas.subpixel && glyph.scale >= 1.0;
+                    let Some(slot) = atlas.slot(gpu, fonts, cache, glyph.key, banded) else {
                         continue;
                     };
                     // White for a glyph that brought its own colour, so the
@@ -296,6 +301,8 @@ pub fn vertices_of(
                         // is the one thing on this sheet that wants the other.
                         if glyph.scale < 1.0 {
                             SMOOTH_LETTERS
+                        } else if slot.subpixel {
+                            SUBPIXEL_LETTERS
                         } else {
                             Sheet::Letters as u32
                         },
@@ -384,6 +391,14 @@ const SHOWN: u32 = 3;
 /// one texel to one pixel except a mark that was rasterised at twice its size
 /// so it could be drawn down, and that one wants filtering.
 const SMOOTH_LETTERS: u32 = 4;
+
+/// The same sheet again, holding a channel of coverage in each of the three
+/// rather than white with one coverage in the alpha.
+///
+/// Its own index because the fragment cannot tell the two apart by looking:
+/// both are four bytes in the letters sheet, and a subpixel mask read as a
+/// white-plus-alpha one is a white letter with the wrong edges.
+const SUBPIXEL_LETTERS: u32 = 5;
 
 /// One layer's vertices and the rectangle they are clipped to.
 ///

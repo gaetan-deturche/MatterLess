@@ -11,6 +11,10 @@ edition = "2024"
 # draw. The shader is HLSL and is compiled at startup by the runtime
 # compiler, which ships with Windows.
 cosmic-text = "0.19"
+# The glyph rasteriser cosmic-text already uses, reached directly for one
+# thing: its `SwashCache` renders `Format::Alpha` and gives no way to ask for
+# a subpixel mask. Same version, so the types are the same types.
+swash = "0.2"
 matterless-core = { path = "../matterless-core" }
 matterless-layout = { path = "../matterless-layout" }
 matterless-paint = { path = "../matterless-paint" }

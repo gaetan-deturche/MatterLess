@@ -32,6 +32,8 @@ pub const DIRECTS: &str = "directs";
 
 /// What the unread button answers to.
 pub const UNREAD: &str = "unread";
+/// What the gear answers to.
+pub const SETTINGS: &str = "settings";
 
 /// What a square on the rail is.
 ///
@@ -52,6 +54,11 @@ pub enum Kind {
     /// what it takes you to, and saying so twice on one square would be a dot
     /// beside a picture of a dot.
     Unread,
+    /// What this copy of the program has been told to do.
+    ///
+    /// Like `Unread`, a thing to do rather than a place to be: it is never
+    /// the chosen square and carries no count.
+    Settings,
 }
 
 /// One square on the rail.
@@ -302,6 +309,7 @@ fn face(tile: &Tile) -> (String, Run) {
         // A message with something on it, which is what the mark this goes
         // to stands in front of.
         Kind::Unread => (marks::TO_UNREAD.to_string(), Run::mark(MARK)),
+        Kind::Settings => (marks::SETTINGS.to_string(), Run::mark(MARK)),
         Kind::Team => (initials(&tile.name), mark_run()),
     }
 }

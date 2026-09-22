@@ -98,7 +98,23 @@ float rounded_box(float2 at, float2 half_size, float radius) {
     return length(max(corner, float2(0.0, 0.0))) + min(max(corner.x, corner.y), 0.0) - radius;
 }
 
-float4 fragment(Out input) : SV_Target0 {
+// What a fragment hands the blender: the colour, and how much of each channel
+// it covers.
+//
+// Two outputs because one alpha cannot describe subpixel coverage. A stem that
+// falls on the red third of a pixel and not the other two covers the channels
+// by different amounts, and the blend has to weigh each of them separately --
+// which is what dual-source blending is for, and the only way to do it without
+// reading back what is already on screen.
+//
+// Everything that is not a subpixel glyph puts its one alpha in all three, so
+// the same blend gives exactly what a plain `SRC_ALPHA` one gave.
+struct Shaded {
+    float4 colour : SV_Target0;
+    float4 cover : SV_Target1;
+};
+
+Shaded fragment(Out input) {
     // A letter is white in its sheet with its coverage in the alpha, so this
     // multiply tints it. An emoji carries its own colour and arrives with a
     // white vertex, so the same multiply leaves it alone.
@@ -116,6 +132,11 @@ float4 fragment(Out input) : SV_Target0 {
         texel = pictures.SampleLevel(smooth_sampler, input.uv, 0.0);
     } else if (input.sheet == 3u) {
         texel = shown.SampleLevel(smooth_sampler, input.uv, 0.0);
+    } else if (input.sheet == 5u) {
+        // The letters sheet, holding a channel of coverage each. Point
+        // sampled like any other letter: it is one texel to one pixel, and
+        // filtering it would smear one channel's coverage into the next.
+        texel = letters.SampleLevel(atlas_sampler, input.uv, 0.0);
     } else {
         // The letters sheet again, filtered: a mark is rasterised at twice the
         // size it is drawn so that its detail survives as shades rather than
@@ -142,5 +163,21 @@ float4 fragment(Out input) : SV_Target0 {
         float fade = max(input.softness, 1.0) * 0.5;
         coverage = 1.0 - smoothstep(-fade, fade, distance);
     }
-    return float4(texel.rgb * input.colour.rgb, texel.a * input.colour.a * coverage);
+
+    Shaded shaded;
+    if (input.sheet == 5u) {
+        // A subpixel letter: the sheet holds the coverage and the vertex holds
+        // the colour, so the colour goes out untouched and each channel is
+        // weighed by its own third of the pixel. The alpha is the most any
+        // channel is covered, which is what the window's own opacity wants.
+        float3 cover = texel.rgb * input.colour.a * coverage;
+        float most = max(max(cover.r, cover.g), cover.b);
+        shaded.colour = float4(input.colour.rgb, most);
+        shaded.cover = float4(cover, most);
+    } else {
+        float alpha = texel.a * input.colour.a * coverage;
+        shaded.colour = float4(texel.rgb * input.colour.rgb, alpha);
+        shaded.cover = float4(alpha, alpha, alpha, alpha);
+    }
+    return shaded;
 }

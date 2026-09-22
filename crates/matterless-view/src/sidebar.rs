@@ -37,6 +37,13 @@ pub enum Entry {
         /// that has expired, and helps with none of them -- so whichever of
         /// those it is, it says so here.
         offline: Option<String>,
+        /// Which build this is.
+        ///
+        /// Handed in rather than read here, like the name and the status: what
+        /// this list draws is decided by whoever builds it, and a widget that
+        /// reaches for the crate's own version is a widget that cannot be
+        /// drawn with any other.
+        version: String,
     },
     /// A team's name, above the groups that belong to it.
     Team { id: String, label: String },
@@ -406,6 +413,7 @@ impl Sidebar {
                     status,
                     live,
                     offline,
+                    version,
                 } => {
                     let who = painter.run(
                         fonts,
@@ -425,15 +433,17 @@ impl Sidebar {
                             DOT / 2.0,
                         );
                     }
+                    let telling = match (*live, offline.as_deref()) {
+                        (true, _) => spoken(status).to_string(),
+                        // The reason, when there is one to give.
+                        (false, Some(why)) => format!("offline -- {why}"),
+                        (false, None) => format!("{} -- offline", spoken(status)),
+                    };
+                    let from = row.rect.x + 4.0 + DOT + 6.0;
                     let said = painter.run(
                         fonts,
-                        &match (*live, offline.as_deref()) {
-                            (true, _) => spoken(status).to_string(),
-                            // The reason, when there is one to give.
-                            (false, Some(why)) => format!("offline -- {why}"),
-                            (false, None) => format!("{} -- offline", spoken(status)),
-                        },
-                        row.rect.x + 4.0 + DOT + 6.0,
+                        &telling,
+                        from,
                         row.rect.y + 28.0,
                         Run::label(f32::MAX),
                     );
@@ -442,6 +452,41 @@ impl Sidebar {
                         if *live { palette.soft } else { palette.danger },
                         palette.faint,
                     );
+
+                    // Which build this is, on the right of the same line.
+                    //
+                    // The one fact somebody reporting a fault is always asked
+                    // for and never has to hand -- and this window had it
+                    // nowhere at all. Beside the line that says whether it is
+                    // hearing anything, because that is already the strip for
+                    // what is true of the program rather than of any
+                    // conversation in it.
+                    //
+                    // Only when it fits. The reason a window is offline can be
+                    // a sentence, and a version drawn over the end of one
+                    // would make both unreadable to say something neither
+                    // needed to interrupt.
+                    let wide =
+                        matterless_layout::extent_of(fonts, version, f32::MAX, version_style())
+                            .width;
+                    let spoken_wide =
+                        matterless_layout::extent_of(fonts, &telling, f32::MAX, label_style())
+                            .width;
+                    let at = (row.rect.right() - wide - VERSION_INSET)
+                        .min(within.right() - TRACK - wide - 2.0);
+                    if at > from + spoken_wide + VERSION_INSET {
+                        let build = painter.run(
+                            fonts,
+                            version,
+                            at,
+                            // Centred against the line beside it, which is set
+                            // larger: two runs sharing a top edge do not share
+                            // a baseline.
+                            row.rect.y + 28.0 + (18.0 - VERSION_SIZE * 1.4) / 2.0,
+                            Run::label(f32::MAX).sized(VERSION_SIZE),
+                        );
+                        scene.glyphs(build, palette.faint, palette.faint);
+                    }
                 }
                 // A team's name leads the groups that belong to it, rather than
                 // every group's name carrying it: two teams each bring a
@@ -812,6 +857,32 @@ fn pill_for(
     ))
 }
 
+/// How the build is set, and how far its right edge sits from the panel's.
+const VERSION_SIZE: f32 = 11.0;
+const VERSION_INSET: f32 = 8.0;
+
+/// What the build is measured by.
+fn version_style() -> matterless_layout::Style {
+    matterless_layout::Style {
+        size: VERSION_SIZE,
+        line_height: VERSION_SIZE * 1.4,
+        bold: false,
+        italic: false,
+        mono: false,
+    }
+}
+
+/// What `Run::label` sets a line in, for measuring one before it is drawn.
+fn label_style() -> matterless_layout::Style {
+    matterless_layout::Style {
+        size: 13.0,
+        line_height: 18.0,
+        bold: false,
+        italic: false,
+        mono: false,
+    }
+}
+
 /// The count itself.
 ///
 /// A mention is the one count worth colouring: it is the difference between
@@ -898,7 +969,15 @@ const RING: f32 = 1.5;
 /// other kinds of conversation get.
 const FACE: f32 = 18.0;
 /// Where the name starts: past the type icon and the gap after it.
-const GUTTER: f32 = ICON_LEFT + ICON + 7.0;
+///
+/// The gap clears the widest thing that column can hold, which is a mark and
+/// not a `#`. An icon glyph is drawn edge to edge and carries none of the side
+/// bearing a letter does, so a mark and a hash left-aligned in the same column
+/// do not leave the same room after them: measured, the spool on the threads
+/// row ended 12px from its name where a channel's hash ended 14px from its
+/// own, and the mark is the wider shape of the two to begin with. The names
+/// have to stay in one column, so the column is sized for the mark.
+const GUTTER: f32 = ICON_LEFT + ICON + 11.0;
 /// The channel-type icon, and where its box begins.
 const ICON: f32 = 16.0;
 const ICON_LEFT: f32 = 4.0;

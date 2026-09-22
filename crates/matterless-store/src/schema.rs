@@ -86,7 +86,7 @@ const MIGRATION_7: &str = "
 ALTER TABLE posts ADD COLUMN is_pinned INTEGER NOT NULL DEFAULT 0;
 ";
 
-pub const TARGET_VERSION: i64 = 9;
+pub const TARGET_VERSION: i64 = 10;
 
 // Migration 1 is frozen: the shell now keeps a real database with real history,
 // so every change gets its own step from here.
@@ -271,7 +271,8 @@ fn missing_columns(connection: &Connection) -> rusqlite::Result<Vec<String>> {
 }
 
 fn missing_tables(connection: &Connection) -> rusqlite::Result<Vec<String>> {
-    const REQUIRED: [&str; 13] = [
+    const REQUIRED: [&str; 14] = [
+        "settings",
         "drafts",
         "left_off",
         "posts",
@@ -370,6 +371,23 @@ CREATE TABLE IF NOT EXISTS drafts (
 );
 ";
 
+/// What this install has been told to do, as opposed to what the server says.
+///
+/// Apart from `preferences`, which holds the reader's settings on the server
+/// and is replaced from it on every sync -- anything local written there would
+/// last until the next one. These are decisions about this copy of the program
+/// on this machine: how text is drawn, and whatever else comes.
+///
+/// No reader on the row. A preference belongs to an account and follows it
+/// between machines; this belongs to the machine, and the one thing in it so
+/// far is about the panel the window is displayed on.
+const MIGRATION_10: &str = "
+CREATE TABLE IF NOT EXISTS settings (
+    name  TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+";
+
 fn migrate(connection: &Connection) -> rusqlite::Result<()> {
     let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
 
@@ -427,6 +445,9 @@ fn migrate(connection: &Connection) -> rusqlite::Result<()> {
     }
     if version < 9 || missing.iter().any(|name| name == "drafts") {
         connection.execute_batch(MIGRATION_9)?;
+    }
+    if version < 10 || missing.iter().any(|name| name == "settings") {
+        connection.execute_batch(MIGRATION_10)?;
     }
     connection.pragma_update(None, "user_version", TARGET_VERSION)?;
     tracing::info!(from = version, to = TARGET_VERSION, "store migrated");

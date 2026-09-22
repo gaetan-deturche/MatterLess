@@ -1922,6 +1922,35 @@ impl Store {
         Ok(())
     }
 
+    // ------------------------------------------------------------ settings
+
+    /// What this install has been told to do, by name.
+    ///
+    /// `None` for anything never set, which is how a caller tells "off" from
+    /// "never chosen" -- and those are different, because a default is a
+    /// decision this program makes and an answer is one the reader made.
+    pub fn setting(&self, name: &str) -> Result<Option<String>> {
+        let connection = self.lock();
+        Ok(connection
+            .query_row(
+                "SELECT value FROM settings WHERE name = ?1",
+                params![name],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?)
+    }
+
+    /// Remembers one, for the next run of this copy of the program.
+    pub fn remember_setting(&self, name: &str, value: &str) -> Result<()> {
+        let connection = self.lock();
+        connection.execute(
+            "INSERT INTO settings (name, value) VALUES (?1, ?2)
+             ON CONFLICT(name) DO UPDATE SET value = excluded.value",
+            params![name, value],
+        )?;
+        Ok(())
+    }
+
     /// Who was reading, and what they were reading, when this store was last
     /// written to.
     pub fn left_off(&self) -> Result<Option<(String, String)>> {

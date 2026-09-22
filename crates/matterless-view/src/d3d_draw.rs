@@ -89,11 +89,19 @@ impl Bound {
         let mut blending = D3D11_BLEND_DESC::default();
         blending.RenderTarget[0] = D3D11_RENDER_TARGET_BLEND_DESC {
             BlendEnable: true.into(),
-            SrcBlend: D3D11_BLEND_SRC_ALPHA,
-            DestBlend: D3D11_BLEND_INV_SRC_ALPHA,
+            // The second colour the fragment writes, not its alpha.
+            //
+            // It carries a coverage per channel, so a subpixel letter weighs
+            // red, green and blue separately against what is already there --
+            // which is the whole of what subpixel antialiasing is, and cannot
+            // be said with one alpha. Everything else writes its alpha into
+            // all three, so this is exactly `SRC_ALPHA / INV_SRC_ALPHA` for
+            // every quad that is not a letter.
+            SrcBlend: D3D11_BLEND_SRC1_COLOR,
+            DestBlend: D3D11_BLEND_INV_SRC1_COLOR,
             BlendOp: D3D11_BLEND_OP_ADD,
             SrcBlendAlpha: D3D11_BLEND_ONE,
-            DestBlendAlpha: D3D11_BLEND_INV_SRC_ALPHA,
+            DestBlendAlpha: D3D11_BLEND_INV_SRC1_ALPHA,
             BlendOpAlpha: D3D11_BLEND_OP_ADD,
             RenderTargetWriteMask: D3D11_COLOR_WRITE_ENABLE_ALL.0 as u8,
         };

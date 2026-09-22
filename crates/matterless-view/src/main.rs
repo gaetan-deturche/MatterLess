@@ -556,6 +556,15 @@ struct App {
     /// `connect` runs again after a sign-in, and a second call would leave two
     /// threads asking the same question for as long as the window is open.
     watching: bool,
+    /// What this copy of the program has been told to do.
+    settings: matterless_view::settings::Settings,
+    /// Which channel the open thread belongs to.
+    ///
+    /// Not whatever the column is showing. A thread opened from the Threads
+    /// list is read beside that list rather than beside its own conversation,
+    /// so "the channel being looked at" stops being the channel being replied
+    /// to -- and a reply sent to the wrong one goes to the wrong people.
+    thread_in: Option<String>,
     /// The session this run holds, once somebody has signed in.
     ///
     /// Held here rather than read back out of the keychain, because signing in
@@ -875,6 +884,8 @@ impl App {
             asked: std::collections::HashSet::new(),
             arrived: Vec::new(),
             signin: matterless_view::signin::SignIn::default(),
+            settings: matterless_view::settings::Settings::default(),
+            thread_in: None,
             put_off: None,
             watching: false,
             session: None,
@@ -1257,6 +1268,7 @@ impl App {
             status: status.to_string(),
             live,
             offline: offline.map(str::to_string),
+            version: matterless_view::update::running().to_string(),
         }];
         // First in the list, because with collapsed threads a reply never
         // touches its channel's counters: this is the only row in the sidebar
@@ -1861,8 +1873,13 @@ impl App {
     /// The rule is `typing::Sending`. Asked *after* the conversation is known,
     /// or a keystroke with no socket to send on would count as having sent.
     fn say_typing(&mut self, root_id: &str) {
-        let (Some(channel), Some(link)) = (self.sidebar.selected.clone(), self.link.as_ref())
-        else {
+        // In a thread, the thread's own channel -- the same conversation the
+        // reply will go to, and not necessarily the one on screen.
+        let where_to = match root_id.is_empty() {
+            true => self.sidebar.selected.clone(),
+            false => self.thread_in.clone(),
+        };
+        let (Some(channel), Some(link)) = (where_to, self.link.as_ref()) else {
             return;
         };
         if !self
@@ -3096,6 +3113,15 @@ impl App {
             }
         }
         teams.push(directs);
+        // Last, under everything that is somewhere to go: it is about the
+        // program rather than about any conversation in it.
+        teams.push(matterless_view::rail::Tile {
+            id: matterless_view::rail::SETTINGS.to_string(),
+            name: "Settings".to_string(),
+            unread: 0,
+            mentions: 0,
+            kind: matterless_view::rail::Kind::Settings,
+        });
         // Above the teams, because it is not one of them: it is the one square
         // that does something to the conversation already open rather than
         // taking the reader to another.
@@ -3228,6 +3254,30 @@ impl App {
         self.sidebar.selected = Some(first.clone());
         self.open_channel(&first);
         true
+    }
+
+    /// Draws text the way the reader asked, and remembers that they did.
+    ///
+    /// The glyphs already rasterised are the wrong ones now -- a sheet of
+    /// flat coverage read as three channels is a letter with the wrong edges
+    /// -- so the atlas forgets them and the window is laid out again against
+    /// the ones that replace them.
+    fn draw_text_as(&mut self, mode: matterless_view::settings::Text) {
+        let want = mode == matterless_view::settings::Text::Subpixel;
+        let changed = self
+            .view
+            .as_mut()
+            .is_some_and(|view| view.atlas.rasterise_subpixel(want));
+        if let Some(store) = self.store.as_ref()
+            && let Err(error) =
+                store.remember_setting(matterless_view::settings::Text::SETTING, mode.stored())
+        {
+            eprintln!("keeping the text setting: {error}");
+        }
+        if changed {
+            println!("text is drawn {}", mode.stored());
+            self.relayout();
+        }
     }
 
     /// Whether the window is asking to be signed in rather than drawing a
@@ -4013,6 +4063,10 @@ impl App {
     /// be tested against the same boxes, and building them separately is how
     /// the two come to disagree about what is under the pointer.
     fn targets(&self) -> Vec<Placed> {
+        // Over everything, so nothing behind it can be pressed through it.
+        if self.settings.open() {
+            return self.settings.boxes(self.window_rect());
+        }
         if self.signing_in() {
             let mut boxes = self.signin.boxes(self.below_notice());
             // After, so the strip is the innermost match along the top: `at`
@@ -4137,6 +4191,9 @@ impl App {
             eprintln!("thread {root_id}: no root in the local store");
             return;
         };
+        // Taken from the root rather than from the column, which may be
+        // showing the Threads list and not a conversation at all.
+        self.thread_in = Some(root.channel_id.clone());
         let replies = store.thread_replies(root_id).unwrap_or_default();
         let mut people: Vec<String> = std::iter::once(root.user_id.clone())
             .chain(replies.iter().map(|reply| reply.user_id.clone()))
@@ -4215,6 +4272,9 @@ impl App {
             return;
         };
         let _ = thread;
+        // With no thread open there is no thread's channel, and a stale one
+        // would send the next reply somewhere nobody is looking.
+        self.thread_in = None;
         // Back to where the channel was before the pane took half of it --
         // which is not the same thing as the line that opened it. Closing is
         // nobody pointing at anything: there is no press to honour, so what
@@ -4925,6 +4985,22 @@ impl App {
         // Where the offer sits, before anything asks what is under the
         // pointer: it is measured rather than computed per frame because
         // measuring needs the fonts and a hit test does not have them.
+        // Over everything and alone, for the same reason the release notes
+        // are: it covers the window, so nothing behind it may take the press.
+        if self.settings.open() {
+            let window = self.window_rect();
+            self.settings.measure(window);
+            let mut input = std::mem::take(&mut self.input);
+            let did = self.settings.react(&mut input);
+            self.input = input;
+            match did {
+                Some(matterless_view::settings::Did::Text(mode)) => self.draw_text_as(mode),
+                Some(matterless_view::settings::Did::Close) => {}
+                None => {}
+            }
+            self.input = Input::default();
+            return;
+        }
         // The panel over everything, first and alone: it covers the window,
         // so nothing behind it may take the same press.
         if self.whats_new.open() {
@@ -5058,9 +5134,12 @@ impl App {
             let did = self.followed.react_in(&input, &boxes, within);
             self.input = input;
             if let Some(matterless_view::listing::Did::Open(found)) = did {
+                // Beside the list, not instead of it. Choosing a thread used
+                // to open its channel in the column and the thread next to it,
+                // which threw the list away to show a conversation nobody
+                // asked for -- and made the list a place you pass through once
+                // rather than one you work down.
                 let root = found.root_id.clone();
-                self.sidebar.selected = Some(found.channel_id.clone());
-                self.open_channel(&found.channel_id);
                 if !root.is_empty() {
                     self.open_thread(&root);
                 }
@@ -5404,9 +5483,10 @@ impl App {
         if let Some(text) = replied
             && let Some(root) = self.open_root()
         {
-            // A reply goes to the channel the thread is in, which is the one
-            // being looked at.
-            let channel = self.sidebar.selected.clone().unwrap_or_default();
+            // A reply goes to the channel the thread is in, which is not
+            // always the one being looked at: from the Threads list it is a
+            // conversation the column is not showing.
+            let channel = self.thread_in.clone().unwrap_or_default();
             self.post_message(&channel, &root, text);
         }
     }
@@ -6361,6 +6441,17 @@ impl App {
             };
             self.offered.draw(&mut canvas, &self.input, notice);
         }
+        if self.settings.open() {
+            scene.clip_to(0.0, 0.0, self.size.0 as f32, self.size.1 as f32);
+            let window = self.window_rect();
+            let mut canvas = Canvas {
+                scene: &mut scene,
+                painter: &mut self.painter,
+                fonts: &mut self.fonts,
+                palette: &self.palette,
+            };
+            self.settings.draw(&mut canvas, &self.input, window);
+        }
         // The picture a reader opened, over the window and everything in it.
         // Under only the menu and the tooltip, which are the two things that
         // are always over whatever they are about.
@@ -6865,6 +6956,25 @@ impl ApplicationHandler<Update> for App {
         };
         println!("drawing through Direct3D, {}x{}", self.size.0, self.size.1);
         self.view = Some(view);
+        // How this reader has asked for text to be drawn, before a glyph is
+        // rasterised: applying it later would throw away a sheet's worth of
+        // letters on the first frame.
+        let asked = matterless_view::settings::Text::read(
+            self.store
+                .as_ref()
+                .and_then(|store| {
+                    store
+                        .setting(matterless_view::settings::Text::SETTING)
+                        .ok()
+                        .flatten()
+                })
+                .as_deref(),
+        );
+        self.settings.text = asked;
+        if let Some(view) = self.view.as_mut() {
+            view.atlas
+                .rasterise_subpixel(asked == matterless_view::settings::Text::Subpixel);
+        }
         // Already held, from before the tray was told about it.
         debug_assert!(self.window.is_some());
         self.relayout();
@@ -7196,6 +7306,10 @@ impl ApplicationHandler<Update> for App {
                     // the sidebar is scrolled to a heading that does not exist.
                     if pressed == matterless_view::rail::UNREAD {
                         self.show_unread_mark();
+                    } else if pressed == matterless_view::rail::SETTINGS {
+                        self.settings.show();
+                        let window = self.window_rect();
+                        self.settings.measure(window);
                     } else {
                         let within = self.sidebar_rect();
                         self.sidebar.scroll_to(&pressed, within);

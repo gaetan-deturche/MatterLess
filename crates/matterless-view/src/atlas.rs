@@ -93,6 +93,142 @@ impl Sheet {
     }
 }
 
+/// How much a glyph's coverage is opened up before it is stored.
+///
+/// The window blends in gamma space -- the swapchain is `B8G8R8A8_UNORM`, not
+/// `_SRGB` -- which is the usual choice for interface text and the reason it
+/// has to be paid for here. Half coverage written as 128 is not half the light
+/// of full coverage; on a dark panel it lands nearer a quarter, so the edges of
+/// every stem come out thinner than the shape they were rasterised from and
+/// light text on dark reads as spindly.
+///
+/// The curve gives that back. It is applied here rather than in the fragment
+/// shader because this is the one place a glyph's pixels are decided: a
+/// rectangle samples the sheet's opaque texel and a colour emoji carries its
+/// own alpha, and neither wants this done to it.
+const COVERAGE_GAMMA: f32 = 1.4;
+
+fn weighted(coverage: u8) -> u8 {
+    // The ends are exact: nothing is not a little something, and a filled
+    // texel stays filled.
+    if coverage == 0 || coverage == 255 {
+        return coverage;
+    }
+    let part = f32::from(coverage) / 255.0;
+    (part.powf(1.0 / COVERAGE_GAMMA) * 255.0)
+        .round()
+        .clamp(0.0, 255.0) as u8
+}
+
+/// Smears each subpixel's coverage across its neighbours, and answers RGB
+/// triples.
+///
+/// Without this, subpixel antialiasing is coloured fringes. A stem landing on
+/// one channel and not the two beside it lights that channel alone, and what
+/// the eye sees at the edge of every letter is orange on one side and blue on
+/// the other rather than a sharper letter.
+///
+/// The filter is the one ClearType and FreeType both use in some form: a
+/// five-tap weighted average along the row of subpixels, which spreads a
+/// third of a pixel's worth of light over a whole pixel's width. The colour
+/// does not disappear -- it is what carries the extra resolution -- but it
+/// stops being the thing you notice.
+///
+/// Three taps, not five. FreeType calls this one "light" and defaults to it,
+/// and the reason is measurable: the five-tap `[1, 2, 3, 2, 1] / 9` reaches two
+/// subpixels either side -- two thirds of a whole pixel -- and took the
+/// steepest edges in a line of text from 163 to 142 while widening the run of
+/// pixels that are neither ink nor panel from 8.8% to 12.4%. That is the
+/// difference between antialiasing and a blur, and it is what somebody means
+/// when they say sharper text came out soft.
+///
+/// One subpixel either side is a third of a pixel: enough to carry a channel's
+/// light into its neighbours, not enough to smear the stem.
+fn spread(data: &[u8], width: usize, height: usize) -> Vec<u8> {
+    const TAPS: [u32; 3] = [1, 1, 1];
+    const TOTAL: u32 = 3;
+    let across = width * 3;
+    let mut out = vec![0u8; across * height];
+    for row in 0..height {
+        // The row as one run of subpixel samples, which is what the filter
+        // works along: red, green and blue are three places on the line rather
+        // than three channels of one place.
+        let from = row * width * 4;
+        let line: Vec<u8> = data[from..from + width * 4]
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .flat_map(|texel| [texel[0], texel[1], texel[2]])
+            .collect();
+        for at in 0..across {
+            let mut sum = 0u32;
+            for (tap, weight) in TAPS.iter().enumerate() {
+                // Past either end is no coverage, which is true: there is
+                // nothing there.
+                let near = at as isize + tap as isize - (TAPS.len() as isize / 2);
+                if near >= 0 && (near as usize) < across {
+                    sum += u32::from(line[near as usize]) * weight;
+                }
+            }
+            out[row * across + at] = (sum / TOTAL).min(255) as u8;
+        }
+    }
+    out
+}
+
+/// Rasterises one glyph with a channel of coverage each.
+///
+/// The same rasterisation cosmic-text does, asked for in a different format.
+/// Its `SwashCache` renders `Format::Alpha` and offers no way to say
+/// otherwise, so the scaler is built here -- font, size, hinting, the
+/// fractional offset the cache key carries, and the fake italic -- and the
+/// only line that differs is the format.
+///
+/// `None` for a glyph with no pixels, which a space is, and which is a real
+/// answer rather than a failure.
+fn subpixel_image(
+    fonts: &mut Fonts,
+    context: &mut swash::scale::ScaleContext,
+    key: CacheKey,
+) -> Option<cosmic_text::SwashImage> {
+    use swash::scale::{Render, Source, StrikeWith};
+    use swash::zeno::{Angle, Format, Transform, Vector};
+
+    let font = fonts.system_mut().get_font(key.font_id, key.font_weight)?;
+    let mut scaler = context
+        .builder(font.as_swash())
+        .size(f32::from_bits(key.font_size_bits))
+        .hint(
+            !key.flags
+                .contains(cosmic_text::CacheKeyFlags::DISABLE_HINTING),
+        )
+        .build();
+    // Where inside the pixel the glyph starts, which is what makes two "a"s a
+    // third of a pixel apart look like two "a"s rather than one shifted.
+    let offset = match key.flags.contains(cosmic_text::CacheKeyFlags::PIXEL_FONT) {
+        true => Vector::new(key.x_bin.as_float().round(), key.y_bin.as_float().round()),
+        false => Vector::new(key.x_bin.as_float(), key.y_bin.as_float()),
+    };
+    Render::new(&[
+        Source::ColorOutline(0),
+        Source::ColorBitmap(StrikeWith::BestFit),
+        Source::Outline,
+    ])
+    // The one line this function exists for.
+    .format(Format::Subpixel)
+    .offset(offset)
+    .transform(
+        match key.flags.contains(cosmic_text::CacheKeyFlags::FAKE_ITALIC) {
+            true => Some(Transform::skew(
+                Angle::from_degrees(14.0),
+                Angle::from_degrees(0.0),
+            )),
+            false => None,
+        },
+    )
+    .render(&mut scaler, key.glyph_id)
+}
+
 /// Where one glyph sits in its sheet, and how far it is drawn from the pen.
 #[derive(Debug, Clone, Copy)]
 pub struct Slot {
@@ -107,6 +243,15 @@ pub struct Slot {
     pub top: i32,
     /// The glyph carries its own colour -- an emoji -- so nothing may tint it.
     pub colour: bool,
+    /// The three channels hold coverage of their own rather than the glyph
+    /// being white with one coverage in its alpha.
+    ///
+    /// Which is what subpixel antialiasing is: a stem that covers the red
+    /// third of a pixel and not the other two is drawn as a third of a pixel
+    /// rather than as a third of the light of a whole one. It needs the
+    /// fragment to hand each channel its own coverage, which is why it also
+    /// needs a second colour out of the shader and a blend that reads it.
+    pub subpixel: bool,
 }
 
 /// One picture in a sheet: where it is, what it is, and when it was last
@@ -180,6 +325,7 @@ impl Pen {
             height,
             left: 0,
             top: 0,
+            subpixel: false,
             colour: false,
         };
         self.x += width + 1;
@@ -418,9 +564,31 @@ impl Store {
     }
 }
 
+/// What a glyph was rasterised for.
+///
+/// The mode is part of the key because the same glyph is a different bitmap
+/// under each, and because a mark is always asked for flat: it is rasterised
+/// at twice the size it is drawn and filtered down, and there is no sense in
+/// which a channel's third of a pixel survives being halved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct Rasterised {
+    key: CacheKey,
+    subpixel: bool,
+}
+
 pub struct Atlas {
     letters: Surface,
-    slots: HashMap<CacheKey, Option<Slot>>,
+    slots: HashMap<Rasterised, Option<Slot>>,
+    /// Reused across glyphs: it holds the scaled outlines a font has already
+    /// been asked for, and building one per glyph throws that away.
+    scaler: swash::scale::ScaleContext,
+    /// Whether letters are rasterised with a channel of coverage each.
+    ///
+    /// Here rather than passed per glyph because it is a property of how this
+    /// sheet was filled: every glyph in it was rasterised one way or the
+    /// other, and changing it means the sheet no longer matches what the
+    /// shader is told to expect.
+    pub subpixel: bool,
     faces: Store,
     pictures: Store,
     /// Frames drawn, which is what `used` counts in.
@@ -432,6 +600,8 @@ impl Atlas {
         let atlas = Self {
             letters: Surface::new(gpu, LETTERS),
             slots: HashMap::new(),
+            scaler: swash::scale::ScaleContext::new(),
+            subpixel: false,
             faces: Store::new(gpu, "faces", FACES),
             pictures: Store::new(gpu, "pictures", PICTURES),
             now: 0,
@@ -441,6 +611,25 @@ impl Atlas {
         // multiplies by its colour.
         atlas.letters.write(gpu, 0, 0, 1, 1, &[255, 255, 255, 255]);
         atlas
+    }
+
+    /// Changes how letters are rasterised, and forgets the ones already done.
+    ///
+    /// Answers whether anything changed, so a caller does not redraw for an
+    /// answer it already had. What is forgotten is only the record of where
+    /// each glyph sits: the pixels stay in the sheet, because nothing reclaims
+    /// there. One switch costs a second copy of whatever is on screen, which
+    /// this sheet has room for -- and a reader who toggles it all afternoon
+    /// gets a full sheet and glyphs that stop arriving, which is the trade the
+    /// note at the top of this file already makes for a sheet that is sized
+    /// never to need reclaiming.
+    pub fn rasterise_subpixel(&mut self, want: bool) -> bool {
+        if self.subpixel == want {
+            return false;
+        }
+        self.subpixel = want;
+        self.slots.clear();
+        true
     }
 
     /// What the pipeline binds, one per sheet.
@@ -521,19 +710,28 @@ impl Atlas {
         fonts: &mut Fonts,
         cache: &mut SwashCache,
         key: CacheKey,
+        subpixel: bool,
     ) -> Option<Slot> {
-        if let Some(held) = self.slots.get(&key) {
+        let asked = Rasterised { key, subpixel };
+        if let Some(held) = self.slots.get(&asked) {
             return *held;
         }
-        let image = cache.get_image_uncached(fonts.system_mut(), key);
+        // Through `cache` for a flat mask, which is what it offers: cosmic-text
+        // renders `Format::Alpha` and gives no way to ask for anything else. A
+        // subpixel mask is the same rasterisation with a different format, so
+        // that path is spelled out here rather than done without.
+        let image = match subpixel {
+            false => cache.get_image_uncached(fonts.system_mut(), key),
+            true => subpixel_image(fonts, &mut self.scaler, key),
+        };
         let Some(image) = image else {
-            self.slots.insert(key, None);
+            self.slots.insert(asked, None);
             return None;
         };
         let width = image.placement.width;
         let height = image.placement.height;
         if width == 0 || height == 0 {
-            self.slots.insert(key, None);
+            self.slots.insert(asked, None);
             return None;
         }
 
@@ -541,13 +739,30 @@ impl Atlas {
         // colour decides what shade the letter is. A colour bitmap is kept
         // exactly as it is.
         let coloured = matches!(image.content, SwashContent::Color);
+        let banded = matches!(image.content, SwashContent::SubpixelMask);
         let pixels: Vec<u8> = if coloured {
             image.data.clone()
+        } else if banded {
+            // Four bytes to a pixel already, and each of the first three is a
+            // channel's own coverage -- filtered across its neighbours first,
+            // then curved like any other coverage. The fourth becomes the most
+            // any channel is covered, which is what anything reading this as
+            // one number wants: the alpha the window blends by.
+            let filtered = spread(&image.data, width as usize, height as usize);
+            filtered
+                .as_chunks::<3>()
+                .0
+                .iter()
+                .flat_map(|texel| {
+                    let (r, g, b) = (weighted(texel[0]), weighted(texel[1]), weighted(texel[2]));
+                    [r, g, b, r.max(g).max(b)]
+                })
+                .collect()
         } else {
             image
                 .data
                 .iter()
-                .flat_map(|coverage| [255, 255, 255, *coverage])
+                .flat_map(|coverage| [255, 255, 255, weighted(*coverage)])
                 .collect()
         };
 
@@ -557,7 +772,7 @@ impl Atlas {
             // stutter that would hide the cause. Nothing reclaims here -- see
             // the note at the top on why this sheet is sized not to need to.
             eprintln!("no room in letters for a {width}x{height} glyph");
-            self.slots.insert(key, None);
+            self.slots.insert(asked, None);
             return None;
         };
         self.letters
@@ -566,9 +781,10 @@ impl Atlas {
             left: image.placement.left,
             top: image.placement.top,
             colour: coloured,
+            subpixel: banded,
             ..slot
         };
-        self.slots.insert(key, Some(slot));
+        self.slots.insert(asked, Some(slot));
         Some(slot)
     }
 }
