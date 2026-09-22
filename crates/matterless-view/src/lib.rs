@@ -23,6 +23,7 @@ pub mod d3d_draw;
 pub mod edit;
 pub mod feed;
 pub mod filecache;
+pub mod glide;
 pub mod header;
 pub mod identity;
 pub mod listing;

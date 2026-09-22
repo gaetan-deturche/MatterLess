@@ -558,6 +558,8 @@ struct App {
     watching: bool,
     /// What this copy of the program has been told to do.
     settings: matterless_view::settings::Settings,
+    /// A turn of the wheel still arriving.
+    glide: matterless_view::glide::Glide,
     /// Which channel the open thread belongs to.
     ///
     /// Not whatever the column is showing. A thread opened from the Threads
@@ -885,6 +887,7 @@ impl App {
             arrived: Vec::new(),
             signin: matterless_view::signin::SignIn::default(),
             settings: matterless_view::settings::Settings::default(),
+            glide: matterless_view::glide::Glide::default(),
             thread_in: None,
             put_off: None,
             watching: false,
@@ -4194,6 +4197,21 @@ impl App {
         // Taken from the root rather than from the column, which may be
         // showing the Threads list and not a conversation at all.
         self.thread_in = Some(root.channel_id.clone());
+        // And everything said in it, because the store may hold only the root.
+        //
+        // A followed thread can live in a channel this window has never
+        // opened: `my_threads` brings the root so the row has something to
+        // say, and nothing brings the replies. Opening one showed the message
+        // it started from and an empty pane under a heading that said how many
+        // replies there were. Asked for every time, like the channel's own
+        // refresh -- the pane draws from the store now and fills in when the
+        // answer lands, which is what this window does everywhere.
+        if let Some(link) = self.link.as_ref() {
+            link.send(matterless_view::live::Ask::Thread {
+                root_id: root_id.to_string(),
+                channel_id: root.channel_id.clone(),
+            });
+        }
         let replies = store.thread_replies(root_id).unwrap_or_default();
         let mut people: Vec<String> = std::iter::once(root.user_id.clone())
             .chain(replies.iter().map(|reply| reply.user_id.clone()))
@@ -5718,12 +5736,38 @@ impl App {
         self.redraw();
     }
 
-    /// A turn of the wheel, wherever the pointer is.
+    /// Takes a turn of the wheel, to be given over the next few frames.
     ///
     /// Its own method because the driver turns the wheel too, and a
     /// measurement of scrolling that went down a path of its own would be a
     /// measurement of the path of its own.
     fn wheel_by(&mut self, by: f32) {
+        self.glide.push(by, std::time::Instant::now());
+        // The frame that draws is the one that moves it, so there has to be
+        // one: this window draws when something happens, and what is
+        // happening now is happening over time rather than at an event.
+        self.redraw();
+    }
+
+    /// Hands over however much of the turn belongs to this frame.
+    ///
+    /// Answers whether there is more to come, so the caller knows to ask for
+    /// another frame. A glide that stopped being asked would leave the rest of
+    /// the distance undelivered and the conversation short of where the wheel
+    /// was turned to.
+    fn glided(&mut self) -> bool {
+        if !self.glide.travelling() {
+            return false;
+        }
+        let step = self.glide.taken(std::time::Instant::now());
+        if step != 0.0 {
+            self.scrolled_by(step);
+        }
+        self.glide.travelling()
+    }
+
+    /// A turn of the wheel, wherever the pointer is.
+    fn scrolled_by(&mut self, by: f32) {
         let boxes = self.targets();
         self.input.apply(UiEvent::Wheel { x: 0.0, y: by }, &boxes);
         // One wheel, five panels, and the pointer decides which of them
@@ -7388,6 +7432,14 @@ impl ApplicationHandler<Update> for App {
                 }
                 // Before anything measures itself against the window.
                 self.take_the_size();
+                // However much of a turn of the wheel belongs to this frame,
+                // before the frame is built from where things now are. Asking
+                // for the next one here rather than at the end, because what
+                // follows can return early and the rest of the distance would
+                // be left undelivered.
+                if self.glided() {
+                    self.redraw();
+                }
                 // Whichever message has the emoji grid open keeps its toolbar,
                 // though the pointer has left it for the grid. Derived once a
                 // frame rather than set beside every `show` and `hide`, so it
