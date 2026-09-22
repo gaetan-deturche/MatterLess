@@ -1552,6 +1552,15 @@ impl App {
                     self.open_channel(&channel);
                 }
             }
+            Update::Met => {
+                // The sidebar labels its conversations from the store, and so
+                // does the plan for the one that is open: both were built
+                // before these names existed.
+                self.rebuild_sidebar();
+                if let Some(channel) = self.sidebar.selected.clone() {
+                    self.open_channel(&channel);
+                }
+            }
             Update::Statuses(found) => {
                 let mine = found.iter().any(|(user_id, _)| user_id == &self.me);
                 for (user_id, status) in found {

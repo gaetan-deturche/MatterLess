@@ -30,6 +30,10 @@ pub enum Update {
     Changed(Vec<Delta>),
     /// The connection could not be made at all, with the reason.
     Failed(String),
+    /// People the store had not met are in it now, so anything named from it
+    /// is named differently: a direct message's row, an author over a message,
+    /// a name taken back out of a group's label.
+    Met,
     /// A sign-in came back with a session.
     ///
     /// The token is an `AuthToken` rather than a `String` so that it keeps its
@@ -619,6 +623,18 @@ async fn run(
     };
     let me_id = me.id.clone();
     println!("signed in as {}", me.username);
+    // Kept, before the window is told. The reader is a user like any other and
+    // everything that names one reads the store: their own name over the
+    // sidebar, their name taken back out of a group conversation's label, the
+    // face beside what they said. None of it had anywhere to read from on a
+    // store this window filled by itself -- so the strip said "signing in"
+    // long after it had, which is the fallback for a name that is not there.
+    //
+    // Before the wake rather than after, because the wake is what rebuilds the
+    // sidebar that reads it.
+    if let Err(error) = store.upsert_users(std::slice::from_ref(&me)) {
+        eprintln!("storing the reader: {error}");
+    }
     wake.wake(Update::SignedIn {
         id: me.id.clone(),
         username: me.username.clone(),
@@ -982,18 +998,38 @@ async fn run(
                         Ok(list) => wake.wake(listed("Pinned", engine.store(), list, &me_id)),
                         Err(error) => eprintln!("listing pinned messages: {error}"),
                     },
-                    Ask::Statuses { user_ids } => match rest.statuses_by_ids(&user_ids).await {
-                        Ok(found) => {
-                            println!("asked about {} people, {} answered", user_ids.len(), found.len());
-                            wake.wake(Update::Statuses(
-                                found
-                                    .into_iter()
-                                    .map(|status| (status.user_id, status.status))
-                                    .collect(),
-                            ));
+                    Ask::Statuses { user_ids } => {
+                        // Who they are, before whether they are here. Nothing
+                        // in this window has ever written a user record except
+                        // the switcher, when somebody is searched for by name
+                        // -- so a store this window filled by itself labels
+                        // every direct message and every author by their id,
+                        // which is what a conversation looks like when nobody
+                        // in it has a name.
+                        //
+                        // These ids and no others: the caller's set is the
+                        // sidebar's conversations and whoever is on screen,
+                        // which is exactly the set whose names are wanted. And
+                        // only the ones the store has not met, so this costs
+                        // one request on a fresh store and nothing after.
+                        met(&rest, engine.store(), &user_ids, &wake).await;
+                        match rest.statuses_by_ids(&user_ids).await {
+                            Ok(found) => {
+                                println!(
+                                    "asked about {} people, {} answered",
+                                    user_ids.len(),
+                                    found.len()
+                                );
+                                wake.wake(Update::Statuses(
+                                    found
+                                        .into_iter()
+                                        .map(|status| (status.user_id, status.status))
+                                        .collect(),
+                                ));
+                            }
+                            Err(error) => eprintln!("asking who is around: {error}"),
                         }
-                        Err(error) => eprintln!("asking who is around: {error}"),
-                    },
+                    }
                     Ask::Typing {
                         channel_id,
                         root_id,
@@ -2123,6 +2159,42 @@ async fn moved(
     }
     rest.update_sidebar_categories(me_id, team_id, &changed)
         .await
+}
+
+/// Fetches and keeps the user records the store is missing.
+///
+/// Answers nothing: the store is the answer, and the window is woken so that
+/// what it draws from the store is drawn again.
+async fn met(
+    rest: &matterless_core::rest::RestClient,
+    store: &Store,
+    user_ids: &[String],
+    wake: &impl Wake,
+) {
+    let unknown: Vec<String> = match store.users_by_ids(user_ids) {
+        Ok(known) => user_ids
+            .iter()
+            .filter(|id| !known.contains_key(*id))
+            .cloned()
+            .collect(),
+        // A store that cannot be asked is a store worth telling.
+        Err(_) => user_ids.to_vec(),
+    };
+    if unknown.is_empty() {
+        return;
+    }
+    match rest.users_by_ids(&unknown).await {
+        Ok(people) if people.is_empty() => {}
+        Ok(people) => {
+            println!("met {} people for the first time", people.len());
+            if let Err(error) = store.upsert_users(&people) {
+                eprintln!("storing the people: {error}");
+                return;
+            }
+            wake.wake(Update::Met);
+        }
+        Err(error) => eprintln!("asking who these people are: {error}"),
+    }
 }
 
 /// Whether this is a conversation the store has heard of.
