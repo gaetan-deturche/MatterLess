@@ -385,6 +385,57 @@ impl Header {
     /// by whoever owns it. The placeholder below is what a *shut* search looks
     /// like, and drawing it under a real field would print two hints in one
     /// box.
+    /// How the name is set, which is what measures it.
+    fn name_style() -> matterless_layout::Style {
+        matterless_layout::Style {
+            size: 15.0,
+            line_height: 20.0,
+            bold: true,
+            italic: false,
+            mono: false,
+        }
+    }
+
+    /// Where the name starts, and how much room it has before the first thing
+    /// on the right of the strip.
+    ///
+    /// The name used to be drawn with no width at all and left to the scene's
+    /// clip, "as it does in the sidebar". The sidebar clips each row to its
+    /// own width and the strip is clipped to the whole strip, so a name longer
+    /// than the room did not stop at the buttons: it ran under every one of
+    /// them and out to the edge of the column. A group conversation is named
+    /// after the people in it, so five names and a thread pane open is all it
+    /// took, and then nothing on the strip could be read or found.
+    pub fn name_box(&self, fonts: &mut matterless_layout::Fonts, within: Rect) -> (f32, f32) {
+        // Past the mark, whichever it is. A hash is narrower than the column
+        // kept for it; three lines are wider, and at a fixed offset the name
+        // lands on top of them.
+        let past = matterless_layout::extent_of(
+            fonts,
+            if self.sigil_is_mark { "#" } else { self.sigil },
+            f32::MAX,
+            matterless_layout::Style {
+                size: 15.0,
+                line_height: 20.0,
+                bold: false,
+                italic: false,
+                mono: false,
+            },
+        )
+        .width
+            + 4.0;
+        let from = within.x + LEFT + SIGIL.max(past);
+        let laid = fit(within, &self.offered);
+        // Whichever is leftmost: the field when there is one, otherwise the
+        // first button, otherwise the edge.
+        let until = laid
+            .field
+            .map(|field| field.x)
+            .or_else(|| laid.shown.first().map(|(_, rect)| rect.x))
+            .unwrap_or_else(|| strip(within).right());
+        (from, (until - from - GAP).max(0.0))
+    }
+
     pub fn draw(&self, into: &mut Canvas<'_>, within: Rect, hovered: Option<Act>, typed_in: bool) {
         let Canvas {
             scene,
@@ -432,30 +483,16 @@ impl Header {
         );
         scene.glyphs(sigil, palette.faint, palette.faint);
 
-        // Past the mark, whichever it is. A hash is narrower than the column
-        // kept for it; three lines are wider, and at a fixed offset the name
-        // lands on top of them.
-        let past = matterless_layout::extent_of(
-            fonts,
-            if self.sigil_is_mark { "#" } else { self.sigil },
-            f32::MAX,
-            matterless_layout::Style {
-                size: 15.0,
-                line_height: 20.0,
-                bold: false,
-                italic: false,
-                mono: false,
-            },
-        )
-        .width
-            + 4.0;
+        let (from, room) = self.name_box(fonts, within);
+        // Cut to that room rather than wrapped: the strip is one line tall,
+        // and an ellipsis says a name goes on where a name simply stopping
+        // would read as the whole of it.
+        let shown = matterless_layout::elided(fonts, &self.title, room, Self::name_style());
         let name = painter.run(
             fonts,
-            &self.title,
-            within.x + LEFT + SIGIL.max(past),
+            &shown,
+            from,
             within.y + 13.0,
-            // Never wrapped: the strip is one line tall, and the panel's clip
-            // cuts a long name as it does in the sidebar.
             Run {
                 size: 15.0,
                 line_height: 20.0,
@@ -716,6 +753,46 @@ mod tests {
     /// The field sits left of the buttons and neither may reach the other.
     /// What the strip did before was drop the field outright the moment it
     /// was under 240, and let the buttons run off the edge.
+    /// A name too long for the strip stops before the controls.
+    ///
+    /// It used to be drawn at its full width and left to the scene's clip,
+    /// which is the whole strip -- so on a narrowed column a group
+    /// conversation, named after the people in it, ran straight under the
+    /// search field and every button and out to the far edge. Nothing on the
+    /// strip could be read, and nothing on it could be found to press.
+    #[test]
+    fn a_long_name_stops_before_the_controls() {
+        let mut fonts = matterless_layout::Fonts::new();
+        // A column with a thread pane beside it, which is when this bites.
+        let within = Rect::new(310.0, 0.0, 320.0, 44.0);
+        let mut header =
+            Header::new("alexandre.boulet, florine.fouquart, leo-paul.couturier, and several more");
+        header.offered = offered(true);
+
+        let (from, room) = header.name_box(&mut fonts, within);
+        let shown =
+            matterless_layout::elided(&mut fonts, &header.title, room, Header::name_style());
+        let wide =
+            matterless_layout::extent_of(&mut fonts, &shown, f32::MAX, Header::name_style()).width;
+
+        assert!(room > 0.0, "the name was given no room at all");
+        assert!(
+            shown != header.title,
+            "a name far too long for the strip was not cut"
+        );
+        let laid = fit(within, &header.offered);
+        let until = laid
+            .field
+            .map(|field| field.x)
+            .or_else(|| laid.shown.first().map(|(_, rect)| rect.x))
+            .expect("something on the right of the strip");
+        assert!(
+            from + wide <= until + 0.5,
+            "the name reaches {} and the first control starts at {until}",
+            from + wide
+        );
+    }
+
     #[test]
     fn nothing_on_the_strip_overlaps_or_overruns() {
         let offers = offered(false);
