@@ -1316,6 +1316,16 @@ async fn run(
                     }
                     Signal::Event { event, .. } => match engine.apply_event(&event, &context) {
                         Ok(deltas) if !deltas.is_empty() => {
+                            // Who wrote them, before the window is told.
+                            //
+                            // Everything that names somebody reads the store,
+                            // and a message can arrive from a person this
+                            // window has never met -- the first message in a
+                            // channel nobody has opened, or from somebody who
+                            // joined today. The notification is raised from
+                            // these deltas, so learning the name afterwards is
+                            // too late: it had already said the id out loud.
+                            learn(&rest, engine.store(), &wrote(engine.store(), &deltas)).await;
                             // Following or unfollowing a thread changes which
                             // replies may interrupt, so the set is re-read
                             // rather than left as it was at startup.
@@ -2193,6 +2203,22 @@ async fn met(
     user_ids: &[String],
     wake: &impl Wake,
 ) {
+    if learn(rest, store, user_ids).await {
+        wake.wake(Update::Met);
+    }
+}
+
+/// Fetches and keeps the user records the store is missing, quietly.
+///
+/// Answers whether it learned anything, so a caller can decide whether the
+/// window needs telling. The one that does not is a message arriving: what
+/// reads those names is about to run anyway, and it has to run *after* this
+/// rather than be sent back to do it again.
+async fn learn(
+    rest: &matterless_core::rest::RestClient,
+    store: &Store,
+    user_ids: &[String],
+) -> bool {
     let unknown: Vec<String> = match store.users_by_ids(user_ids) {
         Ok(known) => user_ids
             .iter()
@@ -2203,20 +2229,41 @@ async fn met(
         Err(_) => user_ids.to_vec(),
     };
     if unknown.is_empty() {
-        return;
+        return false;
     }
     match rest.users_by_ids(&unknown).await {
-        Ok(people) if people.is_empty() => {}
+        Ok(people) if people.is_empty() => false,
         Ok(people) => {
             println!("met {} people for the first time", people.len());
-            if let Err(error) = store.upsert_users(&people) {
-                eprintln!("storing the people: {error}");
-                return;
+            match store.upsert_users(&people) {
+                Ok(()) => true,
+                Err(error) => {
+                    eprintln!("storing the people: {error}");
+                    false
+                }
             }
-            wake.wake(Update::Met);
         }
-        Err(error) => eprintln!("asking who these people are: {error}"),
+        Err(error) => {
+            eprintln!("asking who these people are: {error}");
+            false
+        }
     }
+}
+
+/// Who wrote the posts these deltas are about, as far as the store knows.
+fn wrote(store: &Store, deltas: &[Delta]) -> Vec<String> {
+    let mut who: Vec<String> = deltas
+        .iter()
+        .filter_map(|delta| match delta {
+            Delta::PostUpserted { post_id, .. } => store.post(post_id).ok().flatten(),
+            _ => None,
+        })
+        .map(|post| post.user_id)
+        .filter(|id| !id.is_empty())
+        .collect();
+    who.sort();
+    who.dedup();
+    who
 }
 
 /// Whether this is a conversation the store has heard of.
@@ -2262,6 +2309,32 @@ async fn membership(
                 }
             }
             Err(error) => eprintln!("the categories for {}: {error}", team.id),
+        }
+        // And the threads this reader follows in it.
+        //
+        // Never asked for before. The threads table was filled only as replies
+        // happened to arrive down the socket, so the Threads list held
+        // whatever this window had been open for -- three of them, against a
+        // hundred and seventy-two followed -- rather than what the reader
+        // actually follows. The list has always been ordered by last activity;
+        // it simply had almost nothing to order.
+        match rest.my_threads(me_id, &team.id, FOLLOWED, false).await {
+            Ok(page) => {
+                // The roots as well as the threads. A followed thread can live
+                // in a channel this window has never opened, and without its
+                // root there is nothing to put in the row: `followed_threads`
+                // joins the posts table for the message and comes back empty.
+                let roots: Vec<matterless_core::model::Post> =
+                    page.threads.iter().map(|one| one.post.clone()).collect();
+                if let Err(error) = store.upsert_posts(&roots) {
+                    eprintln!("storing the thread roots for {}: {error}", team.id);
+                }
+                if let Err(error) = store.upsert_threads(&page.threads) {
+                    eprintln!("storing the threads for {}: {error}", team.id);
+                }
+                println!("following {} threads in {}", page.threads.len(), team.id);
+            }
+            Err(error) => eprintln!("the followed threads for {}: {error}", team.id),
         }
     }
     let counted = channels.len();
