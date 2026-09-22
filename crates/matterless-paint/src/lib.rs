@@ -181,6 +181,15 @@ pub enum Shade {
     Signal,
 }
 
+/// Where a run's ink sits, relative to the pen it was measured from.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Ink {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+}
+
 /// One glyph, placed, with the ink it takes.
 #[derive(Debug, Clone, Copy)]
 pub struct PlacedGlyph {
@@ -1153,6 +1162,57 @@ impl Painter {
     /// `y` is the run's *top*, not its baseline: every other measurement in
     /// this app is a box, and a caller that has just been handed a rectangle
     /// should not have to know about baselines to put text in it.
+    /// Where a run's ink actually lands, measured from the pen it is drawn
+    /// from.
+    ///
+    /// The advance box is not the ink box. Shaping says how much room a run
+    /// reserves; where the outline sits inside that room is the glyph's own
+    /// business, and for a picture the two differ by whatever its bearings
+    /// happen to be. Centring the advance box therefore centres the *room*,
+    /// and the picture lands wherever it lands -- measured on the rail's five
+    /// squares, that was a pixel and a half left for the gear, a pixel right
+    /// for the direct-messages mark, and a matched pair of gaps for the
+    /// letters, which is why nothing looked wrong until there was a gear.
+    ///
+    /// Reads the same rasterised glyphs the renderer draws, so what it reports
+    /// is the ink that will actually be on screen, bearings, hinting and all.
+    pub fn ink_of(&mut self, fonts: &mut Fonts, text: &str, run: Run) -> Option<Ink> {
+        let glyphs = self.run(fonts, text, 0.0, 0.0, run);
+        let mut edges: Option<(f32, f32, f32, f32)> = None;
+        for glyph in &glyphs {
+            let Some(image) = self
+                .glyphs
+                .get_image(fonts.system_mut(), glyph.key)
+                .as_ref()
+            else {
+                continue;
+            };
+            let placement = image.placement;
+            if placement.width == 0 || placement.height == 0 {
+                // A space, and anything else the rasteriser answers with
+                // nothing: it takes room but has no ink to centre.
+                continue;
+            }
+            let left = glyph.x as f32 + placement.left as f32 * glyph.scale;
+            let top = glyph.y as f32 - placement.top as f32 * glyph.scale;
+            let right = left + placement.width as f32 * glyph.scale;
+            let bottom = top + placement.height as f32 * glyph.scale;
+            edges = Some(match edges {
+                Some((x0, y0, x1, y1)) => {
+                    (x0.min(left), y0.min(top), x1.max(right), y1.max(bottom))
+                }
+                None => (left, top, right, bottom),
+            });
+        }
+        let (x0, y0, x1, y1) = edges?;
+        Some(Ink {
+            x: x0,
+            y: y0,
+            width: x1 - x0,
+            height: y1 - y0,
+        })
+    }
+
     pub fn run(
         &mut self,
         fonts: &mut Fonts,
