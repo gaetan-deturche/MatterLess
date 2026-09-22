@@ -101,6 +101,12 @@ pub struct Field {
     pub masked: bool,
     /// Where the caret is, as a byte index into `text`.
     caret: usize,
+    /// The other end of the selection, as a byte index.
+    ///
+    /// Equal to the caret when nothing is selected, which is most of the time
+    /// and is why there is no `Option` here: every edit has to collapse the
+    /// selection anyway, and "both ends in the same place" already says that.
+    anchor: usize,
 }
 
 impl Field {
@@ -112,6 +118,7 @@ impl Field {
             text: String::new(),
             masked: false,
             caret: 0,
+            anchor: 0,
         }
     }
 
@@ -130,18 +137,69 @@ impl Field {
     /// anything a keyboard can produce, and `len()` on one with an accent in
     /// it would show more bullets than were typed.
     fn shown(&self) -> String {
+        self.shown_upto(self.text.len())
+    }
+
+    /// What is drawn for the text up to byte `at`.
+    ///
+    /// One function rather than three, because every measurement this field
+    /// makes -- the caret, each end of the selection, the scroll -- is the
+    /// width of some prefix of what is *shown*, and a masked field shows
+    /// something other than what it holds.
+    fn shown_upto(&self, at: usize) -> String {
+        let upto = &self.text[..at];
         match self.masked {
-            true => "\u{2022}".repeat(self.text.chars().count()),
-            false => self.text.clone(),
+            true => "\u{2022}".repeat(upto.chars().count()),
+            false => upto.to_string(),
         }
     }
 
-    /// What is drawn up to the caret, which is what the caret is measured by.
-    fn shown_before_caret(&self) -> String {
-        let before = &self.text[..self.caret];
-        match self.masked {
-            true => "\u{2022}".repeat(before.chars().count()),
-            false => before.to_string(),
+    /// The selection, low end first. Both the same means none.
+    fn span(&self) -> (usize, usize) {
+        match self.caret <= self.anchor {
+            true => (self.caret, self.anchor),
+            false => (self.anchor, self.caret),
+        }
+    }
+
+    pub fn has_selection(&self) -> bool {
+        self.caret != self.anchor
+    }
+
+    /// What is selected, as the reader typed it.
+    ///
+    /// `None` from a masked field even when something is selected. A password
+    /// box that hands its contents to the clipboard is a password box that
+    /// shows the password, by a longer route -- no browser does it, and the
+    /// selection is there to be replaced or deleted, not read.
+    pub fn selection(&self) -> Option<String> {
+        let (from, to) = self.span();
+        (from != to && !self.masked).then(|| self.text[from..to].to_string())
+    }
+
+    /// Takes the selected run out, and leaves the caret where it was.
+    fn cut_selection(&mut self) -> bool {
+        let (from, to) = self.span();
+        if from == to {
+            return false;
+        }
+        self.text.drain(from..to);
+        self.caret = from;
+        self.anchor = from;
+        true
+    }
+
+    /// Puts both ends of the selection at `at`.
+    fn put(&mut self, at: usize) {
+        self.caret = at;
+        self.anchor = at;
+    }
+
+    /// Moves the caret, keeping the anchor when the reader is extending.
+    fn go(&mut self, at: usize, extend: bool) {
+        self.caret = at;
+        if !extend {
+            self.anchor = at;
         }
     }
 
@@ -167,7 +225,33 @@ impl Field {
 
     pub fn set(&mut self, text: &str) {
         self.text = text.to_string();
+        self.put(self.text.len());
+    }
+
+    /// Selects everything, with the caret at the end.
+    pub fn select_all(&mut self) {
+        self.anchor = 0;
         self.caret = self.text.len();
+    }
+
+    /// Selects the run of non-space around `at`, which is what a double press
+    /// on a word means.
+    fn select_word_at(&mut self, at: usize) {
+        let from = self.text[..at]
+            .char_indices()
+            .rev()
+            .take_while(|(_, one)| !one.is_whitespace())
+            .map(|(index, _)| index)
+            .last()
+            .unwrap_or(at);
+        let to = self.text[at..]
+            .char_indices()
+            .take_while(|(_, one)| !one.is_whitespace())
+            .map(|(index, one)| at + index + one.len_utf8())
+            .last()
+            .unwrap_or(at);
+        self.anchor = from;
+        self.caret = to;
     }
 
     fn insert(&mut self, said: &str) {
@@ -175,49 +259,15 @@ impl Field {
         // than not, and a single-line field that accepts one grows a line it
         // will never show.
         let clean: String = said.chars().filter(|one| !one.is_control()).collect();
+        // The selection goes first even when nothing is being put in its
+        // place: what a reader means by selecting and pressing a dead key is
+        // still "not this".
+        self.cut_selection();
         if clean.is_empty() {
             return;
         }
         self.text.insert_str(self.caret, &clean);
-        self.caret += clean.len();
-    }
-
-    /// Takes the frame's keystrokes, if this field holds the keyboard.
-    ///
-    /// The keys are *taken* rather than read: the window reads the same input,
-    /// and an Escape both closed a panel and cleared a field the one time both
-    /// were listening.
-    fn react(&mut self, input: &mut Input) {
-        if input.took(Key::Backspace) && self.caret > 0 {
-            let back = self.back_one();
-            self.text.drain(back..self.caret);
-            self.caret = back;
-        }
-        if input.took(Key::Delete) {
-            let forward = self.forward_one();
-            self.text.drain(self.caret..forward);
-        }
-        if input.took(Key::Left) {
-            self.caret = self.back_one();
-        }
-        if input.took(Key::Right) {
-            self.caret = self.forward_one();
-        }
-        if input.took(Key::Home) {
-            self.caret = 0;
-        }
-        if input.took(Key::End) {
-            self.caret = self.text.len();
-        }
-        if input.chord(Key::Char('v'))
-            && let Some(said) = crate::clip::read()
-        {
-            self.insert(&said);
-        }
-        if !input.typed().is_empty() {
-            let typed = input.typed().to_string();
-            self.insert(&typed);
-        }
+        self.put(self.caret + clean.len());
     }
 
     fn style() -> matterless_layout::Style {
@@ -230,20 +280,149 @@ impl Field {
         }
     }
 
+    /// How wide what is drawn is, up to byte `at`.
+    fn upto(&self, fonts: &mut Fonts, at: usize) -> f32 {
+        matterless_layout::extent_of(fonts, &self.shown_upto(at), f32::MAX, Self::style()).width
+    }
+
+    /// Which character boundary `x` is nearest, `x` measured from the left of
+    /// the text rather than of the box.
+    ///
+    /// Every boundary is measured. A field holds a hostname or a password, so
+    /// this is a few dozen measurements on a press, and the alternative --
+    /// stepping by an assumed character width -- is wrong for every font that
+    /// is not monospaced, which is the one this draws in.
+    fn boundary_at(&self, fonts: &mut Fonts, x: f32) -> usize {
+        let mut best = 0;
+        let mut closest = f32::MAX;
+        let mut at = 0;
+        loop {
+            let away = (self.upto(fonts, at) - x).abs();
+            if away < closest {
+                closest = away;
+                best = at;
+            }
+            match self.text[at..].chars().next() {
+                Some(one) => at += one.len_utf8(),
+                None => break,
+            }
+        }
+        best
+    }
+
     /// How far the text is pushed left so the caret stays in the box.
     ///
     /// Worked out each frame rather than kept: it is a function of the text,
     /// the caret and the width, all three of which the caller already has, and
     /// a stored one is a fourth thing that can disagree with them.
     fn offset(&self, fonts: &mut Fonts, inner: f32) -> f32 {
-        let caret = matterless_layout::extent_of(
-            fonts,
-            &self.shown_before_caret(),
-            f32::MAX,
-            Self::style(),
-        )
-        .width;
+        let caret = self.upto(fonts, self.caret);
         (caret + CARET - inner).max(0.0)
+    }
+
+    /// Where inside the text a press at window `x` landed.
+    fn pressed_at(&self, fonts: &mut Fonts, box_of: Rect, x: f32) -> usize {
+        let inner = box_of.inset(FIELD_PAD);
+        let offset = self.offset(fonts, inner.width);
+        self.boundary_at(fonts, x - inner.x + offset)
+    }
+
+    /// A press, a drag, or a second and third press in the same place.
+    pub fn pointer(&mut self, fonts: &mut Fonts, input: &Input, box_of: Rect, named: &Named) {
+        let Some((x, _)) = input.pointer_at() else {
+            return;
+        };
+        let mine = named.of(self.slug);
+        if input.pressed_now() == Some(mine.as_str()) {
+            let at = self.pressed_at(fonts, box_of, x);
+            match input.clicks() {
+                // A word, then the lot. What every other box on this machine
+                // does, and the reason a reader double-presses a hostname
+                // rather than dragging across it.
+                2 => self.select_word_at(at),
+                n if n >= 3 => self.select_all(),
+                _ => self.go(at, input.mods().shift),
+            }
+            return;
+        }
+        // Still held, from a press that began in this box: the caret follows
+        // and the anchor stays where the press put it, which is a selection
+        // being dragged out.
+        if input.pressed() == Some(mine.as_str()) {
+            let at = self.pressed_at(fonts, box_of, x);
+            self.go(at, true);
+        }
+    }
+
+    /// Takes the frame's keystrokes, if this field holds the keyboard.
+    ///
+    /// The keys are *taken* rather than read: the window reads the same input,
+    /// and an Escape both closed a panel and cleared a field the one time both
+    /// were listening.
+    /// `clipboard` is the window's, not the platform's.
+    ///
+    /// The same contract the message box has: the window owns one string,
+    /// syncs it with the system clipboard around the frame, and hands it to
+    /// whatever is being typed in. Reaching for the real clipboard in here
+    /// would make every test of this field depend on -- and clobber -- what
+    /// the reader happened to have copied.
+    fn react(&mut self, input: &mut Input, clipboard: &mut String) {
+        let extend = input.mods().shift;
+        if input.chord(Key::Char('a')) {
+            self.select_all();
+        }
+        if input.chord(Key::Char('c'))
+            && let Some(said) = self.selection()
+        {
+            *clipboard = said;
+        }
+        if input.chord(Key::Char('x'))
+            && let Some(said) = self.selection()
+        {
+            *clipboard = said;
+            self.cut_selection();
+        }
+        if input.took(Key::Backspace) && !self.cut_selection() && self.caret > 0 {
+            let back = self.back_one();
+            self.text.drain(back..self.caret);
+            self.put(back);
+        }
+        if input.took(Key::Delete) && !self.cut_selection() {
+            let forward = self.forward_one();
+            self.text.drain(self.caret..forward);
+        }
+        if input.took(Key::Left) {
+            // A selection collapses to the end the caret is moving towards,
+            // rather than stepping one off wherever the caret happens to be.
+            match self.has_selection() && !extend {
+                true => self.put(self.span().0),
+                false => self.go(self.back_one(), extend),
+            }
+        }
+        if input.took(Key::Right) {
+            match self.has_selection() && !extend {
+                true => self.put(self.span().1),
+                false => self.go(self.forward_one(), extend),
+            }
+        }
+        if input.took(Key::Home) {
+            self.go(0, extend);
+        }
+        if input.took(Key::End) {
+            self.go(self.text.len(), extend);
+        }
+        if input.chord(Key::Char('v')) && !clipboard.is_empty() {
+            let pasted = clipboard.clone();
+            self.insert(&pasted);
+        }
+        // Typed text last, and only when no chord claimed the frame. A
+        // platform that reports `Ctrl+V` as both a chord and the letter "v"
+        // would otherwise paste and then type a v -- which the message box
+        // already knew and this box had to learn the same way.
+        if !input.typed().is_empty() && !input.mods().command {
+            let typed = input.typed().to_string();
+            self.insert(&typed);
+        }
     }
 
     /// `within` is what the clip goes back to.
@@ -297,7 +476,22 @@ impl Field {
         // longer than the box: without the clip it runs out over the card.
         let offset = self.offset(fonts, inner.width);
         scene.clip_to(inner.x, box_of.y, inner.width, box_of.height);
-        let put_back = within;
+
+        // The selection first, or it would cover the letters it is meant to
+        // be behind.
+        let (from, to) = self.span();
+        if from != to {
+            let left = self.upto(fonts, from) - offset;
+            let right = self.upto(fonts, to) - offset;
+            scene.fill(
+                inner.x + left,
+                baseline,
+                right - left,
+                FIELD_SIZE * 1.4,
+                [palette.ink[0], palette.ink[1], palette.ink[2], 60],
+            );
+        }
+
         let glyphs = painter.run(
             fonts,
             &self.shown(),
@@ -307,13 +501,7 @@ impl Field {
         );
         scene.glyphs(glyphs, palette.ink, palette.faint);
         if focused {
-            let caret = matterless_layout::extent_of(
-                fonts,
-                &self.shown_before_caret(),
-                f32::MAX,
-                Self::style(),
-            )
-            .width;
+            let caret = self.upto(fonts, self.caret);
             scene.fill(
                 inner.x + caret - offset,
                 baseline,
@@ -322,7 +510,7 @@ impl Field {
                 [palette.ink[0], palette.ink[1], palette.ink[2], 255],
             );
         }
-        scene.clip_to(put_back.x, put_back.y, put_back.width, put_back.height);
+        scene.clip_to(within.x, within.y, within.width, within.height);
     }
 }
 
@@ -594,17 +782,37 @@ impl SignIn {
     }
 
     /// Takes the frame, and answers whether the reader asked to sign in.
-    pub fn react(&mut self, input: &mut Input) -> Option<Act> {
+    pub fn react(
+        &mut self,
+        fonts: &mut Fonts,
+        input: &mut Input,
+        clipboard: &mut String,
+    ) -> Option<Act> {
         if self.trying {
             // Nothing is taken while one is in flight, including the
             // keystrokes: a reader who typed into a field whose value had
             // already been sent would be editing a request that has gone.
             return None;
         }
-        if let Some(slug) = named().clicked(input)
-            && self.field_mut(slug).is_some()
-        {
-            input.focus_on(named().of(slug));
+        // A press in a field takes the keyboard and puts the caret where it
+        // landed; the same press held and moved drags a selection out. On the
+        // press rather than on the click, because a selection is finished
+        // before the button comes back up.
+        let card = self.laid().map(|(card, _, _)| card);
+        let boxes = card.map(|card| self.boxes_of(card)).unwrap_or_default();
+        let holding = input.pressed().map(str::to_string);
+        let starting = input.pressed_now().map(str::to_string);
+        for (slug, rect) in boxes {
+            let mine = named().of(slug);
+            if holding.as_deref() != Some(mine.as_str()) {
+                continue;
+            }
+            if starting.as_deref() == Some(mine.as_str()) {
+                input.focus_on(mine.clone());
+            }
+            if let Some(field) = self.field_mut(slug) {
+                field.pointer(fonts, input, rect, &named());
+            }
         }
         // Tab walks the fields, and Shift+Tab walks back. Taken before the
         // field sees it, or a Tab would be typed into one.
@@ -621,7 +829,7 @@ impl SignIn {
         if let Some(slug) = self.focused(input)
             && let Some(field) = self.field_mut(slug)
         {
-            field.react(input);
+            field.react(input, clipboard);
         }
         if entered && !self.ready() {
             self.walk(input, 1);
@@ -765,6 +973,136 @@ pub fn logo() -> Option<(u32, u32, Vec<u8>)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use matterless_ui::input::{Event, Mods};
+
+    fn press(input: &mut Input, key: Key) {
+        input.apply(Event::Key { key, down: true }, &[]);
+    }
+
+    fn holding(input: &mut Input, mods: Mods) {
+        input.apply(Event::Modifiers(mods), &[]);
+    }
+
+    fn command() -> Mods {
+        Mods {
+            command: true,
+            ..Mods::default()
+        }
+    }
+
+    fn shift() -> Mods {
+        Mods {
+            shift: true,
+            ..Mods::default()
+        }
+    }
+
+    /// A field with `said` in it and everything selected.
+    fn all_of(said: &str) -> Field {
+        let mut field = Field::new("server", "Server", "");
+        field.set(said);
+        field.select_all();
+        field
+    }
+
+    /// Windows reports `Ctrl+V` as a chord *and* as the letter "v".
+    ///
+    /// So a paste put the clipboard in and then typed a v after it, which is
+    /// exactly what somebody pasting a password into this form got -- and a
+    /// masked field shows one bullet per character, so the only sign of it was
+    /// that the sign-in failed. The message box already guarded against this;
+    /// this box was written without the guard and earned the same bug.
+    #[test]
+    fn a_paste_does_not_also_type_the_v() {
+        let mut field = Field::new("server", "Server", "");
+        let mut input = Input::default();
+        holding(&mut input, command());
+        press(&mut input, Key::Char('v'));
+        input.apply(Event::Typed("v".to_string()), &[]);
+        let mut clipboard = "mattermost.example.com".to_string();
+        field.react(&mut input, &mut clipboard);
+        assert_eq!(field.text, "mattermost.example.com");
+    }
+
+    #[test]
+    fn typing_over_a_selection_replaces_it() {
+        let mut field = all_of("wrong.example.com");
+        let mut input = Input::default();
+        input.apply(Event::Typed("right.example.com".to_string()), &[]);
+        field.react(&mut input, &mut String::new());
+        assert_eq!(field.text, "right.example.com");
+    }
+
+    #[test]
+    fn select_all_then_backspace_empties_it() {
+        let mut field = all_of("mattermost.example.com");
+        let mut input = Input::default();
+        press(&mut input, Key::Backspace);
+        field.react(&mut input, &mut String::new());
+        assert_eq!(field.text, "");
+    }
+
+    /// Ctrl+A reaches the field, and it is a chord rather than the letter.
+    #[test]
+    fn a_chord_selects_everything() {
+        let mut field = Field::new("login", "Login", "");
+        field.set("ada");
+        let mut input = Input::default();
+        holding(&mut input, command());
+        press(&mut input, Key::Char('a'));
+        input.apply(Event::Typed("a".to_string()), &[]);
+        field.react(&mut input, &mut String::new());
+        assert!(field.has_selection(), "Ctrl+A selected nothing");
+        assert_eq!(field.text, "ada", "Ctrl+A typed an a as well");
+    }
+
+    /// A password never reaches the clipboard, selected or not.
+    #[test]
+    fn a_masked_field_will_not_be_copied() {
+        let mut field = Field::new("password", "Password", "").masked();
+        field.set("hunter2");
+        field.select_all();
+        assert!(field.has_selection());
+        assert_eq!(field.selection(), None);
+
+        let mut input = Input::default();
+        holding(&mut input, command());
+        press(&mut input, Key::Char('c'));
+        let mut clipboard = String::new();
+        field.react(&mut input, &mut clipboard);
+        assert_eq!(clipboard, "", "the password reached the clipboard");
+    }
+
+    /// Left and Right collapse a selection to the end they point at, rather
+    /// than stepping one character off wherever the caret happens to be.
+    #[test]
+    fn an_arrow_collapses_a_selection_to_the_end_it_points_at() {
+        let mut field = all_of("ada");
+        let mut input = Input::default();
+        press(&mut input, Key::Left);
+        field.react(&mut input, &mut String::new());
+        assert!(!field.has_selection());
+        assert_eq!(field.caret, 0);
+
+        let mut field = all_of("ada");
+        let mut input = Input::default();
+        press(&mut input, Key::Right);
+        field.react(&mut input, &mut String::new());
+        assert!(!field.has_selection());
+        assert_eq!(field.caret, 3);
+    }
+
+    #[test]
+    fn shift_and_an_arrow_extends_rather_than_moves() {
+        let mut field = Field::new("login", "Login", "");
+        field.set("ada");
+        let mut input = Input::default();
+        holding(&mut input, shift());
+        press(&mut input, Key::Left);
+        field.react(&mut input, &mut String::new());
+        assert_eq!(field.selection().as_deref(), Some("a"));
+    }
 
     fn filled() -> SignIn {
         let mut form = SignIn::default();
