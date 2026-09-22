@@ -3,7 +3,7 @@ name = "matterless-view"
 # The version the release numbers, which is what the updater compares a
 # manifest against. The only copy of it now the shell that carried a second one
 # is gone.
-version = "0.3.5"
+version = "0.3.6"
 edition = "2024"
 
 [dependencies]
