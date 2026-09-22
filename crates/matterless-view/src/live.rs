@@ -359,10 +359,22 @@ fn minted_token() -> Option<String> {
 /// bearer credential for somebody's account, and the database's own folder is
 /// somewhere anything running as this user can read.
 pub fn remember_token(token: &str) -> Result<(), String> {
-    keyring::Entry::new("matterless", "session")
-        .map_err(|error| format!("no keychain entry: {error}"))?
+    let entry = keyring::Entry::new("matterless", "session")
+        .map_err(|error| format!("no keychain entry: {error}"))?;
+    entry
         .set_password(token)
-        .map_err(|error| format!("the keychain refused the session: {error}"))
+        .map_err(|error| format!("the keychain refused the session: {error}"))?;
+    // Read back, because a write that reports success and does not keep the
+    // value is exactly what this machine's credential store does: the entry is
+    // listed, and asking for its password answers nothing usable. A caller
+    // told the session was kept would go on to read it and find nothing.
+    match entry.get_password() {
+        Ok(kept) if kept == token => Ok(()),
+        Ok(_) => Err("the keychain kept something other than the session".to_string()),
+        Err(error) => Err(format!(
+            "the keychain took the session and lost it: {error}"
+        )),
+    }
 }
 
 /// Keeps the server, beside the database, where `stored_server` reads it.

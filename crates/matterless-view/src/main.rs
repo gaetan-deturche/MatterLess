@@ -544,6 +544,17 @@ struct App {
     /// needed: a refused sign-in has to keep what was typed, and a form built
     /// fresh each frame would not.
     signin: matterless_view::signin::SignIn,
+    /// The session this run holds, once somebody has signed in.
+    ///
+    /// Held here rather than read back out of the keychain, because signing in
+    /// is the one moment this program has a token in its hand and does not
+    /// need to ask anybody for it. It used to ask: `opened_a_session` wrote
+    /// the token away and then `connect` read it again, so a keychain that
+    /// took the write and would not give it back sent the reader straight to
+    /// the sign-in screen they had just come from -- with the password
+    /// cleared, and nothing on screen saying anything had gone wrong, because
+    /// as far as either half was concerned nothing had.
+    session: Option<String>,
     /// What a clicked notification does. Held once and shared with every toast,
     /// because each one outlives the call that raised it.
     clicked: Option<Arc<matterless_view::toast::Clicked>>,
@@ -852,6 +863,7 @@ impl App {
             asked: std::collections::HashSet::new(),
             arrived: Vec::new(),
             signin: matterless_view::signin::SignIn::default(),
+            session: None,
             clicked: None,
             switcher: matterless_view::switcher::Switcher::default(),
             search: matterless_view::search::Search::default(),
@@ -1417,7 +1429,13 @@ impl App {
             self.stayed_offline("no server to talk to");
             return;
         };
-        let Some(token) = matterless_view::live::stored_token() else {
+        // What this run already holds first, and only then what was kept from
+        // a previous one.
+        let Some(token) = self
+            .session
+            .clone()
+            .or_else(matterless_view::live::stored_token)
+        else {
             println!("no session in the keychain; staying offline");
             self.stayed_offline("no session to sign in with");
             return;
@@ -3220,7 +3238,15 @@ impl App {
         let store = matterless_store::Store::open(&path)
             .map_err(|error| format!("could not open {}: {error}", path.display()))?;
         matterless_view::live::remember_server(&path, server)?;
-        matterless_view::live::remember_token(token.bearer())?;
+        // Held for this run before anything is asked to keep it for the next.
+        self.session = Some(token.bearer().to_string());
+        // And keeping it is allowed to fail. It only decides whether the next
+        // launch has to ask again -- this one is signed in either way, and
+        // refusing to go on because a keychain would not take a write is
+        // refusing over something the reader has already done successfully.
+        if let Err(error) = matterless_view::live::remember_token(token.bearer()) {
+            eprintln!("{error} -- signed in for this run, and it will ask again next time");
+        }
         println!("signed in as {username}, store at {}", path.display());
         self.store = Some(Arc::new(store));
         self.me = user_id.to_string();
