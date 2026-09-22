@@ -161,6 +161,14 @@ struct Card {
     /// The heading over the group of choices.
     group: Rect,
     choices: Vec<Choice>,
+    /// The heading over the build this is, and the line under it naming it.
+    about: Rect,
+    build: Rect,
+    /// What the last look for a newer build came back with, when there is
+    /// something to say.
+    said: Option<Rect>,
+    /// The button that goes and looks, and the one that shuts the panel.
+    look: Laid,
     foot: Laid,
 }
 
@@ -169,6 +177,12 @@ struct Card {
 pub struct Settings {
     shown: bool,
     pub text: Text,
+    /// Whether a look for a newer build is out, so it is not asked for twice
+    /// and the button can say what it is doing.
+    looking: bool,
+    /// What that look came back with, in the reader's words rather than the
+    /// program's.
+    said: String,
     placed: Option<Card>,
 }
 
@@ -178,6 +192,11 @@ pub enum Did {
     /// Text is to be drawn the other way, and the caller has to say so to
     /// whatever holds the glyphs.
     Text(Text),
+    /// Go and see whether there is a newer build.
+    ///
+    /// Asked for rather than done here: this widget knows where its buttons
+    /// are and nothing about the network, which is the window's business.
+    Look,
     Close,
 }
 
@@ -252,7 +271,31 @@ impl Settings {
             .sum::<f32>()
             + ROW_GAP * (sizes.len().saturating_sub(1) as f32);
 
-        let height = PAD + head + GAP + heading + ROW_GAP + rows + GAP + BUTTON_HEIGHT + PAD;
+        // The build this is, and what the last look for a newer one said. The
+        // line is only measured into the card when there is something on it:
+        // an empty row of air under a button reads as something missing.
+        let about = tall(fonts, "About", inner, GROUP_SIZE);
+        let build = tall(fonts, &self.build(), inner, LABEL_SIZE);
+        let band = BUTTON_HEIGHT.max(build);
+        let said = match self.said.is_empty() {
+            true => 0.0,
+            false => ROW_GAP + tall(fonts, &self.said, inner, SAID_SIZE),
+        };
+
+        let height = PAD
+            + head
+            + GAP
+            + heading
+            + ROW_GAP
+            + rows
+            + GAP
+            + about
+            + ROW_GAP
+            + band
+            + said
+            + GAP
+            + BUTTON_HEIGHT
+            + PAD;
         let rect = Rect::new(
             window.x + (window.width - width) / 2.0,
             window.y + ((window.height - height) / 2.0).max(PAD),
@@ -275,6 +318,32 @@ impl Settings {
             y = row.bottom() + ROW_GAP;
         }
 
+        let about = Rect::new(rect.x + PAD, y - ROW_GAP + GAP, inner, about);
+        let band = Rect::new(rect.x, about.bottom() + ROW_GAP, rect.width, band);
+        // The name of the build on the left, the button that goes looking on
+        // the right, on one line: they are the same subject, and a button
+        // under the sentence it belongs to reads as a second thing.
+        let look = Row::new(NAME, band)
+            .pad(PAD)
+            .depth(63)
+            .enabled(!self.looking)
+            .button(Button::plain("look", self.looking_label()))
+            .measure(fonts);
+        let build = Rect::new(
+            band.x + PAD,
+            band.y + (band.height - build) / 2.0,
+            (look.spare() - PAD).max(0.0),
+            build,
+        );
+        let said = (!self.said.is_empty()).then(|| {
+            Rect::new(
+                rect.x + PAD,
+                band.bottom() + ROW_GAP,
+                inner,
+                tall(fonts, &self.said, inner, SAID_SIZE),
+            )
+        });
+
         let foot = Row::new(
             NAME,
             Rect::new(
@@ -293,8 +362,43 @@ impl Settings {
             rect,
             group,
             choices,
+            about,
+            build,
+            said,
+            look,
             foot,
         }
+    }
+
+    /// Which build this is, which is the question the button beside it
+    /// answers for.
+    fn build(&self) -> String {
+        format!("MatterLess {}", crate::update::running())
+    }
+
+    fn looking_label(&self) -> &'static str {
+        match self.looking {
+            true => "Looking...",
+            false => "Check for updates",
+        }
+    }
+
+    /// A look has gone out: the button is spent until it comes back.
+    pub fn looking(&mut self) {
+        self.looking = true;
+        self.said = "Asking for the newest build...".to_string();
+        self.placed = None;
+    }
+
+    /// And it came back, with whatever there is to say about it.
+    ///
+    /// Said here rather than only on the strip along the top, because this is
+    /// where it was asked for -- a button that answers somewhere else is a
+    /// button that did nothing.
+    pub fn looked(&mut self, said: impl Into<String>) {
+        self.looking = false;
+        self.said = said.into();
+        self.placed = None;
     }
 
     fn laid(&self) -> Option<&Card> {
@@ -318,6 +422,7 @@ impl Settings {
         for choice in &card.choices {
             placed.push(named().at(choice.which.slug(), choice.rect, 62));
         }
+        placed.extend(card.look.boxes());
         placed.extend(card.foot.boxes());
         placed
     }
@@ -337,6 +442,17 @@ impl Settings {
         {
             self.hide();
             return Some(Did::Close);
+        }
+        if self
+            .laid()
+            .and_then(|card| card.look.clicked(input))
+            .is_some()
+        {
+            // The panel says it is looking before anything has been asked:
+            // the answer is a round trip away, and a button that sits there
+            // unchanged reads as a button that missed.
+            self.looking();
+            return Some(Did::Look);
         }
         let clicked = input.clicked()?.to_string();
         if let Some(slug) = named().slug(&clicked) {
@@ -470,7 +586,37 @@ impl Settings {
                 );
                 scene.glyphs(glyphs, palette.faint, palette.faint);
             }
+
+            let glyphs = painter.run(
+                fonts,
+                "About",
+                card.about.x,
+                card.about.y,
+                Run::label(card.about.width).sized(GROUP_SIZE),
+            );
+            scene.glyphs(glyphs, palette.faint, palette.faint);
+
+            let glyphs = painter.run(
+                fonts,
+                &self.build(),
+                card.build.x,
+                card.build.y,
+                Run::label(card.build.width).sized(LABEL_SIZE),
+            );
+            scene.glyphs(glyphs, palette.soft, palette.faint);
+
+            if let Some(said) = card.said {
+                let glyphs = painter.run(
+                    fonts,
+                    &self.said,
+                    said.x,
+                    said.y,
+                    Run::label(said.width).sized(SAID_SIZE),
+                );
+                scene.glyphs(glyphs, palette.faint, palette.faint);
+            }
         }
+        card.look.draw(into, input);
         card.foot.draw(into, input);
     }
 }
@@ -561,8 +707,9 @@ mod tests {
             );
             floor = choice.rect.bottom();
         }
-        // A box for each, plus the card, the window behind it, and the foot.
-        assert_eq!(settings.boxes(window()).len(), 3 + card.choices.len());
+        // A box for each, plus the card, the window behind it, and the two
+        // buttons -- the one that looks for a build and the one that shuts it.
+        assert_eq!(settings.boxes(window()).len(), 4 + card.choices.len());
     }
 
     /// What a choice says stays inside the choice.
@@ -666,6 +813,43 @@ mod tests {
         input.apply(matterless_ui::input::Event::PointerReleased, boxes);
     }
 
+    /// Asking for a newer build says so, and answers where it was asked.
+    ///
+    /// The card grows by the line it answers on, which is why this measures
+    /// again rather than trusting the first placement.
+    #[test]
+    fn looking_for_a_build_is_said_on_the_card() {
+        let (mut settings, mut fonts) = shown();
+        let before = settings.laid().expect("measured").rect.height;
+        assert!(settings.laid().expect("measured").said.is_none());
+
+        let boxes = settings.boxes(window());
+        let look = settings
+            .laid()
+            .expect("measured")
+            .look
+            .rect("look")
+            .expect("placed");
+        let mut input = Input::default();
+        press(&mut input, &boxes, look);
+        assert_eq!(settings.react(&mut input), Some(Did::Look));
+        assert!(settings.open(), "asking is not leaving");
+
+        settings.measure(&mut fonts, window());
+        let card = settings.laid().expect("measured");
+        assert!(card.said.is_some(), "nothing says a look went out");
+        assert!(card.rect.height > before, "the card did not make room");
+        // And the button is spent while the answer is on its way: a disabled
+        // row draws dimmed and registers nothing to press.
+        assert!(card.look.boxes().is_empty(), "it can be asked twice");
+
+        settings.looked("This is the newest build.");
+        settings.measure(&mut fonts, window());
+        let card = settings.laid().expect("measured");
+        assert!(!card.look.boxes().is_empty(), "the button never came back");
+        assert!(card.said.is_some());
+    }
+
     /// And the card holds everything measured into it.
     #[test]
     fn nothing_runs_out_of_the_card() {
@@ -674,7 +858,18 @@ mod tests {
         let done = card.foot.rect("done").expect("placed");
         let last = card.choices.last().expect("a choice").rect;
         assert!(card.group.y > card.rect.y + PAD);
-        assert!(last.bottom() <= done.y, "the choices reach the button");
+        assert!(
+            last.bottom() <= card.about.y,
+            "the choices reach the heading"
+        );
+        assert!(
+            card.about.bottom() <= card.build.y,
+            "the heading reaches the build"
+        );
+        assert!(
+            card.build.bottom() <= done.y,
+            "the build reaches the button"
+        );
         assert!(
             done.bottom() <= card.rect.bottom() - PAD + 0.5,
             "the button reaches past the foot of the card"

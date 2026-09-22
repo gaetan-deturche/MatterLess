@@ -73,6 +73,12 @@ pub enum Update {
     /// Offered, never taken: nothing has been fetched at this point beyond the
     /// manifest saying it exists.
     Updatable(crate::update::Offer),
+    /// A look somebody asked for came back, with whatever it found -- nothing
+    /// newer, something newer, or a reason it could not tell.
+    ///
+    /// Carries the whole outcome rather than only the good half, because the
+    /// reader is waiting on the answer either way.
+    Checked(Result<Option<crate::update::Offer>, String>),
     /// Installing the build the reader accepted did not work.
     UpdateFailed(String),
     /// A file is on the server and waiting for a message to claim it.
@@ -549,6 +555,22 @@ pub const HOW_OFTEN: std::time::Duration = std::time::Duration::from_secs(2 * 60
 /// One thread that sleeps, rather than a timer the window has to hold: the
 /// window draws when something happens, and nothing happening is exactly the
 /// state this has to work in.
+/// Looks once, because somebody asked.
+///
+/// Its own call rather than a nudge to the loop above: what the reader wants
+/// is an answer, and "already the newest build" is an answer. The loop has
+/// nowhere to say that -- it only ever speaks when there is something to
+/// offer, which is right for a check nobody asked for and useless for one
+/// somebody is waiting on.
+///
+/// Unconditional, unlike the periodic look, which a dev build skips: asking
+/// is the whole point of pressing it.
+pub fn look_once(wake: impl Wake) {
+    apart("look for an update now", move || async move {
+        wake.wake(Update::Checked(looked().await));
+    });
+}
+
 pub fn look_for_updates(every: std::time::Duration, wake: impl Wake) {
     apart("look for an update", move || async move {
         loop {

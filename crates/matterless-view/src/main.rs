@@ -1814,6 +1814,27 @@ impl App {
                 // question for the layout rather than for this.
                 self.relayout();
             }
+            Update::Checked(found) => {
+                // Answered where it was asked, and then handed on: a build
+                // that is there is a build the strip along the top should
+                // offer, whoever went looking for it.
+                match found {
+                    Ok(Some(offer)) => {
+                        self.settings
+                            .looked(format!("MatterLess {} is ready to install.", offer.version));
+                        self.apply(Update::Updatable(offer));
+                        return;
+                    }
+                    Ok(None) => self.settings.looked("This is the newest build."),
+                    Err(why) => {
+                        eprintln!("could not look for an update: {why}");
+                        self.settings
+                            .looked("Could not reach the place builds are kept.");
+                    }
+                }
+                let window = self.window_rect();
+                self.settings.measure(&mut self.fonts, window);
+            }
             Update::UpdateFailed(why) => {
                 self.offered.failed(&why);
                 let window = self.notice_rect();
@@ -3257,6 +3278,22 @@ impl App {
         self.sidebar.selected = Some(first.clone());
         self.open_channel(&first);
         true
+    }
+
+    /// Goes and looks for a newer build, because the reader asked.
+    ///
+    /// The periodic look needs a session to have been opened before it starts,
+    /// and a dev build never starts it at all. This one needs neither: it is
+    /// somebody pressing a button, and the answer is the same whether or not
+    /// the window ever reached a server.
+    fn look_for_a_build(&mut self) {
+        let Some(waker) = self.waker.clone() else {
+            // No event loop to answer on, which is the window not being up
+            // yet. Nothing can have pressed the button.
+            self.settings.looked("Nothing to look with yet.");
+            return;
+        };
+        matterless_view::live::look_once(Proxy(waker));
     }
 
     /// Draws text the way the reader asked, and remembers that they did.
@@ -5016,8 +5053,10 @@ impl App {
             // to agree with -- and a click is a press and a release agreeing.
             // Every press in here died on the frame it was made.
             if let Some(did) = did {
-                if let matterless_view::settings::Did::Text(mode) = did {
-                    self.draw_text_as(mode);
+                match did {
+                    matterless_view::settings::Did::Text(mode) => self.draw_text_as(mode),
+                    matterless_view::settings::Did::Look => self.look_for_a_build(),
+                    matterless_view::settings::Did::Close => {}
                 }
                 self.input = Input::default();
             }
