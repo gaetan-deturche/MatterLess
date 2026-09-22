@@ -29,13 +29,33 @@ fn the_credential_store_keeps_what_it_is_given() {
         .set_password(secret)
         .expect("the store refused a write");
     let read = entry.get_password();
-    // Removed before the assert, so a failure does not leave it behind.
+    // What Windows itself can see, while it is still there.
+    //
+    // This is the half that matters, and the half this test did not have. A
+    // write and a read back inside one process prove nothing: with no platform
+    // feature enabled, `keyring` falls back to a mock that lives in the
+    // process, answers every read with what it was given, and keeps nothing.
+    // That passes a round trip and loses the session at every launch, which is
+    // exactly what the app did for as long as nobody asked this question.
+    //
+    // The target is `{user}.{service}`, which is how the crate names one.
+    let listed = std::process::Command::new("cmdkey").arg("/list").output();
+    let seen = listed
+        .map(|out| {
+            String::from_utf8_lossy(&out.stdout).contains("roundtrip.matterless-keychain-test")
+        })
+        .unwrap_or(false);
+    // Removed before the asserts, so a failure does not leave it behind.
     let removed = entry.delete_credential();
     println!("delete: {removed:?}");
     assert_eq!(
         read.expect("the store took the write and would not read it back"),
         secret,
         "the store kept something other than what it was given"
+    );
+    assert!(
+        seen,
+        "the write never reached Windows: this is the in-process mock, which keeps nothing"
     );
 }
 
