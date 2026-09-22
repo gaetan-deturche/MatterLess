@@ -223,15 +223,6 @@ pub enum Ask {
     },
     /// Be told about one message again later.
     Remind { post_id: String, when: i64 },
-    /// Look for a newer build. Answered with nothing at all when there is
-    /// none, which is the common case and not worth a message.
-    LookForUpdate,
-    /// Fetch, check and run the installer the reader has just accepted.
-    ///
-    /// Does not come back: the installer replaces this executable, so the
-    /// process has to be gone before it can. Only a reader's press reaches
-    /// here -- nothing is downloaded by the looking.
-    InstallUpdate(crate::update::Offer),
     /// Join a public channel, then open it.
     Join { channel_id: String },
     /// Find or create the conversation with one person, then open it.
@@ -487,6 +478,76 @@ fn said_plainly(error: &matterless_core::Error) -> String {
         Error::Api(envelope, _) if !envelope.message.is_empty() => envelope.message.clone(),
         other => other.to_string(),
     }
+}
+
+/// Runs one request on a thread with a runtime of its own.
+///
+/// Three things in this file are a thread, a runtime and one request that has
+/// no business on the socket: signing in, asking what the newest build is, and
+/// fetching it. Two of those have to work when there is no socket at all.
+fn apart<Work>(named: &'static str, work: impl FnOnce() -> Work + Send + 'static)
+where
+    Work: std::future::Future<Output = ()>,
+{
+    std::thread::spawn(move || {
+        match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(runtime) => runtime.block_on(work()),
+            Err(error) => eprintln!("no runtime to {named} with: {error}"),
+        }
+    });
+}
+
+/// Asks the release host whether there is a newer build.
+///
+/// Nothing to do with the session. `looked` builds a client of its own
+/// precisely because this is a request to a release host and has no business
+/// carrying a Mattermost token -- and then it was queued on the socket, which
+/// does not exist until there is a store, a server and a session. So the one
+/// install most in need of an update, the one that cannot sign in, was the
+/// only one that never asked. It never failed a check; it never made one.
+pub fn look_for_update(wake: impl Wake) {
+    apart("look for an update", move || async move {
+        match looked().await {
+            Ok(Some(offer)) => {
+                println!("{} is available", offer.version);
+                wake.wake(Update::Updatable(offer));
+            }
+            Ok(None) => println!("already the newest build"),
+            // A failed check is not a failed start: the client runs perfectly
+            // well on the build it has.
+            Err(error) => eprintln!("could not look for an update: {error}"),
+        }
+    });
+}
+
+/// Fetches, checks and runs the installer the reader has just accepted.
+///
+/// Does not come back when it works: the installer replaces this executable,
+/// so the process has to be gone before it can. Only a reader's press reaches
+/// here -- nothing is downloaded by the looking.
+///
+/// Off the socket for the same reason as the looking, and it matters more
+/// here: an offer this window could show and not install would be worse than
+/// one it never made.
+pub fn install_update(offer: crate::update::Offer, wake: impl Wake) {
+    apart("install an update", move || async move {
+        match fetched(&offer).await {
+            Ok(bytes) => match crate::update::install(&bytes, &offer.version) {
+                Ok(_) => unreachable!("the installer took over"),
+                Err(error) => {
+                    eprintln!("installing {}: {error}", offer.version);
+                    wake.wake(Update::UpdateFailed(error));
+                }
+            },
+            Err(error) => {
+                eprintln!("fetching {}: {error}", offer.version);
+                wake.wake(Update::UpdateFailed(error));
+            }
+        }
+    });
 }
 
 /// Opens the socket on a thread of its own and reports what arrives.
@@ -822,34 +883,6 @@ async fn run(
                         match rest.set_reminder(&me_id, &post_id, when).await {
                             Ok(()) => println!("reminder set on {post_id}"),
                             Err(error) => eprintln!("setting a reminder: {error}"),
-                        }
-                    }
-                    Ask::LookForUpdate => {
-                        match looked().await {
-                            Ok(Some(offer)) => {
-                                println!("{} is available", offer.version);
-                                wake.wake(Update::Updatable(offer));
-                            }
-                            Ok(None) => println!("already the newest build"),
-                            // A failed check is not a failed start: the client
-                            // runs perfectly well on the build it has.
-                            Err(error) => eprintln!("could not look for an update: {error}"),
-                        }
-                    }
-                    Ask::InstallUpdate(offer) => {
-                        match fetched(&offer).await {
-                            // `install` does not return when it works.
-                            Ok(bytes) => match crate::update::install(&bytes, &offer.version) {
-                                Ok(_) => unreachable!("the installer took over"),
-                                Err(error) => {
-                                    eprintln!("installing {}: {error}", offer.version);
-                                    wake.wake(Update::UpdateFailed(error));
-                                }
-                            },
-                            Err(error) => {
-                                eprintln!("fetching {}: {error}", offer.version);
-                                wake.wake(Update::UpdateFailed(error));
-                            }
                         }
                     }
                     Ask::Join { channel_id } => {

@@ -1388,7 +1388,18 @@ impl App {
         // Looked for once, here, rather than on a timer: an update is not
         // urgent, and asking again mid-session would interrupt reading to talk
         // about the client rather than about anything the reader came for.
-        let looking = matterless_view::update::asks();
+        //
+        // And before everything below it, which is the point. This used to be
+        // queued on the socket, so every one of the three returns under this
+        // line -- no store, no server, no session -- took the update check
+        // away with it. An install that cannot sign in is the one that most
+        // needs a newer build, and it was the only one that never asked.
+        if matterless_view::update::asks() {
+            matterless_view::live::look_for_update(Proxy(proxy.clone()));
+        } else {
+            println!("no update check in a dev build");
+            self.pretend_offered();
+        }
         // Each of these is said on screen as well as here. They are three
         // different problems with three different answers, and "offline" on
         // its own is the one word that fits all of them and helps with none.
@@ -1421,14 +1432,12 @@ impl App {
         })));
         println!("connecting to {server}");
         self.server = server.clone();
-        let link = matterless_view::live::start(store, server, token, Proxy(proxy));
-        if looking {
-            link.send(matterless_view::live::Ask::LookForUpdate);
-        } else {
-            println!("no update check in a dev build");
-            self.pretend_offered();
-        }
-        self.link = Some(link);
+        self.link = Some(matterless_view::live::start(
+            store,
+            server,
+            token,
+            Proxy(proxy),
+        ));
     }
 
     /// Puts a made-up offer on screen, in a dev build, when asked.
@@ -3942,7 +3951,11 @@ impl App {
     /// the two come to disagree about what is under the pointer.
     fn targets(&self) -> Vec<Placed> {
         if self.signing_in() {
-            return self.signin.boxes(self.window_rect());
+            let mut boxes = self.signin.boxes(self.below_notice());
+            // After, so the strip is the innermost match along the top: `at`
+            // takes the last box holding the point, not the shallowest.
+            boxes.extend(self.offered.boxes(self.notice_rect()));
+            return boxes;
         }
         let mut boxes = self.shell();
         boxes.extend(self.rail.boxes(self.rail_rect()));
@@ -4331,6 +4344,55 @@ impl App {
         }
         if let Some(words) = aside {
             self.clipboard = words;
+        }
+    }
+
+    /// The strip across the top, and what its buttons do.
+    ///
+    /// Its own method because two screens carry it: the conversation, and the
+    /// sign-in screen -- which is the one that most needs it, being what a
+    /// window shows when it cannot reach the server at all.
+    fn answered_the_strip(&mut self) {
+        if !self.offered.open() {
+            return;
+        }
+        let notice = self.notice_rect();
+        self.offered.measure(&mut self.fonts, notice);
+        match self.offered.react(&self.input) {
+            Some(matterless_view::updater_bar::Chose::Install) => {
+                // The waker rather than the socket. Installing never needed a
+                // Mattermost session -- it is a fetch from a release host and
+                // a check against a key -- and asking for one meant the offer
+                // could be shown to a window that could not take it.
+                match (self.offer.clone(), self.waker.clone()) {
+                    (Some(offer), Some(waker)) => {
+                        println!("installing {}", offer.version);
+                        matterless_view::live::install_update(offer, Proxy(waker));
+                    }
+                    _ => self.offered.failed("there is nothing to install"),
+                }
+                // Measured again: the button says something else now.
+                self.offered.measure(&mut self.fonts, notice);
+            }
+            Some(matterless_view::updater_bar::Chose::Later) => {
+                println!("the update was put off");
+                self.offer = None;
+                // The strip has given its row back, so everything under it is
+                // taller than it was.
+                self.relayout();
+            }
+            Some(matterless_view::updater_bar::Chose::News) => {
+                let notes = self.offered.notes().to_string();
+                let version = self
+                    .offer
+                    .as_ref()
+                    .map(|offer| offer.version.clone())
+                    .unwrap_or_default();
+                self.whats_new.show(&version, &notes);
+                let window = self.window_rect();
+                self.whats_new.measure(&mut self.fonts, window);
+            }
+            None => {}
         }
     }
 
@@ -4763,9 +4825,12 @@ impl App {
     /// Hands the frame's input to the widgets that want it.
     fn reacted(&mut self) {
         // Before everything, and alone: with no session this is the whole
-        // window, and nothing behind it is drawn for a press to reach.
+        // window, and nothing behind it is drawn for a press to reach. Except
+        // the strip that offers a newer build, which belongs to every screen
+        // and to this one most of all.
         if self.signing_in() {
-            let window = self.window_rect();
+            self.answered_the_strip();
+            let window = self.below_notice();
             self.signin.measure(&mut self.fonts, window);
             if self
                 .signin
@@ -4806,42 +4871,7 @@ impl App {
             }
             return;
         }
-        if self.offered.open() {
-            let notice = self.notice_rect();
-            self.offered.measure(&mut self.fonts, notice);
-            match self.offered.react(&self.input) {
-                Some(matterless_view::updater_bar::Chose::Install) => {
-                    match (self.offer.clone(), self.link.as_ref()) {
-                        (Some(offer), Some(link)) => {
-                            println!("installing {}", offer.version);
-                            link.send(matterless_view::live::Ask::InstallUpdate(offer));
-                        }
-                        _ => self.offered.failed("there is nothing to install"),
-                    }
-                    // Measured again: the button says something else now.
-                    self.offered.measure(&mut self.fonts, notice);
-                }
-                Some(matterless_view::updater_bar::Chose::Later) => {
-                    println!("the update was put off");
-                    self.offer = None;
-                    // The strip has given its row back, so everything under it
-                    // is taller than it was.
-                    self.relayout();
-                }
-                Some(matterless_view::updater_bar::Chose::News) => {
-                    let notes = self.offered.notes().to_string();
-                    let version = self
-                        .offer
-                        .as_ref()
-                        .map(|offer| offer.version.clone())
-                        .unwrap_or_default();
-                    self.whats_new.show(&version, &notes);
-                    let window = self.window_rect();
-                    self.whats_new.measure(&mut self.fonts, window);
-                }
-                None => {}
-            }
-        }
+        self.answered_the_strip();
         // The viewer first of all and alone: it covers the window, so nothing
         // behind it may take the same press or the same key.
         if self.viewer.open() {
@@ -5834,7 +5864,7 @@ impl App {
     /// says the sample is the reader's.
     fn signin_scene(&mut self) -> Scene {
         let mut scene = Scene::default();
-        let window = self.window_rect();
+        let window = self.below_notice();
         self.signin.measure(&mut self.fonts, window);
         let mut canvas = Canvas {
             scene: &mut scene,
@@ -5843,6 +5873,19 @@ impl App {
             palette: &self.palette,
         };
         self.signin.draw(&mut canvas, &self.input, window);
+        // Over it, because a window that cannot sign in is exactly the one
+        // that may be too old to. Drawn after, so the strip is not inside the
+        // card's own background.
+        if self.offered.open() {
+            let notice = self.notice_rect();
+            let mut canvas = Canvas {
+                scene: &mut scene,
+                painter: &mut self.painter,
+                fonts: &mut self.fonts,
+                palette: &self.palette,
+            };
+            self.offered.draw(&mut canvas, &self.input, notice);
+        }
         scene
     }
 
