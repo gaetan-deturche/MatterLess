@@ -560,6 +560,8 @@ struct App {
     settings: matterless_view::settings::Settings,
     /// A turn of the wheel still arriving.
     glide: matterless_view::glide::Glide,
+    /// The pictures that move, and where in their loops they are.
+    moving: matterless_view::moving::Moving,
     /// Which channel the open thread belongs to.
     ///
     /// Not whatever the column is showing. A thread opened from the Threads
@@ -888,6 +890,7 @@ impl App {
             signin: matterless_view::signin::SignIn::default(),
             settings: matterless_view::settings::Settings::default(),
             glide: matterless_view::glide::Glide::default(),
+            moving: matterless_view::moving::Moving::default(),
             thread_in: None,
             put_off: None,
             watching: false,
@@ -1632,6 +1635,23 @@ impl App {
                 height,
                 rgba,
             } => self.arrived.push((key, width, height, rgba)),
+            Update::Moving {
+                key,
+                width,
+                height,
+                frames,
+            } => {
+                println!("{key} moves: {} frames", frames.len());
+                self.moving.keep(
+                    &key,
+                    matterless_view::moving::Reel::new(
+                        width,
+                        height,
+                        frames,
+                        std::time::Instant::now(),
+                    ),
+                );
+            }
             // Straight to a texture of its own rather than into the atlas --
             // and only if it is still the one being looked at, since a reader
             // flicking through outruns the network.
@@ -3287,6 +3307,80 @@ impl App {
         self.sidebar.selected = Some(first.clone());
         self.open_channel(&first);
         true
+    }
+
+    /// Whether there is anything to see: a window that is up rather than one
+    /// that has the reader's attention.
+    ///
+    /// Not `focused`, which was the first answer and the wrong one: a window
+    /// read beside an editor is not focused, and a picture that stops moving
+    /// whenever the pointer goes elsewhere reads as a picture that has broken
+    /// rather than as a window being frugal. Minimised or in the tray, there
+    /// is nothing to draw for and this goes quiet.
+    fn on_show(&self) -> bool {
+        self.window
+            .as_ref()
+            .is_some_and(|window| !window.is_minimized().unwrap_or(false))
+    }
+
+    /// When the window next has to wake for a picture that moves.
+    ///
+    /// `None` whenever nothing is moving on screen, which is nearly always --
+    /// and that is what keeps this out of the way: the window then waits for
+    /// something to happen rather than for a clock, exactly as it did before
+    /// any picture moved.
+    fn playing(&self) -> Option<std::time::Instant> {
+        if !self.on_show() || self.moving.is_empty() {
+            return None;
+        }
+        let view = self.view.as_ref()?;
+        self.moving
+            .wakes(std::time::Instant::now(), |key| view.atlas.drawn(key))
+    }
+
+    /// Whether a picture on screen is showing a frame it has outlasted.
+    fn overdue(&self) -> bool {
+        if !self.on_show() || self.moving.is_empty() {
+            return false;
+        }
+        let Some(view) = self.view.as_ref() else {
+            return false;
+        };
+        self.moving
+            .overdue(std::time::Instant::now(), |key| view.atlas.drawn(key))
+    }
+
+    /// Queues whatever frame each moving picture is due.
+    ///
+    /// Only what the atlas is still holding, which is what "on screen" means
+    /// here: a picture is put in before the frame that draws it and thrown out
+    /// a few frames after the last one that did, so the atlas already answers
+    /// the question and answers it without walking the scene.
+    ///
+    /// And only while the window is being looked at. A conversation left open
+    /// behind an editor should cost nothing at all, and a loop nobody can see
+    /// is a texture upload and a woken thread for each frame of it.
+    fn played(&mut self) {
+        if !self.on_show() || self.moving.is_empty() {
+            return;
+        }
+        let Some(view) = self.view.as_ref() else {
+            return;
+        };
+        let due = self
+            .moving
+            .due(std::time::Instant::now(), |key| view.atlas.drawn(key));
+        let Some(view) = self.view.as_mut() else {
+            return;
+        };
+        // Over the frame showing rather than into the queue the arriving
+        // pictures use: that queue ends at `put_image`, which answers a key it
+        // already holds with the slot it already gave and writes nothing. A
+        // frame of a picture already on screen is the one thing in this window
+        // that has to overwrite what is under its own key.
+        for (key, width, height, rgba) in due {
+            view.put_frame(&key, &rgba, width, height);
+        }
     }
 
     /// Goes and looks for a newer build, because the reader asked.
@@ -6972,9 +7066,22 @@ impl ApplicationHandler<Update> for App {
         if self.rest.ripened(std::time::Instant::now()) {
             self.forget_divider();
         }
+        // A picture with more than one frame asks to be woken when the frame
+        // showing runs out, rather than the window redrawing continuously for
+        // as long as one is on screen: a loop is ten frames a second and a
+        // window is sixty, so five of every six of those frames would draw
+        // the picture that is already there.
+        let playing = self.playing();
+        // Asked as "is a frame other than the one showing due", not as "has
+        // the wake time passed": the wake is the end of the frame showing, so
+        // by the time it fires the answer to the second question is always no.
+        if self.overdue() {
+            self.redraw();
+        }
         let filling = self.shape_some();
         let next = [
             next,
+            playing,
             self.tooltip.wakes(),
             self.rest.wakes(),
             // So the window wakes to finish shaping even when the drag ends
@@ -7519,6 +7626,11 @@ impl ApplicationHandler<Update> for App {
                         driver.did += did;
                     }
                 }
+                // Whatever frame a moving picture is due, into the same queue
+                // the still ones use: a frame is the same size as the one
+                // before it and goes into the same slot, so nothing above this
+                // knows a picture moved.
+                self.played();
                 // Pictures go into the atlas here, on the thread that owns the
                 // GPU and before the scene names them: uploading after the
                 // draw list is built would show a face one frame late.

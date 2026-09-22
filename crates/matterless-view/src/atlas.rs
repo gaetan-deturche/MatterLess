@@ -448,6 +448,35 @@ impl Store {
         Some(held.slot)
     }
 
+    /// Writes new pixels into the slot a key already holds.
+    ///
+    /// `put` answers a key it already has with the slot it already gave and
+    /// writes nothing, which is right for everything this atlas holds but one:
+    /// nothing changes under its key here -- a new avatar is a new key -- and
+    /// a picture that moves is exactly the exception. Every frame after the
+    /// first went in through `put`, was recognised as a key already held, and
+    /// was dropped on the floor; the loop played perfectly and the screen
+    /// showed frame one.
+    ///
+    /// Answers whether it could. A frame of a different size than the slot is
+    /// not a frame of the same picture, and goes back to being a new picture.
+    fn replace(&mut self, gpu: &Gpu, key: &str, rgba: &[u8], width: u32, height: u32) -> bool {
+        let Some(Some(held)) = self.images.get_mut(key) else {
+            return false;
+        };
+        let needs = (width * height * 4) as usize;
+        if held.slot.width != width || held.slot.height != height || rgba.len() < needs {
+            return false;
+        }
+        let (x, y) = (held.slot.x, held.slot.y);
+        // Kept on this side as well, because a repack moves what is here and
+        // rewrites it from these bytes: without this the sheet would go back
+        // to whichever frame the picture arrived on the next time it filled.
+        held.pixels = rgba[..needs].to_vec();
+        self.surface.write(gpu, x, y, width, height, rgba);
+        true
+    }
+
     fn put(
         &mut self,
         gpu: &Gpu,
@@ -654,6 +683,45 @@ impl Atlas {
         Some((sheet, slot))
     }
 
+    /// Whether a picture asked for in frame `used` counts as still being drawn
+    /// in frame `now`.
+    ///
+    /// One frame of slack and no more. A picture goes into the atlas before
+    /// the frame that draws it, so the freshest mark a caller can see between
+    /// frames is the one before this -- and anything older is a picture the
+    /// window has stopped drawing.
+    fn recently(used: u64, now: u64) -> bool {
+        used + 1 >= now
+    }
+
+    /// Whether the frame just built actually asked for this picture.
+    ///
+    /// Held is not drawn. A picture stays in the atlas until something needs
+    /// the room, so "is it in there" answers yes for every emoji the reader
+    /// has scrolled past today -- and asked that question, a moving picture
+    /// nobody can see goes on costing an upload and a woken window for each
+    /// frame of its loop.
+    ///
+    /// The mark that `image` leaves is the real answer: it names the frame the
+    /// picture was last asked for in. One frame of slack, because a picture is
+    /// put in before the frame that draws it.
+    ///
+    /// Without marking it used, which is the point of it being separate from
+    /// `image`: this is asked *about* a picture rather than for one, and a
+    /// mark made here would keep a picture alive on the strength of nothing
+    /// but the asking.
+    pub fn drawn(&self, key: &str) -> bool {
+        let sheet = match Sheet::of(key) {
+            Sheet::Faces => &self.faces,
+            _ => &self.pictures,
+        };
+        sheet
+            .images
+            .get(key)
+            .and_then(|held| held.as_ref())
+            .is_some_and(|held| Self::recently(held.used, self.now))
+    }
+
     /// A frame has been drawn.
     ///
     /// Counted rather than timed because it is only ever compared against
@@ -685,6 +753,25 @@ impl Atlas {
     ///
     /// `rgba` is straight, not premultiplied, which is what the blend expects
     /// and what every decoder here produces.
+    /// The next frame of a picture that moves, into the slot it already has.
+    ///
+    /// Answers whether the picture was there to be written over. It will not
+    /// be once the sheet has reclaimed it, and a frame of a picture nobody is
+    /// drawing is nothing to put anywhere.
+    pub fn put_frame(
+        &mut self,
+        gpu: &Gpu,
+        key: &str,
+        rgba: &[u8],
+        width: u32,
+        height: u32,
+    ) -> bool {
+        match Sheet::of(key) {
+            Sheet::Faces => self.faces.replace(gpu, key, rgba, width, height),
+            _ => self.pictures.replace(gpu, key, rgba, width, height),
+        }
+    }
+
     pub fn put_image(
         &mut self,
         gpu: &Gpu,
@@ -894,6 +981,30 @@ mod tests {
         assert!(keeps(9, 10), "drawn in the frame before");
         assert!(keeps(7, 10), "three frames back is the edge");
         assert!(!keeps(6, 10), "and four is past it");
+    }
+
+    /// Held is not drawn, and a moving picture asks the difference.
+    ///
+    /// A picture stays in the atlas until something needs the room, so "is it
+    /// in there" answers yes for every emoji a reader has scrolled past today.
+    /// A loop advanced on that answer costs an upload and a woken window for
+    /// each of its frames while nobody can see it -- which, with two animated
+    /// emoji fetched for a channel and neither on screen, is what it did.
+    #[test]
+    fn only_what_the_last_frame_asked_for_counts_as_drawn() {
+        let drawn = Atlas::recently;
+        assert!(drawn(10, 10), "asked for in the frame being built");
+        assert!(
+            drawn(9, 10),
+            "asked for in the one before, and put in before that"
+        );
+        assert!(
+            !drawn(8, 10),
+            "two frames back is a picture nothing is drawing"
+        );
+        // And what is kept is a far longer memory than what is drawn: the two
+        // answer different questions and must not be the same number.
+        assert!(9 + KEEP >= 10 && !drawn(6, 10));
     }
 
     /// A scroll through a channel of screenshots must not cost the avatars

@@ -127,6 +127,20 @@ pub enum Update {
         height: u32,
         rgba: Vec<u8>,
     },
+    /// The same, for a picture with more than one frame in it.
+    ///
+    /// Its own update rather than a longer `Picture`, because almost nothing
+    /// is animated and every avatar in the window would otherwise carry an
+    /// empty list of frames across a channel. The first frame arrives as an
+    /// ordinary `Picture` beside this, so a build that did nothing with these
+    /// would still draw what it draws today.
+    Moving {
+        key: String,
+        width: u32,
+        height: u32,
+        /// Every frame and how long it lasts, in order.
+        frames: Vec<(Vec<u8>, std::time::Duration)>,
+    },
     /// The picture a reader opened, full size, for a texture of its own.
     ///
     /// Apart from `Picture` because it does not go into the atlas: one of
@@ -1321,31 +1335,51 @@ async fn run(
                         // at an old one -- so a hit is as good as a fetch and
                         // costs no round trip.
                         if let Some((bytes, _)) = pictures.as_ref().and_then(|held| held.read(&key))
-                            && let Some((width, height, rgba)) = decode(&bytes, width, height)
+                            && let Some((wide, tall, rgba)) = decode(&bytes, width, height)
                         {
+                            let moves = frames_of(&bytes, width, height);
+                            // The still frame first, so a picture is on screen
+                            // whether or not anything plays it.
                             wake.wake(Update::Picture {
-                                key,
-                                width,
-                                height,
+                                key: key.clone(),
+                                width: wide,
+                                height: tall,
                                 rgba,
                             });
+                            if let Some(frames) = moves {
+                                wake.wake(Update::Moving {
+                                    key,
+                                    width: wide,
+                                    height: tall,
+                                    frames,
+                                });
+                            }
                             continue;
                         }
                         match rest.fetch_bytes(&route).await {
                             Ok(Some((bytes, kind))) => match decode(&bytes, width, height) {
-                                Some((width, height, rgba)) => {
+                                Some((wide, tall, rgba)) => {
                                     // Kept only once it has decoded: bytes this
                                     // build cannot read are worth nothing on
                                     // the next start either.
                                     if let Some(held) = pictures.as_ref() {
                                         held.write(&key, &bytes, &kind);
                                     }
+                                    let moves = frames_of(&bytes, width, height);
                                     wake.wake(Update::Picture {
-                                        key,
-                                        width,
-                                        height,
+                                        key: key.clone(),
+                                        width: wide,
+                                        height: tall,
                                         rgba,
-                                    })
+                                    });
+                                    if let Some(frames) = moves {
+                                        wake.wake(Update::Moving {
+                                            key,
+                                            width: wide,
+                                            height: tall,
+                                            frames,
+                                        });
+                                    }
                                 }
                                 // Named by what actually came back: a picture
                                 // this build has no decoder for and a picture
@@ -1776,6 +1810,52 @@ mod tests {
         assert!(touches_thread(&[posted("c", "", "root")], "root"));
         assert!(!touches_thread(&[posted("c", "other", "reply")], "root"));
     }
+}
+
+/// Every frame of a picture that moves, at the size the atlas will hold them.
+///
+/// `None` for anything with one frame in it, which is almost everything: an
+/// avatar, a thumbnail, a still emoji. Only a GIF is looked at, because a GIF
+/// is what a team makes a moving emoji out of -- the other formats this build
+/// can read are animated so rarely that opening every one of them to find out
+/// would cost more than it saves.
+///
+/// Scaled the same way `decode` scales, and frame by frame rather than as a
+/// whole: the frames go into one slot in the atlas, one after another, and a
+/// slot is one size.
+fn frames_of(bytes: &[u8], width: u32, height: u32) -> Option<Vec<(Vec<u8>, std::time::Duration)>> {
+    use image::AnimationDecoder;
+    if kind_of(bytes) != "gif" {
+        return None;
+    }
+    let decoder = image::codecs::gif::GifDecoder::new(std::io::Cursor::new(bytes)).ok()?;
+    let mut frames = Vec::new();
+    for frame in decoder.into_frames() {
+        let Ok(frame) = frame else {
+            // Whatever was read before the file went wrong is still a loop,
+            // and a short loop is better than a still picture.
+            break;
+        };
+        let (numerator, denominator) = frame.delay().numer_denom_ms();
+        let delay = std::time::Duration::from_micros(
+            (u64::from(numerator) * 1000) / u64::from(denominator.max(1)).max(1),
+        );
+        let mut rgba = frame.into_buffer();
+        let wanted = (
+            width.clamp(1, MAX_SIDE).min(rgba.width()),
+            height.clamp(1, MAX_SIDE).min(rgba.height()),
+        );
+        if (rgba.width(), rgba.height()) != wanted {
+            rgba = image::imageops::thumbnail(&rgba, wanted.0, wanted.1);
+        }
+        frames.push((rgba.into_raw(), delay));
+        // A loop longer than this is somebody's video, not an emoji, and the
+        // frames are held in memory for as long as the picture is on screen.
+        if frames.len() >= 240 {
+            break;
+        }
+    }
+    (frames.len() > 1).then_some(frames)
 }
 
 /// Decodes a picture to straight RGBA at its own size.

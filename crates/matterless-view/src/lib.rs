@@ -29,6 +29,7 @@ pub mod identity;
 pub mod listing;
 pub mod live;
 pub mod menu;
+pub mod moving;
 pub mod offer;
 pub mod open;
 pub mod picker;
@@ -463,6 +464,11 @@ impl View {
         height: u32,
     ) -> Option<atlas::Slot> {
         self.atlas.put_image(&self.gpu, key, rgba, width, height)
+    }
+
+    /// The next frame of a picture that moves, over the one showing.
+    pub fn put_frame(&mut self, key: &str, rgba: &[u8], width: u32, height: u32) -> bool {
+        self.atlas.put_frame(&self.gpu, key, rgba, width, height)
     }
 
     /// Puts a picture in a texture of its own, for the viewer.
