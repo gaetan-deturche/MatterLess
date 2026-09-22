@@ -89,10 +89,27 @@ jobs:
       # this release is; the commit subjects since the last tag otherwise,
       # which is at least true. Written to a file rather than passed as an
       # argument: it is several lines, and a shell is where newlines go to die.
+      #
+      # The fetch is the point. `actions/checkout` leaves the tag *ref* behind
+      # but not the tag *object*, so what a checkout gives this job is a
+      # lightweight tag -- and `%(contents)` on a lightweight tag is the
+      # tagged commit's message. So this step had never once read what a tag
+      # says: it read the last commit, and the fallback below could not fire,
+      # because a commit always has a message. 0.2.0 shipped a card showing a
+      # commit body and looked right by luck, because that commit had a body
+      # worth reading. 0.3.0 was tagged on "Take the app version to 0.3.0"
+      # and shipped that one line as its release notes.
       - name: What changed
         shell: pwsh
         run: |
-          $notes = (git tag -l --format='%(contents)' $env:TAG | Out-String).Trim()
+          git fetch --force origin "refs/tags/$($env:TAG):refs/tags/$($env:TAG)"
+          $global:LASTEXITCODE = 0
+          $notes = ""
+          if ((git tag -l --format='%(objecttype)' $env:TAG) -eq "tag") {
+            $notes = (git tag -l --format='%(contents)' $env:TAG | Out-String).Trim()
+          } else {
+            "$env:TAG is a lightweight tag: falling back to the commits"
+          }
           if (-not $notes) {
             $previous = git describe --tags --abbrev=0 "$env:TAG^" 2>$null
             $range = if ($LASTEXITCODE -eq 0 -and $previous) { "$previous..$env:TAG" } else { $env:TAG }
