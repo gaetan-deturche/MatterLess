@@ -227,6 +227,13 @@ pub enum Ask {
     },
     /// Be told about one message again later.
     Remind { post_id: String, when: i64 },
+    /// Everything said in one thread.
+    ///
+    /// A followed thread can live in a channel this window has never opened,
+    /// so its replies are not in the store and nothing else would ever fetch
+    /// them: the channel's own refresh brings the recent page of that channel,
+    /// and a thread older than that page is not in it.
+    Thread { root_id: String, channel_id: String },
     /// Join a public channel, then open it.
     Join { channel_id: String },
     /// Find or create the conversation with one person, then open it.
@@ -1056,6 +1063,39 @@ async fn run(
                         channel_id,
                         root_id,
                     } => handle.typing(&channel_id, &root_id),
+                    Ask::Thread {
+                        root_id,
+                        channel_id,
+                    } => match rest.thread(&root_id).await {
+                        Ok(list) => {
+                            // A backfill: these are messages the reader has
+                            // had for a while rather than messages arriving,
+                            // so none of them may interrupt anybody.
+                            let quiet =
+                                SyncContext::new(context.me.clone(), ThreadMode::Collapsed);
+                            match engine.apply_post_list(
+                                &channel_id,
+                                &list,
+                                Arrival::Backfill,
+                                &quiet,
+                                0,
+                            ) {
+                                Ok(deltas) => {
+                                    // Who wrote them, before the window draws
+                                    // them: a thread in a channel never opened
+                                    // is full of people never met.
+                                    learn(&rest, engine.store(), &wrote(engine.store(), &deltas))
+                                        .await;
+                                    println!("thread {root_id}: {} posts", list.order.len());
+                                    if !deltas.is_empty() {
+                                        wake.wake(Update::Changed(deltas));
+                                    }
+                                }
+                                Err(error) => eprintln!("reading thread {root_id}: {error}"),
+                            }
+                        }
+                        Err(error) => eprintln!("fetching thread {root_id}: {error}"),
+                    },
                     Ask::Refresh { channel_id } => {
                         if !known(engine.store(), &channel_id) {
                             continue;
