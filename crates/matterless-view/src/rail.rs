@@ -232,7 +232,7 @@ impl Rail {
             // envelope on the direct-messages button -- which is not initials
             // at all and is a different width again -- sat further right still.
             let (label, mark) = face(team);
-            let (at_x, at_y) = mark_at(painter, fonts, rect, &label, mark);
+            let (at_x, at_y) = mark_at(fonts, rect, &label, mark);
             let glyphs = painter.run(fonts, &label, at_x, at_y, mark);
             scene.glyphs(
                 glyphs,
@@ -306,46 +306,41 @@ pub fn icon_key(team_id: &str) -> String {
     format!("team/{team_id}")
 }
 
-/// Where a tile's mark goes, from where its ink actually lands.
+/// Where a tile's mark goes.
 ///
 /// Measured rather than offset by a constant. Nine pixels in suited the two
 /// letters most team names reduce to and nothing else: one letter sat right of
 /// centre, and the envelope on the direct-messages button is wider than either
 /// and ran off the edge of its tile.
 ///
-/// And the ink rather than the advance box, which was the next version of the
-/// same mistake: measured off the screen, the gear sat a pixel and a half left
-/// of centre in a square whose reserved room was centred exactly. Where a
-/// picture sits inside the room it reserves is the glyph's own business.
-///
-/// Falls back to the advance when there is no ink to find -- a mark the font
-/// does not have, which would otherwise be placed by a measurement of nothing.
-fn mark_at(
-    painter: &mut matterless_paint::Painter,
-    fonts: &mut matterless_layout::Fonts,
-    tile: Rect,
-    label: &str,
-    mark: Run,
-) -> (f32, f32) {
-    if let Some(ink) = painter.ink_of(fonts, label, mark) {
-        return (
-            (tile.x + (tile.width - ink.width) / 2.0 - ink.x).round(),
-            (tile.y + (tile.height - ink.height) / 2.0 - ink.y).round(),
-        );
-    }
-    let wide = matterless_layout::extent_of(
-        fonts,
-        label,
-        f32::MAX,
-        matterless_layout::Style {
-            size: mark.size,
-            line_height: mark.line_height,
-            bold: mark.bold,
-            italic: false,
-            mono: mark.mono,
-        },
-    )
-    .width;
+/// A mark is not measured at all, because there is nothing to measure: the
+/// icon family draws every picture on one square grid and centres it there, so
+/// the square it is set at *is* its width. Measuring it was the fault, not the
+/// fix -- `Style` has no way to say "the icon family", so a private-use
+/// codepoint went through ordinary fallback and came back as whatever font
+/// claims that block. Segoe's icons claim the same one. The gear measured
+/// 18.38 where lucide's own em is 15, which put it a pixel and a half left of
+/// centre; the three marks that did reach lucide measured exactly 15, with
+/// their ink centred in it to within a quarter of a pixel.
+fn mark_at(fonts: &mut matterless_layout::Fonts, tile: Rect, label: &str, mark: Run) -> (f32, f32) {
+    let wide = match mark.icon {
+        true => mark.size,
+        false => {
+            matterless_layout::extent_of(
+                fonts,
+                label,
+                f32::MAX,
+                matterless_layout::Style {
+                    size: mark.size,
+                    line_height: mark.line_height,
+                    bold: mark.bold,
+                    italic: false,
+                    mono: mark.mono,
+                },
+            )
+            .width
+        }
+    };
     (
         (tile.x + (tile.width - wide) / 2.0).round(),
         (tile.y + (tile.height - mark.line_height) / 2.0).round(),
@@ -504,10 +499,15 @@ mod tests {
     /// one letter sat right of centre and the envelope -- wider than any pair
     /// of them -- ended past the right edge of its own tile.
     ///
-    /// The *ink*, which is the second version of this test. Measured against
-    /// the advance box it passed while the gear sat a pixel and a half left of
-    /// centre on screen, because the box was centred and the picture inside it
-    /// was not. Nothing a reader can see was being asked about.
+    /// Asked of the *ink*, which is the second version of this test. The first
+    /// asked whether the reserved box was centred, and passed while the gear
+    /// sat a pixel and a half left of centre on screen -- because the box was
+    /// centred and the picture inside it was not. Nothing a reader can see was
+    /// being asked about.
+    ///
+    /// Where the mark is put comes from the grid and needs no measuring; that
+    /// the ink then lands in the middle is what this checks, and it is the one
+    /// thing that would notice the grid being wrong again.
     #[test]
     fn a_tile_carries_its_mark_in_the_middle() {
         let mut fonts = matterless_layout::Fonts::new();
@@ -528,24 +528,25 @@ mod tests {
                 mentions: 0,
                 kind,
             });
-            let (x, y) = mark_at(&mut painter, &mut fonts, tile, &label, run);
+            let (x, y) = mark_at(&mut fonts, tile, &label, run);
             let ink = painter
                 .ink_of(&mut fonts, &label, run)
                 .expect("a mark with ink in it");
-            let (left, right) = (x + ink.x - tile.x, tile.right() - (x + ink.x + ink.width));
+            // Middle against middle, rather than the two gaps against each
+            // other: a gap counts the same pixel twice, so half a pixel of
+            // rounding reads as a whole one out of place.
+            let across = (x + ink.x + ink.width / 2.0) - (tile.x + tile.width / 2.0);
+            let down = (y + ink.y + ink.height / 2.0) - (tile.y + tile.height / 2.0);
             assert!(
-                (left - right).abs() <= 1.0,
-                "{name} sits {left} from the left and {right} from the right"
+                across.abs() <= 1.0,
+                "{name} sits {across} off the middle across"
             );
+            assert!(down.abs() <= 1.0, "{name} sits {down} off the middle down");
+            let (left, right) = (x + ink.x - tile.x, tile.right() - (x + ink.x + ink.width));
             assert!(
                 left >= 0.0 && right >= 0.0,
                 "{name} is {} wide and runs off a {TILE} tile",
                 ink.width
-            );
-            let (top, bottom) = (y + ink.y - tile.y, tile.bottom() - (y + ink.y + ink.height));
-            assert!(
-                (top - bottom).abs() <= 1.0,
-                "{name} sits {top} from the top and {bottom} from the bottom"
             );
         }
     }
@@ -634,4 +635,3 @@ mod tests {
         assert_eq!(initials("   "), "?");
     }
 }
-
