@@ -922,6 +922,66 @@ fn a_stamped_but_missing_table_is_repaired_rather_than_trusted() {
     assert_eq!(store.thread_unread_totals().unwrap(), (0, 0));
 }
 
+/// The upgrade path, which is the one that runs on a database somebody has.
+///
+/// A drafts table from before the files column, stamped at the version that
+/// wrote it. `ADD COLUMN` is not idempotent, so this is keyed on the column
+/// being absent rather than on the version -- the rule migration 7 wrote down
+/// -- and the rows already in the table have to survive it.
+#[test]
+fn a_drafts_table_from_before_the_files_column_is_upgraded() {
+    let store = store();
+    {
+        let connection = store.connection.lock().unwrap();
+        connection
+            .execute_batch(
+                "DROP TABLE drafts;
+                 CREATE TABLE drafts (
+                    user_id      TEXT NOT NULL,
+                    conversation TEXT NOT NULL,
+                    message      TEXT NOT NULL,
+                    at           INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (user_id, conversation)
+                 );
+                 INSERT INTO drafts (user_id, conversation, message, at)
+                 VALUES ('me', 'c1', 'written before the upgrade', 1000);",
+            )
+            .unwrap();
+        connection
+            .pragma_update(None, "user_version", 10_i64)
+            .unwrap();
+        crate::schema::prepare(&connection).unwrap();
+    }
+
+    let kept = store.drafts("me").unwrap();
+    assert_eq!(kept.len(), 1, "the upgrade dropped what was in the table");
+    assert_eq!(kept[0].message, "written before the upgrade");
+    assert!(
+        kept[0].files.is_empty(),
+        "a row written before the column had no attachments, and says so"
+    );
+
+    // And the new column really is usable afterwards.
+    store
+        .keep_draft(
+            "me",
+            "c2",
+            "with one",
+            &[matterless_core::model::FileInfo {
+                id: "f1".into(),
+                name: "holiday.png".into(),
+                ..Default::default()
+            }],
+            2_000,
+        )
+        .unwrap();
+    let kept = store.drafts("me").unwrap();
+    assert_eq!(
+        kept[0].files.first().map(|file| file.id.as_str()),
+        Some("f1")
+    );
+}
+
 /// The bug the user caught: with collapsed threads on, a channel was counting
 /// replies -- including replies in threads they do not follow -- because unread
 /// came from the all-posts counters instead of the root ones.
@@ -1493,11 +1553,17 @@ fn a_half_written_message_outlives_the_window() {
     );
 
     store
-        .keep_draft("me", "c1", "half a thought", 1_000)
+        .keep_draft("me", "c1", "half a thought", &[], 1_000)
         .unwrap();
-    store.keep_draft("me", "c2", "another", 2_000).unwrap();
+    store.keep_draft("me", "c2", "another", &[], 2_000).unwrap();
+    let kept: Vec<(String, String)> = store
+        .drafts("me")
+        .unwrap()
+        .into_iter()
+        .map(|draft| (draft.conversation, draft.message))
+        .collect();
     assert_eq!(
-        store.drafts("me").unwrap(),
+        kept,
         vec![
             ("c2".to_string(), "another".to_string()),
             ("c1".to_string(), "half a thought".to_string()),
@@ -1507,7 +1573,7 @@ fn a_half_written_message_outlives_the_window() {
 
     // One row per conversation: writing more is the same draft, not a second.
     store
-        .keep_draft("me", "c1", "half a thought, continued", 3_000)
+        .keep_draft("me", "c1", "half a thought, continued", &[], 3_000)
         .unwrap();
     assert_eq!(store.drafts("me").unwrap().len(), 2);
     assert_eq!(
@@ -1515,8 +1581,8 @@ fn a_half_written_message_outlives_the_window() {
             .drafts("me")
             .unwrap()
             .first()
-            .map(|(id, _)| id.as_str()),
-        Some("c1"),
+            .map(|draft| draft.conversation.clone()),
+        Some("c1".to_string()),
         "the one just written is the newest"
     );
 
@@ -1533,14 +1599,66 @@ fn a_half_written_message_outlives_the_window() {
 #[test]
 fn an_emptied_box_is_not_an_unfinished_message() {
     let store = store();
-    store.keep_draft("me", "c1", "something", 1_000).unwrap();
+    store
+        .keep_draft("me", "c1", "something", &[], 1_000)
+        .unwrap();
     assert_eq!(store.drafts("me").unwrap().len(), 1);
 
-    store.keep_draft("me", "c1", "   ", 2_000).unwrap();
+    store.keep_draft("me", "c1", "   ", &[], 2_000).unwrap();
     assert!(
         store.drafts("me").unwrap().is_empty(),
         "whitespace is not a message anybody is still writing"
     );
+}
+
+/// What was attached comes back with it, and is a draft on its own.
+///
+/// Reported 2026-09-22: the text survived a restart and the screenshot did
+/// not, so a message half written with a picture in it came back without the
+/// picture and nothing said it had ever been there.
+///
+/// The files themselves rather than their ids: an upload no message claims is
+/// on the server and in no table here, so ids alone would come back as ids --
+/// nothing to name in the tray and nothing to draw.
+#[test]
+fn what_was_attached_is_kept_with_the_draft() {
+    let store = store();
+    let shot = matterless_core::model::FileInfo {
+        id: "f1".into(),
+        name: "holiday.png".into(),
+        mime_type: "image/png".into(),
+        width: 120,
+        height: 60,
+        ..Default::default()
+    };
+
+    store
+        .keep_draft(
+            "me",
+            "c1",
+            "look at this",
+            std::slice::from_ref(&shot),
+            1_000,
+        )
+        .unwrap();
+    let kept = store.drafts("me").unwrap();
+    assert_eq!(kept.len(), 1);
+    assert_eq!(kept[0].message, "look at this");
+    assert_eq!(kept[0].files.len(), 1);
+    assert_eq!(kept[0].files[0].id, "f1");
+    assert_eq!(kept[0].files[0].name, "holiday.png");
+
+    // A picture with nothing typed beside it is still something unfinished:
+    // the box already sends on Enter with an empty line and a full tray, so
+    // forgetting this row would throw away the only thing there was.
+    store
+        .keep_draft("me", "c2", "", std::slice::from_ref(&shot), 2_000)
+        .unwrap();
+    assert_eq!(store.drafts("me").unwrap().len(), 2);
+
+    // And emptying both really is nothing.
+    store.keep_draft("me", "c2", "  ", &[], 3_000).unwrap();
+    assert_eq!(store.drafts("me").unwrap().len(), 1);
 }
 
 /// Where the reader was, so the window opens there again.

@@ -47,6 +47,17 @@ pub struct PostOutcome {
     pub change: PostChange,
 }
 
+/// A half-written message, and whatever was attached to it.
+///
+/// A tuple until the files joined it, which is the point at which a row with
+/// three different things in it stops reading as one.
+#[derive(Debug, Clone, Default)]
+pub struct Draft {
+    pub conversation: String,
+    pub message: String,
+    pub files: Vec<matterless_core::model::FileInfo>,
+}
+
 /// Derived, never read from a flag.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Unread {
@@ -1978,40 +1989,56 @@ impl Store {
     /// question anybody asks of this table is "which conversations have
     /// something unfinished in them" and a row saying "nothing" would be a
     /// wrong answer to it.
+    ///
+    /// Empty means *nothing at all*, words and files both. A screenshot
+    /// pasted with no message typed beside it is a draft: the box already
+    /// sends on Enter with an empty line and something in the tray, so
+    /// treating it as nothing would throw away the one thing there was.
     pub fn keep_draft(
         &self,
         user_id: &str,
         conversation: &str,
         message: &str,
+        files: &[matterless_core::model::FileInfo],
         at: Timestamp,
     ) -> Result<()> {
         let connection = self.lock();
-        if message.trim().is_empty() {
+        if message.trim().is_empty() && files.is_empty() {
             connection.execute(
                 "DELETE FROM drafts WHERE user_id = ?1 AND conversation = ?2",
                 params![user_id, conversation],
             )?;
             return Ok(());
         }
+        let carried = serde_json::to_string(files).unwrap_or_else(|_| "[]".to_string());
         connection.execute(
-            "INSERT INTO drafts (user_id, conversation, message, at) VALUES (?1, ?2, ?3, ?4)
+            "INSERT INTO drafts (user_id, conversation, message, files, at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
              ON CONFLICT(user_id, conversation) DO UPDATE SET
                 message = excluded.message,
+                files = excluded.files,
                 at = excluded.at",
-            params![user_id, conversation, message, at],
+            params![user_id, conversation, message, carried, at],
         )?;
         Ok(())
     }
 
     /// Every conversation this reader has something unfinished in, newest
     /// first -- which is the order anybody wants their unfinished business.
-    pub fn drafts(&self, user_id: &str) -> Result<Vec<(String, String)>> {
+    ///
+    /// Carrying whatever was attached to it. A draft row written before this
+    /// column existed answers with none, which is what it had.
+    pub fn drafts(&self, user_id: &str) -> Result<Vec<Draft>> {
         let connection = self.lock();
         let mut statement = connection.prepare(
-            "SELECT conversation, message FROM drafts WHERE user_id = ?1 ORDER BY at DESC",
+            "SELECT conversation, message, files FROM drafts WHERE user_id = ?1 ORDER BY at DESC",
         )?;
         let rows = statement.query_map(params![user_id], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            Ok(Draft {
+                conversation: row.get::<_, String>(0)?,
+                message: row.get::<_, String>(1)?,
+                files: serde_json::from_str(&row.get::<_, String>(2)?).unwrap_or_default(),
+            })
         })?;
         Ok(rows.filter_map(std::result::Result::ok).collect())
     }

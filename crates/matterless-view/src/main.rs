@@ -4663,12 +4663,18 @@ impl App {
         //
         // Not before the reader is known: the row carries whose draft it is,
         // and one written with nobody's id could never be honoured.
+        // With whatever is attached to that conversation. The tray already
+        // outlives a channel switch; what it did not outlive was the window,
+        // so a message begun with a screenshot came back without it and
+        // nothing said it had ever been there.
+        let carried = self.attached.get(&under).cloned().unwrap_or_default();
         if !self.me.is_empty()
             && let Some(store) = self.store.as_ref()
             && let Err(error) = store.keep_draft(
                 &self.me,
                 &under,
                 &text,
+                &carried,
                 matterless_view::clock::now() * 1_000,
             )
         {
@@ -4691,15 +4697,26 @@ impl App {
         };
         let kept = store.drafts(&self.me).unwrap_or_default();
         let mut brought = 0usize;
-        for (conversation, message) in kept {
-            if let std::collections::hash_map::Entry::Vacant(slot) = self.drafts.entry(conversation)
+        let mut files = 0usize;
+        for draft in kept {
+            // What was attached comes back the same way and under the same
+            // rule: never over what this run already holds.
+            if !draft.files.is_empty()
+                && let std::collections::hash_map::Entry::Vacant(slot) =
+                    self.attached.entry(draft.conversation.clone())
             {
-                slot.insert(message);
+                files += slot.insert(draft.files).len();
+            }
+            if let std::collections::hash_map::Entry::Vacant(slot) =
+                self.drafts.entry(draft.conversation)
+                && !draft.message.is_empty()
+            {
+                slot.insert(draft.message);
                 brought += 1;
             }
         }
-        if brought > 0 {
-            println!("{brought} drafts came back");
+        if brought > 0 || files > 0 {
+            println!("{brought} drafts came back, carrying {files} attachment(s)");
         }
     }
 
@@ -5856,8 +5873,8 @@ impl App {
             .drafts(&self.me)
             .unwrap_or_default()
             .into_iter()
-            .map(|(conversation, message)| {
-                let (channel_id, root_id) = named(&conversation);
+            .map(|draft| {
+                let (channel_id, root_id) = named(&draft.conversation);
                 // A reply names the conversation its root is in, which needs
                 // the post: without it the row would say nothing about where
                 // the draft belongs.
@@ -5884,7 +5901,16 @@ impl App {
                     channel_id,
                     channel,
                     author: String::new(),
-                    preview: matterless_sync::notify::preview_of(&message),
+                    // A draft that is only a picture still has to say what it
+                    // is: with nothing typed, the row would otherwise be a
+                    // channel name and a blank line.
+                    preview: match (draft.message.trim().is_empty(), draft.files.first()) {
+                        (true, Some(file)) => match draft.files.len() {
+                            1 => file.name.clone(),
+                            more => format!("{} and {} more", file.name, more - 1),
+                        },
+                        _ => matterless_sync::notify::preview_of(&draft.message),
+                    },
                     note: match root_id.is_empty() {
                         true => String::new(),
                         false => "a reply".to_string(),

@@ -108,7 +108,7 @@ pub struct Reaction {
     pub create_at: Timestamp,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct FileInfo {
     pub id: String,
     #[serde(default)]

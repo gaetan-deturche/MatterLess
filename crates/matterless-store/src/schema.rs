@@ -86,7 +86,7 @@ const MIGRATION_7: &str = "
 ALTER TABLE posts ADD COLUMN is_pinned INTEGER NOT NULL DEFAULT 0;
 ";
 
-pub const TARGET_VERSION: i64 = 10;
+pub const TARGET_VERSION: i64 = 11;
 
 // Migration 1 is frozen: the shell now keeps a real database with real history,
 // so every change gets its own step from here.
@@ -255,7 +255,7 @@ DROP TABLE IF EXISTS post_render;
 /// Columns added after their table, checked the same way tables are: a version
 /// number is a claim, and this is the evidence.
 fn missing_columns(connection: &Connection) -> rusqlite::Result<Vec<String>> {
-    const REQUIRED: [(&str, &str); 1] = [("posts", "is_pinned")];
+    const REQUIRED: [(&str, &str); 2] = [("posts", "is_pinned"), ("drafts", "files")];
     let mut absent = Vec::new();
     for (table, column) in REQUIRED {
         let present: i64 = connection.query_row(
@@ -371,6 +371,20 @@ CREATE TABLE IF NOT EXISTS drafts (
 );
 ";
 
+/// What was attached to a half-written message, kept with it.
+///
+/// The text survived a restart and what had been attached did not, so a
+/// message begun with a screenshot in it came back without the screenshot --
+/// and the reader had no way of knowing it was ever there.
+///
+/// The files themselves, as JSON, rather than their ids. An upload that no
+/// message claims is on the server but in no table here, so ids alone would
+/// come back as ids: nothing to name in the tray and nothing to draw. What is
+/// kept is exactly what the window was handed when the upload finished.
+const MIGRATION_11: &str = "
+ALTER TABLE drafts ADD COLUMN files TEXT NOT NULL DEFAULT '[]';
+";
+
 /// What this install has been told to do, as opposed to what the server says.
 ///
 /// Apart from `preferences`, which holds the reader's settings on the server
@@ -448,6 +462,10 @@ fn migrate(connection: &Connection) -> rusqlite::Result<()> {
     }
     if version < 10 || missing.iter().any(|name| name == "settings") {
         connection.execute_batch(MIGRATION_10)?;
+    }
+    // On the column, not the version, for the reason migration 7 gives.
+    if absent_columns.iter().any(|name| name == "drafts.files") {
+        connection.execute_batch(MIGRATION_11)?;
     }
     connection.pragma_update(None, "user_version", TARGET_VERSION)?;
     tracing::info!(from = version, to = TARGET_VERSION, "store migrated");
