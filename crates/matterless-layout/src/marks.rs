@@ -94,3 +94,17 @@ pub const REMIND: &str = "\u{e087}";
 pub const FORWARD: &str = "\u{e229}";
 /// Find a message already said.  `search`
 pub const SEARCH: &str = "\u{e151}";
+
+/// What the message box offers for marking a message up.
+///
+/// Read out of `lucide.ttf` itself rather than copied from the website: the
+/// codepoints are private-use, so a wrong one is a different picture rather
+/// than a missing glyph. `loader-circle` is not in the build bundled here at
+/// all, which is worth knowing before anybody reaches for it.
+pub const BOLD: &str = "\u{e05d}";
+pub const ITALIC: &str = "\u{e0fb}";
+pub const STRIKE: &str = "\u{e177}";
+pub const CODE: &str = "\u{e093}";
+pub const QUOTE: &str = "\u{e239}";
+pub const BULLETS: &str = "\u{e106}";
+pub const NUMBERS: &str = "\u{e1d1}";

@@ -2193,6 +2193,19 @@ impl App {
             composer::Button::Attach => {
                 println!("drop a file on the window, or paste one into the box");
             }
+            // Straight into the box's own text. Markdown is what the server
+            // stores and what this window already draws, so a formatting
+            // button is a text edit and there is no second representation of
+            // a message for anything to keep in step.
+            composer::Button::Mark(how) => {
+                let box_of = if root_id.is_empty() {
+                    &mut self.composer
+                } else {
+                    &mut self.thread_composer
+                };
+                box_of.mark_up(how, &mut self.fonts);
+                self.relayout();
+            }
             composer::Button::Unattach(at) => {
                 let under = match root_id.is_empty() {
                     true => self.sidebar.selected.clone().unwrap_or_default(),

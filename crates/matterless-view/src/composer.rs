@@ -95,6 +95,198 @@ pub enum Tools {
     Editing,
 }
 
+/// A way of marking a message up, as the strip under the box offers them.
+///
+/// Markdown is what the server stores and what this window already draws, so
+/// a button here is a text edit and nothing more -- there is no second
+/// representation of a message to keep in step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Format {
+    Bold,
+    Italic,
+    Strike,
+    Code,
+    Quote,
+    Bullets,
+    Numbers,
+}
+
+impl Format {
+    /// Every one, in the order the official client puts them.
+    pub const EVERY: [Format; 7] = [
+        Format::Bold,
+        Format::Italic,
+        Format::Strike,
+        Format::Code,
+        Format::Quote,
+        Format::Bullets,
+        Format::Numbers,
+    ];
+
+    /// What goes either side of the words, for the ones that wrap them.
+    ///
+    /// `None` for the ones that mark a *line* rather than a run of words: a
+    /// quote and a list are prefixes, and wrapping them would put the marks
+    /// where they mean nothing.
+    fn around(self) -> Option<(&'static str, &'static str)> {
+        match self {
+            Format::Bold => Some(("**", "**")),
+            Format::Italic => Some(("*", "*")),
+            Format::Strike => Some(("~~", "~~")),
+            Format::Code => Some(("`", "`")),
+            Format::Quote | Format::Bullets | Format::Numbers => None,
+        }
+    }
+
+    /// What goes in front of the line, given the line above it.
+    ///
+    /// The number is counted from the line before rather than fixed at one: a
+    /// numbered list whose every item says `1.` is what the button did when
+    /// it was first written, and it is what the reader reported.
+    /// A number goes in as one and is corrected by `renumber`, which is the
+    /// one place that knows how a count works across nesting: two pieces of
+    /// arithmetic for the same question is how the button came to write `1.`
+    /// under `1.` in the first place.
+    fn in_front(self) -> &'static str {
+        match self {
+            Format::Quote => "> ",
+            Format::Bullets => "- ",
+            Format::Numbers => "1. ",
+            _ => "",
+        }
+    }
+
+    /// How many characters of this line are already this mark, if it is.
+    ///
+    /// So a second press takes it off again rather than laying a second
+    /// marker over the first -- `- - ` is not a list of anything, and the
+    /// official client toggles.
+    fn already_on(self, line: &str) -> Option<usize> {
+        let marker = carries_a_list(line)?;
+        let mine = match self {
+            Format::Quote => marker.body == "> ",
+            Format::Bullets => marker.number.is_none() && marker.body != "> ",
+            Format::Numbers => marker.number.is_some(),
+            _ => false,
+        };
+        mine.then(|| marker.whole().chars().count() - marker.indent.chars().count())
+    }
+
+    /// The mark drawn on its button.
+    pub fn glyph(self) -> &'static str {
+        use matterless_layout::marks;
+        match self {
+            Format::Bold => marks::BOLD,
+            Format::Italic => marks::ITALIC,
+            Format::Strike => marks::STRIKE,
+            Format::Code => marks::CODE,
+            Format::Quote => marks::QUOTE,
+            Format::Bullets => marks::BULLETS,
+            Format::Numbers => marks::NUMBERS,
+        }
+    }
+
+    /// What it is called, for the tooltip.
+    pub fn said(self) -> &'static str {
+        match self {
+            Format::Bold => "Bold",
+            Format::Italic => "Italic",
+            Format::Strike => "Strikethrough",
+            Format::Code => "Code",
+            Format::Quote => "Quote",
+            Format::Bullets => "Bulleted list",
+            Format::Numbers => "Numbered list",
+        }
+    }
+
+    /// The slug it is named by in a hit box.
+    fn slug(self) -> &'static str {
+        match self {
+            Format::Bold => "bold",
+            Format::Italic => "italic",
+            Format::Strike => "strike",
+            Format::Code => "code",
+            Format::Quote => "quote",
+            Format::Bullets => "bullets",
+            Format::Numbers => "numbers",
+        }
+    }
+
+    fn from_slug(slug: &str) -> Option<Format> {
+        Format::EVERY.into_iter().find(|one| one.slug() == slug)
+    }
+}
+
+/// The list marker a line carries, and how far in it sits.
+///
+/// Its own type because three things ask the same question -- continuing a
+/// list on a new line, counting the next number, and taking a marker off --
+/// and each answered it slightly differently while it was three pieces of
+/// arithmetic in three places.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Marker {
+    /// The spaces in front of it, which are what makes a list nested.
+    pub indent: String,
+    /// The number, for an ordered item. `None` for a bullet or a quote.
+    pub number: Option<u32>,
+    /// What the mark itself is: `- `, `> `, or the `. ` after a number.
+    pub body: String,
+}
+
+impl Marker {
+    /// The whole marker as it appears, indent included.
+    pub fn whole(&self) -> String {
+        match self.number {
+            Some(number) => format!("{}{number}{}", self.indent, self.body),
+            None => format!("{}{}", self.indent, self.body),
+        }
+    }
+
+    /// The marker the next line of this list wants.
+    pub fn next(&self) -> String {
+        match self.number {
+            Some(number) => format!("{}{}{}", self.indent, number + 1, self.body),
+            None => self.whole(),
+        }
+    }
+}
+
+/// The list marker a line begins with, if it begins with one.
+///
+/// Quotes count: a quoted paragraph carries on the same way, and the reader
+/// pressing return inside one is still inside it.
+pub fn carries_a_list(line: &str) -> Option<Marker> {
+    let indent: String = line.chars().take_while(|one| *one == ' ').collect();
+    let rest = &line[indent.len()..];
+    for mark in ["- ", "* ", "> "] {
+        if rest.starts_with(mark) {
+            return Some(Marker {
+                indent,
+                number: None,
+                body: mark.to_string(),
+            });
+        }
+    }
+    let digits: String = rest
+        .chars()
+        .take_while(|one| one.is_ascii_digit())
+        .collect();
+    if digits.is_empty() {
+        return None;
+    }
+    let after = &rest[digits.len()..];
+    for mark in [". ", ") "] {
+        if after.starts_with(mark) {
+            return Some(Marker {
+                indent,
+                number: digits.parse().ok(),
+                body: mark.to_string(),
+            });
+        }
+    }
+    None
+}
+
 /// A button inside the box.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Button {
@@ -109,6 +301,8 @@ pub enum Button {
     Send,
     /// Take one of the waiting attachments off again.
     Unattach(usize),
+    /// Mark the selection up, or open the marks to type between.
+    Mark(Format),
 }
 
 /// What the channel's own composer is called.
@@ -251,6 +445,8 @@ const CHIP: f32 = 180.0;
 /// What is kept clear at the ends of that row, and between two of them.
 const CHIP_MARGIN: f32 = 6.0;
 const CHIP_GAP: f32 = 4.0;
+/// Between two marking-up buttons.
+const MARK_GAP: f32 = 2.0;
 /// What the attach button shows.
 ///
 /// A sheet of paper rather than the paperclip every client uses, because there
@@ -616,6 +812,30 @@ impl Composer {
             fonts,
             palette,
         } = into;
+        // What the box can do to a message, between the paperclip and Send.
+        // Quiet until the pointer is on one: seven marks at full ink under
+        // every conversation is a row of buttons shouting over the words
+        // above them.
+        for (how, rect) in self.marks(within) {
+            let under =
+                input.hovered() == Some(format!("{}/mark/{}", self.name, how.slug()).as_str());
+            if under {
+                scene.rounded(rect.x, rect.y, rect.width, rect.height, palette.raised, 5.0);
+            }
+            let mark = painter.run(
+                fonts,
+                how.glyph(),
+                rect.x + 5.0,
+                rect.y + 2.0,
+                Run::mark(15.0),
+            );
+            scene.glyphs(
+                mark,
+                if under { palette.ink } else { palette.soft },
+                palette.faint,
+            );
+        }
+
         // What is waiting to go with this message, above the tools. A press
         // takes one off: the window holds the uploads, so this only says
         // which one was pressed.
@@ -921,6 +1141,39 @@ impl Composer {
         Rect::new(tools.right() - width - 6.0, tools.y + 4.0, width, BUTTON)
     }
 
+    /// Where the marking-up buttons sit, left to right after the paperclip.
+    ///
+    /// Empty when the strip is too narrow for them. The same rule the
+    /// header's search field follows: a row of buttons squeezed into a column
+    /// that cannot hold them is worse than a row that is not there, and the
+    /// chords still work either way.
+    pub fn marks(&self, within: Rect) -> Vec<(Format, Rect)> {
+        if self.plain {
+            return Vec::new();
+        }
+        let tools = self.tools(within);
+        let from = self.attach(within).right() + MARK_GAP * 2.0;
+        let to = match self.cancel(within) {
+            Some(cancel) => cancel.x,
+            None => self.send(within).x,
+        };
+        let each = BUTTON + MARK_GAP;
+        let room = to - from - MARK_GAP * 2.0;
+        if room < each * Format::EVERY.len() as f32 {
+            return Vec::new();
+        }
+        Format::EVERY
+            .into_iter()
+            .enumerate()
+            .map(|(at, how)| {
+                (
+                    how,
+                    Rect::new(from + at as f32 * each, tools.y + 4.0, BUTTON, BUTTON),
+                )
+            })
+            .collect()
+    }
+
     /// Where the way out sits: left of Save, and only while editing.
     ///
     /// `None` for a box a message is being written in. Nothing is being
@@ -963,6 +1216,13 @@ impl Composer {
                 depth: 3,
             });
         }
+        for (how, rect) in self.marks(within) {
+            placed.push(Placed {
+                name: format!("{}/mark/{}", self.name, how.slug()),
+                rect,
+                depth: 3,
+            });
+        }
         if let Some(cancel) = self.cancel(within) {
             placed.push(Placed {
                 name: format!("{}/cancel", self.name),
@@ -991,10 +1251,13 @@ impl Composer {
                 Tools::Writing => Button::Send,
                 Tools::Editing => Button::Save,
             }),
-            other => other
-                .strip_prefix("unattach/")
-                .and_then(|at| at.parse().ok())
-                .map(Button::Unattach),
+            other => match other.strip_prefix("mark/") {
+                Some(slug) => Format::from_slug(slug).map(Button::Mark),
+                None => other
+                    .strip_prefix("unattach/")
+                    .and_then(|at| at.parse().ok())
+                    .map(Button::Unattach),
+            },
         }
     }
 
@@ -1083,7 +1346,12 @@ impl Composer {
         let mut sent = None;
         for key in input.keys() {
             match key {
-                Key::Enter if mods.shift => self.act(fonts, Action::Enter),
+                Key::Enter if mods.shift => self.new_line(fonts),
+                // Tab nests a list item, and only a list item. A box is not a
+                // form and there is nowhere for a tab to take the caret, so
+                // outside a list it is left alone rather than inserting one:
+                // a literal tab in a message means nothing to markdown.
+                Key::Tab if self.nesting(mods.shift, fonts) => {}
                 Key::Enter => {
                     let text = self.text();
                     // An empty box with a file waiting in it is still worth
@@ -1144,6 +1412,18 @@ impl Composer {
             self.editor.delete_selection();
             self.touched = true;
         }
+        // The chords everybody arrives with. Taken before the paste, and
+        // before typed text is folded in, so a platform reporting the chord
+        // *and* the letter does not also type a b.
+        for (key, how) in [
+            (Key::Char('b'), Format::Bold),
+            (Key::Char('i'), Format::Italic),
+            (Key::Char('k'), Format::Code),
+        ] {
+            if input.chord(key) {
+                self.mark_up(how, fonts);
+            }
+        }
         if input.chord(Key::Char('v')) && !clipboard.is_empty() {
             let pasted = clipboard.clone();
             self.editor.insert_string(&pasted, None);
@@ -1172,6 +1452,254 @@ impl Composer {
         // arrows.
         self.follow_caret();
         sent
+    }
+
+    /// Marks the selection up, or opens the marks for words to be typed.
+    ///
+    /// One change around the whole operation, not one per action: undo steps
+    /// back "I made that bold" rather than three quarters of it.
+    ///
+    /// Nothing clever about already-marked text. Pressing bold twice gives
+    /// `****`, which is what the official client does and is honest about
+    /// what the button is -- markdown typed for you, not a style applied to a
+    /// range that something has to keep track of.
+    pub fn mark_up(&mut self, how: Format, fonts: &mut Fonts) {
+        self.editor.start_change();
+        match how.around() {
+            Some((before, after)) => match self.editor.copy_selection() {
+                Some(chosen) => {
+                    self.editor.delete_selection();
+                    self.editor
+                        .insert_string(&format!("{before}{chosen}{after}"), None);
+                }
+                None => {
+                    self.editor.insert_string(&format!("{before}{after}"), None);
+                    // Between the marks, so whatever is typed next lands
+                    // inside them. A caret left after the closing pair means
+                    // typing outside what was just opened.
+                    for _ in 0..after.chars().count() {
+                        let system = fonts.system_mut();
+                        self.editor.action(system, Action::Motion(Motion::Previous));
+                    }
+                }
+            },
+            // A prefix belongs at the start of the line, whatever the caret
+            // is in the middle of. `Motion::Home` is the logical line here,
+            // which is what a list marker wants -- a wrapped paragraph is one
+            // line as far as markdown is concerned.
+            None => {
+                // Read before anything moves: which line the caret is on, and
+                // what that line and the one above already say.
+                let held = self.text();
+                let lines: Vec<&str> = held.lines().collect();
+                let was = self.editor.cursor();
+                let at = was.line;
+                let this = lines.get(at).copied().unwrap_or_default();
+
+                let system = fonts.system_mut();
+                self.editor.action(system, Action::Motion(Motion::Home));
+                match how.already_on(this) {
+                    // A second press takes it off again.
+                    Some(width) => {
+                        for _ in 0..width {
+                            let system = fonts.system_mut();
+                            self.editor.action(system, Action::Delete);
+                        }
+                    }
+                    None => {
+                        self.editor.insert_string(how.in_front(), None);
+                        // Which number it actually is, counted at its own
+                        // level of nesting rather than from whatever line
+                        // happens to be above.
+                        if how == Format::Numbers {
+                            self.renumber(at, fonts);
+                        }
+                        self.after_the_marker(at, was, 0);
+                    }
+                }
+            }
+        }
+        self.remember();
+        self.touched = true;
+        self.follow_caret();
+    }
+
+    /// Puts the caret at the start of one line, for a test that has to press
+    /// a button on a particular one.
+    ///
+    /// Nothing in the window needs this -- a reader puts the caret there by
+    /// pressing -- but a list marker is about a line, and a test that could
+    /// only ever act on the first line would not have caught the counting.
+    #[cfg(test)]
+    fn put_caret_on_line_for_test(&mut self, line: usize, fonts: &mut Fonts) {
+        let system = fonts.system_mut();
+        self.editor
+            .action(system, Action::Motion(Motion::BufferStart));
+        for _ in 0..line {
+            let system = fonts.system_mut();
+            self.editor.action(system, Action::Motion(Motion::Down));
+        }
+        let system = fonts.system_mut();
+        self.editor.action(system, Action::Motion(Motion::Home));
+    }
+
+    /// A new line, carrying the list on if the caret is in one.
+    ///
+    /// What every editor does and what the reader asked for: a line begun
+    /// under `- one` starts `- `, a line under `3. three` starts `4. `, and
+    /// pressing it again on an item with nothing in it leaves the list rather
+    /// than adding an empty bullet for ever.
+    ///
+    /// The indent is carried too, which is the whole of nesting: an item two
+    /// spaces in continues two spaces in, and Tab takes an item further in.
+    fn new_line(&mut self, fonts: &mut Fonts) {
+        let held = self.text();
+        let lines: Vec<&str> = held.lines().collect();
+        let at = self.editor.cursor().line;
+        let this = lines.get(at).copied().unwrap_or_default();
+        let Some(marker) = carries_a_list(this) else {
+            return self.act(fonts, Action::Enter);
+        };
+        // An item with nothing in it: the reader has pressed it twice, which
+        // means they are done with the list. Take the marker off and leave a
+        // plain line rather than starting another empty item.
+        if this.trim_end() == marker.whole().trim_end() {
+            self.editor.start_change();
+            let system = fonts.system_mut();
+            self.editor.action(system, Action::Motion(Motion::Home));
+            for _ in 0..marker.whole().chars().count() {
+                let system = fonts.system_mut();
+                self.editor.action(system, Action::Delete);
+            }
+            let system = fonts.system_mut();
+            self.editor.action(system, Action::Motion(Motion::End));
+            self.remember();
+            self.touched = true;
+            self.follow_caret();
+            return;
+        }
+        self.editor.start_change();
+        let system = fonts.system_mut();
+        self.editor.action(system, Action::Enter);
+        self.editor.insert_string(&marker.next(), None);
+        self.remember();
+        self.touched = true;
+        self.follow_caret();
+    }
+
+    /// Takes a list item one level in, or back out. Answers whether it did.
+    ///
+    /// Two spaces, because that is what the markdown this window parses reads
+    /// as a nested list -- the indent is the nesting, and there is nothing
+    /// else to record it in.
+    fn nesting(&mut self, back_out: bool, fonts: &mut Fonts) -> bool {
+        const STEP: &str = "  ";
+        let held = self.text();
+        let lines: Vec<&str> = held.lines().collect();
+        let at = self.editor.cursor().line;
+        let this = lines.get(at).copied().unwrap_or_default();
+        let Some(marker) = carries_a_list(this) else {
+            return false;
+        };
+        if back_out && marker.indent.is_empty() {
+            return false;
+        }
+        // Where the reader actually is, so they are still there afterwards.
+        // Editing the marker moves the caret to the middle of it, and the
+        // next thing typed then lands inside the marker instead of in the
+        // words -- which is what the nesting test caught.
+        let was = self.editor.cursor();
+        self.editor.start_change();
+        let system = fonts.system_mut();
+        self.editor.action(system, Action::Motion(Motion::Home));
+        match back_out {
+            true => {
+                for _ in 0..STEP.len().min(marker.indent.len()) {
+                    let system = fonts.system_mut();
+                    self.editor.action(system, Action::Delete);
+                }
+            }
+            false => self.editor.insert_string(STEP, None),
+        }
+        // A nested item starts its own count, and an item brought back out
+        // rejoins the one it is returning to.
+        if marker.number.is_some() {
+            self.renumber(at, fonts);
+        }
+        self.after_the_marker(at, was, marker.whole().len());
+        self.remember();
+        self.touched = true;
+        self.follow_caret();
+        true
+    }
+
+    /// Puts the caret back where it was, moved by however much the marker
+    /// in front of it changed.
+    ///
+    /// Byte indices, which is what `cosmic-text` counts in. A marker is ASCII
+    /// so the arithmetic is the same either way, but the cursor is not the
+    /// place to start assuming that.
+    fn after_the_marker(&mut self, line: usize, was: Cursor, before: usize) {
+        let held = self.text();
+        let after = held
+            .lines()
+            .nth(line)
+            .and_then(carries_a_list)
+            .map_or(0, |marker| marker.whole().len());
+        let index = (was.index + after).saturating_sub(before);
+        self.editor.set_cursor(Cursor::new(line, index));
+    }
+
+    /// Sets one ordered item's number from the item above it at its own level.
+    fn renumber(&mut self, at: usize, fonts: &mut Fonts) {
+        let held = self.text();
+        let lines: Vec<&str> = held.lines().collect();
+        let Some(marker) = lines.get(at).copied().and_then(carries_a_list) else {
+            return;
+        };
+        let Some(number) = marker.number else { return };
+        // The nearest line above at the same indent, stopping at anything
+        // shallower: that is where this level's count lives.
+        let mut wanted = 1;
+        for above in lines[..at].iter().rev() {
+            let Some(other) = carries_a_list(above) else {
+                break;
+            };
+            if other.indent.len() < marker.indent.len() {
+                break;
+            }
+            if other.indent.len() == marker.indent.len() {
+                wanted = other.number.map_or(1, |was| was + 1);
+                break;
+            }
+        }
+        if wanted == number {
+            return;
+        }
+        let system = fonts.system_mut();
+        self.editor.action(system, Action::Motion(Motion::Home));
+        for _ in 0..marker.indent.chars().count() {
+            let system = fonts.system_mut();
+            self.editor.action(system, Action::Motion(Motion::Next));
+        }
+        for _ in 0..number.to_string().len() {
+            let system = fonts.system_mut();
+            self.editor.action(system, Action::Delete);
+        }
+        self.editor.insert_string(&wanted.to_string(), None);
+    }
+
+    /// Closes the change opened around an edit and puts it on the undo stack.
+    fn remember(&mut self) {
+        let Some(change) = self
+            .editor
+            .finish_change()
+            .filter(|one| !one.items.is_empty())
+        else {
+            return;
+        };
+        self.undone.clear();
+        self.done.push(change);
     }
 
     /// Does one thing to the text, and remembers that it did.
@@ -1893,6 +2421,164 @@ mod tests {
             })
             .count();
         assert_eq!(spokes, 8, "a tile with nothing to draw is not saying so");
+    }
+
+    /// Marking up wraps what is chosen, and opens the marks when nothing is.
+    #[test]
+    fn a_mark_wraps_the_selection_or_opens_for_typing() {
+        let mut fonts = Fonts::new();
+        let mut composer = Composer::new("composer");
+
+        // Nothing selected: the marks go in and the caret lands between them,
+        // so what is typed next is inside them.
+        composer.mark_up(super::Format::Bold, &mut fonts);
+        assert_eq!(composer.text(), "****");
+        for character in "loud".chars() {
+            composer.act(&mut fonts, super::Action::Insert(character));
+        }
+        assert_eq!(composer.text(), "**loud**");
+
+        // And one step of undo takes the whole marking-up back, not a third
+        // of it: the change is opened around the operation, not per action.
+        let mut fresh = Composer::new("composer");
+        fresh.fill("already written", &mut fonts);
+        fresh.mark_up(super::Format::Quote, &mut fonts);
+        assert_eq!(fresh.text(), "> already written");
+    }
+
+    /// The row is not there at all when the strip cannot hold it.
+    ///
+    /// The rule the header's search field follows: a row of buttons squeezed
+    /// into half a column is worse than one that is absent, and the chords go
+    /// on working either way.
+    #[test]
+    fn the_marks_step_aside_in_a_narrow_box() {
+        let composer = Composer::new("composer");
+        let wide = Rect::new(0.0, 0.0, 700.0, composer.height());
+        assert_eq!(
+            composer.marks(wide).len(),
+            super::Format::EVERY.len(),
+            "a full-width box has room for all of them"
+        );
+        let narrow = Rect::new(0.0, 0.0, 240.0, composer.height());
+        assert!(
+            composer.marks(narrow).is_empty(),
+            "the marks are being squeezed into a box that cannot hold them"
+        );
+        // And none of them ever reaches the button that sends.
+        for (_, rect) in composer.marks(wide) {
+            assert!(
+                rect.right() <= composer.send(wide).x,
+                "{rect:?} runs into Send at {:?}",
+                composer.send(wide)
+            );
+        }
+    }
+
+    /// A numbered list counts, and a second press takes the mark off again.
+    ///
+    /// Reported 2026-09-23 with a screenshot of two lines both saying `1.`:
+    /// the button put a fixed `1. ` in front of whatever line the caret was
+    /// on and never looked at the line above it.
+    #[test]
+    fn a_numbered_list_counts_up() {
+        let mut fonts = Fonts::new();
+        let mut composer = Composer::new("composer");
+        composer.fill("first\nsecond\nthird", &mut fonts);
+
+        // On each line in turn, as a reader pressing the button would.
+        for line in 0..3 {
+            composer.put_caret_on_line_for_test(line, &mut fonts);
+            composer.mark_up(super::Format::Numbers, &mut fonts);
+        }
+        assert_eq!(composer.text(), "1. first\n2. second\n3. third");
+
+        // Pressing it again on the last line takes that mark off rather than
+        // laying a second one over it.
+        composer.put_caret_on_line_for_test(2, &mut fonts);
+        composer.mark_up(super::Format::Numbers, &mut fonts);
+        assert_eq!(composer.text(), "1. first\n2. second\nthird");
+    }
+
+    /// Ten is two digits, and taking it off again has to know that.
+    #[test]
+    fn a_two_digit_marker_comes_off_whole() {
+        let mut fonts = Fonts::new();
+        let mut composer = Composer::new("composer");
+        composer.fill("9. ninth\ntenth", &mut fonts);
+        composer.put_caret_on_line_for_test(1, &mut fonts);
+        composer.mark_up(super::Format::Numbers, &mut fonts);
+        assert_eq!(composer.text(), "9. ninth\n10. tenth");
+
+        composer.put_caret_on_line_for_test(1, &mut fonts);
+        composer.mark_up(super::Format::Numbers, &mut fonts);
+        assert_eq!(
+            composer.text(),
+            "9. ninth\ntenth",
+            "the marker came off by the wrong number of characters"
+        );
+    }
+
+    /// A new line inside a list carries the list on, and a second one leaves.
+    ///
+    /// What every text editor does, asked for 2026-09-23. The exit is the
+    /// half that matters: without it a list can only be left by rubbing the
+    /// marker out by hand, which is why editors all do this.
+    #[test]
+    fn a_new_line_carries_the_list_on_and_a_second_one_leaves_it() {
+        let mut fonts = Fonts::new();
+        let mut composer = Composer::new("composer");
+        composer.fill("- one", &mut fonts);
+        composer.new_line(&mut fonts);
+        assert_eq!(composer.text(), "- one\n- ");
+
+        // Nothing typed into that item: the reader is done with the list.
+        composer.new_line(&mut fonts);
+        assert_eq!(composer.text(), "- one\n");
+
+        // Numbers count as they go.
+        let mut counting = Composer::new("composer");
+        counting.fill("1. one", &mut fonts);
+        counting.new_line(&mut fonts);
+        for character in "two".chars() {
+            counting.act(&mut fonts, super::Action::Insert(character));
+        }
+        counting.new_line(&mut fonts);
+        assert_eq!(counting.text(), "1. one\n2. two\n3. ");
+
+        // And a quoted line carries on the same way.
+        let mut quoted = Composer::new("composer");
+        quoted.fill("> said", &mut fonts);
+        quoted.new_line(&mut fonts);
+        assert_eq!(quoted.text(), "> said\n> ");
+    }
+
+    /// A list nests, and a nested ordered list counts on its own.
+    #[test]
+    fn a_list_nests_and_the_nested_one_counts_from_itself() {
+        let mut fonts = Fonts::new();
+        let mut composer = Composer::new("composer");
+        composer.fill("1. one", &mut fonts);
+        composer.new_line(&mut fonts);
+        assert_eq!(composer.text(), "1. one\n2. ");
+
+        // Tab takes the new item in, and it becomes the first of its own list
+        // rather than the second of the one above.
+        assert!(composer.nesting(false, &mut fonts));
+        assert_eq!(composer.text(), "1. one\n  1. ");
+
+        // A new line at that depth stays at that depth and counts there.
+        for character in "under".chars() {
+            composer.act(&mut fonts, super::Action::Insert(character));
+        }
+        composer.new_line(&mut fonts);
+        assert_eq!(composer.text(), "1. one\n  1. under\n  2. ");
+
+        // Shift+Tab brings it back out, where it rejoins the outer count.
+        assert!(composer.nesting(true, &mut fonts));
+        assert_eq!(composer.text(), "1. one\n  1. under\n2. ");
+        // And there is nowhere further out to go.
+        assert!(!composer.nesting(true, &mut fonts));
     }
 
     /// A waiting attachment gives itself room, and gives it back.
