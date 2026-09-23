@@ -411,11 +411,23 @@ pub fn remember_server(database: &std::path::Path, server: &str) -> Result<(), S
 }
 
 /// The server this install is pointed at, from the file beside the database.
+///
+/// A sandbox run with no `server.txt` of its own borrows the installed
+/// program's. The address is not the reader's data -- it is which server this
+/// machine talks to, and the session behind it is in the keyring, which both
+/// builds share anyway. Without this a dev build would come up on the sign-in
+/// screen every time its store was new, which is the sort of friction that
+/// gets a separation like this quietly undone.
 pub fn stored_server(database: &std::path::Path) -> Option<String> {
-    let directory = database.parent()?;
-    let held = std::fs::read_to_string(directory.join("server.txt")).ok()?;
-    let trimmed = held.trim().to_string();
-    (!trimmed.is_empty()).then_some(trimmed)
+    let named = |directory: &std::path::Path| -> Option<String> {
+        let held = std::fs::read_to_string(directory.join("server.txt")).ok()?;
+        let trimmed = held.trim().to_string();
+        (!trimmed.is_empty()).then_some(trimmed)
+    };
+    named(database.parent()?).or_else(|| {
+        let installed = crate::feed::installed_store()?;
+        named(installed.parent()?)
+    })
 }
 
 /// Signs in, on a thread of its own, and reports what came back.

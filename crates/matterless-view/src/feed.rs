@@ -19,14 +19,45 @@ use std::path::Path;
 /// has somewhere to go, and far short of the whole history, which is unbounded.
 pub const PAGE: u32 = 400;
 
-/// Where the dev build keeps its database.
-pub fn default_store() -> Option<std::path::PathBuf> {
+/// Where the installed program keeps its database.
+///
+/// The folder is called `.dev` and that is a misnomer kept on purpose: every
+/// build has written here since the beginning and the reader's whole history
+/// is in it. Renaming it needs a migration that moves a live database, which
+/// is not worth the tidiness.
+pub fn installed_store() -> Option<std::path::PathBuf> {
     let base = std::env::var_os("APPDATA")?;
     Some(
         Path::new(&base)
             .join("com.gaetandeturche.matterless.dev")
             .join("matterless.db"),
     )
+}
+
+/// Where *this* build keeps its database.
+///
+/// A build that was not installed gets one of its own. The two shared a file
+/// until 2026-09-23, which is how an experiment run out of `target\` came to
+/// write to the database the reader's real client had open -- and it cost
+/// that database. A dev run is an experiment by definition: it must not be
+/// able to reach the history somebody is actually reading.
+///
+/// The keyring entry is shared, so a sandbox run still signs in, and
+/// `stored_server` borrows the server address from the installed folder when
+/// the sandbox has none. Everything else is separate, pictures included.
+/// To work against real data on purpose, pass a path: `matterless-view <db>`.
+pub fn default_store() -> Option<std::path::PathBuf> {
+    match crate::identity::installed() {
+        true => installed_store(),
+        false => {
+            let base = std::env::var_os("APPDATA")?;
+            Some(
+                Path::new(&base)
+                    .join("com.gaetandeturche.matterless.sandbox")
+                    .join("matterless.db"),
+            )
+        }
+    }
 }
 
 /// Where the pictures fetched for the atlas are kept between runs.

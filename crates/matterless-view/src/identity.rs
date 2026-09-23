@@ -36,6 +36,20 @@ pub fn claimed() -> bool {
     *ONCE.get_or_init(claim)
 }
 
+/// Whether this executable is the one the installer put there.
+///
+/// Answered once, and public because it decides more than a toast's branding:
+/// it is what keeps a build run out of `target\` off the installed program's
+/// database. See `feed::default_store`.
+pub fn installed() -> bool {
+    static ONCE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    #[cfg(windows)]
+    let answer = || is_the_installed_build();
+    #[cfg(not(windows))]
+    let answer = || false;
+    *ONCE.get_or_init(answer)
+}
+
 /// Where the installer puts the shortcut, which is the only one this will
 /// touch.
 #[cfg(windows)]
@@ -260,5 +274,50 @@ mod tests {
     fn a_build_that_was_not_installed_does_not_claim_to_be() {
         assert!(!super::is_the_installed_build());
         assert!(!super::claimed(), "a test binary branded itself");
+    }
+
+    /// And it does not write where the installed program writes.
+    ///
+    /// They shared one file until 2026-09-23, under a folder named `.dev`
+    /// that the release build used too, and it cost the reader's database: an
+    /// experiment run out of `target\` wrote to the store their real client
+    /// had open. This test binary is not installed, so what `default_store`
+    /// answers here is the sandbox -- which is the whole assertion.
+    #[test]
+    fn a_build_that_was_not_installed_has_a_database_of_its_own() {
+        let installed = crate::feed::installed_store().expect("a store path");
+        let mine = crate::feed::default_store().expect("a store path");
+        assert!(
+            !super::installed(),
+            "the test binary thinks it is installed"
+        );
+        assert_ne!(
+            installed.parent(),
+            mine.parent(),
+            "a dev run shares the installed program's folder"
+        );
+        // The pictures follow the database, or the sandbox would still be
+        // writing into the installed program's cache.
+        let pictures = crate::feed::pictures_dir().expect("a pictures path");
+        assert_eq!(pictures.parent(), mine.parent());
+    }
+
+    /// The installed folder's name is a misnomer, and is kept deliberately.
+    ///
+    /// Asserted exactly rather than by prefix, because a prefix is what let
+    /// the misnomer hide: `com.gaetandeturche.matterless.dev` starts with the
+    /// AUMID, so the test above passed while every build shared one store.
+    /// Changing this string moves the reader's whole history and needs a
+    /// migration, so it has to be a deliberate act with a failing test in
+    /// front of it.
+    #[test]
+    fn the_installed_store_keeps_the_name_the_history_is_under() {
+        let installed = crate::feed::installed_store().expect("a store path");
+        let folder = installed
+            .parent()
+            .and_then(|parent| parent.file_name())
+            .map(|name| name.to_string_lossy().to_string())
+            .expect("a folder");
+        assert_eq!(folder, "com.gaetandeturche.matterless.dev");
     }
 }
