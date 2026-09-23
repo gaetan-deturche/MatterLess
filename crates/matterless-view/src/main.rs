@@ -1464,10 +1464,22 @@ impl App {
         // Each of these is said on screen as well as here. They are three
         // different problems with three different answers, and "offline" on
         // its own is the one word that fits all of them and helps with none.
-        let Some(store) = self.store.clone() else {
-            println!("no database, so nothing to keep up to date");
-            self.stayed_offline("no message store");
-            return;
+        let store = match self.store.clone() {
+            Some(store) => store,
+            // No database is not the same as nothing to be done about it.
+            // It is a sandbox build's first start, and it is also what a
+            // reader who deleted theirs is left with -- which used to be
+            // unrecoverable: the window said "offline" for ever while holding
+            // a session and a server address that would have filled a new one
+            // in seconds.
+            None => match self.made_a_store() {
+                Some(store) => store,
+                None => {
+                    println!("no database, so nothing to keep up to date");
+                    self.stayed_offline("no message store");
+                    return;
+                }
+            },
         };
         let Some(path) = matterless_view::feed::default_store() else {
             self.stayed_offline("nowhere to keep a message store");
@@ -3499,6 +3511,37 @@ impl App {
     /// nor the file naming the server. `feed::open` refuses a path that is not
     /// already a file, which is why the store is opened here rather than
     /// through it.
+    /// Makes an empty store where this build keeps one, for a start that has
+    /// everything except a database.
+    ///
+    /// Only when it can actually be filled. An empty database with nobody to
+    /// sign in as is a worse answer than saying there is none: the window
+    /// would look signed out *and* claim to have a store, and the next start
+    /// would find a file and stop asking why it is empty.
+    fn made_a_store(&mut self) -> Option<Arc<matterless_store::Store>> {
+        let path = matterless_view::feed::default_store()?;
+        matterless_view::live::stored_server(&path)?;
+        self.session
+            .clone()
+            .or_else(matterless_view::live::stored_token)?;
+        if let Err(error) = std::fs::create_dir_all(path.parent()?) {
+            eprintln!("could not make {}: {error}", path.display());
+            return None;
+        }
+        match matterless_store::Store::open(&path) {
+            Ok(store) => {
+                println!("no store yet, so one was made at {}", path.display());
+                let store = Arc::new(store);
+                self.store = Some(store.clone());
+                Some(store)
+            }
+            Err(error) => {
+                eprintln!("could not make a store at {}: {error}", path.display());
+                None
+            }
+        }
+    }
+
     fn opened_a_session(
         &mut self,
         token: &matterless_core::auth::AuthToken,
