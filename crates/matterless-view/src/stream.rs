@@ -2504,14 +2504,28 @@ impl Stream {
             fonts,
             palette,
         };
-        self.bar.draw(
-            &mut canvas,
-            &self.name,
-            input,
-            within,
-            self.scroll,
-            self.reach(within),
-        );
+        // Not while the rest of the conversation is still being shaped. A
+        // channel opens on its last dozen rows and the hundred above them are
+        // measured behind the window over the next fifth of a second, so the
+        // reach the thumb is sized against grows the whole time -- 1368, 1388,
+        // 1408, measured a frame apart on a switch. The thumb starts sized for
+        // what has been measured and shrinks as the truth arrives, which is a
+        // bar that jumps for a few frames every time a channel is opened.
+        //
+        // A bar that says nothing is better than a bar that says something
+        // untrue: this window computes heights rather than estimating them,
+        // and the same rule has to hold for the one thing drawn *from* those
+        // heights. It appears, right, the moment the last row is measured.
+        if self.waiting() == 0 {
+            self.bar.draw(
+                &mut canvas,
+                &self.name,
+                input,
+                within,
+                self.scroll,
+                self.reach(within),
+            );
+        }
     }
 }
 

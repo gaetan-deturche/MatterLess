@@ -1821,3 +1821,43 @@ fn the_thread_pane_does_not_throw_the_conversation_away() {
     );
 }
 
+/// The bar stays away until the conversation's height is known.
+///
+/// A channel opens on its last dozen rows and the rest are measured behind the
+/// window, so the reach the thumb is sized against grows for about a fifth of
+/// a second: measured a frame apart on a switch, 1368 then 1388 then 1408. The
+/// text does not move -- it is pinned to the end -- but the thumb starts sized
+/// for what has been measured and shrinks as the truth arrives, which is what
+/// a reader sees as the bar glitching on every channel they open.
+#[test]
+fn the_scrollbar_waits_for_the_height_to_be_known() {
+    let mut fonts = Fonts::new();
+    let mut stream = Stream::new("stream");
+    let rows: Vec<Row> = (0..40)
+        .map(|at| Row::Post {
+            post: post(&format!("p{at}"), "something said"),
+        })
+        .collect();
+    // As a channel is opened: the tail is shaped and the rest is waiting.
+    stream.plan(rows, true);
+    stream.lay_out(&mut fonts, panel().width);
+    assert!(stream.waiting() > 0, "the rest is still to be measured");
+    let named = |stream: &Stream| {
+        stream
+            .boxes(panel(), None)
+            .into_iter()
+            .any(|placed| placed.name.contains("scrollbar"))
+    };
+    assert!(
+        !named(&stream),
+        "a bar sized against a height nobody has yet"
+    );
+
+    // And once every row has been measured it is there, with something true
+    // to say.
+    while stream.waiting() > 0 {
+        stream.fill(&mut fonts, panel().width, 40);
+    }
+    assert!(named(&stream), "the bar never came back");
+}
+
