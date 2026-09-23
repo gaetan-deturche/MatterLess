@@ -1406,7 +1406,36 @@ async fn run(
                     Signal::ResyncRequired => {
                         wake.wake(Update::Changed(vec![Delta::ResyncRequired]))
                     }
-                    Signal::Event { event, .. } => match engine.apply_event(&event, &context) {
+                    Signal::Event { event, .. } => {
+                        // Every event by name, when asked for. Nothing else
+                        // says what the socket actually delivered, so a report
+                        // of "the window did not react" cannot be told from
+                        // "the server never said so" -- which is exactly the
+                        // fork a deleted message that stayed on screen turned
+                        // on. `Event::Other` is the interesting one: it is an
+                        // event this program has a name for and no answer to.
+                        if std::env::var_os("MATTERLESS_EVENTS").is_some() {
+                            // Said apart, because `Other` *carries* the name it
+                            // could not answer -- so printing the name alone
+                            // cannot tell "decoded and acted on" from "arrived
+                            // and understood as nothing", which is the whole
+                            // question when something on screen does not move.
+                            match &event {
+                                matterless_core::Event::Other { name } => {
+                                    println!("socket: {name} -- nothing was made of it")
+                                }
+                                // With its timestamps, because whether a
+                                // delete is honoured turns on them and the
+                                // server does not fill them in the way the
+                                // name suggests.
+                                matterless_core::Event::PostDeleted(post) => println!(
+                                    "socket: post_deleted {} delete_at {} update_at {}",
+                                    post.id, post.delete_at, post.update_at
+                                ),
+                                event => println!("socket: {}", event.name()),
+                            }
+                        }
+                        match engine.apply_event(&event, &context) {
                         Ok(deltas) if !deltas.is_empty() => {
                             // Who wrote them, before the window is told.
                             //
@@ -1431,7 +1460,8 @@ async fn run(
                         }
                         Ok(_) => {}
                         Err(error) => eprintln!("applying {}: {error}", event.name()),
-                    },
+                        }
+                    }
                 }
             }
         }
