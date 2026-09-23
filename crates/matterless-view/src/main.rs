@@ -2315,19 +2315,19 @@ impl App {
                 self.open_channel(matterless_view::sidebar::THREADS);
             }
             header::Act::Saved => {
-                self.listing.expect("Saved");
+                self.show_the_list("Saved");
                 if let Some(link) = self.link.as_ref() {
                     link.send(matterless_view::live::Ask::Saved);
                 }
             }
             header::Act::Pinned => {
-                if let (Some(channel), Some(link)) =
-                    (self.sidebar.selected.clone(), self.link.as_ref())
-                {
-                    self.listing.expect("Pinned");
-                    link.send(matterless_view::live::Ask::Pinned {
-                        channel_id: channel,
-                    });
+                if let Some(channel) = self.sidebar.selected.clone() {
+                    self.show_the_list("Pinned");
+                    if let Some(link) = self.link.as_ref() {
+                        link.send(matterless_view::live::Ask::Pinned {
+                            channel_id: channel,
+                        });
+                    }
                 }
             }
             // No field on the strip to type into, so the pane's own is what
@@ -4500,6 +4500,57 @@ impl App {
         }
     }
 
+    /// Opens one of the side lists, leaving the conversation where it was.
+    ///
+    /// The pane takes its width from the channel, so the rows have to be laid
+    /// out again -- and the anchor has to be taken *before* the column
+    /// changes, or it describes a panel the reader is no longer in. That is
+    /// the thread pane's rule and the list had none of it: it opened, the
+    /// conversation was drawn at a width it had not been measured for, and it
+    /// appeared to scroll.
+    ///
+    /// Nothing is held when the column does not actually change -- a list
+    /// opening over a thread takes the pane the thread already had -- because
+    /// the parked place belongs to whoever moved the column first.
+    fn show_the_list(&mut self, title: &str) {
+        let before = self.channel_rect().width;
+        let was = self.anchors().0;
+        self.listing.expect(title);
+        if (self.channel_rect().width - before).abs() < 0.5 {
+            return;
+        }
+        self.relayout();
+        self.parked = Some(Parked {
+            was,
+            left_at: self.stream.scroll,
+        });
+    }
+
+    /// Shuts the side list and gives the conversation its column back.
+    ///
+    /// The mirror of `show_the_list`, and the same rule as closing a thread:
+    /// the place is put back only if the reader has not moved it since, and
+    /// `relayout` holds them where they actually are otherwise.
+    fn hide_the_list(&mut self) {
+        if !self.listing.open() {
+            return;
+        }
+        let before = self.channel_rect().width;
+        self.listing.hide();
+        if (self.channel_rect().width - before).abs() < 0.5 {
+            return;
+        }
+        let parked = self
+            .parked
+            .take()
+            .filter(|parked| (parked.left_at - self.stream.scroll).abs() < 1.0);
+        self.relayout();
+        if let Some(parked) = parked {
+            let within = self.stream_rect();
+            self.stream.anchored(parked.was, within);
+        }
+    }
+
     /// What to hold on to when a thread opens or closes beside the channel.
     ///
     /// The "N replies" line, and not the message it hangs under. That line is
@@ -5373,24 +5424,24 @@ impl App {
         if self.listing.open() {
             let mut input = std::mem::take(&mut self.input);
             if input.struck(Key::Escape) {
-                self.listing.hide();
                 input.focus_on(composer::NAME);
                 self.input = input;
+                self.hide_the_list();
                 return;
             }
             let pane = matterless_view::aside::rect(self.column_rect(), self.pane_width);
             let boxes = self.placed.clone();
             let did = self.listing.react(&input, &boxes, pane);
             if matches!(did, Some(matterless_view::listing::Did::Close)) {
-                self.listing.hide();
                 input.focus_on(composer::NAME);
                 self.input = input;
+                self.hide_the_list();
                 return;
             }
             if let Some(matterless_view::listing::Did::Open(found)) = did {
-                self.listing.hide();
                 input.focus_on(composer::NAME);
                 self.input = input;
+                self.hide_the_list();
                 // Opened at the conversation it was said in. Landing on the
                 // message itself needs an anchor the window cannot ask for
                 // yet, so it opens where the reader can find it rather than
@@ -5749,7 +5800,7 @@ impl App {
         let Some(store) = self.store.clone() else {
             return;
         };
-        self.listing.expect("Drafts");
+        self.show_the_list("Drafts");
         let named = |conversation: &str| -> (String, String) {
             // A reply's conversation is the thread's own name, which carries
             // the root it hangs from.
@@ -5809,6 +5860,15 @@ impl App {
             return;
         };
         let _open = matterless_view::timing::watch("opening a channel", 0, "");
+        // The drafts row opens a pane beside the conversation and leaves the
+        // reader in the one they are reading, so it is answered before
+        // anything that records where they are: it is not a place, and
+        // writing it down as one overwrote `left_off` -- which is what the
+        // next start reopens -- and put it in the back-and-forward history.
+        if channel == matterless_view::sidebar::DRAFTS {
+            self.open_drafts();
+            return;
+        }
         // Written on the way in rather than on the way out, so a window that
         // is killed still knows where somebody was. Nothing depends on it this
         // run: it is read once, at the next start.
@@ -5846,15 +5906,6 @@ impl App {
                 &store, &self.me, THREADS,
             ));
             self.thread = None;
-            return;
-        }
-        // The drafts row is a place to go in the same sense, and opens the
-        // side pane rather than the column: what it lists are conversations
-        // to return to rather than messages to read, so choosing one takes
-        // the reader *away* from the list instead of filling the column with
-        // it. Which is what `Did::Open` already does for Saved and Pinned.
-        if channel == matterless_view::sidebar::DRAFTS {
-            self.open_drafts();
             return;
         }
         // What was being written here goes with the channel being left, and
@@ -7503,7 +7554,7 @@ impl ApplicationHandler<Update> for App {
                 // Answered from the store, so it is filled the moment it
                 // opens rather than after a round trip.
                 if down && self.input.chord(Key::Char('t')) {
-                    self.listing.expect("Threads");
+                    self.show_the_list("Threads");
                     if let Some(store) = self.store.clone() {
                         let found = matterless_view::listing::followed(&store, &self.me, THREADS);
                         println!("Threads: {} followed", found.len());
@@ -7621,8 +7672,17 @@ impl ApplicationHandler<Update> for App {
                     return;
                 }
                 let within = self.sidebar_rect();
+                let stood_in = self.sidebar.selected.clone();
                 if let Some(channel) = self.sidebar.react(&self.input, &boxes, within) {
                     self.open_channel(&channel);
+                    // The drafts row lists conversations to go back to rather
+                    // than being one, so the reader has not moved: the strip
+                    // keeps the channel's name and the sidebar keeps its mark.
+                    // Pressing the row otherwise left the header reading
+                    // "# drafts" with no way back to the name.
+                    if channel == matterless_view::sidebar::DRAFTS {
+                        self.sidebar.selected = stood_in;
+                    }
                 }
                 // The strip's own buttons, which are the only visible way to
                 // reach the lists: a keystroke nobody has been told about is
