@@ -7350,13 +7350,17 @@ impl ApplicationHandler<Update> for App {
             WindowEvent::CursorMoved { position, .. } => {
                 self.point_at(position.x as f32, position.y as f32);
             }
-            // A file dragged onto the window goes to the conversation under
-            // the pointer -- the thread if one is open and the pointer is in
-            // it, the channel otherwise. Dropping is the whole gesture: no
-            // dialog to open, and no dependency for one.
+            // A file dragged onto the window joins the message being written
+            // in the conversation under the pointer -- the thread if one is
+            // open and the pointer is in it, the channel otherwise.
+            //
+            // It used to be the whole message and posted at once, which is the
+            // one thing a reader cannot take back. A drop and a paste mean the
+            // same thing now: here is a file for what I am writing. Sending is
+            // still the reader's own gesture.
             WindowEvent::DroppedFile(path) => {
                 let Some(channel_id) = self.sidebar.selected.clone() else {
-                    eprintln!("no conversation to send that to");
+                    eprintln!("nowhere to attach that");
                     return;
                 };
                 let over_thread = self.thread_rect().zip(self.input.pointer_at()).is_some_and(
@@ -7370,7 +7374,7 @@ impl ApplicationHandler<Update> for App {
                     String::new()
                 };
                 if let Some(link) = self.link.as_ref() {
-                    link.send(matterless_view::live::Ask::Upload {
+                    link.send(matterless_view::live::Ask::Attach {
                         channel_id,
                         root_id,
                         path,

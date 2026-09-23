@@ -1,9 +1,10 @@
-//! Sends a file the way a drop on the window does.
+//! Sends a file as a message of its own, against a real server.
 //!
-//! The window's own path cannot be driven from outside -- a drop is a gesture
-//! -- so this calls the same `upload` with the same arguments the event
-//! handler builds. It sends a real message, so it takes the conversation and
-//! the file as arguments rather than guessing either.
+//! This is no longer what a drop on the window does -- a dropped file joins
+//! the message being written, like a pasted one -- so it is a probe for the
+//! upload-and-post round trip rather than a stand-in for a gesture. It sends
+//! a real message, so it takes the conversation and the file as arguments
+//! rather than guessing either.
 //!
 //! `drop_a_file <channel id> <path>`, or `--self` for the reader's own note
 //! to self, which is where a probe belongs.

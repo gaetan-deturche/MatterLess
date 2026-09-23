@@ -172,10 +172,11 @@ pub enum Ask {
     },
     /// Put a file on the server and say so, without posting anything.
     ///
-    /// Apart from `Upload`, which is the whole errand -- upload *and* post,
-    /// because a file dropped on the window is the message. A file pasted
-    /// into the box is not: it waits there with whatever is being written
-    /// until the reader sends both.
+    /// What both gestures do: a file pasted into the box and a file dropped on
+    /// the window alike wait with whatever is being written until the reader
+    /// sends them. A drop used to be the whole errand, upload *and* post, and
+    /// there is deliberately no request for that any more -- posting a file
+    /// the moment it lands is the one thing a reader cannot take back.
     Attach {
         channel_id: String,
         root_id: String,
@@ -206,16 +207,6 @@ pub enum Ask {
         /// right for anything it does not re-encode -- a GIF, an SVG.
         original: bool,
         within: (u32, u32),
-    },
-    /// Send a file that was dropped on the window.
-    ///
-    /// The path rather than the bytes: reading a hundred and fifty megabytes
-    /// on the thread that draws would stall the window for as long as the disk
-    /// took, and the socket thread is already the one that waits for things.
-    Upload {
-        channel_id: String,
-        root_id: String,
-        path: std::path::PathBuf,
     },
     /// What else this name could mean, beyond the conversations already held.
     ///
@@ -824,13 +815,6 @@ async fn run(
                             Ok(None) => eprintln!("{name}: the server sent nothing"),
                             Err(error) => eprintln!("fetching {name}: {error}"),
                         }
-                    }
-                    Ask::Upload {
-                        channel_id,
-                        root_id,
-                        path,
-                    } => {
-                        upload(&rest, &engine, &context, &channel_id, &root_id, &path).await;
                     }
                     Ask::Attach {
                         channel_id,
@@ -2620,6 +2604,11 @@ const LARGEST: u64 = 100 * 1024 * 1024;
 /// an id, and the post is created with that id in `file_ids`. An upload with
 /// no post attached is orphaned rather than broken, which is why a failed send
 /// here costs nothing but disk on the server.
+///
+/// Nothing in the window does this in one gesture any more -- a dropped file
+/// joins the message being written, like a pasted one. It is kept for the
+/// `drop_a_file` probe, which is how the round trip is exercised against a
+/// real server without a window.
 pub async fn upload(
     rest: &matterless_core::rest::RestClient,
     engine: &SyncEngine,
