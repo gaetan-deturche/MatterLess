@@ -124,13 +124,18 @@ impl Input {
         match event {
             Event::PointerMoved { x, y } => {
                 self.pointer = Some((x, y));
-                self.hovered = hit::at(placed, x, y).map(|found| found.name.clone());
+                self.aim(placed);
             }
             Event::PointerLeft => {
                 self.pointer = None;
                 self.hovered = None;
             }
             Event::PointerPressed => {
+                // Asked again here, because `hovered` is otherwise only ever
+                // set by a *move*: it is a memory of where the pointer went,
+                // and a row that slid under a still pointer -- a list losing
+                // the row above it -- would take the press meant for it.
+                self.aim(placed);
                 self.pressed_on = self.hovered.clone();
                 self.pressed_now = self.hovered.clone();
                 self.clicks = 1;
@@ -142,11 +147,16 @@ impl Input {
             Event::Contexted => {
                 // No press and release to agree: the menu opens where the
                 // button went down, which is what every platform does with it.
+                self.aim(placed);
                 self.contexted = self.hovered.clone();
             }
             Event::PointerReleased => {
                 // Only when the release agrees with the press. Dragging off and
                 // letting go is a cancellation, and the reader means it.
+                //
+                // Deliberately not aimed again, unlike the press: a press that
+                // moves the layout under a still pointer would then disagree
+                // with itself and no click would ever come of it.
                 if let (Some(from), Some(over)) = (&self.pressed_on, &self.hovered)
                     && from == over
                 {
@@ -165,6 +175,17 @@ impl Input {
             }
             Event::Modifiers(mods) => self.mods = mods,
             Event::Typed(text) => self.typed.push_str(&text),
+        }
+    }
+
+    /// Re-reads what is under the pointer from the boxes as they now stand.
+    ///
+    /// Public because the window has to ask after anything that moved them:
+    /// a hover is an answer about a frame, and the pointer does not move
+    /// because a list got shorter.
+    pub fn aim(&mut self, placed: &[Placed]) {
+        if let Some((x, y)) = self.pointer {
+            self.hovered = hit::at(placed, x, y).map(|found| found.name.clone());
         }
     }
 
@@ -344,8 +365,51 @@ mod tests {
         solve(&tree, Rect::new(0.0, 0.0, 800.0, 600.0))
     }
 
+    /// The same list one row shorter, as it stands once the top row has been
+    /// read and left it: what was second sits where first used to be.
+    fn shorter_shell() -> Vec<Placed> {
+        let tree = Node::new("shell", Size::Grow(1.0))
+            .axis(Axis::Row)
+            .with(
+                Node::new("sidebar", Size::Fixed(200.0))
+                    .with(Node::new("sidebar/two", Size::Fixed(40.0))),
+            )
+            .with(Node::new("stream", Size::Grow(1.0)));
+        solve(&tree, Rect::new(0.0, 0.0, 800.0, 600.0))
+    }
+
     fn at(input: &mut Input, placed: &[Placed], x: f32, y: f32) {
         input.apply(Event::PointerMoved { x, y }, placed);
+    }
+
+    /// A press belongs to whatever is under the pointer *now*. A still pointer
+    /// over a list that has lost a row is pointing at a different row, and
+    /// nothing tells the input layer so: there is no move to answer.
+    #[test]
+    fn a_press_is_answered_against_the_boxes_as_they_stand() {
+        let placed = shell();
+        let mut input = Input::default();
+        at(&mut input, &placed, 100.0, 20.0);
+        assert_eq!(input.hovered(), Some("sidebar/one"));
+        let shorter = shorter_shell();
+        input.apply(Event::PointerPressed, &shorter);
+        input.apply(Event::PointerReleased, &shorter);
+        assert!(
+            input.clicked_on("sidebar/two"),
+            "the press went to the row that used to be there"
+        );
+    }
+
+    /// And the release does not ask again, or a press that moves the layout
+    /// under a still pointer would disagree with itself.
+    #[test]
+    fn a_press_that_moves_the_list_is_still_a_click() {
+        let placed = shell();
+        let mut input = Input::default();
+        at(&mut input, &placed, 100.0, 20.0);
+        input.apply(Event::PointerPressed, &placed);
+        input.apply(Event::PointerReleased, &shorter_shell());
+        assert!(input.clicked_on("sidebar/one"));
     }
 
     #[test]

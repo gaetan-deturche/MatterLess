@@ -6231,6 +6231,7 @@ impl App {
     fn paint(&mut self, waiting: bool) {
         let building =
             matterless_view::timing::watch("building the frame", self.stream.rows.len(), "rows");
+        self.re_aim();
         let scene = self.scene();
         drop(building);
         let _drawing = matterless_view::timing::watch("drawing the frame", 0, "");
@@ -6749,6 +6750,34 @@ impl App {
             self.tooltip.draw(&mut canvas, window);
         }
         scene
+    }
+
+    /// Asks again what the pointer is on, against the boxes this frame will
+    /// be drawn from.
+    ///
+    /// The pointer does not move because a list got shorter, and `hovered` is
+    /// only ever set by a move -- so a row sliding under a still pointer (the
+    /// next unread conversation, once the one above it has been read) stayed
+    /// dark, kept the arrow, and took no press. Every layout change ends in a
+    /// frame, so the frame is the one place that catches all of them.
+    fn re_aim(&mut self) {
+        // Never while a button is held. A press that opens something under the
+        // pointer -- the settings panel over the gear that opened it -- would
+        // otherwise be released onto a box it did not begin on, and a press
+        // that disagrees with its release is not a click at all. A held press
+        // that the reader actually drags is re-aimed by the move itself.
+        if self.input.pointer_at().is_none() || self.input.pressed().is_some() {
+            return;
+        }
+        let was = self.input.hovered().map(str::to_string);
+        let boxes = self.targets();
+        self.input.aim(&boxes);
+        self.placed = boxes;
+        // Only when it changed. `watch_pointer` restarts the tooltip's wait,
+        // so asking it once a frame is a tooltip that never appears.
+        if self.input.hovered() != was.as_deref() {
+            self.watch_pointer();
+        }
     }
 
     /// Points the tooltip at whatever the pointer is now on.
