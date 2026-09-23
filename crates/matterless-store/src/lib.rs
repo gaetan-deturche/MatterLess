@@ -408,14 +408,21 @@ impl Store {
 
             let change = match existing {
                 Some((held_update_at, held_delete_at)) => {
-                    if post.update_at < held_update_at {
+                    // A delete is answered first, before anything looks at the
+                    // timestamps. `post_deleted` carries the post with
+                    // `delete_at` set and `update_at` exactly as it was --
+                    // deleting does not move it -- so the replay guard below
+                    // read every tombstone as a copy of a post already held
+                    // and dropped it. The message then stayed on screen until
+                    // the channel was read from scratch.
+                    if post.delete_at != 0 && held_delete_at == 0 {
+                        PostChange::Tombstoned
+                    } else if post.update_at < held_update_at {
                         // Older than what we hold: a late REST page or a replayed
                         // event. Never let it overwrite.
                         PostChange::Unchanged
                     } else if post.update_at == held_update_at {
                         PostChange::Unchanged
-                    } else if post.delete_at != 0 && held_delete_at == 0 {
-                        PostChange::Tombstoned
                     } else {
                         PostChange::Updated
                     }

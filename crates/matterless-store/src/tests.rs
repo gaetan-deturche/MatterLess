@@ -86,6 +86,56 @@ fn deletion_is_a_tombstone_not_a_removal() {
     assert!(held.is_deleted(), "the row must survive as a placeholder");
 }
 
+/// And it lands in the shape the server actually sends it.
+///
+/// `post_deleted` carries the post with `delete_at` set and `update_at`
+/// exactly as it was: deleting does not move it. The test above moves it to
+/// 300, which is the shape a reasonable person would write and not the one
+/// that arrives -- so the guard against replays answered first, read the
+/// tombstone as a post it already had, and dropped it. Measured against a
+/// real server on 2026-09-23: the event arrived and decoded, the row was
+/// never written, and the message stayed on screen until the channel was
+/// read again from scratch.
+#[test]
+fn a_tombstone_lands_even_though_update_at_did_not_move() {
+    let store = store();
+    store.upsert_posts(&[post("p1", "c1", 100, 100)]).unwrap();
+
+    let mut deleted = post("p1", "c1", 100, 100);
+    deleted.delete_at = 300;
+    let outcome = store.upsert_posts(&[deleted]).unwrap();
+    assert_eq!(outcome[0].change, PostChange::Tombstoned);
+    assert!(
+        store.post("p1").unwrap().expect("still a row").is_deleted(),
+        "the delete was dropped as a replay"
+    );
+}
+
+/// A delete still does not resurrect anything or rewrite what is held.
+///
+/// The tombstone is answered before the replay guard now, so this is the case
+/// that has to keep working: a second copy of the same delete changes nothing,
+/// and an older *undeleted* copy arriving late must not undo it.
+#[test]
+fn a_delete_already_held_is_not_a_second_delta() {
+    let store = store();
+    store.upsert_posts(&[post("p1", "c1", 100, 100)]).unwrap();
+    let mut deleted = post("p1", "c1", 100, 100);
+    deleted.delete_at = 300;
+    store.upsert_posts(std::slice::from_ref(&deleted)).unwrap();
+
+    let again = store.upsert_posts(&[deleted]).unwrap();
+    assert_eq!(again[0].change, PostChange::Unchanged);
+
+    let stale = post("p1", "c1", 100, 100);
+    let outcome = store.upsert_posts(&[stale]).unwrap();
+    assert_eq!(outcome[0].change, PostChange::Unchanged);
+    assert!(
+        store.post("p1").unwrap().expect("still a row").is_deleted(),
+        "a late undeleted copy brought it back"
+    );
+}
+
 #[test]
 fn channel_page_is_newest_first_and_pages_backwards() {
     let store = store();
