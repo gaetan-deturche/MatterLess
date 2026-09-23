@@ -1491,6 +1491,14 @@ pub fn touches_thread(deltas: &[Delta], root_id: &str) -> bool {
             post_id,
             ..
         } => root == root_id || post_id == root_id,
+        // A delete counts the same way an arrival does. Without this a
+        // message deleted while its thread was open stayed on the pane: the
+        // channel behind it was redrawn and the pane was never asked.
+        Delta::PostTombstoned {
+            root_id: root,
+            post_id,
+            ..
+        } => root == root_id || post_id == root_id,
         Delta::ThreadChanged { root_id: root, .. } => root == root_id,
         Delta::ReactionsChanged { post_id } => post_id == root_id,
         _ => false,
@@ -1722,6 +1730,29 @@ mod tests {
                 .collect::<serde_json::Map<_, _>>(),
         }))
         .expect("a page")
+    }
+
+    /// A delete reaches the thread pane it happened in.
+    ///
+    /// `touches_thread` listed arrivals, thread changes and reactions and not
+    /// tombstones, so a reply deleted while its thread was open stayed on the
+    /// pane: the channel behind it was redrawn and the pane was never asked.
+    /// The root counts too -- deleting the message a pane hangs from is very
+    /// much something that pane is showing.
+    #[test]
+    fn a_delete_reaches_the_thread_it_happened_in() {
+        let gone = |post_id: &str, root_id: &str| Delta::PostTombstoned {
+            post_id: post_id.into(),
+            channel_id: "c1".into(),
+            root_id: root_id.into(),
+        };
+        assert!(touches_thread(&[gone("reply", "root")], "root"));
+        assert!(touches_thread(&[gone("root", "")], "root"));
+        assert!(
+            !touches_thread(&[gone("reply", "elsewhere")], "root"),
+            "another thread's delete redrew this pane"
+        );
+        assert!(!touches_thread(&[gone("loose", "")], "root"));
     }
 
     /// A page from the server proves a message is gone only for the span it
@@ -2156,6 +2187,7 @@ fn vanished(store: &Store, channel_id: &str, list: &PostList) -> Vec<Delta> {
                     Some(Delta::PostTombstoned {
                         post_id: post.id,
                         channel_id: post.channel_id,
+                        root_id: post.root_id,
                     })
                 }
                 Ok(false) => None,

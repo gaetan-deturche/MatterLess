@@ -261,6 +261,46 @@ fn deletion_emits_a_tombstone_delta() {
     assert!(matches!(deltas[0], Delta::PostTombstoned { .. }));
 }
 
+/// The shape the server really sends, and the thing that matters: the store.
+///
+/// The test above asserts the delta and never looks at the database, which is
+/// how this shipped. The window was told the post was gone while the store
+/// still held it alive, so the next read of the channel put it straight back
+/// on screen. Measured against a real server on 2026-09-23: `post_deleted`
+/// carries the post exactly as it was -- `delete_at` zero, `update_at`
+/// unmoved -- so the event's name is the only thing that says it is gone.
+#[test]
+fn a_deleted_post_is_gone_from_the_store_and_not_merely_announced() {
+    let engine = engine();
+    let context = SyncContext::new(me(), ThreadMode::Flat);
+    engine
+        .apply_event(
+            &Event::Posted {
+                post: Box::new(post("p1", 100, "")),
+                channel_id: "c1".into(),
+            },
+            &context,
+        )
+        .unwrap();
+
+    // Exactly as it arrives. Nothing in the body says it was deleted.
+    let as_it_arrives = post("p1", 100, "");
+    assert_eq!(
+        as_it_arrives.delete_at, 0,
+        "the fixture is not the real one"
+    );
+    engine
+        .apply_event(&Event::PostDeleted(Box::new(as_it_arrives)), &context)
+        .unwrap();
+
+    let held = engine
+        .store()
+        .post("p1")
+        .unwrap()
+        .expect("the row survives as a placeholder");
+    assert!(held.is_deleted(), "the store still holds it alive");
+}
+
 #[test]
 fn sync_state_tracks_the_contiguous_range_and_the_beginning() {
     let engine = engine();

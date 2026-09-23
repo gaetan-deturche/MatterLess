@@ -63,6 +63,11 @@ pub enum Delta {
     PostTombstoned {
         post_id: String,
         channel_id: String,
+        /// The thread it hung under, empty for a message in the channel
+        /// itself. Carried for the same reason an upsert carries it: a pane
+        /// showing a thread has to know whether the delete was one of its own,
+        /// and without this it could not be told and never took the row away.
+        root_id: String,
     },
     UnreadChanged {
         channel_id: String,
@@ -302,11 +307,30 @@ impl SyncEngine {
                 }])
             }
             Event::PostDeleted(post) => {
+                // The event's *name* is the only thing that says it is gone.
+                // Measured against a real server on 2026-09-23: the payload
+                // carries the post exactly as it was -- `delete_at` zero, and
+                // `update_at` unmoved -- so storing it as it arrived wrote
+                // nothing at all. Same id, same `update_at`, no tombstone, and
+                // the message stayed on screen until the channel was read from
+                // scratch. The store is told separately, which is what
+                // `tombstone_post` is for.
                 self.store
                     .upsert_posts(std::slice::from_ref(post.as_ref()))?;
+                let at = match post.delete_at {
+                    0 => std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|since| since.as_millis() as i64)
+                        // A clock before 1970 is not a reason to keep showing
+                        // a deleted message: any non-zero mark reads as gone.
+                        .unwrap_or(post.update_at.max(1)),
+                    said => said,
+                };
+                self.store.tombstone_post(&post.id, at)?;
                 Ok(vec![Delta::PostTombstoned {
                     post_id: post.id.clone(),
                     channel_id: post.channel_id.clone(),
+                    root_id: post.root_id.clone(),
                 }])
             }
             // The store has to be patched, not just announced: reactions live
