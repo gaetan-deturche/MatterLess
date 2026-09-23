@@ -710,6 +710,22 @@ impl Atlas {
     /// `image`: this is asked *about* a picture rather than for one, and a
     /// mark made here would keep a picture alive on the strength of nothing
     /// but the asking.
+    /// Whether the sheet has this picture at all, drawn lately or not.
+    ///
+    /// The question `drawn` cannot answer: it asks whether a picture was on
+    /// screen in the last frame, which is false for one that has just landed
+    /// and has not been drawn yet. What the composer's tray needs to know is
+    /// whether there is anything to draw -- a tile whose upload has finished
+    /// but whose thumbnail has not arrived is still waiting, and stopping its
+    /// spinner leaves a dark square with nothing happening on it.
+    pub fn holds(&self, key: &str) -> bool {
+        let sheet = match Sheet::of(key) {
+            Sheet::Faces => &self.faces,
+            _ => &self.pictures,
+        };
+        sheet.images.get(key).is_some_and(Option::is_some)
+    }
+
     pub fn drawn(&self, key: &str) -> bool {
         let sheet = match Sheet::of(key) {
             Sheet::Faces => &self.faces,

@@ -1753,7 +1753,7 @@ impl Stream {
         index: usize,
         top: f32,
         left: f32,
-        ground: [u8; 4],
+        waiting_on: [u8; 4],
     ) -> Vec<matterless_paint::Piece> {
         let Some(Row::Post { post } | Row::Continuation { post }) = self.rows.get(index) else {
             return Vec::new();
@@ -1773,15 +1773,21 @@ impl Stream {
                     block.wrap,
                     block.height,
                 );
-                // `background-color: var(--ground)` under the picture: the box
-                // is drawn from the moment the row is, and an empty one is a
-                // hole in the conversation rather than a picture on its way.
+                // The box is drawn from the moment the row is, so a picture
+                // that has not arrived is a plate rather than a gap -- and a
+                // step off the ground rather than the ground itself, or the
+                // plate is the same colour as the page and an empty box says
+                // nothing at all. It is what the composer's tray shows for a
+                // file still going up, for the same reason: something was
+                // understood to be here.
+                //
+                // Covered the moment the bytes land, so it costs a frame.
                 let mut pieces = vec![matterless_paint::Piece::Fill {
                     x: at.x,
                     y: at.y,
                     width: at.width,
                     height: at.height,
-                    colour: ground,
+                    colour: waiting_on,
                     // An attachment is a card like any other, and the
                     // stylesheet rounds it to match the one a file without a
                     // preview gets.
@@ -2422,7 +2428,7 @@ impl Stream {
                         scene.rounded(at.0, at.1, STATUS, STATUS, lit, STATUS / 2.0);
                     }
                 }
-                scene.extend(self.pictures(index, top, inner.x, palette.ground));
+                scene.extend(self.pictures(index, top, inner.x, palette.raised));
                 // The toolbar last of the row's own drawing, so it sits over
                 // the message rather than under the first word of it.
                 if hovered == Some(index) {

@@ -89,6 +89,24 @@ pub enum Update {
         channel_id: String,
         root_id: String,
         file: Box<matterless_core::model::FileInfo>,
+        /// Which of the files on their way this one was.
+        ///
+        /// The window puts a tile up the moment something is dropped, before
+        /// any of it has left the machine, and the path is what tells it
+        /// which tile just became real. Matching on the name instead would
+        /// mistake two drops of `image.png` for each other.
+        path: std::path::PathBuf,
+    },
+    /// A file that was on its way is not going to arrive.
+    ///
+    /// Said out loud rather than left silent, because the tile for it is
+    /// already on screen: without this the reader is left looking at a
+    /// picture that will never finish, with no way to take it off.
+    NotAttached {
+        channel_id: String,
+        root_id: String,
+        path: std::path::PathBuf,
+        why: String,
     },
     /// The tray icon was used.
     ///
@@ -832,15 +850,20 @@ async fn run(
                         channel_id,
                         root_id,
                         path,
-                    } => {
-                        if let Some(file) = put(&rest, &channel_id, &path).await {
-                            wake.wake(Update::Attached {
-                                channel_id,
-                                root_id,
-                                file: Box::new(file),
-                            });
-                        }
-                    }
+                    } => match put(&rest, &channel_id, &path).await {
+                        Some(file) => wake.wake(Update::Attached {
+                            channel_id,
+                            root_id,
+                            file: Box::new(file),
+                            path,
+                        }),
+                        None => wake.wake(Update::NotAttached {
+                            channel_id,
+                            root_id,
+                            why: format!("{} did not go up", path.display()),
+                            path,
+                        }),
+                    },
                     Ask::Discover { query } => {
                         let found = discover(&rest, engine.store(), &me_id, &query).await;
                         println!("{} other ways to read \"{query}\"", found.len());

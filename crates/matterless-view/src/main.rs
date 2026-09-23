@@ -510,6 +510,17 @@ struct App {
     /// the moment a message is sent shows the attachments too, and only the
     /// server's copy says how big a picture is.
     attached: std::collections::HashMap<String, Vec<matterless_core::model::FileInfo>>,
+    /// When this window started, which is what the spinner's phase is taken
+    /// from: any fixed instant will do, and one that never changes means two
+    /// spinners on screen turn together.
+    began: std::time::Instant,
+    /// Files dropped and not yet on the server, by conversation.
+    ///
+    /// The tray is drawn from these as well as from `attached`, so a tile
+    /// appears on the frame a file is dropped rather than when the upload
+    /// answers -- which for anything large was several seconds of a window
+    /// that had visibly done nothing with what was dropped on it.
+    attaching: std::collections::HashMap<String, Vec<std::path::PathBuf>>,
     /// Where each box is writing to, so its text can be put away under the
     /// right name when the reader moves.
     ///
@@ -888,6 +899,8 @@ impl App {
             },
             drafts: std::collections::HashMap::new(),
             attached: std::collections::HashMap::new(),
+            attaching: std::collections::HashMap::new(),
+            began: std::time::Instant::now(),
             writing_to: None,
             replying_to: None,
             pressed_before: None,
@@ -1574,13 +1587,30 @@ impl App {
                 channel_id,
                 root_id,
                 file,
+                path,
             } => {
                 let under = match root_id.is_empty() {
                     true => channel_id,
                     false => thread_name(&root_id),
                 };
                 println!("{} is attached and waiting", file.name);
+                self.no_longer_on_its_way(&under, &path);
                 self.attached.entry(under).or_default().push(*file);
+                self.relayout();
+                self.redraw();
+            }
+            Update::NotAttached {
+                channel_id,
+                root_id,
+                path,
+                why,
+            } => {
+                let under = match root_id.is_empty() {
+                    true => channel_id,
+                    false => thread_name(&root_id),
+                };
+                eprintln!("{why}");
+                self.no_longer_on_its_way(&under, &path);
                 self.relayout();
                 self.redraw();
             }
@@ -2182,25 +2212,96 @@ impl App {
         }
     }
 
-    /// Hands each box the names of what it is carrying.
+    /// Hands each box what it is carrying.
     ///
     /// The window holds the uploads, because they belong to a conversation
     /// rather than to a box -- the box is emptied and refilled every time the
     /// reader moves, and what they pasted has to still be there when they
-    /// come back. So the names are copied down at the one point both boxes
-    /// are measured.
+    /// come back. So they are copied down at the one point both boxes are
+    /// measured.
+    ///
+    /// A picture is resolved through the same `FileRef` the conversation
+    /// uses, at the same gallery size, so the tray shows the rendition the
+    /// message will show and the two can never disagree about which one a
+    /// file has. It is also the only honest way to ask "is this a picture":
+    /// a mime type alone once called a 4.5MB bitmap an image the server had
+    /// declined to decode, and it was laid out in a box nothing by nothing.
     fn show_what_is_attached(&mut self) {
-        let named = |held: Option<&Vec<matterless_core::model::FileInfo>>| {
-            held.map(|files| files.iter().map(|file| file.name.clone()).collect())
+        let going_up = |paths: Option<&Vec<std::path::PathBuf>>| {
+            paths
+                .map(|paths| {
+                    paths
+                        .iter()
+                        .map(|path| composer::Waiting {
+                            name: path
+                                .file_name()
+                                .map(|name| name.to_string_lossy().to_string())
+                                .unwrap_or_default(),
+                            picture: None,
+                            shape: (1.0, 1.0),
+                            on_its_way: true,
+                        })
+                        .collect::<Vec<_>>()
+                })
                 .unwrap_or_default()
         };
+        let named = |held: Option<&Vec<matterless_core::model::FileInfo>>| {
+            held.map(|files| {
+                files
+                    .iter()
+                    .map(|file| {
+                        let shown = matterless_render::FileRef::from_info(
+                            file,
+                            matterless_render::FileLayout {
+                                gallery: true,
+                                ..Default::default()
+                            },
+                        );
+                        composer::Waiting {
+                            name: file.name.clone(),
+                            picture: shown
+                                .image
+                                .then(|| matterless_view::stream::picture_key(&shown)),
+                            shape: (shown.box_width as f32, shown.box_height as f32),
+                            on_its_way: false,
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+        };
         let channel = self.sidebar.selected.clone().unwrap_or_default();
-        self.composer.waiting = named(self.attached.get(&channel));
+        // Arrived first, then the ones still going up: a tile that jumped
+        // along the row when its upload finished would move the cross the
+        // reader was about to press.
+        let mut waiting: Vec<composer::Waiting> = named(self.attached.get(&channel));
+        waiting.extend(going_up(self.attaching.get(&channel)));
+        self.composer.waiting = waiting;
         let thread = self.open_root().map(|root| thread_name(&root));
         self.thread_composer.waiting = match thread {
-            Some(name) => named(self.attached.get(&name)),
+            Some(name) => {
+                let mut waiting: Vec<composer::Waiting> = named(self.attached.get(&name));
+                waiting.extend(going_up(self.attaching.get(&name)));
+                waiting
+            }
             None => Vec::new(),
         };
+    }
+
+    /// Takes a file off the on-its-way list, whichever way it ended.
+    ///
+    /// By path rather than by name: two drops of `image.png` from different
+    /// folders are two files, and matching on the name would take the wrong
+    /// tile away.
+    fn no_longer_on_its_way(&mut self, under: &str, path: &std::path::Path) {
+        if let Some(going) = self.attaching.get_mut(under) {
+            if let Some(at) = going.iter().position(|held| held == path) {
+                going.remove(at);
+            }
+            if going.is_empty() {
+                self.attaching.remove(under);
+            }
+        }
     }
 
     /// Whether anything is waiting to be sent with the next message here.
@@ -3511,6 +3612,26 @@ impl App {
     /// nor the file naming the server. `feed::open` refuses a path that is not
     /// already a file, which is why the store is opened here rather than
     /// through it.
+    /// Marks every tile whose picture the atlas cannot draw yet.
+    ///
+    /// Answered from the atlas rather than from the upload, because "the
+    /// server has the file" and "this window can show it" are two different
+    /// things with a fetch between them.
+    fn still_waiting(view: Option<&matterless_view::View>, box_of: &mut composer::Composer) {
+        for held in &mut box_of.waiting {
+            if let Some(key) = held.picture.as_deref() {
+                held.on_its_way = !view.is_some_and(|view| view.atlas.holds(key));
+            }
+        }
+    }
+
+    /// Whether any tile in either box is still waiting for something.
+    fn anything_loading(&self) -> bool {
+        [&self.composer, &self.thread_composer]
+            .into_iter()
+            .any(|box_of| box_of.waiting.iter().any(|held| held.on_its_way))
+    }
+
     /// Makes an empty store where this build keeps one, for a start that has
     /// everything except a database.
     ///
@@ -3906,6 +4027,10 @@ impl App {
         wanted.extend(self.rail.wants());
         wanted.extend(self.sidebar.wants());
         wanted.extend(self.switcher.wants());
+        // The tray shows a picture rather than naming it, so it needs the same
+        // thumbnail the conversation would.
+        wanted.extend(self.composer.wants());
+        wanted.extend(self.thread_composer.wants());
         for (key, width, height) in wanted {
             if self.asked.insert(key.clone()) {
                 link.send(matterless_view::live::Ask::Fetch { key, width, height });
@@ -6352,6 +6477,21 @@ impl App {
         let building =
             matterless_view::timing::watch("building the frame", self.stream.rows.len(), "rows");
         self.re_aim();
+        // Where the spinner has got to. Per frame, and not in the layout
+        // pass: `show_what_is_attached` runs from `relayout`, so a phase set
+        // there is the phase at the last time something changed shape -- the
+        // window woke, drew, and drew the same picture, which is a spinner
+        // that does not spin.
+        let spinning = self.began.elapsed().as_secs_f32() / SPIN.as_secs_f32() % 1.0;
+        self.composer.spinning = spinning;
+        self.thread_composer.spinning = spinning;
+        // A tile stops being "on its way" the moment the upload answers, and
+        // its thumbnail is another round trip behind that -- so for a second
+        // it was a dark square with no spinner and no picture, which is what
+        // attaching four files at once showed. The spinner outlasts the
+        // upload and stops when there is something to draw.
+        Self::still_waiting(self.view.as_ref(), &mut self.composer);
+        Self::still_waiting(self.view.as_ref(), &mut self.thread_composer);
         let scene = self.scene();
         drop(building);
         let _drawing = matterless_view::timing::watch("drawing the frame", 0, "");
@@ -7279,10 +7419,19 @@ impl ApplicationHandler<Update> for App {
             self.redraw();
         }
         let filling = self.shape_some();
+        // A spinner is the one thing on screen that moves with nothing
+        // happening, so the window has to ask for its own frames -- and only
+        // while something is actually going up.
+        let spinning = (!self.attaching.is_empty() || self.anything_loading())
+            .then(|| std::time::Instant::now() + SPIN / SPOKES_A_TURN);
+        if spinning.is_some() {
+            self.redraw();
+        }
         let next = [
             next,
             written,
             playing,
+            spinning,
             self.tooltip.wakes(),
             self.rest.wakes(),
             // So the window wakes to finish shaping even when the drag ends
@@ -7495,10 +7644,22 @@ impl ApplicationHandler<Update> for App {
                 };
                 if let Some(link) = self.link.as_ref() {
                     link.send(matterless_view::live::Ask::Attach {
-                        channel_id,
-                        root_id,
-                        path,
+                        channel_id: channel_id.clone(),
+                        root_id: root_id.clone(),
+                        path: path.clone(),
                     });
+                    // On screen now, not when the server answers. A large
+                    // file is seconds of upload and then another round trip
+                    // for its thumbnail, and until both were done the window
+                    // showed nothing at all -- so a drop looked like it had
+                    // missed.
+                    let under = match root_id.is_empty() {
+                        true => channel_id,
+                        false => thread_name(&root_id),
+                    };
+                    self.attaching.entry(under).or_default().push(path);
+                    self.relayout();
+                    self.redraw();
                 }
             }
             WindowEvent::Focused(focused) => {
@@ -8129,6 +8290,15 @@ impl Shaping {
 /// How long after the last size before the rest of the conversation is
 /// shaped. Short enough to feel like part of letting go of the edge.
 const SETTLE: std::time::Duration = std::time::Duration::from_millis(120);
+
+/// How long one turn of a loading spinner takes.
+///
+/// Slow enough not to strobe, fast enough to read as working. The window
+/// wakes once per spoke rather than once per frame: eight frames a turn is
+/// what the eye needs, and sixty would be drawing the same picture over.
+const SPIN: std::time::Duration = std::time::Duration::from_millis(1_100);
+/// How many frames one turn is drawn in.
+const SPOKES_A_TURN: u32 = 8;
 
 /// How long a box has to be still before what is in it is written down.
 ///

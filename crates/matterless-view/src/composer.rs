@@ -31,13 +31,13 @@ pub struct Composer {
     pub placeholder: String,
     /// What the row along the bottom offers.
     pub tools_for: Tools,
-    /// What is attached and waiting to go with the next message, by name.
+    /// What is attached and waiting to go with the next message.
     ///
     /// Set by the window, which is what holds the uploads and decides which
     /// conversation they belong to. The box only has to say they are there
     /// and offer to take one off -- a file waiting invisibly is worse than
     /// one sent by accident, because nobody can undo what they cannot see.
-    pub waiting: Vec<String>,
+    pub waiting: Vec<Waiting>,
     /// True once anything has been typed, so an empty buffer can be told from
     /// one the reader has emptied on purpose.
     pub touched: bool,
@@ -67,6 +67,12 @@ pub struct Composer {
     /// throw away what they just wrote.
     done: Vec<Change>,
     undone: Vec<Change>,
+    /// Where the spinner on a file still going up has got to, in turns.
+    ///
+    /// Set by the window, which owns the clock. A widget that read one would
+    /// draw a different frame every time it was asked, and this one is asked
+    /// more than once for a single frame.
+    pub spinning: f32,
     /// A field, not a message box: no paperclip, no Send, and none of the
     /// height they take.
     ///
@@ -140,8 +146,107 @@ const SEND: f32 = 52.0;
 const CANCEL: f32 = 60.0;
 /// The row they sit on, along the bottom of the box.
 const TOOLS: f32 = 34.0;
+/// Draws lucide's `loader` at a turn of `phase`, out of what the renderer has.
+///
+/// Eight spokes, brightest at the head and fading behind it, which is the
+/// mark's own shape. Dots rather than the glyph itself because nothing here
+/// can rotate: every quad and every texture lookup is axis-aligned, so
+/// spinning a glyph would mean a transform in the shader. A ring of rounded
+/// fills with a travelling brightness is the same picture with none of that.
+///
+/// The phase is turns, not radians, so the window can hand over a clock
+/// without either side agreeing about pi.
+fn spinner(
+    scene: &mut matterless_paint::Scene,
+    x: f32,
+    y: f32,
+    phase: f32,
+    palette: &matterless_paint::Palette,
+) {
+    const SPOKES: usize = 8;
+    const RING: f32 = 9.0;
+    const DOT: f32 = 2.6;
+    let turn = std::f32::consts::TAU;
+    for spoke in 0..SPOKES {
+        let along = spoke as f32 / SPOKES as f32;
+        // How far behind the head this spoke is, as a fraction of a turn.
+        let behind = (along - phase).rem_euclid(1.0);
+        // Brightest at the head, down to a quarter at the tail: the eye reads
+        // the gradient as the direction of travel.
+        let lit = 1.0 - behind * 0.75;
+        let angle = along * turn;
+        let ink = palette.soft;
+        scene.rounded(
+            x + angle.cos() * RING - DOT,
+            y + angle.sin() * RING - DOT,
+            DOT * 2.0,
+            DOT * 2.0,
+            [ink[0], ink[1], ink[2], (255.0 * lit) as u8],
+            DOT,
+        );
+    }
+}
+
+/// One thing waiting to go with the next message.
+///
+/// A name is enough for a document and not enough for a picture: somebody who
+/// has just pasted three screenshots is choosing between `image.png`,
+/// `image (1).png` and `image (2).png`, which is no choice at all.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Waiting {
+    pub name: String,
+    /// What the atlas calls its picture, when it has one.
+    ///
+    /// Decided by the same `FileRef` the conversation uses, so the tray and
+    /// the message it becomes never disagree about which rendition a file has
+    /// -- the doc on `FileRef::from_info` has asked for this since it was
+    /// written.
+    pub picture: Option<String>,
+    /// The box the server's own numbers give it, for keeping the tile's shape.
+    pub shape: (f32, f32),
+    /// Still going up: the tile is on screen and the file is not there yet.
+    ///
+    /// A drop used to show nothing at all until the upload answered and its
+    /// thumbnail came back -- several seconds of a window that had visibly
+    /// done nothing with what was dropped on it. The tile goes up first and
+    /// fills in afterwards.
+    pub on_its_way: bool,
+}
+
+impl Waiting {
+    /// Wide over tall, and 1.0 for anything that did not say.
+    fn aspect(&self) -> f32 {
+        let (wide, tall) = self.shape;
+        match wide > 0.0 && tall > 0.0 {
+            true => wide / tall,
+            false => 1.0,
+        }
+    }
+
+    /// Whether it gets a tile rather than a chip.
+    ///
+    /// A file on its way gets one before anybody knows whether it is a
+    /// picture: the tile is the feedback, and a row that changed height when
+    /// the answer came back would move the whole box under the reader.
+    fn tiled(&self) -> bool {
+        self.picture.is_some() || self.on_its_way
+    }
+}
+
 /// The row of waiting attachments, and the widest one of them.
 const WAITING: f32 = 26.0;
+/// The row when one of them is a picture: the picture, and its name under it.
+///
+/// Both, because either alone fails somewhere. Three files called
+/// `image.png`, `image (1).png` and `image (2).png` cannot be told apart by
+/// name; two screenshots of the same window cannot be told apart by a
+/// sixty-pixel preview.
+const TILE: f32 = 80.0;
+/// The line under a picture that says what it is called.
+const TILE_NAME: f32 = 16.0;
+/// Narrow enough for a tall picture, wide enough for a few characters of its
+/// name: a portrait screenshot would otherwise be a slot with one letter in it.
+const TILE_NARROWEST: f32 = 64.0;
 const CHIP: f32 = 180.0;
 /// What is kept clear at the ends of that row, and between two of them.
 const CHIP_MARGIN: f32 = 6.0;
@@ -189,6 +294,7 @@ impl Composer {
                 .to_string(),
             tools_for: Tools::Writing,
             waiting: Vec::new(),
+            spinning: 0.0,
             touched: false,
             scroll: 0.0,
             bar: crate::scrollbar::Scrollbar::default(),
@@ -513,10 +619,7 @@ impl Composer {
         // What is waiting to go with this message, above the tools. A press
         // takes one off: the window holds the uploads, so this only says
         // which one was pressed.
-        for at in 0..self.waiting.len() {
-            let Some(chip) = self.waiting_at(within, at) else {
-                continue;
-            };
+        for (at, chip) in self.tray(within).into_iter().enumerate() {
             let under = input.hovered() == Some(format!("{}/unattach/{at}", self.name).as_str());
             scene.rounded(
                 chip.x,
@@ -526,10 +629,102 @@ impl Composer {
                 if under { palette.hover } else { palette.raised },
                 5.0,
             );
+            // A picture is shown rather than named. Nothing is drawn until the
+            // bytes arrive, which leaves the plate above standing in for it --
+            // the same rule the conversation follows, and the reason the tray
+            // does not change size when one lands.
+            if self.waiting[at].tiled() {
+                let shown = chip.height - TILE_NAME;
+                // On `on_its_way`, not on "is there a picture": a key is
+                // chosen the moment the upload answers and the bytes are a
+                // fetch behind it, so matching on the key drew an image the
+                // atlas could not draw and no spinner either -- a dark square
+                // with nothing happening on it.
+                match self.waiting[at]
+                    .picture
+                    .clone()
+                    .filter(|_| !self.waiting[at].on_its_way)
+                {
+                    Some(key) => scene.extend([matterless_paint::Piece::Image {
+                        x: chip.x,
+                        y: chip.y,
+                        width: chip.width,
+                        height: shown,
+                        key,
+                        radius: 5.0,
+                    }]),
+                    // Nothing to draw yet, so the plate and a spinner on it.
+                    // A dark tile alone says "something is here" and not
+                    // "something is happening", and what is being waited
+                    // through is seconds of upload.
+                    None => {
+                        scene.rounded(chip.x, chip.y, chip.width, shown, palette.ground, 5.0);
+                        spinner(
+                            scene,
+                            chip.x + chip.width / 2.0,
+                            chip.y + shown / 2.0,
+                            self.spinning,
+                            palette,
+                        );
+                    }
+                }
+                // Its name under it. A preview alone is not enough -- two
+                // screenshots of the same window look alike at this size --
+                // and a name alone is not either, which is what the tray used
+                // to be.
+                let said = matterless_layout::elided(
+                    fonts,
+                    &self.waiting[at].name,
+                    (chip.width - 8.0).max(8.0),
+                    matterless_layout::Style {
+                        size: 11.0,
+                        line_height: 14.0,
+                        bold: false,
+                        italic: false,
+                        mono: false,
+                    },
+                );
+                let glyphs = painter.run(
+                    fonts,
+                    &said,
+                    chip.x + 4.0,
+                    chip.y + shown + 1.0,
+                    Run {
+                        size: 11.0,
+                        line_height: 14.0,
+                        wrap: f32::MAX,
+                        ..Run::label(f32::MAX)
+                    },
+                );
+                scene.glyphs(glyphs, palette.soft, palette.faint);
+                // Over the picture, and always readable: the corner it sits in
+                // belongs to whatever was photographed.
+                scene.rounded(
+                    chip.right() - 19.0,
+                    chip.y + 3.0,
+                    16.0,
+                    16.0,
+                    palette.ground,
+                    8.0,
+                );
+                let cross = painter.run(
+                    fonts,
+                    matterless_layout::marks::CLOSE,
+                    chip.right() - 16.0,
+                    chip.y + 4.0,
+                    Run::mark(11.0),
+                );
+                scene.glyphs(
+                    cross,
+                    if under { palette.ink } else { palette.soft },
+                    palette.faint,
+                );
+                continue;
+            }
             let room = (chip.width - 22.0).max(10.0);
             let said = matterless_layout::elided(
                 fonts,
-                &self.waiting[at],
+                &self.waiting[at].name,
                 room,
                 matterless_layout::Style {
                     size: 12.0,
@@ -543,7 +738,7 @@ impl Composer {
                 fonts,
                 &said,
                 chip.x + 7.0,
-                chip.y + 2.0,
+                chip.y + (chip.height - 16.0) / 2.0,
                 Run::label(f32::MAX),
             );
             scene.glyphs(glyphs, palette.soft, palette.faint);
@@ -552,7 +747,7 @@ impl Composer {
                 fonts,
                 matterless_layout::marks::CLOSE,
                 chip.right() - 15.0,
-                chip.y + 3.0,
+                chip.y + (chip.height - 14.0) / 2.0,
                 Run::mark(11.0),
             );
             scene.glyphs(
@@ -605,10 +800,14 @@ impl Composer {
     ///
     /// One row however many there are: they are names on a line and they run
     /// out of width long before they run out of box, which is what the
-    /// eliding is for.
+    /// eliding is for. A picture among them makes the row deep enough to see
+    /// one in -- all of them, because a row of two heights reads as two rows.
     fn held(&self) -> f32 {
-        match self.plain || self.waiting.is_empty() {
-            true => 0.0,
+        if self.plain || self.waiting.is_empty() {
+            return 0.0;
+        }
+        match self.waiting.iter().any(|held| held.tiled()) {
+            true => TILE,
             false => WAITING,
         }
     }
@@ -619,25 +818,62 @@ impl Composer {
         Rect::new(tools.x, tools.y - self.held(), tools.width, self.held())
     }
 
-    /// Where one of them sits on that shelf.
+    /// Where every one of them sits on that shelf.
+    ///
+    /// Laid out in one place and indexed by `waiting_at`, because the drawing,
+    /// the hit boxes and the press all have to agree about it -- and with
+    /// pictures in the row the widths are no longer all the same, so "the nth
+    /// of n equal shares" stopped being an answer.
     ///
     /// The gaps and the margins come out of the width before it is shared, so
     /// that however many are waiting the last one ends inside the box: a chip
-    /// drawn past the edge can be neither read nor clicked off again.
-    fn waiting_at(&self, within: Rect, at: usize) -> Option<Rect> {
+    /// drawn past the edge can be neither read nor pressed off again.
+    fn tray(&self, within: Rect) -> Vec<Rect> {
         let shelf = self.shelf(within);
         let count = self.waiting.len();
-        if shelf.height <= 0.0 || at >= count {
-            return None;
+        if shelf.height <= 0.0 || count == 0 {
+            return Vec::new();
         }
+        let tall = shelf.height - 6.0;
         let room = (shelf.width - CHIP_MARGIN * 2.0 - CHIP_GAP * (count - 1) as f32).max(0.0);
-        let each = (room / count as f32).min(CHIP);
-        Some(Rect::new(
-            shelf.x + CHIP_MARGIN + at as f32 * (each + CHIP_GAP),
-            shelf.y + 2.0,
-            each,
-            WAITING - 6.0,
-        ))
+        let share = (room / count as f32).min(CHIP);
+        let mut at = shelf.x + CHIP_MARGIN;
+        let mut places = Vec::with_capacity(count);
+        for held in &self.waiting {
+            // A picture keeps its own shape, so a tall screenshot is not
+            // stretched into a wide box -- measured against the picture's own
+            // part of the tile, not the name's. Never wider than its share:
+            // the row has to end inside the box whatever is in it.
+            let wide = match held.tiled() {
+                true => {
+                    ((tall - TILE_NAME) * held.aspect()).clamp(TILE_NARROWEST.min(share), share)
+                }
+                false => share,
+            };
+            places.push(Rect::new(at, shelf.y + 3.0, wide, tall));
+            at += wide + CHIP_GAP;
+        }
+        places
+    }
+
+    /// Where one of them sits, for the boxes and the drawing.
+    fn waiting_at(&self, within: Rect, at: usize) -> Option<Rect> {
+        self.tray(within).get(at).copied()
+    }
+
+    /// The pictures the tray needs before it can show anything.
+    ///
+    /// The same shape every other widget answers with, so the window gathers
+    /// them all the same way: what to fetch, and how big it will be drawn.
+    pub fn wants(&self) -> Vec<(String, u32, u32)> {
+        self.waiting
+            .iter()
+            .filter_map(|held| {
+                let key = held.picture.clone()?;
+                let (wide, tall) = held.shape;
+                Some((key, wide.max(1.0) as u32, tall.max(1.0) as u32))
+            })
+            .collect()
     }
 
     /// Inside the box, and around it. Tighter on a field than on a message.
@@ -1283,7 +1519,7 @@ impl Composer {
 
 #[cfg(test)]
 mod tests {
-    use super::{Composer, Rect};
+    use super::{Composer, Rect, Waiting};
     use matterless_layout::Fonts;
     /// The hint fits the box it is drawn in, at every width the box gets.
     ///
@@ -1350,6 +1586,315 @@ mod tests {
         );
     }
 
+    /// A file waiting by name alone, which is what a document is.
+    fn named(name: &str) -> Waiting {
+        Waiting {
+            name: name.to_string(),
+            ..Default::default()
+        }
+    }
+
+    /// A picture waiting, which is what is shown rather than named.
+    fn pictured(name: &str, wide: f32, tall: f32) -> Waiting {
+        Waiting {
+            name: name.to_string(),
+            picture: Some(format!("thumb/{name}")),
+            shape: (wide, tall),
+            on_its_way: false,
+        }
+    }
+
+    /// A file dropped a moment ago and not yet on the server.
+    fn going_up(name: &str) -> Waiting {
+        Waiting {
+            name: name.to_string(),
+            on_its_way: true,
+            ..Default::default()
+        }
+    }
+
+    /// A picture waiting is shown rather than named, at its own shape.
+    ///
+    /// Reported against the official client: the tray listed `image.png`,
+    /// `image (1).png` and `image (2).png`, which is no way to tell three
+    /// screenshots apart.
+    #[test]
+    fn a_waiting_picture_is_shown_at_its_own_shape() {
+        let mut composer = Composer::new("composer");
+        composer.waiting = vec![named("map.pdf")];
+        let by_name = composer.height();
+        composer.waiting = vec![pictured("holiday.png", 120.0, 60.0)];
+        let shown = composer.height();
+        assert!(
+            shown > by_name,
+            "{shown} leaves no more room for a picture than {by_name} does for a name"
+        );
+
+        let within = Rect::new(0.0, 0.0, 600.0, composer.height());
+        let tile = composer.waiting_at(within, 0).expect("a tile");
+        // Against the picture's own part of the tile: the name under it is
+        // the tray's, not the picture's, and measuring the shape against the
+        // whole tile would squash every preview by a line.
+        let shown = tile.height - super::TILE_NAME;
+        assert!(
+            (tile.width / shown - 2.0).abs() < 0.1,
+            "{tile:?} is not the shape the server gave it"
+        );
+        // And it asks for exactly the rendition the conversation would.
+        assert_eq!(
+            composer.wants(),
+            vec![("thumb/holiday.png".to_string(), 120, 60)]
+        );
+    }
+
+    /// Pictures and names in one tray still make one row, inside the box.
+    #[test]
+    fn a_mixed_tray_stays_on_one_shelf() {
+        let mut composer = Composer::new("composer");
+        composer.waiting = vec![
+            pictured("a.png", 100.0, 100.0),
+            named("b.pdf"),
+            pictured("tall.png", 40.0, 120.0),
+        ];
+        let within = Rect::new(0.0, 0.0, 600.0, composer.height());
+        let shelf = composer.shelf(within);
+        let tray = composer.tray(within);
+        assert_eq!(tray.len(), 3);
+        for (at, tile) in tray.iter().enumerate() {
+            assert!(
+                tile.right() <= shelf.right() + 0.5,
+                "{at} at {tile:?} runs past {shelf:?}"
+            );
+            assert!(tile.y >= shelf.y && tile.bottom() <= shelf.bottom() + 0.5);
+        }
+        assert!(
+            tray.windows(2)
+                .all(|pair| (pair[0].y - pair[1].y).abs() < 0.01),
+            "the tray is two rows deep"
+        );
+    }
+
+    /// And the tile really carries the picture, in the box the tray gave it.
+    ///
+    /// A gesture cannot be driven from here -- nothing can be dropped or
+    /// pasted into this window from a test -- so the scene is built and the
+    /// pieces read back. What this catches is the pair that has to agree: the
+    /// key the atlas is asked for, and the rect it is drawn in.
+    #[test]
+    fn the_tile_draws_the_picture_the_tray_asked_for() {
+        use matterless_paint::{Painter, Palette, Piece, Scene};
+
+        let mut fonts = Fonts::new();
+        let mut composer = Composer::new("composer");
+        composer.waiting = vec![pictured("holiday.png", 120.0, 60.0), named("map.pdf")];
+        let within = Rect::new(0.0, 0.0, 600.0, composer.height());
+        let tile = composer.waiting_at(within, 0).expect("a tile");
+
+        let mut scene = Scene::default();
+        let mut painter = Painter::new();
+        let palette = Palette::default();
+        composer.draw_over(
+            &mut matterless_widgets::Canvas {
+                scene: &mut scene,
+                painter: &mut painter,
+                fonts: &mut fonts,
+                palette: &palette,
+            },
+            &matterless_ui::input::Input::default(),
+            within,
+        );
+
+        let drawn: Vec<(String, f32, f32, f32, f32)> = scene
+            .layers
+            .iter()
+            .flat_map(|layer| layer.pieces.iter())
+            .filter_map(|piece| match piece {
+                Piece::Image {
+                    key,
+                    x,
+                    y,
+                    width,
+                    height,
+                    ..
+                } => Some((key.clone(), *x, *y, *width, *height)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            drawn,
+            vec![(
+                "thumb/holiday.png".to_string(),
+                tile.x,
+                tile.y,
+                tile.width,
+                tile.height - super::TILE_NAME
+            )],
+            "the picture is drawn somewhere other than its own tile"
+        );
+        // And the name is under it rather than over it, which is the whole
+        // reason the tile is deeper than the picture.
+        // The positive claim, rather than "nothing above it": the box draws
+        // its own words too, and a minimum over every glyph answers about
+        // whichever of them sits highest.
+        let under = scene
+            .layers
+            .iter()
+            .flat_map(|layer| layer.pieces.iter())
+            .filter_map(|piece| match piece {
+                Piece::Text { glyphs, .. } => Some(glyphs),
+                _ => None,
+            })
+            .flatten()
+            .any(|glyph| {
+                let (gx, gy) = (glyph.x as f32, glyph.y as f32);
+                gx >= tile.x
+                    && gx <= tile.right()
+                    && gy >= tile.y + tile.height - super::TILE_NAME - 1.0
+                    && gy <= tile.bottom() + 1.0
+            });
+        assert!(under, "the tile has no name under its picture");
+    }
+
+    /// A file still going up already has its tile, at the size it will keep.
+    ///
+    /// Reported 2026-09-23: dropping a picture showed nothing for several
+    /// seconds -- the upload, and then a round trip for its thumbnail -- so a
+    /// drop looked like it had missed. The tile is the feedback, and it has
+    /// to be the same tile afterwards: a row that changed height when the
+    /// answer came back would move the whole box under the reader.
+    #[test]
+    fn a_file_on_its_way_already_has_its_tile() {
+        let mut composer = Composer::new("composer");
+        composer.waiting = vec![going_up("holiday.png")];
+        let while_waiting = composer.height();
+        let within = Rect::new(0.0, 0.0, 600.0, while_waiting);
+        let tile = composer
+            .waiting_at(within, 0)
+            .expect("a tile while it goes up");
+
+        // The same file, once the server has answered.
+        composer.waiting = vec![pictured("holiday.png", 120.0, 60.0)];
+        assert_eq!(
+            composer.height(),
+            while_waiting,
+            "the box changed height when the upload finished"
+        );
+        let landed = composer.waiting_at(within, 0).expect("a tile");
+        assert_eq!(
+            (tile.y, tile.height),
+            (landed.y, landed.height),
+            "the tile moved when its picture arrived"
+        );
+    }
+
+    /// The spinner turns, and only while something is going up.
+    ///
+    /// What it guards is the pair that makes an animation visible at all: the
+    /// picture has to change with the phase, and the window has to be woken
+    /// to draw it. This half is the picture -- that the same tile, drawn at
+    /// two phases, is not the same set of pieces.
+    #[test]
+    fn the_spinner_turns_while_a_file_goes_up() {
+        use matterless_paint::{Painter, Palette, Piece, Scene};
+
+        let mut fonts = Fonts::new();
+        let mut composer = Composer::new("composer");
+        composer.waiting = vec![going_up("holiday.png")];
+        let within = Rect::new(0.0, 0.0, 600.0, composer.height());
+
+        let drawn = |composer: &Composer, fonts: &mut Fonts| -> Vec<u8> {
+            let mut scene = Scene::default();
+            let mut painter = Painter::new();
+            let palette = Palette::default();
+            composer.draw_over(
+                &mut matterless_widgets::Canvas {
+                    scene: &mut scene,
+                    painter: &mut painter,
+                    fonts,
+                    palette: &palette,
+                },
+                &matterless_ui::input::Input::default(),
+                within,
+            );
+            // The alphas of the round fills, in order: the spinner is the
+            // only thing here whose brightness changes.
+            scene
+                .layers
+                .iter()
+                .flat_map(|layer| layer.pieces.iter())
+                .filter_map(|piece| match piece {
+                    Piece::Fill { colour, radius, .. } if *radius > 2.0 && *radius < 3.0 => {
+                        Some(colour[3])
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+
+        composer.spinning = 0.0;
+        let head = drawn(&composer, &mut fonts);
+        assert_eq!(head.len(), 8, "eight spokes, as the mark has");
+        composer.spinning = 0.5;
+        let half = drawn(&composer, &mut fonts);
+        assert_ne!(head, half, "the spinner is the same at every phase");
+        // Back where it started: a turn is a turn.
+        composer.spinning = 1.0;
+        assert_eq!(drawn(&composer, &mut fonts), head);
+
+        // And nothing turns once the picture has arrived.
+        composer.waiting = vec![pictured("holiday.png", 120.0, 60.0)];
+        assert!(
+            drawn(&composer, &mut fonts).is_empty(),
+            "a picture that has landed is still drawing a spinner"
+        );
+    }
+
+    /// A picture the atlas cannot draw yet keeps its spinner.
+    ///
+    /// The gap reported 2026-09-23 with four files at once: the upload
+    /// answers, so the tile is no longer "on its way", and its thumbnail is
+    /// another round trip behind that -- leaving a dark square with no
+    /// spinner and no picture. Whether to spin is `on_its_way`, which the
+    /// window keeps true until the atlas holds the key; it is not "has a
+    /// picture been chosen", which is true the moment the upload lands.
+    #[test]
+    fn a_tile_whose_picture_has_not_arrived_still_spins() {
+        use matterless_paint::{Painter, Palette, Piece, Scene};
+
+        let mut fonts = Fonts::new();
+        let mut composer = Composer::new("composer");
+        // What the window hands over between the two: the rendition is known
+        // and the bytes are not here.
+        composer.waiting = vec![Waiting {
+            on_its_way: true,
+            ..pictured("holiday.png", 120.0, 60.0)
+        }];
+        let within = Rect::new(0.0, 0.0, 600.0, composer.height());
+
+        let mut scene = Scene::default();
+        let mut painter = Painter::new();
+        let palette = Palette::default();
+        composer.draw_over(
+            &mut matterless_widgets::Canvas {
+                scene: &mut scene,
+                painter: &mut painter,
+                fonts: &mut fonts,
+                palette: &palette,
+            },
+            &matterless_ui::input::Input::default(),
+            within,
+        );
+        let spokes = scene
+            .layers
+            .iter()
+            .flat_map(|layer| layer.pieces.iter())
+            .filter(|piece| {
+                matches!(piece, Piece::Fill { radius, .. } if *radius > 2.0 && *radius < 3.0)
+            })
+            .count();
+        assert_eq!(spokes, 8, "a tile with nothing to draw is not saying so");
+    }
+
     /// A waiting attachment gives itself room, and gives it back.
     ///
     /// The box is measured before it is laid out, so a shelf that took no
@@ -1358,14 +1903,14 @@ mod tests {
     fn what_is_waiting_makes_the_box_taller() {
         let mut composer = Composer::new("composer");
         let empty = composer.height();
-        composer.waiting = vec!["holiday.png".to_string()];
+        composer.waiting = vec![named("holiday.png")];
         let carrying = composer.height();
         assert!(
             carrying > empty,
             "{carrying} is no taller than {empty} with a file waiting"
         );
 
-        composer.waiting.push("map.pdf".to_string());
+        composer.waiting.push(named("map.pdf"));
         assert_eq!(
             composer.height(),
             carrying,
@@ -1386,7 +1931,7 @@ mod tests {
         let mut composer = Composer::new("composer");
         let within = Rect::new(0.0, 0.0, 600.0, composer.height());
         for count in [1_usize, 3, 10] {
-            composer.waiting = (0..count).map(|at| format!("{at}.png")).collect();
+            composer.waiting = (0..count).map(|at| named(&format!("{at}.png"))).collect();
             let within = Rect::new(within.x, within.y, within.width, composer.height());
             let shelf = composer.shelf(within);
             assert!(
