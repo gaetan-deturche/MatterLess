@@ -30,6 +30,14 @@ pub struct Theme {
     pub header_size: f32,
     /// Above and below a row's content. `.post { padding: 3px 0 }`.
     pub row_padding: f32,
+    /// The same, for a message that carries on from the one above it.
+    ///
+    /// Less, because the two are one person still talking. A run of short
+    /// messages -- "AH", "ouf", "I hadn't even read the one above" -- is a
+    /// paragraph said in pieces, and at a full row's padding each piece stood
+    /// eight pixels off the next while the lines *inside* one message stood
+    /// at none. The eye reads that as five things rather than one turn.
+    pub merged_padding: f32,
     /// Between two rows. The stream is a flex column with `gap: 2px`, which is
     /// two pixels every row owes the one after it.
     pub row_gap: f32,
@@ -124,6 +132,7 @@ impl Default for Theme {
             header_height: 20.0,
             header_size: 13.5,
             row_padding: 3.0,
+            merged_padding: 0.0,
             row_gap: 2.0,
             pad_x: 16.0,
             pad_top: 12.0,
@@ -1035,7 +1044,13 @@ pub fn lay_out_opened(fonts: &mut Fonts, row: &Row, theme: &Theme, opened: bool)
 
     let attachments = post.map(|post| post.files.len()).unwrap_or(0);
 
-    y += theme.row_padding;
+    // A message carrying on from the one above it is the same person still
+    // talking, and is spaced as such.
+    let padding = match header {
+        true => theme.row_padding,
+        false => theme.merged_padding,
+    };
+    y += padding;
     if header {
         // Who and when, as text rather than a reserved rectangle: it is a line
         // like any other and it is what tells one message from the next.
@@ -1500,7 +1515,7 @@ pub fn lay_out_opened(fonts: &mut Fonts, row: &Row, theme: &Theme, opened: bool)
         // The gap the stream's flex column puts between every pair. Owed by
         // each row rather than subtracted from the last, which would make the
         // last row a different height for no reason a reader could see.
-        height: y + theme.row_padding + theme.row_gap,
+        height: y + padding + theme.row_gap,
         blocks,
     }
 }
@@ -1999,11 +2014,14 @@ mod tests {
         );
     }
 
-    /// A continuation omits the author line, and that is the only difference.
+    /// A continuation omits the author line, and is spaced as one person
+    /// still talking.
     ///
     /// The line and the gap under it: the header is separated from the first
     /// block of the message by the same gap that separates every other pair of
-    /// blocks, so a message without a header is shorter by both.
+    /// blocks, so a message without a header is shorter by both. And by the
+    /// padding it does not carry either -- a run of short messages read as
+    /// five separate things at a full row's padding each.
     #[test]
     fn a_continuation_is_shorter_by_its_header() {
         let mut fonts = Fonts::new();
@@ -2019,7 +2037,20 @@ mod tests {
         let next = lay_out(&mut fonts, &Row::Continuation { post: post(body) }, &theme);
         assert_eq!(
             first.height - next.height,
-            theme.header_height + theme.block_gap
+            theme.header_height
+                + theme.block_gap
+                + (theme.row_padding - theme.merged_padding) * 2.0
+        );
+        // Which leaves two things one person said in a row sitting like two
+        // paragraphs of one message: the gap a block owes the next, plus the
+        // gap the stream owes between rows, and nothing else. At a full row's
+        // padding it was that plus six more, and a run of one-word messages
+        // read as five separate things.
+        let between = next.height - theme.line_height;
+        assert_eq!(
+            between,
+            theme.block_gap + theme.row_gap,
+            "{between} between two merged messages"
         );
     }
 
