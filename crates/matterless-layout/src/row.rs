@@ -173,6 +173,18 @@ impl Theme {
     pub fn text_width(&self) -> f32 {
         (self.width - self.gutter).max(40.0)
     }
+
+    /// The line under a picture that says what it is called, and the gap
+    /// above it. One number, because the layout reserves it and the tests
+    /// have to be able to say why a shelf is as tall as it is.
+    pub fn caption_height(&self) -> f32 {
+        self.small_size + 4.0
+    }
+
+    /// Between a picture and its name.
+    pub fn caption_gap(&self) -> f32 {
+        2.0
+    }
 }
 
 /// What a row occupies, and the pieces that make it up.
@@ -221,6 +233,15 @@ pub enum Kind {
     Unread,
     /// An image or a file card, whose size the server told us.
     Attachment,
+    /// What a picture is called, under it.
+    ///
+    /// A preview alone is not enough to tell two attachments apart -- two
+    /// screenshots of the same window look alike at any size a conversation
+    /// can spare -- and the name alone was what the composer's tray used to
+    /// show, which is no better. Its own kind so it is set quietly: a
+    /// filename in full ink under every picture would read as something
+    /// somebody said.
+    Caption,
     /// One line of a link or permalink card. A card is several of these
     /// stacked with no gap, so the bar drawn beside them reads as one.
     Preview,
@@ -1265,8 +1286,39 @@ pub fn lay_out_opened(fonts: &mut Fonts, row: &Row, theme: &Theme, opened: bool)
                 size: theme.body_size,
                 wrap: width,
             });
+            // What it is called, under it, elided to the picture's own width.
+            //
+            // A line of the layout rather than something the painter adds, so
+            // the room it takes is reserved like everything else here: a name
+            // drawn into space nobody set aside is drawn over the next
+            // message. One line always -- a filename that wrapped would make
+            // a picture's height an answer about text, which is the one thing
+            // this layout refuses to guess at.
+            let named = crate::elided(
+                fonts,
+                &file.name,
+                width,
+                crate::Style {
+                    size: theme.small_size,
+                    line_height: theme.caption_height(),
+                    bold: false,
+                    italic: false,
+                    mono: false,
+                },
+            );
+            let caption = theme.caption_height();
+            blocks.push(Block {
+                y: y + height + theme.caption_gap(),
+                x: along,
+                height: caption,
+                lines: 1,
+                kind: Kind::Caption,
+                spans: vec![plain(named)],
+                size: theme.small_size,
+                wrap: width,
+            });
             along += width + theme.block_gap;
-            tallest = tallest.max(height);
+            tallest = tallest.max(height + theme.caption_gap() + caption);
         }
         close_the_shelf(&mut y, &mut along, &mut tallest);
     }
@@ -2612,8 +2664,8 @@ mod tests {
         assert_eq!(blocks[0].y, blocks[1].y, "two fit");
         assert_eq!(
             blocks[2].y,
-            blocks[0].y + 300.0 + theme.block_gap,
-            "the third clears the 300 above it, not the 80"
+            blocks[0].y + 300.0 + theme.caption_gap() + theme.caption_height() + theme.block_gap,
+            "the third clears the 300 above it and its name, not the 80"
         );
         assert_eq!(blocks[2].x, 0.0, "and starts a shelf of its own");
         assert!(laid.height >= blocks[2].y + 50.0);

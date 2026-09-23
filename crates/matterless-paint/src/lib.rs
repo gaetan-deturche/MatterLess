@@ -932,6 +932,18 @@ impl Painter {
                     });
                 }
                 // The same as text, a step quieter, with a bar down its left.
+                // A picture's name, under it. Quiet, and nothing else: the
+                // block is one elided line the layout already measured, so
+                // there is no wrapping to do and no ground to draw.
+                Kind::Caption => {
+                    let (glyphs, _, _, _) = self.glyphs_of(fonts, block, x, y, theme);
+                    pieces.push(Piece::Text {
+                        glyphs,
+                        ink: palette.soft,
+                        faint: palette.faint,
+                        signal: palette.signal,
+                    });
+                }
                 Kind::Quote => {
                     let (glyphs, _, _, _) = self.glyphs_of(fonts, block, x, y, theme);
                     pieces.push(Piece::Fill {
