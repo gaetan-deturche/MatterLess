@@ -7591,7 +7591,28 @@ impl ApplicationHandler<Update> for App {
                 }
             }
             WindowEvent::Resized(size) => {
-                self.sized = Some((size.width.max(1), size.height.max(1)));
+                // Minimising is reported as a resize to nothing, and a
+                // conversation re-wrapped to a column one pixel wide is worse
+                // than wasted work: the anchor for putting the reader back is
+                // taken against that panel on the way out *and* on the way in,
+                // and an anchor measured against a panel nobody is looking at
+                // says nothing at all. That is the frame of broken layout
+                // after a restore. It also filled a slot of the per-width
+                // cache with a width no reader will ever see.
+                // Minimising is reported as a resize to nothing -- measured:
+                // 0x0 on the way down, then the real size on the way back --
+                // and a conversation re-wrapped to a column one pixel wide is
+                // worse than wasted work. The anchor that puts the reader
+                // back where they were is taken against that panel on the way
+                // out and read against it on the way in, and an anchor
+                // measured against a panel nobody is looking at says nothing
+                // at all: that is the frame of broken layout after a restore.
+                // It also spent a slot of the three-width row cache on a
+                // width no reader will ever see.
+                if size.width == 0 || size.height == 0 {
+                    return;
+                }
+                self.sized = Some((size.width, size.height));
                 // Drawn here, before this handler comes back, rather than left
                 // for the next frame. The window is already the new size when
                 // this runs, and the compositor will show it at that size with
