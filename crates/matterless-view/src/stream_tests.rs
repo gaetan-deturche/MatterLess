@@ -1861,3 +1861,87 @@ fn the_scrollbar_waits_for_the_height_to_be_known() {
     assert!(named(&stream), "the bar never came back");
 }
 
+/// The "New messages" line survives a pointer resting on the message under it.
+///
+/// It has no height of its own and its block is lifted half its depth into the
+/// join, so a light laid down when the row below took its turn covered the rule
+/// and the lower half of the words. That row is the first unread message, which
+/// is the one a reader coming back is most likely to be pointing at.
+#[test]
+fn the_unread_line_is_not_covered_by_the_light_under_the_message() {
+    use matterless_paint::{Painter, Palette, Piece, Scene};
+
+    let mut fonts = Fonts::new();
+    let within = panel();
+    let mut stream = Stream::new("stream");
+    stream.rows = vec![
+        Row::Post {
+            post: post("read", ""),
+        },
+        Row::UnreadDivider,
+        Row::Post {
+            post: post("fresh", ""),
+        },
+    ];
+    stream.lay_out(&mut fonts, within.width);
+
+    let placed = stream.boxes(within, None);
+    let row = placed
+        .iter()
+        .find(|item| item.name == "stream/row/2")
+        .expect("the first unread message is placed");
+    let mut input = Input::default();
+    input.apply(
+        Event::PointerMoved {
+            x: row.rect.x + 10.0,
+            y: row.rect.y + row.rect.height / 2.0,
+        },
+        &placed,
+    );
+    assert_eq!(
+        stream.hovered(&input),
+        Some(2),
+        "the fixture is not pointing at the row it means to"
+    );
+
+    let palette = Palette::default();
+    let mut painter = Painter::new();
+    let mut scene = Scene::default();
+    stream.draw(
+        &mut crate::sidebar::Canvas {
+            scene: &mut scene,
+            painter: &mut painter,
+            fonts: &mut fonts,
+            palette: &palette,
+        },
+        within,
+        &input,
+        &std::collections::HashMap::new(),
+    );
+
+    let mut light = None;
+    let mut mark = None;
+    for (at, piece) in scene
+        .layers
+        .iter()
+        .flat_map(|layer| layer.pieces.iter())
+        .enumerate()
+    {
+        if let Piece::Fill { colour, height, .. } = piece {
+            if *colour == palette.hover && light.is_none() {
+                light = Some(at);
+            }
+            // The rules either side of the words: one pixel deep, in the
+            // colour the unread line alone is drawn in.
+            if *height == 1.0 && colour[..3] == palette.flag[..3] && mark.is_none() {
+                mark = Some(at);
+            }
+        }
+    }
+    let light = light.expect("the hovered row has a light under it");
+    let mark = mark.expect("the unread line draws its rule");
+    assert!(
+        light < mark,
+        "the light ({light}) is drawn over the line ({mark})"
+    );
+}

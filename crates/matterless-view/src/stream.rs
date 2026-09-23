@@ -2265,13 +2265,22 @@ impl Stream {
         } = into;
         let hovered = self.hovered(input);
         let inner = self.inner(within);
+        // The light goes down before any row is drawn rather than when its own
+        // row comes up. The unread line has no height and its block is lifted
+        // half its depth into the join it shares with the row below, so a fill
+        // laid on that row's turn covered the rule and the lower half of the
+        // words -- and the row it hides behind is the first unread message,
+        // which is exactly the one being pointed at.
+        if let Some(index) = hovered
+            && let Some(row) = self.laid.get(index)
+        {
+            let at = self.top_of(index, within);
+            scene.fill(inner.x, at, inner.width, row.height, palette.hover);
+        }
         let mut top = within.y + self.theme.pad_top - self.scroll;
         for (index, row) in self.laid.iter().enumerate() {
             let bottom = top + row.height;
             if bottom >= within.y && top <= within.bottom() {
-                if hovered == Some(index) {
-                    scene.fill(inner.x, top, inner.width, row.height, palette.hover);
-                }
                 {
                     let mut canvas = Canvas {
                         scene,
