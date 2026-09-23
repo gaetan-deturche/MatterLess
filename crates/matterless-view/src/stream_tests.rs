@@ -717,6 +717,42 @@ fn a_shorter_panel_keeps_the_newest_message_against_the_bottom() {
     );
 }
 
+/// A reader part-way up keeps the foot of the conversation, not the middle.
+///
+/// The case the anchor alone gets wrong, and the one that was reported: a
+/// message box growing a line takes that line off the bottom of the panel,
+/// and holding the row across the middle keeps the words still while the
+/// newest message slides under the box. In a conversation the bottom is the
+/// edge that matters -- a growing box must not cover what is being replied
+/// to. The window adds the height it lost to the scroll; this is that sum.
+#[test]
+fn a_panel_losing_its_foot_keeps_what_was_at_the_bottom() {
+    let mut fonts = Fonts::new();
+    let tall = panel();
+    let mut stream = wordy(&mut fonts, tall.width);
+    stream.to_bottom(tall);
+    // Part-way up, so neither edge answers for the reader.
+    stream.scroll -= 150.0;
+    assert!(stream.behind(tall) > 1.0 && stream.scroll > 1.0);
+    let behind = stream.behind(tall);
+
+    // The box grows by a line: the panel loses twenty pixels from its foot.
+    let short = Rect::new(tall.x, tall.y, tall.width, tall.height - 20.0);
+    let held = stream.anchor(tall);
+    stream.anchored(held, short);
+    // What the window then does, and the whole of this fix: the distance
+    // from the newest message is what is kept, rather than the height that
+    // was lost -- the anchor has already moved the scroll by half of that.
+    let reach = stream.reach(short);
+    stream.scroll = (reach - behind).clamp(0.0, reach);
+
+    assert!(
+        (stream.behind(short) - behind).abs() < 1.0,
+        "the foot moved: {behind}px behind before, {}px after",
+        stream.behind(short)
+    );
+}
+
 /// And the top of the channel is the same in reverse.
 ///
 /// Where holding a row is not merely useless but wrong: the rows above the

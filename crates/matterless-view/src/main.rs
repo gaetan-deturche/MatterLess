@@ -510,6 +510,13 @@ struct App {
     /// the moment a message is sent shows the attachments too, and only the
     /// server's copy says how big a picture is.
     attached: std::collections::HashMap<String, Vec<matterless_core::model::FileInfo>>,
+    /// The box heights the conversation was last laid out against.
+    ///
+    /// `reacted` checks for a box that changed size and returns early on half
+    /// a dozen paths before it gets there -- a picker open, a mention list
+    /// up, a pane taking the frame -- so the frame asks too. It is the one
+    /// place every path ends at.
+    laid_against: (f32, f32),
     /// When this window started, which is what the spinner's phase is taken
     /// from: any fixed instant will do, and one that never changes means two
     /// spinners on screen turn together.
@@ -901,6 +908,7 @@ impl App {
             attached: std::collections::HashMap::new(),
             attaching: std::collections::HashMap::new(),
             began: std::time::Instant::now(),
+            laid_against: (0.0, 0.0),
             writing_to: None,
             replying_to: None,
             pressed_before: None,
@@ -5936,7 +5944,7 @@ impl App {
         // Only when a box actually grew or shrank. Every keystroke would
         // otherwise re-lay-out four hundred messages to learn nothing moved.
         if (self.composer.height(), self.thread_composer.height()) != was {
-            self.relayout();
+            self.box_changed_size();
         }
 
         // Sent after the boxes are settled: posting re-reads the channel, and
@@ -6489,6 +6497,11 @@ impl App {
     fn paint(&mut self, waiting: bool) {
         let building =
             matterless_view::timing::watch("building the frame", self.stream.rows.len(), "rows");
+        // A box that grew without the conversation being told is a box drawn
+        // over the last message.
+        if (self.composer.height(), self.thread_composer.height()) != self.laid_against {
+            self.box_changed_size();
+        }
         self.re_aim();
         // Where the spinner has got to. Per frame, and not in the layout
         // pass: `show_what_is_attached` runs from `relayout`, so a phase set
@@ -7127,6 +7140,40 @@ impl App {
             || BUTTONS.iter().any(|button| name.ends_with(button))
     }
 
+    /// Lays out again for a box that grew or shrank, keeping the foot of the
+    /// conversation where it was.
+    ///
+    /// The relayout alone is not enough, and this is the half that was
+    /// reported twice: the anchor holds the row across the *middle* for a
+    /// reader who is not at either end, so a panel losing height from the
+    /// bottom keeps that row still and slides the newest message under the
+    /// box. In a conversation the bottom is the edge that matters -- a
+    /// growing message box must not cover what is being replied to.
+    ///
+    /// The distance from the newest message is what is kept, not the height
+    /// that was lost: the anchor has already moved the scroll by half of that
+    /// to hold the middle row, and adding the loss on top overshot by ten.
+    ///
+    /// Measured against the panel the reader was **looking at**, which is not
+    /// what `stream_rect` answers: the box has already grown by the time this
+    /// runs. Asking the new panel and restoring against the new panel is the
+    /// same question twice and hands back the scroll unchanged -- which is
+    /// exactly what the first attempt did, and why the report came back. The
+    /// same "asked too late" fault as the drag anchor and the stale hit box.
+    fn box_changed_size(&mut self) {
+        let now = self.stream_rect();
+        let grew = self.composer.height() - self.laid_against.0;
+        let was = Rect::new(now.x, now.y, now.width, now.height + grew);
+        let behind = self.stream.behind(was);
+        self.relayout();
+        let within = self.stream_rect();
+        let reach = self.stream.reach(within);
+        if reach <= 0.0 {
+            return;
+        }
+        self.stream.scroll = (reach - behind).clamp(0.0, reach);
+    }
+
     /// Lays the whole conversation out for the current width.
     fn relayout(&mut self) {
         let held = self.anchors();
@@ -7207,6 +7254,7 @@ impl App {
         let width = self.channel_rect().width;
         self.composer.lay_out(&mut self.fonts, width);
 
+        self.laid_against = (self.composer.height(), self.thread_composer.height());
         let stream = self.stream_rect();
         {
             let _shaping = matterless_view::timing::watch(
