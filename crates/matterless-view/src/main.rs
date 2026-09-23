@@ -560,6 +560,15 @@ struct App {
     settings: matterless_view::settings::Settings,
     /// A turn of the wheel still arriving.
     glide: matterless_view::glide::Glide,
+    /// What the two boxes said when they were last looked at, and when that
+    /// changed, for putting a draft away once the typing stops.
+    ///
+    /// The text rather than a flag set where a key is handled: a box takes
+    /// characters, pastes, drops, deletions, an emoji off the grid and a name
+    /// off the completion list, and a flag would have to be set in every one
+    /// of those places and would be forgotten in one.
+    watched: (String, String),
+    typed_at: Option<std::time::Instant>,
     /// The pictures that move, and where in their loops they are.
     moving: matterless_view::moving::Moving,
     /// Which channel the open thread belongs to.
@@ -890,6 +899,8 @@ impl App {
             signin: matterless_view::signin::SignIn::default(),
             settings: matterless_view::settings::Settings::default(),
             glide: matterless_view::glide::Glide::default(),
+            watched: (String::new(), String::new()),
+            typed_at: None,
             moving: matterless_view::moving::Moving::default(),
             thread_in: None,
             put_off: None,
@@ -3336,6 +3347,43 @@ impl App {
         let view = self.view.as_ref()?;
         self.moving
             .wakes(std::time::Instant::now(), |key| view.atlas.drawn(key))
+    }
+
+    /// Puts a half-written message away a couple of seconds after the typing
+    /// stops, and says when to come back if it is not time yet.
+    ///
+    /// A draft used to reach the store only when the conversation was left,
+    /// which is a fine moment to save one and a poor one to rely on: anything
+    /// that ends the window without a channel change -- an update installing
+    /// itself, a machine going down, the program falling over -- took whatever
+    /// was in the box with it.
+    ///
+    /// Read off the text rather than hooked into the keyboard, because a box
+    /// changes in a dozen ways: a paste, a drop, a deletion, an emoji off the
+    /// grid, a name off the completion list. Comparing what it says now with
+    /// what it said when it was last looked at catches all of them and cannot
+    /// be forgotten in one.
+    fn settled_draft(&mut self) -> Option<std::time::Instant> {
+        let said = (self.composer.text(), self.thread_composer.text());
+        if said != self.watched {
+            self.watched = said;
+            // Not "somebody typed a moment ago" but "somebody is typing":
+            // every change pushes the clock out again, so what this measures
+            // is the pause at the end rather than the first keystroke.
+            self.typed_at = Some(std::time::Instant::now());
+        }
+        let at = self.typed_at?;
+        if at.elapsed() < WRITTEN {
+            return Some(at + WRITTEN);
+        }
+        self.typed_at = None;
+        // Under the conversation each box belongs to, and both, because a
+        // reply in the pane is as much a draft as a message in the channel.
+        let (channel, thread) = (self.writing_to.clone(), self.replying_to.clone());
+        let (said, replied) = (self.watched.0.clone(), self.watched.1.clone());
+        self.park(channel, said);
+        self.park(thread, replied);
+        None
     }
 
     /// Whether a picture on screen is showing a frame it has outlasted.
@@ -7071,6 +7119,9 @@ impl ApplicationHandler<Update> for App {
         // as long as one is on screen: a loop is ten frames a second and a
         // window is sixty, so five of every six of those frames would draw
         // the picture that is already there.
+        // A draft goes to the store once the typing has stopped, rather than
+        // waiting for the conversation to be left.
+        let written = self.settled_draft();
         let playing = self.playing();
         // Asked as "is a frame other than the one showing due", not as "has
         // the wake time passed": the wake is the end of the frame showing, so
@@ -7081,6 +7132,7 @@ impl ApplicationHandler<Update> for App {
         let filling = self.shape_some();
         let next = [
             next,
+            written,
             playing,
             self.tooltip.wakes(),
             self.rest.wakes(),
@@ -7915,6 +7967,12 @@ impl Shaping {
 /// How long after the last size before the rest of the conversation is
 /// shaped. Short enough to feel like part of letting go of the edge.
 const SETTLE: std::time::Duration = std::time::Duration::from_millis(120);
+
+/// How long a box has to be still before what is in it is written down.
+///
+/// Long enough that an ordinary sentence is one write rather than thirty, and
+/// short enough that somebody who stops to think has already been saved.
+const WRITTEN: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// What a thread's conversation is called, and the one place it is spelled.
 ///
