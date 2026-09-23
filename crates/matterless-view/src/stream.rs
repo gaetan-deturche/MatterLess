@@ -139,14 +139,27 @@ pub struct Stream {
     /// was in this place last time even if rows have been added above it, and
     /// the comparison is what says whether it is still the same row. Comparing
     /// a message costs a string compare; shaping one costs four milliseconds.
-    kept: std::collections::HashMap<String, (Row, RowLayout)>,
-    /// What `kept` was shaped against: the column's width, the day it was,
-    /// and the reader's offset from UTC.
+    /// What has been shaped, by the width it was shaped against.
     ///
-    /// A narrower column wraps differently. And a separator says "Today" --
-    /// a window left open across midnight would keep yesterday's word for it,
-    /// because the row itself is a day number and has not changed.
-    kept_against: (f32, i64, i32),
+    /// Each holds the row, its layout, which visit last wanted it, and where
+    /// in that conversation it sat -- the last of those so a channel left
+    /// behind can be cut to its newest rows rather than dropped whole.
+    ///
+    /// A handful of widths are in constant use and the rest are passing: the
+    /// column with the thread pane open, the same column without it, and
+    /// whatever a drag of the window settles on. Newest first.
+    kept: Vec<(f32, Shaped)>,
+    /// Which layout this is, counting up, so the cache can tell what has been
+    /// wanted recently from what belongs to a conversation left behind.
+    visits: u64,
+    /// How many shaped rows to keep. Settable so a test can drive past it
+    /// without shaping twenty thousand rows to get there.
+    pub kept_cap: usize,
+    /// Which day everything held was shaped on, and the reader's offset from
+    /// UTC. A window left open across midnight would otherwise keep
+    /// yesterday's word for "Today", the row being a day number that has not
+    /// changed.
+    kept_on_day: (i64, i32),
     /// How many rows the last layout took from the cache rather than shaping.
     /// Read by the tests, which is the only way to tell reuse from a very fast
     /// shaper.
@@ -215,6 +228,108 @@ fn names(row: &Row, post_id: &str) -> bool {
 /// unread in it.
 pub const DIVIDER: &str = "divider";
 
+/// How much of one conversation is kept once it has been left.
+///
+/// A channel opens on four hundred messages (`feed::PAGE`) and the ones in
+/// this account run 86 to 200, so this binds on one thing only: a reader who
+/// has scrolled a long way back and then gone elsewhere. Measuring those again
+/// on a return is the right trade -- it is the rows near the end that somebody
+/// comes back to, and reaching the same distance into the history twice is
+/// rare enough to pay for.
+const PER_CHANNEL: usize = 500;
+
+/// How many column widths are kept shaped at once.
+///
+/// Three: this column with the thread pane open, the same without it, and one
+/// more for whatever a drag of the window settles on. A row's height is only
+/// true for the width it was measured at, so these are separate sets rather
+/// than one -- and holding only the newest meant the pane cost two full
+/// re-shapes of the conversation every time it was opened and closed.
+const WIDTHS: usize = 3;
+
+/// One row's shaped height and the rest of its layout, with the layout that
+/// last wanted it and where it sat in its conversation.
+type Held = (Row, RowLayout, u64, usize);
+
+/// What has been shaped at one width, by row identity.
+type Shaped = std::collections::HashMap<String, Held>;
+
+/// How many shaped rows are kept across conversations.
+///
+/// Read as conversations rather than as rows: at `feed::PAGE` of 400 this is
+/// about fifty of them kept whole, which is more than anybody moves between
+/// in a day. A row costs its own text again plus its geometry -- half a
+/// kilobyte for an ordinary message -- so the whole of it is around ten
+/// megabytes, against a window already holding ninety of pictures.
+pub(crate) const KEPT_ROWS: usize = 20_000;
+
+/// Cuts every conversation but the one on screen down to its newest rows.
+///
+/// A standing rule rather than something that happens once the cache is full:
+/// what somebody returns to is the end of a conversation, so a channel they
+/// scrolled a thousand messages back through keeps its newest five hundred and
+/// lets the rest go. Gated on the total only, it would have been no rule at
+/// all -- a reader with room to spare would hold every row they had ever
+/// scrolled past.
+///
+/// Never the conversation being drawn: every row of the layout being built
+/// carries this visit's mark, and those are kept whatever else goes.
+fn trim_each_conversation(kept: &mut Shaped, visit: u64) {
+    if kept.len() <= PER_CHANNEL {
+        return;
+    }
+    let mut wheres: std::collections::HashMap<u64, Vec<usize>> = std::collections::HashMap::new();
+    for (_, _, seen, at) in kept.values() {
+        if *seen != visit {
+            wheres.entry(*seen).or_default().push(*at);
+        }
+    }
+    // The oldest row each conversation may keep.
+    let mut floors: std::collections::HashMap<u64, usize> = std::collections::HashMap::new();
+    for (seen, mut at) in wheres {
+        if at.len() <= PER_CHANNEL {
+            continue;
+        }
+        at.sort_unstable();
+        floors.insert(seen, at[at.len() - PER_CHANNEL]);
+    }
+    if floors.is_empty() {
+        return;
+    }
+    kept.retain(|_, (_, _, seen, at)| match floors.get(seen) {
+        Some(floor) => *at >= *floor,
+        None => true,
+    });
+}
+
+/// Drops whole conversations once too many are held.
+///
+/// By the layout that last wanted each rather than by insertion: what deserves
+/// to stay is what the reader keeps coming back to, and a channel opened twice
+/// a minute would otherwise be dropped in favour of one scrolled through once.
+/// Never the one on screen, for the same reason as above.
+fn forget_the_oldest(kept: &mut Shaped, visit: u64, cap: usize) {
+    if kept.len() <= cap {
+        return;
+    }
+    let mut visits: Vec<u64> = kept
+        .values()
+        .map(|(_, _, seen, _)| *seen)
+        .filter(|seen| *seen != visit)
+        .collect();
+    if visits.is_empty() {
+        return;
+    }
+    visits.sort_unstable();
+    // The mark that leaves the cache at its cap, never taking anything this
+    // layout just asked for.
+    let over = kept.len() - cap;
+    let Some(cut) = visits.get(over.saturating_sub(1)).copied() else {
+        return;
+    };
+    kept.retain(|_, (_, _, seen, _)| *seen > cut || *seen == visit);
+}
+
 /// Not an index: a page of older history arriving pushes every row down, and a
 /// cache that matched on position would miss all of them. Rows that have no id
 /// of their own are named by what they are, which is enough -- there is one
@@ -243,8 +358,10 @@ impl Stream {
             me: String::new(),
             presses: Vec::new(),
             bar: crate::scrollbar::Scrollbar::default(),
-            kept: std::collections::HashMap::new(),
-            kept_against: (f32::NAN, 0, 0),
+            kept: Vec::new(),
+            visits: 0,
+            kept_cap: KEPT_ROWS,
+            kept_on_day: (0, 0),
             reused: 0,
             above: Vec::new(),
             opened: std::collections::HashSet::new(),
@@ -296,35 +413,57 @@ impl Stream {
             self.theme.today,
             self.theme.utc_offset_minutes,
         );
-        let reusable = self.kept_against == against;
-        let mut kept = std::collections::HashMap::with_capacity(self.rows.len());
+        // A day changing invalidates every width at once: a separator that
+        // says "Today" is a row whose height is right and whose word is
+        // wrong, and it is keyed on the day number rather than on the words.
+        if self.kept_on_day != (against.1, against.2) {
+            self.kept.clear();
+            self.kept_on_day = (against.1, against.2);
+        }
+        // Held per width rather than thrown away when one changes. Opening
+        // the thread pane narrows this column and closing it widens it back,
+        // which is the commonest thing anybody does here -- and each way
+        // round used to discard every row that had been measured, so the pane
+        // cost two full re-shapes of the conversation every time it was
+        // looked at.
+        let mut kept = self.take_at(against.0);
+        // Which layout each row was last wanted by, so what leaves is what
+        // nobody has looked at for the longest.
+        self.visits = self.visits.wrapping_add(1);
+        let visit = self.visits;
         let mut reused = 0;
-        self.laid = self
-            .rows
-            .iter()
-            .map(|row| {
-                let key = key_of(row);
-                let found = self
-                    .kept
-                    .get(&key)
-                    .filter(|_| reusable)
-                    .filter(|(was, _)| was == row)
-                    .map(|(_, laid)| laid.clone());
-                reused += usize::from(found.is_some());
-                let laid = found.unwrap_or_else(|| {
-                    matterless_layout::row::lay_out_opened(
-                        fonts,
-                        row,
-                        &self.theme,
-                        self.shows_whole(row),
-                    )
-                });
-                kept.insert(key, (row.clone(), laid.clone()));
-                laid
-            })
-            .collect();
-        self.kept = kept;
-        self.kept_against = against;
+        let mut laid = Vec::with_capacity(self.rows.len());
+        for (at, row) in self.rows.iter().enumerate() {
+            let key = key_of(row);
+            // Found by identity and kept only if it is still the same row:
+            // the key finds what was in this place last time even after a
+            // page of history has been added above it, and the comparison is
+            // what says nothing has been edited underneath.
+            if let Some(held) = kept.get_mut(&key).filter(|(was, _, _, _)| was == row) {
+                held.2 = visit;
+                held.3 = at;
+                reused += 1;
+                laid.push(held.1.clone());
+                continue;
+            }
+            let fresh = matterless_layout::row::lay_out_opened(
+                fonts,
+                row,
+                &self.theme,
+                self.shows_whole(row),
+            );
+            kept.insert(key, (row.clone(), fresh.clone(), visit, at));
+            laid.push(fresh);
+        }
+        // What the other channels left behind, up to a point. Kept because a
+        // reader goes back and forth between the same few conversations all
+        // day and each return used to shape the whole of one again -- two
+        // hundred rows, a fifth of a second, for messages that had not changed
+        // since they were measured a minute ago.
+        trim_each_conversation(&mut kept, visit);
+        forget_the_oldest(&mut kept, visit, self.kept_cap);
+        self.laid = laid;
+        self.put_back(against.0, kept);
         self.reused = reused;
         self.open_the_edited_row();
     }
@@ -438,7 +577,6 @@ impl Stream {
         // Every row is against a stale width now, this one's included: the
         // cache must not hand any of them back.
         self.kept.clear();
-        self.kept_against = (f32::NAN, 0, 0);
         // The edited row was just re-laid from its own words like any other,
         // so it has to give them up again.
         self.open_the_edited_row();
@@ -464,6 +602,38 @@ impl Stream {
             }
             false => self.rows = rows,
         }
+    }
+
+    /// How many shaped rows are held at the width last drawn. Read by the
+    /// tests, which is the only way to see the bound holding.
+    pub fn kept_rows(&self) -> usize {
+        self.kept.first().map(|(_, held)| held.len()).unwrap_or(0)
+    }
+
+    /// How many widths are being held at once.
+    pub fn kept_widths(&self) -> usize {
+        self.kept.len()
+    }
+
+    /// Takes out what was shaped against `width`, or an empty set.
+    ///
+    /// Moved to the front on the way out, so what falls off the end is the
+    /// width nobody has drawn at for the longest -- a size the window passed
+    /// through on the way to this one rather than one it keeps returning to.
+    fn take_at(
+        &mut self,
+        width: f32,
+    ) -> std::collections::HashMap<String, (Row, RowLayout, u64, usize)> {
+        match self.kept.iter().position(|(was, _)| *was == width) {
+            Some(at) => self.kept.remove(at).1,
+            None => Shaped::new(),
+        }
+    }
+
+    /// Puts it back at the front, and lets go of the widths past the last few.
+    fn put_back(&mut self, width: f32, held: Shaped) {
+        self.kept.insert(0, (width, held));
+        self.kept.truncate(WIDTHS);
     }
 
     /// How many planned rows are still waiting to be shaped.
@@ -574,7 +744,12 @@ impl Stream {
         }
         let above: f32 = self.laid[..at].iter().map(|row| row.height).sum();
         let height = self.laid[at].height;
-        self.kept.remove(&key_of(&self.rows[at]));
+        // Out of every width: the row is gone from the conversation, not
+        // merely wrong at the size being drawn.
+        let key = key_of(&self.rows[at]);
+        for (_, held) in &mut self.kept {
+            held.remove(&key);
+        }
         self.rows.remove(at);
         self.laid.remove(at);
         if above < self.scroll {
@@ -710,7 +885,12 @@ impl Stream {
             }
             top = bottom;
         }
-        placed.extend(self.bar.boxes(&self.name, within, self.reach(within)));
+        // Only while it is drawn: a track that catches a press where there is
+        // no bar is a drag that moves a list by a fraction nobody could have
+        // aimed at, against a reach that is still being worked out.
+        if self.waiting() == 0 {
+            placed.extend(self.bar.boxes(&self.name, within, self.reach(within)));
+        }
         if let Some(rect) = self.to_newest(within) {
             placed.push(Placed {
                 name: format!("{}/newest", self.name),

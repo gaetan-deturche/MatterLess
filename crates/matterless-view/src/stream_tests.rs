@@ -1660,3 +1660,164 @@ fn a_mark_at_the_top_clamps_rather_than_overscrolling() {
     assert!(stream.to_row(crate::stream::DIVIDER, 72.0, panel()));
     assert_eq!(stream.scroll, 0.0);
 }
+
+/// Going back to a conversation does not measure it again.
+///
+/// The cache used to be rebuilt from whatever was laid out that time, so
+/// leaving a channel threw away every row of it and coming back shaped all two
+/// hundred from nothing -- a fifth of a second, for messages that had not
+/// changed since they were measured a minute earlier. It is the same work,
+/// against the same width, for the same rows.
+#[test]
+fn coming_back_to_a_channel_reuses_what_was_shaped() {
+    let mut fonts = Fonts::new();
+    let mut stream = Stream::new("stream");
+    let first: Vec<Row> = (0..30)
+        .map(|at| Row::Post {
+            post: post(&format!("a{at}"), "something said in the first"),
+        })
+        .collect();
+    let second: Vec<Row> = (0..30)
+        .map(|at| Row::Post {
+            post: post(&format!("b{at}"), "something said in the second"),
+        })
+        .collect();
+
+    stream.rows = first.clone();
+    stream.lay_out(&mut fonts, panel().width);
+    assert_eq!(stream.reused(), 0, "nothing was known the first time");
+
+    // Away to another conversation, which shapes its own rows...
+    stream.rows = second;
+    stream.lay_out(&mut fonts, panel().width);
+    assert_eq!(stream.reused(), 0);
+
+    // ...and back again, which should cost nothing at all.
+    stream.rows = first;
+    stream.lay_out(&mut fonts, panel().width);
+    assert_eq!(
+        stream.reused(),
+        30,
+        "every row was measured again after a single channel switch"
+    );
+}
+
+/// What is kept is bounded, and what goes is what nobody has been back to.
+#[test]
+fn the_kept_rows_do_not_grow_without_end() {
+    let mut fonts = Fonts::new();
+    let mut stream = Stream::new("stream");
+    // Driven past a small cap rather than the real one, which would mean
+    // shaping twenty thousand rows to prove an arithmetic rule.
+    stream.kept_cap = 250;
+    for channel in 0..8 {
+        stream.rows = (0..100)
+            .map(|at| Row::Post {
+                post: post(&format!("c{channel}-{at}"), "something said"),
+            })
+            .collect();
+        stream.lay_out(&mut fonts, panel().width);
+        assert!(
+            stream.kept_rows() <= stream.kept_cap + 100,
+            "{} rows kept after {channel} conversations",
+            stream.kept_rows()
+        );
+    }
+    // The one in front of the reader is whole, however much was dropped.
+    stream.lay_out(&mut fonts, panel().width);
+    assert_eq!(
+        stream.reused(),
+        100,
+        "the conversation on screen was evicted from under it"
+    );
+}
+
+/// A conversation left behind keeps its newest rows, not all of them.
+///
+/// Somebody who has scrolled a thousand messages back into a channel and gone
+/// elsewhere should not hold the whole of it: what a reader returns to is the
+/// end of a conversation, and reaching that far into the history twice is rare
+/// enough to pay for again.
+#[test]
+fn a_channel_left_behind_keeps_only_its_newest_rows() {
+    let mut fonts = Fonts::new();
+    let mut stream = Stream::new("stream");
+    // Room enough that the outer bound is not what binds here: the inner
+    // rule is the one under test, and a cap below it would drop the whole
+    // conversation before the trim could keep any of it.
+    stream.kept_cap = 2_000;
+    // One long scrollback, then away to something else.
+    let deep: Vec<Row> = (0..900)
+        .map(|at| Row::Post {
+            post: post(&format!("deep{at:03}"), "something said long ago"),
+        })
+        .collect();
+    stream.rows = deep.clone();
+    stream.lay_out(&mut fonts, panel().width);
+    stream.rows = vec![Row::Post {
+        post: post("elsewhere", "a different channel"),
+    }];
+    stream.lay_out(&mut fonts, panel().width);
+
+    // Back to the end of the long one, which is what a reader returns to.
+    stream.rows = deep[400..].to_vec();
+    stream.lay_out(&mut fonts, panel().width);
+    assert_eq!(
+        stream.reused(),
+        500,
+        "the newest rows of the channel were not kept"
+    );
+
+    // And the far end of it was let go, as it should have been.
+    stream.rows = deep[..400].to_vec();
+    stream.lay_out(&mut fonts, panel().width);
+    assert_eq!(stream.reused(), 0, "the oldest rows were kept after all");
+}
+
+/// Opening the thread pane does not cost the conversation behind it.
+///
+/// The pane narrows this column and closing it widens it back, which is the
+/// commonest thing anybody does in this window. A height is only true for the
+/// width it was measured at, so the two sizes are held apart rather than one
+/// replacing the other -- held one at a time, the pane cost a full re-shape of
+/// the conversation each way, twice per look.
+#[test]
+fn the_thread_pane_does_not_throw_the_conversation_away() {
+    let mut fonts = Fonts::new();
+    let mut stream = Stream::new("stream");
+    stream.rows = (0..40)
+        .map(|at| Row::Post {
+            post: post(&format!("p{at}"), "something said in a channel"),
+        })
+        .collect();
+    let wide = panel().width;
+    let narrow = wide - 320.0;
+
+    stream.lay_out(&mut fonts, wide);
+    assert_eq!(stream.reused(), 0, "nothing was known to begin with");
+    // The pane opens: a width never seen, so everything is measured.
+    stream.lay_out(&mut fonts, narrow);
+    assert_eq!(stream.reused(), 0);
+    // And closing it comes back to rows that were measured at this width.
+    stream.lay_out(&mut fonts, wide);
+    assert_eq!(
+        stream.reused(),
+        40,
+        "closing the pane re-shaped the channel"
+    );
+    stream.lay_out(&mut fonts, narrow);
+    assert_eq!(stream.reused(), 40, "and opening it again did too");
+    assert_eq!(stream.kept_widths(), 2);
+
+    // A drag through a size settles somewhere new, and the sizes the window
+    // keeps returning to are the ones kept.
+    for width in [wide - 40.0, wide - 80.0, wide - 120.0] {
+        stream.lay_out(&mut fonts, width);
+    }
+    assert!(
+        stream.kept_widths() <= 3,
+        "{} widths held",
+        stream.kept_widths()
+    );
+}
+
