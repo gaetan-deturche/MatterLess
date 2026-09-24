@@ -86,7 +86,7 @@ const MIGRATION_7: &str = "
 ALTER TABLE posts ADD COLUMN is_pinned INTEGER NOT NULL DEFAULT 0;
 ";
 
-pub const TARGET_VERSION: i64 = 11;
+pub const TARGET_VERSION: i64 = 12;
 
 // Migration 1 is frozen: the shell now keeps a real database with real history,
 // so every change gets its own step from here.
@@ -271,7 +271,8 @@ fn missing_columns(connection: &Connection) -> rusqlite::Result<Vec<String>> {
 }
 
 fn missing_tables(connection: &Connection) -> rusqlite::Result<Vec<String>> {
-    const REQUIRED: [&str; 14] = [
+    const REQUIRED: [&str; 15] = [
+        "row_heights",
         "settings",
         "drafts",
         "left_off",
@@ -371,6 +372,35 @@ CREATE TABLE IF NOT EXISTS drafts (
 );
 ";
 
+/// How tall each message was drawn, so a channel knows its own length before
+/// it has measured anything.
+///
+/// Heights only, and that is the whole point: a shaped row carries its blocks
+/// and a copy of the message's text, which is thirty bytes against several
+/// hundred. What a conversation needs *before* it can draw honestly is how
+/// far it scrolls, and that is a sum of heights -- the blocks are needed only
+/// for the dozen rows actually on screen.
+///
+/// Keyed on the width and a fingerprint as well as the row. By the row
+/// rather than the post, because a separator and a thread footer have heights
+/// too and `key_of` already names every kind of row there is. A height is an
+/// answer about a column width, a set of theme numbers and a font stack, and
+/// the emoji face changing on 2026-09-22 moved the height of every row with
+/// one in it. Anything the fingerprint does not cover is a wrong height
+/// served confidently, which is worse than no cache at all.
+const MIGRATION_12: &str = "
+CREATE TABLE IF NOT EXISTS row_heights (
+    row_key     TEXT NOT NULL,
+    width       INTEGER NOT NULL,
+    fingerprint TEXT NOT NULL,
+    height      REAL NOT NULL,
+    -- Local milliseconds, for throwing the oldest away.
+    at          INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (row_key, width, fingerprint)
+);
+CREATE INDEX IF NOT EXISTS row_heights_by_age ON row_heights(at);
+";
+
 /// What was attached to a half-written message, kept with it.
 ///
 /// The text survived a restart and what had been attached did not, so a
@@ -466,6 +496,9 @@ fn migrate(connection: &Connection) -> rusqlite::Result<()> {
     // On the column, not the version, for the reason migration 7 gives.
     if absent_columns.iter().any(|name| name == "drafts.files") {
         connection.execute_batch(MIGRATION_11)?;
+    }
+    if version < 12 || missing.iter().any(|name| name == "row_heights") {
+        connection.execute_batch(MIGRATION_12)?;
     }
     connection.pragma_update(None, "user_version", TARGET_VERSION)?;
     tracing::info!(from = version, to = TARGET_VERSION, "store migrated");

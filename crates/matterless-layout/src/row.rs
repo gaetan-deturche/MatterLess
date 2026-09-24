@@ -174,6 +174,84 @@ impl Theme {
         (self.width - self.gutter).max(40.0)
     }
 
+    /// What a height measured against this theme may be reused for.
+    ///
+    /// Everything a row's height depends on except the width, which is a key
+    /// of its own, and the clock, which changes a separator's words and not
+    /// its height. A height kept under the wrong fingerprint is a wrong
+    /// answer served confidently -- the emoji face changed on 2026-09-22 and
+    /// moved the height of every row with one in it -- so the font stack is
+    /// in here beside the numbers.
+    ///
+    /// Written out rather than derived from `Debug`: a field added to the
+    /// theme should make somebody decide whether it changes a height, and a
+    /// derived string decides silently.
+    pub fn fingerprint(&self) -> String {
+        let numbers = [
+            self.body_size,
+            self.line_height,
+            self.header_height,
+            self.header_size,
+            self.row_padding,
+            self.merged_padding,
+            self.row_gap,
+            self.pad_x,
+            self.block_gap,
+            self.rule_height,
+            self.code_size,
+            self.code_line_height,
+            self.code_padding,
+            self.code_padding_y,
+            self.card_height,
+            self.small_size,
+            self.system_size,
+            self.pill_size,
+            self.pill_line,
+            self.emoji_size,
+            self.reaction_height,
+            self.separator_height,
+            self.footer_height,
+            self.indent,
+            self.preview_width,
+            self.card_padding,
+            self.attached_size,
+            self.attached_padding,
+            self.gutter,
+        ];
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+        for number in numbers {
+            for byte in number.to_bits().to_le_bytes() {
+                hash ^= byte as u64;
+                hash = hash.wrapping_mul(0x100_0000_01b3);
+            }
+        }
+        for count in [self.code_lines_shown, self.preview_lines] {
+            hash ^= count as u64;
+            hash = hash.wrapping_mul(0x100_0000_01b3);
+        }
+        // The faces the shaper will actually use. A different emoji font is a
+        // different set of advances and so a different set of heights -- the
+        // bundled one changed on 2026-09-22 and moved every row carrying an
+        // emoji.
+        //
+        // The body face is the machine's own and is not named here. A system
+        // font update would change heights without changing this, which is
+        // the one gap: it heals itself, because every row that is actually
+        // shaped writes its height back, and it costs a scrollbar that is
+        // slightly wrong until then rather than a wrong row.
+        let mono = match crate::mono_family() {
+            cosmic_text::Family::Name(name) => name,
+            _ => "monospace",
+        };
+        for family in [crate::EMOJI_FAMILY, mono] {
+            for byte in family.as_bytes() {
+                hash ^= *byte as u64;
+                hash = hash.wrapping_mul(0x100_0000_01b3);
+            }
+        }
+        format!("{hash:016x}")
+    }
+
     /// The line under a picture that says what it is called, and the gap
     /// above it. One number, because the layout reserves it and the tests
     /// have to be able to say why a shelf is as tall as it is.

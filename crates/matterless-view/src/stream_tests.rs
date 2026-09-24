@@ -717,6 +717,158 @@ fn a_shorter_panel_keeps_the_newest_message_against_the_bottom() {
     );
 }
 
+/// A conversation knows how long it is before it has measured most of it.
+///
+/// The whole point of the remembered heights: a channel opens on its last
+/// dozen rows and the hundred above them are shaped over the next fifth of a
+/// second -- measured at 30 to 220ms on 125 of 466 openings -- and until they
+/// are, the length is a growing number. A scrollbar drawn against a growing
+/// number shrinks under the reader; held back until it settles, it appears
+/// out of nowhere six to thirteen frames in. Knowing the length answers both.
+#[test]
+fn a_remembered_length_is_known_before_the_rows_are_measured() {
+    let mut fonts = Fonts::new();
+    let within = panel();
+    let stream = wordy(&mut fonts, within.width);
+    // Everything measured: this is what the reader would have seen last time,
+    // and what would have been written down.
+    let whole = stream.total();
+    let measured: std::collections::HashMap<String, f32> = stream.measured().into_iter().collect();
+    assert!(
+        measured.len() > 12,
+        "the fixture is too short to prove anything"
+    );
+
+    // Opened afresh, the way a channel does: only the newest end is shaped.
+    let mut opened = Stream::new("stream");
+    opened.rows = stream.rows.clone();
+    opened.plan(stream.rows.clone(), true);
+    opened.lay_out(&mut fonts, within.width);
+    opened.cover(&mut fonts, within.width, within);
+    assert!(opened.waiting() > 0, "the whole channel was shaped at once");
+    assert!(
+        !opened.knows_its_length(),
+        "it claims to know a length it has not been told"
+    );
+    let shaped_only = opened.total();
+
+    // Told what it measured to last time.
+    opened.foresee(&measured);
+    assert!(opened.knows_its_length());
+    assert!(
+        (opened.total() - whole).abs() < 1.0,
+        "remembered length {} against the real {whole}",
+        opened.total()
+    );
+    assert!(
+        opened.total() > shaped_only,
+        "the remembered rows added nothing"
+    );
+
+    // And one row it has never heard of is enough to stop it claiming.
+    let mut partial = measured.clone();
+    partial.remove(&opened.waiting_keys()[0]);
+    opened.foresee(&partial);
+    assert!(
+        !opened.knows_its_length(),
+        "a conversation half remembered is claiming to know its length"
+    );
+}
+
+/// A remembered height stands in for a row until the row is measured, and
+/// then it has to leave. It did not: the rows were shaped and counted, and the
+/// remembered length stayed on top of them -- a conversation-length void above
+/// the first message, and a scrollbar measuring a channel twice as long.
+#[test]
+fn a_remembered_length_leaves_as_the_rows_are_shaped() {
+    let mut fonts = Fonts::new();
+    let within = panel();
+    let stream = wordy(&mut fonts, within.width);
+    let whole = stream.total();
+    let measured: std::collections::HashMap<String, f32> = stream.measured().into_iter().collect();
+
+    let mut opened = Stream::new("stream");
+    opened.plan(stream.rows.clone(), true);
+    opened.lay_out(&mut fonts, within.width);
+    opened.cover(&mut fonts, within.width, within);
+    opened.foresee(&measured);
+    assert!(opened.waiting() > 0);
+
+    while opened.waiting() > 0 {
+        opened.fill(&mut fonts, within.width, 8);
+        assert!(
+            (opened.total() - whole).abs() < 1.0,
+            "{} rows still waiting, and the length is {} against {whole}",
+            opened.waiting(),
+            opened.total()
+        );
+    }
+}
+
+/// The next conversation is not the last one. Opening a channel with nothing
+/// waiting kept the length remembered for the channel before it, and drew its
+/// one message that far down the panel.
+#[test]
+fn a_new_plan_forgets_the_last_conversations_length() {
+    let mut fonts = Fonts::new();
+    let within = panel();
+    let stream = wordy(&mut fonts, within.width);
+    let measured: std::collections::HashMap<String, f32> = stream.measured().into_iter().collect();
+
+    let mut opened = Stream::new("stream");
+    opened.plan(stream.rows.clone(), true);
+    opened.lay_out(&mut fonts, within.width);
+    opened.foresee(&measured);
+    assert!(opened.total() > opened.laid.iter().map(|row| row.height).sum::<f32>());
+
+    // A short conversation: nothing waits.
+    let short: Vec<_> = stream.rows[stream.rows.len() - 2..].to_vec();
+    opened.plan(short, true);
+    opened.lay_out(&mut fonts, within.width);
+    assert_eq!(opened.waiting(), 0);
+    let shaped: f32 = opened.laid.iter().map(|row| row.height).sum();
+    assert!(
+        (opened.total() - shaped).abs() < 0.5,
+        "two rows measuring {shaped} report a length of {}",
+        opened.total()
+    );
+}
+
+/// Changing what a height *means* empties the kept rows.
+///
+/// The text size is going to be the reader's to choose. The width was already
+/// a key of the row cache and the rest of the theme was not, so a size changed
+/// under a warm cache would have handed back every height measured at the old
+/// one -- confidently, and wrong by a line per row.
+#[test]
+fn a_different_text_size_is_a_different_set_of_heights() {
+    let mut fonts = Fonts::new();
+    let within = panel();
+    let mut stream = wordy(&mut fonts, within.width);
+    let at_default = stream.total();
+    assert!(at_default > 0.0);
+
+    // What a reader picking a larger size would do to the theme.
+    let mut bigger = stream.theme;
+    bigger.body_size += 3.0;
+    bigger.line_height += 4.0;
+    assert_ne!(
+        stream.theme.fingerprint(),
+        bigger.fingerprint(),
+        "a text size the reader can change is not in the fingerprint"
+    );
+
+    // The same rows, measured again at the bigger size, must be taller --
+    // which can only happen if the cache let go of the old answers.
+    stream.theme_for_test(bigger);
+    stream.relay_seen(&mut fonts, within.width, within);
+    let at_bigger = stream.total();
+    assert!(
+        at_bigger > at_default,
+        "the conversation is {at_bigger} at the larger size against {at_default} at the smaller"
+    );
+}
+
 /// A reader part-way up keeps the foot of the conversation, not the middle.
 ///
 /// The case the anchor alone gets wrong, and the one that was reported: a

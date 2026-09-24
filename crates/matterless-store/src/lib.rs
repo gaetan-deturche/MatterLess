@@ -1983,6 +1983,96 @@ impl Store {
             .filter(|(_, channel_id)| !channel_id.is_empty()))
     }
 
+    /// Keeps how tall a set of rows were drawn, at one width and fingerprint.
+    ///
+    /// Written after a channel has settled, never mid-drag: a height measured
+    /// against a column the reader is still dragging is an answer about a
+    /// width nobody ended up at, and it would fill the table with them.
+    pub fn keep_heights(
+        &self,
+        width: u32,
+        fingerprint: &str,
+        heights: &[(String, f32)],
+        at: Timestamp,
+    ) -> Result<()> {
+        if heights.is_empty() {
+            return Ok(());
+        }
+        let mut connection = self.lock();
+        let transaction = connection.transaction()?;
+        {
+            let mut statement = transaction.prepare(
+                "INSERT INTO row_heights (row_key, width, fingerprint, height, at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(row_key, width, fingerprint) DO UPDATE SET
+                    height = excluded.height,
+                    at = excluded.at",
+            )?;
+            for (post_id, height) in heights {
+                statement.execute(params![post_id, width, fingerprint, height, at])?;
+            }
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// The heights this reader's machine already knows for these rows.
+    ///
+    /// One query for the whole channel, which is the point: the alternative is
+    /// measuring four hundred messages before the scrollbar can be honest
+    /// about how far the conversation goes.
+    pub fn heights_of(
+        &self,
+        width: u32,
+        fingerprint: &str,
+        row_keys: &[String],
+    ) -> Result<HashMap<String, f32>> {
+        if row_keys.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let connection = self.lock();
+        let mut found = HashMap::with_capacity(row_keys.len());
+        // In batches, because SQLite has a ceiling on how many parameters one
+        // statement may carry and a channel can be longer than it.
+        for slice in row_keys.chunks(400) {
+            let places = std::iter::repeat_n("?", slice.len())
+                .collect::<Vec<_>>()
+                .join(",");
+            let sql = format!(
+                "SELECT row_key, height FROM row_heights
+                 WHERE width = ?1 AND fingerprint = ?2 AND row_key IN ({places})"
+            );
+            let mut statement = connection.prepare(&sql)?;
+            let mut values: Vec<Box<dyn rusqlite::ToSql>> =
+                vec![Box::new(width), Box::new(fingerprint.to_string())];
+            values.extend(
+                slice
+                    .iter()
+                    .map(|id| Box::new(id.clone()) as Box<dyn rusqlite::ToSql>),
+            );
+            let rows = statement.query_map(rusqlite::params_from_iter(values.iter()), |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)? as f32))
+            })?;
+            found.extend(rows.filter_map(std::result::Result::ok));
+        }
+        Ok(found)
+    }
+
+    /// Throws away all but the newest `keep` heights.
+    ///
+    /// Bounded like everything else here: a reader who has been through every
+    /// channel at three widths would otherwise carry a row per message per
+    /// width for ever.
+    pub fn forget_old_heights(&self, keep: usize) -> Result<usize> {
+        let connection = self.lock();
+        let gone = connection.execute(
+            "DELETE FROM row_heights WHERE rowid NOT IN
+                (SELECT rowid FROM row_heights ORDER BY at DESC LIMIT ?1)",
+            params![keep as i64],
+        )?;
+        Ok(gone)
+    }
+
     /// Keeps what is half written in one conversation, or forgets it.
     ///
     /// An empty draft is a deletion rather than an empty row, because the

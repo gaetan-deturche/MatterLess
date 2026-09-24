@@ -982,6 +982,64 @@ fn a_drafts_table_from_before_the_files_column_is_upgraded() {
     );
 }
 
+/// A channel's length is remembered, and only for what it was measured at.
+///
+/// The width and the fingerprint are keys, not decoration: a height is an
+/// answer about a column, a set of theme numbers and a font stack. Served
+/// under the wrong one it is a wrong height given confidently, which is worse
+/// than no cache -- the emoji face changed on 2026-09-22 and moved the height
+/// of every row carrying one.
+#[test]
+fn remembered_heights_answer_only_for_what_they_were_measured_at() {
+    let store = store();
+    let heights = vec![
+        ("post/p1".to_string(), 42.0),
+        ("post/p2".to_string(), 98.5),
+        ("day/20340".to_string(), 34.0),
+    ];
+    store.keep_heights(880, "abc123", &heights, 1_000).unwrap();
+
+    let keys: Vec<String> = heights.iter().map(|(key, _)| key.clone()).collect();
+    let found = store.heights_of(880, "abc123", &keys).unwrap();
+    assert_eq!(found.len(), 3);
+    assert_eq!(found.get("post/p2"), Some(&98.5));
+
+    // Another width is another question, and so is another fingerprint.
+    assert!(store.heights_of(600, "abc123", &keys).unwrap().is_empty());
+    assert!(store.heights_of(880, "def456", &keys).unwrap().is_empty());
+
+    // Measured again at the same width, the newer answer wins.
+    store
+        .keep_heights(880, "abc123", &[("post/p1".to_string(), 60.0)], 2_000)
+        .unwrap();
+    assert_eq!(
+        store
+            .heights_of(880, "abc123", &keys)
+            .unwrap()
+            .get("post/p1"),
+        Some(&60.0)
+    );
+}
+
+/// And the table is bounded, like everything else kept here.
+#[test]
+fn remembered_heights_do_not_grow_without_end() {
+    let store = store();
+    for at in 0..50 {
+        store
+            .keep_heights(880, "abc", &[(format!("post/p{at}"), 20.0)], at as i64)
+            .unwrap();
+    }
+    let gone = store.forget_old_heights(20).unwrap();
+    assert_eq!(gone, 30);
+    let keys: Vec<String> = (0..50).map(|at| format!("post/p{at}")).collect();
+    let left = store.heights_of(880, "abc", &keys).unwrap();
+    assert_eq!(left.len(), 20);
+    // The newest are what is kept.
+    assert!(left.contains_key("post/p49"));
+    assert!(!left.contains_key("post/p0"));
+}
+
 /// The bug the user caught: with collapsed threads on, a channel was counting
 /// replies -- including replies in threads they do not follow -- because unread
 /// came from the all-posts counters instead of the root ones.

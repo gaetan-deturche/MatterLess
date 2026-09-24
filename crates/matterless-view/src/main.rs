@@ -4406,6 +4406,9 @@ impl App {
                 since.elapsed().as_millis()
             );
             self.behind = None;
+            // Written down now it is all measured, so the next opening of
+            // this channel knows its length from the first frame.
+            self.remember_heights();
             // The divider can be further back than a screenful of unread
             // messages, in which case it was still waiting when the plan
             // asked. Left unasked, its clock would never start and it would
@@ -6123,6 +6126,11 @@ impl App {
             self.thread = None;
             return;
         }
+        // How tall this channel's rows were drawn, before its rows are
+        // replaced. Waiting for the background shaping to finish writes
+        // nothing at all for a reader who keeps moving -- measured: a run
+        // that switched channels every forty frames never once got there.
+        self.remember_heights();
         // What was being written here goes with the channel being left, and
         // whatever was left in the one being opened comes back.
         let leaving = self.writing_to.take();
@@ -6160,6 +6168,13 @@ impl App {
                 self.relayout();
                 let within = self.stream_rect();
                 self.stream.cover(&mut self.fonts, within.width, within);
+                // How long this conversation is, before a single row above
+                // the panel has been measured. Without it the channel opens
+                // knowing the height of its last dozen messages and finds out
+                // about the rest over the next fifth of a second -- which is
+                // the scrollbar appearing late, measured at 30 to 220ms on
+                // 125 of 466 openings.
+                self.foresee_heights();
                 self.stream.to_bottom(within);
                 // Opening a channel is reading it, and a channel that stays
                 // unread however long it is looked at makes the sidebar a lie.
@@ -7138,6 +7153,64 @@ impl App {
                 .iter()
                 .any(|panel| name.starts_with(&format!("{panel}/")))
             || BUTTONS.iter().any(|button| name.ends_with(button))
+    }
+
+    /// Tells the conversation how tall the rows it has not measured were, from
+    /// the last time this machine drew them.
+    ///
+    /// One query for the whole channel. What comes back is heights and
+    /// nothing else -- the blocks are needed only for the dozen rows actually
+    /// on screen, and a `RowLayout` carries a copy of the message's text,
+    /// which is several hundred bytes against thirty.
+    fn foresee_heights(&mut self) {
+        let Some(store) = self.store.as_ref() else {
+            return;
+        };
+        let width = self.stream.laid_at_width().round() as u32;
+        let fingerprint = self.stream.fingerprint();
+        let wanted: Vec<String> = self.stream.waiting_keys();
+        if wanted.is_empty() {
+            return;
+        }
+        match store.heights_of(width, &fingerprint, &wanted) {
+            Ok(known) => {
+                self.stream.foresee(&known);
+                println!(
+                    "the channel's length was remembered for {} of {} rows not yet measured",
+                    known.len(),
+                    wanted.len()
+                );
+            }
+            Err(error) => eprintln!("reading remembered heights: {error}"),
+        }
+    }
+
+    /// Writes down how tall every measured row was drawn.
+    ///
+    /// After the width has settled and never during a drag: a height measured
+    /// against a column somebody is still moving is an answer about a width
+    /// nobody ended up at, and it would fill the table with them.
+    fn remember_heights(&mut self) {
+        let Some(store) = self.store.as_ref() else {
+            return;
+        };
+        if self.resizing.is_some() {
+            return;
+        }
+        let width = self.stream.laid_at_width().round() as u32;
+        let fingerprint = self.stream.fingerprint();
+        let measured = self.stream.measured();
+        if measured.is_empty() {
+            return;
+        }
+        if let Err(error) = store.keep_heights(
+            width,
+            &fingerprint,
+            &measured,
+            matterless_view::clock::now() * 1_000,
+        ) {
+            eprintln!("remembering heights: {error}");
+        }
     }
 
     /// Lays out again for a box that grew or shrank, keeping the foot of the

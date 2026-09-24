@@ -114,6 +114,26 @@ pub struct Stream {
     pub name: String,
     pub rows: Vec<Row>,
     pub laid: Vec<RowLayout>,
+    /// What the kept rows were measured under: theme numbers and font stack.
+    ///
+    /// The width is already a key of its own. This is everything else that
+    /// decides a height, so a reader changing the text size empties the cache
+    /// rather than reading old answers out of it.
+    kept_print: String,
+    /// The height of the rows still waiting to be shaped, when it is known.
+    ///
+    /// Zero when it is not, which is also what it means for a conversation
+    /// with nothing waiting -- the two are told apart by `foresaw`.
+    foreseen: f32,
+    foresaw: bool,
+    /// Each remembered height, by row, and the width they were measured at.
+    ///
+    /// Kept by row rather than as one total because the total has to shrink
+    /// as rows are shaped and change when the rows do: held as a single
+    /// number, it outlived both -- counted again on top of the rows it stood
+    /// in for, and carried into the next channel opened.
+    remembered: std::collections::HashMap<String, f32>,
+    remembered_at: f32,
     pub theme: Theme,
     pub scroll: f32,
     /// Custom emoji this conversation uses, by name to the id whose image the
@@ -351,6 +371,11 @@ impl Stream {
             name: name.into(),
             rows: Vec::new(),
             laid: Vec::new(),
+            kept_print: String::new(),
+            foreseen: 0.0,
+            foresaw: false,
+            remembered: std::collections::HashMap::new(),
+            remembered_at: 0.0,
             editing: None,
             theme: Theme::default(),
             scroll: 0.0,
@@ -395,6 +420,9 @@ impl Stream {
             crate::clock::today(),
             crate::clock::utc_offset_minutes(),
         );
+        // Where a new width takes effect, and so where remembered heights
+        // measured at the old one stop counting.
+        self.reforesee();
     }
 
     /// The same, as of a given day, so the day can be moved in a test.
@@ -419,6 +447,16 @@ impl Stream {
         if self.kept_on_day != (against.1, against.2) {
             self.kept.clear();
             self.kept_on_day = (against.1, against.2);
+        }
+        // And so does anything that changes what a height *means*. The text
+        // size is going to be the reader's to choose, and a row measured at
+        // one size is not a row at another -- the width is a key here and the
+        // rest of the theme was not, so a size changed under a warm cache
+        // would have served every old height back confidently.
+        let print = self.theme.fingerprint();
+        if self.kept_print != print {
+            self.kept.clear();
+            self.kept_print = print;
         }
         // Held per width rather than thrown away when one changes. Opening
         // the thread pane narrows this column and closing it widens it back,
@@ -550,7 +588,7 @@ impl Stream {
             width: width - Theme::default().pad_x * 2.0,
             ..self.theme
         };
-        let mut top = within.y + self.theme.pad_top - self.scroll;
+        let mut top = self.first_row_at(within);
         for (index, row) in self.rows.iter().enumerate() {
             let Some(was) = self.laid.get(index) else {
                 break;
@@ -602,6 +640,7 @@ impl Stream {
             }
             false => self.rows = rows,
         }
+        self.reforesee();
     }
 
     /// How many shaped rows are held at the width last drawn. Read by the
@@ -641,6 +680,113 @@ impl Stream {
         self.above.len()
     }
 
+    /// Where the first *shaped* row begins on screen.
+    ///
+    /// Not simply the top of the panel less the scroll: the rows still
+    /// waiting to be shaped sit above these, and when their heights are known
+    /// from the disk they are already counted in `total` and in the scroll.
+    /// Ten places worked this out for themselves; they ask here now, because
+    /// a conversation where the drawing and the hit boxes disagree by the
+    /// height of what has not been measured yet is unusable in a way that is
+    /// very hard to see.
+    fn first_row_at(&self, within: Rect) -> f32 {
+        within.y + self.theme.pad_top + self.foreseen - self.scroll
+    }
+
+    /// Takes the heights of the rows still waiting, from wherever they were
+    /// remembered.
+    ///
+    /// Only the ones it can answer for: a conversation whose heights are half
+    /// known is a conversation whose length is a guess, and the whole point
+    /// of this is that the length stops being one. `foreseen` is zero unless
+    /// *every* waiting row is accounted for.
+    pub fn foresee(&mut self, heights: &std::collections::HashMap<String, f32>) {
+        self.remembered = heights.clone();
+        self.remembered_at = self.theme.width;
+        self.reforesee();
+    }
+
+    /// The remembered height of what is still waiting, worked out again from
+    /// the rows actually waiting now.
+    ///
+    /// Called whenever that changes -- a new plan, a slice shaped -- so the
+    /// length never counts a row twice or counts one that is not there.
+    /// Heights measured at another width are no answer at this one.
+    fn reforesee(&mut self) {
+        self.foreseen = 0.0;
+        self.foresaw = false;
+        if (self.remembered_at - self.theme.width).abs() >= 0.5 {
+            return;
+        }
+        let mut total = 0.0;
+        for row in &self.above {
+            let Some(height) = self.remembered.get(&key_of(row)) else {
+                return;
+            };
+            total += height;
+        }
+        self.foreseen = total;
+        self.foresaw = true;
+    }
+
+    /// Sets the theme directly, for a test about what a height depends on.
+    ///
+    /// `lay_out_on` builds the theme from the default every time, so there is
+    /// no other way in until the text size becomes a reader's option -- and
+    /// when it does, this is the seam it arrives through.
+    #[cfg(test)]
+    pub fn theme_for_test(&mut self, theme: matterless_layout::row::Theme) {
+        self.theme = theme;
+    }
+
+    /// The side a custom emoji is drawn at, in a pill or in a line.
+    ///
+    /// Asked of the theme rather than written down elsewhere: the text size is
+    /// going to be the reader's, and an emoji decoded at the old one would be
+    /// the wrong picture in the atlas.
+    pub fn emoji_side(&self) -> u32 {
+        self.theme.emoji_size as u32
+    }
+
+    /// The keys of the rows still waiting, for asking what they measured to.
+    pub fn waiting_keys(&self) -> Vec<String> {
+        self.above.iter().map(key_of).collect()
+    }
+
+    /// Every row that has actually been measured, with its height.
+    ///
+    /// What gets written down. A row that was taken from the remembered
+    /// heights and never shaped is not in here: it would only be writing back
+    /// what it was told.
+    pub fn measured(&self) -> Vec<(String, f32)> {
+        self.rows
+            .iter()
+            .zip(self.laid.iter())
+            .map(|(row, laid)| (key_of(row), laid.height))
+            .collect()
+    }
+
+    /// The width the rows were last laid out against.
+    pub fn laid_at_width(&self) -> f32 {
+        self.theme.width
+    }
+
+    /// What a remembered height of this conversation may be reused for.
+    pub fn fingerprint(&self) -> String {
+        self.theme.fingerprint()
+    }
+
+    /// Whether the conversation knows how long it is.
+    ///
+    /// True when everything is shaped, and true when what is not shaped has a
+    /// remembered height. What it gates is the scrollbar: a bar drawn against
+    /// a length that is still growing is a bar that shrinks under the reader,
+    /// and one drawn against a remembered length is right from the first
+    /// frame.
+    pub fn knows_its_length(&self) -> bool {
+        self.above.is_empty() || self.foresaw
+    }
+
     /// Every row of the plan, shaped or not.
     ///
     /// For anything asking what is *in* the conversation rather than what is
@@ -663,7 +809,10 @@ impl Stream {
         let moved: Vec<Row> = self.above.drain(at..).collect();
         self.rows.splice(0..0, moved);
         // Everything already shaped comes back from the cache, so this costs
-        // the slice and not the conversation.
+        // the slice and not the conversation. What the moved rows were
+        // remembered at leaves with them in here, so the answer is the
+        // difference between the two -- what a caller holding the reader's
+        // place has to move by, and nothing when the memory was right.
         self.lay_out(fonts, width);
         self.total() - before
     }
@@ -683,7 +832,7 @@ impl Stream {
     }
 
     pub fn total(&self) -> f32 {
-        self.laid.iter().map(|row| row.height).sum()
+        self.laid.iter().map(|row| row.height).sum::<f32>() + self.foreseen
     }
 
     /// How far it can be scrolled before it runs out.
@@ -791,7 +940,7 @@ impl Stream {
             rect: within,
             depth: 1,
         }];
-        let mut top = within.y + self.theme.pad_top - self.scroll;
+        let mut top = self.first_row_at(within);
         for (index, row) in self.laid.iter().enumerate() {
             let bottom = top + row.height;
             if bottom >= within.y && top <= within.bottom() {
@@ -1232,7 +1381,7 @@ impl Stream {
     /// the whole of the Y axis not obeying this.
     pub fn holding(&self, within: Rect) -> Option<(String, f32)> {
         let middle = within.y + within.height / 2.0;
-        let mut top = within.y + self.theme.pad_top - self.scroll;
+        let mut top = self.first_row_at(within);
         for (index, laid) in self.laid.iter().enumerate() {
             let bottom = top + laid.height;
             if bottom > middle {
@@ -1258,7 +1407,7 @@ impl Stream {
     /// is the one that has to stay put.
     pub fn holding_row(&self, key: &str, within: Rect) -> Option<(String, f32)> {
         let middle = within.y + within.height / 2.0;
-        let mut top = within.y + self.theme.pad_top - self.scroll;
+        let mut top = self.first_row_at(within);
         for (index, laid) in self.laid.iter().enumerate() {
             if self.rows.get(index).map(key_of).as_deref() == Some(key) {
                 return Some((key.to_string(), middle - top));
@@ -1360,7 +1509,7 @@ impl Stream {
     /// `None` when it is scrolled out of view, which is the honest answer: a
     /// panel anchored to a row nobody can see would float over nothing.
     pub fn row_rect(&self, post_id: &str, within: Rect) -> Option<Rect> {
-        let mut top = within.y + self.theme.pad_top - self.scroll;
+        let mut top = self.first_row_at(within);
         for (index, laid) in self.laid.iter().enumerate() {
             let bottom = top + laid.height;
             let matches = matches!(
@@ -1657,7 +1806,7 @@ impl Stream {
     /// screenful either way.
     pub fn who_is_here(&self, within: Rect) -> Vec<String> {
         let mut here = Vec::new();
-        let mut top = within.y + self.theme.pad_top - self.scroll;
+        let mut top = self.first_row_at(within);
         for (index, laid) in self.laid.iter().enumerate() {
             let bottom = top + laid.height;
             if bottom >= within.y
@@ -1673,7 +1822,7 @@ impl Stream {
 
     pub fn faces(&self, within: Rect) -> Vec<(String, u32, u32)> {
         let mut wanted = Vec::new();
-        let mut top = within.y + self.theme.pad_top - self.scroll;
+        let mut top = self.first_row_at(within);
         for (index, laid) in self.laid.iter().enumerate() {
             let bottom = top + laid.height;
             if bottom >= within.y && top <= within.bottom() {
@@ -1832,7 +1981,7 @@ impl Stream {
     /// already here, in the message, and want decoding rather than asking for.
     pub fn minis(&self, within: Rect) -> Vec<(String, String)> {
         let mut wanted = Vec::new();
-        let mut top = within.y + self.theme.pad_top - self.scroll;
+        let mut top = self.first_row_at(within);
         for (index, laid) in self.laid.iter().enumerate() {
             let bottom = top + laid.height;
             if bottom >= within.y
@@ -2072,7 +2221,7 @@ impl Stream {
 
     /// Where a row's top edge is on screen.
     fn top_of(&self, index: usize, within: Rect) -> f32 {
-        within.y + self.theme.pad_top - self.scroll
+        self.first_row_at(within)
             + self
                 .laid
                 .iter()
@@ -2283,7 +2432,7 @@ impl Stream {
             let at = self.top_of(index, within);
             scene.fill(inner.x, at, inner.width, row.height, palette.hover);
         }
-        let mut top = within.y + self.theme.pad_top - self.scroll;
+        let mut top = self.first_row_at(within);
         for (index, row) in self.laid.iter().enumerate() {
             let bottom = top + row.height;
             if bottom >= within.y && top <= within.bottom() {
@@ -2531,7 +2680,12 @@ impl Stream {
         // untrue: this window computes heights rather than estimating them,
         // and the same rule has to hold for the one thing drawn *from* those
         // heights. It appears, right, the moment the last row is measured.
-        if self.waiting() == 0 {
+        // Drawn as soon as the conversation knows how long it is -- which is
+        // when everything is measured, or when what is not measured has a
+        // remembered height. Held back it appeared 30 to 220ms into a cold
+        // channel and popped; drawn against a length still growing it shrank
+        // under the reader. Knowing the length is the only answer to both.
+        if self.knows_its_length() {
             self.bar.draw(
                 &mut canvas,
                 &self.name,
