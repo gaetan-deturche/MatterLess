@@ -2877,6 +2877,98 @@ impl App {
         );
     }
 
+    /// Suggestions for the misspelled word under a right-click in a message
+    /// box, and a way to say it is right.
+    fn offer_spelling_menu(&mut self) {
+        use matterless_view::menu::{Item, Style};
+        let Some(name) = self.input.contexted().map(str::to_string) else {
+            return;
+        };
+        let Some((x, y)) = self.input.pointer_at() else {
+            return;
+        };
+        let found = if name == composer::NAME {
+            self.composer
+                .misspelled_at(header::below(self.channel_rect()), x, y)
+        } else if name == THREAD_COMPOSER {
+            self.thread_body()
+                .and_then(|body| self.thread_composer.misspelled_at(body, x, y))
+        } else {
+            return;
+        };
+        let (Some((line, range, word, sentence)), Some(speller)) =
+            (found, matterless_view::spell::speller())
+        else {
+            return;
+        };
+        let offered = speller.suggest(&word, &sentence);
+        let mut items: Vec<Item> = offered
+            .iter()
+            .map(|one| Item::new(&format!("spell.use.{one}"), one))
+            .collect();
+        if items.is_empty() {
+            items.push(Item::new("spell.none", "No suggestions"));
+        }
+        items.push(Item::rule());
+        items.push(Item::new("spell.learn", "Add to Dictionary"));
+        // Which box, where in it, and the word -- handed back with the choice.
+        let about = [
+            name,
+            line.to_string(),
+            range.start.to_string(),
+            range.end.to_string(),
+            word,
+        ]
+        .join("\u{1f}");
+        self.menu.show(
+            &about,
+            matterless_view::menu::Anchor::At(x, y),
+            Style::message(),
+            items,
+        );
+    }
+
+    /// A spelling suggestion taken, or a word taught.
+    fn act_on_spelling(&mut self, about: &str, chosen: &str) {
+        let parts: Vec<&str> = about.split('\u{1f}').collect();
+        let [name, line, start, end, word] = parts.as_slice() else {
+            return;
+        };
+        let (Ok(line), Ok(start), Ok(end)) = (line.parse(), start.parse(), end.parse()) else {
+            return;
+        };
+        if chosen == "learn" {
+            matterless_view::spell::learn_all([word.to_string()]);
+            // Kept, so it is still right after a restart.
+            if let Some(store) = self.store.as_ref() {
+                let mut kept: Vec<String> = store
+                    .setting(matterless_view::spell::OWN_WORDS)
+                    .ok()
+                    .flatten()
+                    .map(|saved| saved.lines().map(str::to_string).collect())
+                    .unwrap_or_default();
+                if !kept.iter().any(|one| one.eq_ignore_ascii_case(word)) {
+                    kept.push(word.to_string());
+                }
+                if let Err(error) =
+                    store.remember_setting(matterless_view::spell::OWN_WORDS, &kept.join("\n"))
+                {
+                    eprintln!("keeping a word: {error}");
+                }
+            }
+            println!("a word was added to the dictionary");
+        } else if let Some(with) = chosen.strip_prefix("use.") {
+            let box_of = match *name {
+                composer::NAME => &mut self.composer,
+                THREAD_COMPOSER => &mut self.thread_composer,
+                _ => return,
+            };
+            box_of.replace_word(&mut self.fonts, line, start..end, with);
+        }
+        self.relayout();
+        self.redraw();
+    }
+
     /// Runs whichever item was chosen.
     ///
     /// The channel menu's ids carry a prefix and the message menu's do not,
@@ -2884,6 +2976,10 @@ impl App {
     /// Unread" and they mean different things by it.
     fn act_on_menu(&mut self, about: &str, chosen: &str) {
         use matterless_view::actions::Action;
+        if let Some(rest) = chosen.strip_prefix("spell.") {
+            self.act_on_spelling(about, rest);
+            return;
+        }
         if let Some(rest) = chosen.strip_prefix("channel.") {
             self.act_on_channel_menu(about, rest);
             return;
@@ -5086,6 +5182,16 @@ impl App {
     /// over what is already in hand: a draft parked this run is the newer of
     /// the two, and the store is only a memory of what happened before.
     fn recall_drafts(&mut self) {
+        // The words this reader taught the spell checker, back with the rest of
+        // what they left behind.
+        if let Some(saved) = self.store.as_ref().and_then(|store| {
+            store
+                .setting(matterless_view::spell::OWN_WORDS)
+                .ok()
+                .flatten()
+        }) {
+            matterless_view::spell::learn_all(saved.lines().map(str::to_string));
+        }
         let Some(store) = self.store.as_ref() else {
             return;
         };
@@ -8274,6 +8380,7 @@ impl ApplicationHandler<Update> for App {
                     let boxes = self.targets();
                     self.input.apply(UiEvent::Contexted, &boxes);
                     self.offer_channel_menu();
+                    self.offer_spelling_menu();
                     self.react();
                     self.redraw();
                     return;
@@ -8585,6 +8692,10 @@ fn main() {
     {
         println!("a rustls crypto provider was already installed");
     }
+    // The spelling dictionaries, on a thread of their own from the start: they
+    // take a few tens of milliseconds, and the box underlines nothing until
+    // they are there rather than making the first frame wait for them.
+    matterless_view::spell::load_in_background();
     // Before any notification, and before the window: an AppUserModelID is
     // what the shell attributes a toast to, and it is a claim about the whole
     // process rather than about one message. Says what it decided, because

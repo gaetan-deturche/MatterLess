@@ -310,6 +310,20 @@ pub const NAME: &str = "composer";
 
 const SIZE: f32 = 14.0;
 const LINE: f32 = 20.0;
+
+/// A wavy line `width` long, as short steps up and down: the scene draws
+/// rectangles, and a run of them offset by turns reads as a wave at this size.
+fn squiggle(scene: &mut matterless_paint::Scene, x: f32, y: f32, width: f32, colour: [u8; 4]) {
+    const STEP: f32 = 2.0;
+    let mut at = 0.0;
+    let mut up = false;
+    while at < width {
+        let step = STEP.min(width - at);
+        scene.fill(x + at, if up { y } else { y + 1.5 }, step, 1.5, colour);
+        up = !up;
+        at += STEP;
+    }
+}
 const PADDING: f32 = 10.0;
 /// The same two on a field, which the app sets tighter: `input { padding: 6px
 /// 8px }` inside a `header { padding: 8px 10px }`, which is a 46px strip.
@@ -749,6 +763,114 @@ impl Composer {
                 }
             });
         }
+        out
+    }
+
+    /// Every misspelled word, as the rectangles it occupies: `(x, y, width)`,
+    /// each one line tall -- worked out the way the selection is, so the line
+    /// under a word lands under that word however the box has wrapped.
+    ///
+    /// Not the word being typed: one that touches the caret is still being
+    /// written, and underlining every half-finished word as it goes by is
+    /// how a spell checker becomes noise. It is judged once the caret leaves.
+    pub fn spelling_marks(&self, within: Rect) -> Vec<(f32, f32, f32)> {
+        self.misspelled_spans(within)
+            .into_iter()
+            .map(|(_, _, x, y, width)| (x, y, width))
+            .collect()
+    }
+
+    /// The misspelled word under a point, if there is one: its line, where it
+    /// is in that line, the word, and the whole line -- which is what a
+    /// suggestion needs to know which language it is being written in.
+    pub fn misspelled_at(
+        &self,
+        within: Rect,
+        x: f32,
+        y: f32,
+    ) -> Option<(usize, std::ops::Range<usize>, String, String)> {
+        let (line, range, ..) =
+            self.misspelled_spans(within)
+                .into_iter()
+                .find(|(_, _, left, top, width)| {
+                    x >= *left && x <= left + width && y >= *top && y <= top + LINE
+                })?;
+        self.editor.with_buffer(|buffer| {
+            let text = buffer.lines.get(line)?.text();
+            Some((
+                line,
+                range.clone(),
+                text.get(range)?.to_string(),
+                text.to_string(),
+            ))
+        })
+    }
+
+    /// Puts `with` where a word was, as an edit the reader can undo like any
+    /// other.
+    pub fn replace_word(
+        &mut self,
+        fonts: &mut Fonts,
+        line: usize,
+        range: std::ops::Range<usize>,
+        with: &str,
+    ) {
+        self.editor.set_cursor(Cursor::new(line, range.end));
+        self.editor
+            .set_selection(Selection::Normal(Cursor::new(line, range.start)));
+        for character in with.chars() {
+            self.act(fonts, Action::Insert(character));
+        }
+        self.touched = true;
+    }
+
+    /// Every misspelled word with where it is drawn: line, range, and the
+    /// rectangles `spelling_marks` hands out.
+    fn misspelled_spans(
+        &self,
+        within: Rect,
+    ) -> Vec<(usize, std::ops::Range<usize>, f32, f32, f32)> {
+        let Some(speller) = crate::spell::speller() else {
+            return Vec::new();
+        };
+        let inner = self.inner(within);
+        let scroll = self.scroll;
+        let caret = self.editor.cursor();
+        let mut out = Vec::new();
+        self.editor.with_buffer(|buffer| {
+            let found: Vec<(usize, std::ops::Range<usize>)> = buffer
+                .lines
+                .iter()
+                .enumerate()
+                .flat_map(|(line, text)| {
+                    speller
+                        .misspelled(text.text())
+                        .into_iter()
+                        .map(move |range| (line, range))
+                })
+                .filter(|(line, range)| {
+                    !(*line == caret.line && range.start <= caret.index && caret.index <= range.end)
+                })
+                .collect();
+            if found.is_empty() {
+                return;
+            }
+            for run in buffer.layout_runs() {
+                for (line, range) in found.iter().filter(|(line, _)| *line == run.line_i) {
+                    let from = Cursor::new(*line, range.start);
+                    let to = Cursor::new(*line, range.end);
+                    for (x, width) in run.highlight(from, to) {
+                        out.push((
+                            *line,
+                            range.clone(),
+                            inner.x + x,
+                            inner.y + run.line_top - scroll,
+                            width,
+                        ));
+                    }
+                }
+            }
+        });
         out
     }
 
@@ -1945,6 +2067,13 @@ impl Composer {
             let glyphs = matterless_paint::placed_glyphs(buffer, inner.x, inner.y - scroll);
             scene.glyphs(glyphs, palette.ink, palette.faint);
         });
+
+        // A misspelled word gets the wavy line every editor draws under one,
+        // at the foot of its line and in the colour for something wrong.
+        let wrong = [palette.danger[0], palette.danger[1], palette.danger[2], 255];
+        for (x, y, width) in self.spelling_marks(within) {
+            squiggle(scene, x, y + LINE - 4.0, width, wrong);
+        }
 
         // Solid rather than blinking: a blink needs a clock and a redraw of its
         // own, and this window only draws when something happens.

@@ -941,3 +941,97 @@ fn shift_home_selects_back_along_the_row() {
         "one row, not the paragraph: {picked:?}"
     );
 }
+
+/// A misspelled word is marked, in the box's own coordinates, and a word
+/// that is right is not.
+#[test]
+fn a_misspelled_word_is_marked_where_it_is() {
+    crate::spell::load_now();
+    let mut fonts = Fonts::new();
+    let (mut composer, mut input) = ready(&mut fonts);
+    type_text(
+        &mut composer,
+        &mut fonts,
+        &mut input,
+        "le netoyage est fait ",
+    );
+    let marks = composer.spelling_marks(panel());
+    assert_eq!(marks.len(), 1, "one word is wrong: {marks:?}");
+    let (x, _, width) = marks[0];
+    assert!(width > 20.0, "a word's width, not a sliver: {width}");
+    // After "le ", so not at the very start of the box.
+    let (start, _, _) = composer
+        .spelling_marks(panel())
+        .first()
+        .copied()
+        .expect("marked");
+    assert!(start > panel().x, "{x} is before the box");
+}
+
+/// The word being typed is left alone until the caret moves on from it.
+#[test]
+fn the_word_being_typed_is_not_marked_yet() {
+    crate::spell::load_now();
+    let mut fonts = Fonts::new();
+    let (mut composer, mut input) = ready(&mut fonts);
+    type_text(&mut composer, &mut fonts, &mut input, "le netoyage");
+    assert!(
+        composer.spelling_marks(panel()).is_empty(),
+        "underlined while still being typed"
+    );
+    type_text(&mut composer, &mut fonts, &mut input, " ");
+    assert_eq!(
+        composer.spelling_marks(panel()).len(),
+        1,
+        "and marked once left"
+    );
+}
+
+/// Code in a message is somebody's program, not prose.
+#[test]
+fn code_in_the_box_is_not_marked() {
+    crate::spell::load_now();
+    let mut fonts = Fonts::new();
+    let (mut composer, mut input) = ready(&mut fonts);
+    type_text(
+        &mut composer,
+        &mut fonts,
+        &mut input,
+        "voir `fn mian() {}` merci ",
+    );
+    assert!(composer.spelling_marks(panel()).is_empty());
+}
+
+/// A right-click on a misspelled word finds that word, and taking a
+/// suggestion puts it exactly where the word was.
+#[test]
+fn a_suggestion_replaces_the_word_under_the_pointer() {
+    crate::spell::load_now();
+    let mut fonts = Fonts::new();
+    let (mut composer, mut input) = ready(&mut fonts);
+    type_text(
+        &mut composer,
+        &mut fonts,
+        &mut input,
+        "le netoyage est fait ",
+    );
+    let (x, y, width) = composer.spelling_marks(panel())[0];
+    let (line, range, word, sentence) = composer
+        .misspelled_at(panel(), x + width / 2.0, y + LINE / 2.0)
+        .expect("the word under the pointer");
+    assert_eq!(word, "netoyage");
+    assert_eq!(sentence, "le netoyage est fait ");
+    assert!(
+        composer
+            .misspelled_at(panel(), x - 30.0, y + LINE / 2.0)
+            .is_none(),
+        "beside it"
+    );
+    composer.replace_word(&mut fonts, line, range, "nettoyage");
+    composer.lay_out(&mut fonts, panel().width);
+    assert_eq!(composer.text(), "le nettoyage est fait ");
+    assert!(
+        composer.spelling_marks(panel()).is_empty(),
+        "and it is right now"
+    );
+}

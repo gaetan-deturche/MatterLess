@@ -44,6 +44,7 @@ pub mod settings;
 pub mod sidebar;
 pub mod sidebar_feed;
 pub mod signin;
+pub mod spell;
 pub mod stream;
 #[cfg(test)]
 mod stream_tests;

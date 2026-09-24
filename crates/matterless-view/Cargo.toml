@@ -40,6 +40,11 @@ image = { version = "0.25", default-features = false, features = [
 # The socket runs on a thread of its own, so the window never blocks on it.
 tokio = { version = "1", features = ["rt", "macros", "sync", "time"] }
 serde_json = "1"
+# Spelling, in French and English at once, from the Hunspell dictionaries in
+# `resources/dictionaries` -- the ones the official desktop client checks with
+# on Windows. Pure Rust, with `hashbrown` as its only dependency, where the
+# Windows spell checker was judged not good enough and poor with two languages.
+spellbook = "0.4"
 # The session the app already established, read rather than collected: this
 # window has no business asking for a password to mint a second one.
 # `windows-native`, explicitly. Version 3 made every platform's credential
