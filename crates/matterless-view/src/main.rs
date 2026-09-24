@@ -305,6 +305,13 @@ impl Act {
     }
 }
 
+/// What the driver's typing act types, over and over.
+///
+/// Named because it is also how what the driver typed is recognised and
+/// cleared afterwards: a draft made of nothing but this word was left by a
+/// measurement, never by the reader.
+const DRIVER_TYPES: &str = "mesure ";
+
 /// Draws frames on its own, so a measurement does not need a hand on a wheel.
 ///
 /// The window renders on demand: it waits, and a frame happens because
@@ -4986,6 +4993,12 @@ impl App {
         let Some(under) = under else {
             return;
         };
+        // The Threads list and the Drafts list are rows of the sidebar and not
+        // conversations: there is no box on either to write in, and text kept
+        // under one came back as a draft "in a conversation" nobody could open.
+        if under == matterless_view::sidebar::THREADS || under == matterless_view::sidebar::DRAFTS {
+            return;
+        }
         // To the store as well as to the window. Held only here they were
         // thrown away by every restart -- and this window restarts itself to
         // install an update, so somebody who had written three paragraphs and
@@ -4998,7 +5011,12 @@ impl App {
         // so a message begun with a screenshot came back without it and
         // nothing said it had ever been there.
         let carried = self.attached.get(&under).cloned().unwrap_or_default();
+        // Never while the driver is measuring. Its typing act writes into the
+        // box and its switching act carries that from channel to channel, and
+        // kept, it left "mesure mesure ..." drafts in five of the reader's
+        // conversations -- in the store the installed client reads too.
         if !self.me.is_empty()
+            && self.driver.is_none()
             && let Some(store) = self.store.as_ref()
             && let Err(error) = store.keep_draft(
                 &self.me,
@@ -5010,10 +5028,56 @@ impl App {
         {
             eprintln!("keeping a draft: {error}");
         }
+        let had = self.drafts.contains_key(&under);
         match text.trim().is_empty() {
             true => self.drafts.remove(&under),
-            false => self.drafts.insert(under, text),
+            false => self.drafts.insert(under.clone(), text),
         };
+        // The sidebar's Drafts row counts what the store holds, and is built
+        // only when the sidebar is: a draft left by switching channel showed
+        // there whenever something else next rebuilt it, seconds later.
+        if had != self.drafts.contains_key(&under) {
+            self.rebuild_sidebar();
+        }
+    }
+
+    /// Throws away every kept draft that is nothing but what the driver types.
+    ///
+    /// A run no longer keeps any; this is for the ones runs kept before that,
+    /// and it is exact rather than a guess -- one word, repeated, which is
+    /// the driver's and not something a reader writes.
+    fn clear_what_the_driver_typed(&mut self) {
+        let Some(store) = self.store.as_ref() else {
+            return;
+        };
+        let typed = DRIVER_TYPES.trim();
+        let left = match store.drafts(&self.me) {
+            Ok(drafts) => drafts,
+            Err(error) => return eprintln!("reading the drafts: {error}"),
+        };
+        let mut cleared = 0;
+        for draft in left {
+            let words: Vec<&str> = draft.message.split_whitespace().collect();
+            if words.is_empty()
+                || words.iter().any(|word| *word != typed)
+                || !draft.files.is_empty()
+            {
+                continue;
+            }
+            match store.keep_draft(
+                &self.me,
+                &draft.conversation,
+                "",
+                &[],
+                matterless_view::clock::now() * 1_000,
+            ) {
+                Ok(()) => cleared += 1,
+                Err(error) => eprintln!("clearing a draft the driver left: {error}"),
+            }
+        }
+        if cleared > 0 {
+            println!("cleared {cleared} drafts the driver had typed");
+        }
     }
 
     /// Brings back everything left half written, from the last time.
@@ -6589,7 +6653,8 @@ impl App {
                 match tick.is_multiple_of(90) {
                     true => self.composer.clear(&mut self.fonts),
                     false => {
-                        self.input.apply(UiEvent::Typed("mesure ".to_string()), &[]);
+                        self.input
+                            .apply(UiEvent::Typed(DRIVER_TYPES.to_string()), &[]);
                         self.react();
                     }
                 }
@@ -8443,6 +8508,7 @@ impl ApplicationHandler<Update> for App {
                     }
                     matterless_view::timing::forget();
                     if driver.over() {
+                        self.clear_what_the_driver_typed();
                         events.exit();
                     }
                 }
