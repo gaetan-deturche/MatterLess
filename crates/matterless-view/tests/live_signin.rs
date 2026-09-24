@@ -20,6 +20,10 @@ use std::sync::mpsc;
 /// The real one is winit's event-loop proxy. What matters here is the half
 /// `sign_in` owns: that it calls `wake` exactly once, from the thread it
 /// spawned, whatever the server said.
+/// Cloneable for the same reason the window's proxy is: a picture fetch runs
+/// on a task of its own and carries a waker with it. A `Sender` clone is
+/// another handle to the same channel, so the test still sees everything.
+#[derive(Clone)]
 struct Told(mpsc::Sender<Update>);
 
 impl Wake for Told {

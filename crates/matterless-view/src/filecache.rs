@@ -13,7 +13,8 @@
 //!
 //! One file per entry with the content type in a small header, so an entry is a
 //! single atomic rename and there is no index to keep in step with the
-//! directory.
+//! directory -- except for the small ones, which are the great majority and go
+//! in one packed file instead. See `pack`.
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -31,6 +32,9 @@ const BUDGET_BYTES: u64 = 256 * 1024 * 1024;
 
 pub struct FileCache {
     root: PathBuf,
+    /// Where everything small lives. `None` only when it could not be opened,
+    /// which costs speed rather than correctness: entries go one to a file.
+    small: Option<crate::pack::Pack>,
     /// How much it may hold. A field rather than the constant so the rule can
     /// be tested without writing a quarter of a gigabyte to find out.
     budget: u64,
@@ -43,6 +47,23 @@ pub struct FileCache {
 struct Entry {
     bytes: u64,
     used: u64,
+    /// In the packed file rather than one of its own.
+    packed: bool,
+}
+
+/// The one cache this process has.
+///
+/// One rather than several because the pack belongs to whoever opened it: a
+/// second cache here would get it read-only and quietly stop packing anything.
+/// `None` when there is nowhere to put it, which is slow rather than broken.
+pub fn shared() -> Option<std::sync::Arc<FileCache>> {
+    static ONE: std::sync::OnceLock<Option<std::sync::Arc<FileCache>>> = std::sync::OnceLock::new();
+    ONE.get_or_init(|| {
+        crate::feed::pictures_dir()
+            .map(FileCache::open)
+            .map(std::sync::Arc::new)
+    })
+    .clone()
 }
 
 impl FileCache {
@@ -56,13 +77,25 @@ impl FileCache {
 
     /// The same, to a given size.
     pub fn holding(root: PathBuf, budget: u64) -> Self {
+        if let Err(error) = std::fs::create_dir_all(&root) {
+            eprintln!("no picture cache at {}: {error}", root.display());
+        }
+        let small = match crate::pack::Pack::open(crate::pack::beside(&root)) {
+            Ok(pack) => Some(pack),
+            Err(error) => {
+                eprintln!("the packed pictures could not be opened ({error}), one file each");
+                None
+            }
+        };
         let cache = Self {
             root,
+            small,
             budget,
             entries: Mutex::new(HashMap::new()),
             tick: AtomicU64::new(1),
         };
         cache.seed();
+        cache.fold();
         cache
     }
 
@@ -97,6 +130,10 @@ impl FileCache {
             if !metadata.is_file() || name.ends_with(PARTIAL) {
                 continue;
             }
+            // The packed file is the cache, not an entry in it.
+            if crate::pack::beside(&self.root) == item.path() || name.starts_with(PACKED_NAME) {
+                continue;
+            }
             let Some(key) = key_of(&name) else {
                 continue;
             };
@@ -110,7 +147,32 @@ impl FileCache {
         for (key, bytes, _) in found {
             total += bytes;
             let used = self.tick.fetch_add(1, Ordering::Relaxed);
-            entries.insert(key, Entry { bytes, used });
+            entries.insert(
+                key,
+                Entry {
+                    bytes,
+                    used,
+                    packed: false,
+                },
+            );
+        }
+        // The pack keeps its own recency, so these carry theirs rather than
+        // being renumbered by the order they happen to come back in.
+        if let Some(pack) = self.small.as_ref() {
+            let mut highest = 0;
+            for (key, bytes, used) in pack.listing() {
+                total += bytes;
+                highest = highest.max(used);
+                entries.insert(
+                    key,
+                    Entry {
+                        bytes,
+                        used,
+                        packed: true,
+                    },
+                );
+            }
+            self.tick.fetch_max(highest + 1, Ordering::Relaxed);
         }
         if !entries.is_empty() {
             println!(
@@ -121,15 +183,91 @@ impl FileCache {
         }
     }
 
-    /// The cached bytes and their content type, if this key is held.
-    pub fn read(&self, key: &str) -> Option<(Vec<u8>, String)> {
-        {
-            let mut entries = self.entries.lock().expect("the picture cache");
-            let entry = entries.get_mut(key)?;
-            entry.used = self.tick.fetch_add(1, Ordering::Relaxed);
+    /// Moves the small loose files into the pack, once.
+    ///
+    /// Without this the pack only fills as pictures are fetched again -- and a
+    /// face is never fetched again, because its key carries the moment it was
+    /// last changed. A cache from before the pack existed would stay one file
+    /// per face forever.
+    fn fold(&self) {
+        let Some(pack) = self.small.as_ref().filter(|pack| pack.writable()) else {
+            return;
+        };
+        let loose: Vec<(String, u64)> = {
+            let entries = self.entries.lock().expect("the picture cache");
+            entries
+                .iter()
+                .filter(|(_, entry)| !entry.packed && entry.bytes as usize <= crate::pack::LARGEST)
+                .map(|(key, entry)| (key.clone(), entry.used))
+                .collect()
+        };
+        if loose.is_empty() {
+            return;
         }
+        let mut moved = 0;
+        for (key, used) in loose {
+            let Ok((bytes, content_type)) = decode(&self.path_for(&key)) else {
+                continue;
+            };
+            pack.write(&key, &bytes, &content_type, used);
+            // Only once the pack holds it: a crash between the two leaves the
+            // file behind, which is a duplicate, not a loss.
+            let _ = std::fs::remove_file(self.path_for(&key));
+            if let Some(entry) = self
+                .entries
+                .lock()
+                .expect("the picture cache")
+                .get_mut(&key)
+            {
+                entry.packed = true;
+            }
+            moved += 1;
+        }
+        if moved > 0 {
+            println!("{moved} pictures packed into one file");
+        }
+    }
+
+    /// The cached bytes and their content type, if this key is held.
+    ///
+    /// The file is tried even for a key this instance has never heard of. Two
+    /// of these are open on the same directory -- the shelf reads, the socket
+    /// thread writes -- and each seeded its list when it opened, so anything
+    /// written since would otherwise look like a miss and be fetched again.
+    /// That is exactly what the warm-up writes.
+    pub fn read(&self, key: &str) -> Option<(Vec<u8>, String)> {
+        let used = self.tick.fetch_add(1, Ordering::Relaxed);
+        let known = {
+            let mut entries = self.entries.lock().expect("the picture cache");
+            match entries.get_mut(key) {
+                Some(entry) => {
+                    entry.used = used;
+                    Some(entry.packed)
+                }
+                None => None,
+            }
+        };
+        if known != Some(false)
+            && let Some(pack) = self.small.as_ref()
+            && let Some(held) = pack.read(key)
+        {
+            pack.touch(key, used);
+            if known.is_none() {
+                self.adopt(key, held.0.len() as u64, true);
+            }
+            return Some(held);
+        }
+        let known = known.is_some();
         match decode(&self.path_for(key)) {
-            Ok(held) => Some(held),
+            Ok(held) => {
+                if !known {
+                    self.adopt(key, held.0.len() as u64, false);
+                }
+                Some(held)
+            }
+            // Never claimed to hold it, so its absence is the ordinary answer
+            // and worth nothing said.
+            Err(_) if !known => None,
             Err(error) => {
                 // A truncated entry is a miss, not a failure: drop it and let
                 // the caller fetch. Happens if a write was interrupted.
@@ -138,6 +276,38 @@ impl FileCache {
                 None
             }
         }
+    }
+
+    /// The newest version held of a picture whose exact version is not known.
+    ///
+    /// An avatar's key carries the moment it was last changed, and the window
+    /// asks with a zero when the store has not heard of that person yet -- so
+    /// a face already on this disk misses, goes to the server, and is fetched
+    /// a second time the moment the person's record lands. This answers the
+    /// first ask with the face already held.
+    pub fn read_like(&self, stem: &str) -> Option<(Vec<u8>, String)> {
+        let newest = {
+            let entries = self.entries.lock().expect("the picture cache");
+            entries
+                .keys()
+                .filter(|key| key.starts_with(stem))
+                .max_by_key(|key| key[stem.len()..].parse::<i64>().unwrap_or(0))
+                .cloned()?
+        };
+        self.read(&newest)
+    }
+
+    /// Takes an entry another instance wrote into this one's list.
+    fn adopt(&self, key: &str, bytes: u64, packed: bool) {
+        let used = self.tick.fetch_add(1, Ordering::Relaxed);
+        self.entries.lock().expect("the picture cache").insert(
+            key.to_string(),
+            Entry {
+                bytes,
+                used,
+                packed,
+            },
+        );
     }
 
     /// Stores bytes under `key`, evicting the least recently used to stay
@@ -151,15 +321,33 @@ impl FileCache {
             return;
         }
         self.evict_for(size);
-        if let Err(error) = encode(&self.path_for(key), bytes, content_type) {
+        let used = self.tick.fetch_add(1, Ordering::Relaxed);
+        let packed = bytes.len() <= crate::pack::LARGEST
+            && self.small.as_ref().is_some_and(crate::pack::Pack::writable);
+        if packed {
+            if let Some(pack) = self.small.as_ref() {
+                pack.write(key, bytes, content_type, used);
+            }
+        } else if let Err(error) = encode(&self.path_for(key), bytes, content_type) {
             eprintln!("{key} could not be cached: {error}");
             return;
         }
-        let used = self.tick.fetch_add(1, Ordering::Relaxed);
+        self.entries.lock().expect("the picture cache").insert(
+            key.to_string(),
+            Entry {
+                bytes: size,
+                used,
+                packed,
+            },
+        );
+    }
+
+    /// Whether this key is held, without reading it.
+    pub fn holds(&self, key: &str) -> bool {
         self.entries
             .lock()
             .expect("the picture cache")
-            .insert(key.to_string(), Entry { bytes: size, used });
+            .contains_key(key)
     }
 
     /// How many entries it holds, for whoever wants to say so.
@@ -168,8 +356,17 @@ impl FileCache {
     }
 
     fn forget(&self, key: &str) {
-        self.entries.lock().expect("the picture cache").remove(key);
-        let _ = std::fs::remove_file(self.path_for(key));
+        let gone = self.entries.lock().expect("the picture cache").remove(key);
+        match gone {
+            Some(entry) if entry.packed => {
+                if let Some(pack) = self.small.as_ref() {
+                    pack.forget(key);
+                }
+            }
+            _ => {
+                let _ = std::fs::remove_file(self.path_for(key));
+            }
+        }
     }
 
     fn evict_for(&self, incoming: u64) {
@@ -203,6 +400,9 @@ impl FileCache {
 
 /// What an interrupted write is called while it is being written.
 const PARTIAL: &str = ".partial";
+
+/// The packed file, and anything left beside it mid-rewrite.
+const PACKED_NAME: &str = "packed";
 
 /// One flat filename for a key, and back again.
 ///
@@ -337,11 +537,18 @@ mod tests {
 
     /// A write that was interrupted is a miss, not a crash, and it does not
     /// stay in the way of the fetch that replaces it.
+    ///
+    /// Big enough to have a file of its own: that is what an interrupted write
+    /// can leave behind now, since a small one goes in the pack.
     #[test]
     fn a_truncated_entry_is_a_miss_not_a_failure() {
         let root = scratch("truncated");
         let cache = FileCache::open(root.clone());
-        cache.write("file/one", b"the bytes", "image/png");
+        cache.write(
+            "file/one",
+            &vec![3u8; crate::pack::LARGEST + 1],
+            "image/png",
+        );
         std::fs::write(root.join(name_of("file/one")), b"xx").expect("truncate");
         assert!(cache.read("file/one").is_none());
         // And it was dropped rather than left to fail again.
@@ -385,5 +592,41 @@ mod tests {
         cache.write("file/huge", &vec![0u8; 1024 + 1], "video/mp4");
         assert_eq!(cache.held(), 0);
         assert!(cache.read("file/huge").is_none());
+    }
+
+    /// The shelf and the socket thread each hold one of these on the same
+    /// directory. Whatever one writes, the other has to be able to read --
+    /// otherwise the warm-up fills a disk the reader never looks at.
+    #[test]
+    fn one_instance_reads_what_another_wrote_after_it_opened() {
+        let root = scratch("shared");
+        let reading = FileCache::open(root.clone());
+        let writing = FileCache::open(root);
+        assert!(reading.read("avatar/late").is_none(), "nothing there yet");
+        // Big enough to be a file of its own: the pack belongs to whichever of
+        // the two opened it first, and this is about the loose files.
+        writing.write(
+            "avatar/late",
+            &vec![9u8; crate::pack::LARGEST + 1],
+            "image/png",
+        );
+        let (bytes, kind) = reading.read("avatar/late").expect("written since");
+        assert_eq!(bytes.len(), crate::pack::LARGEST + 1);
+        assert_eq!(kind, "image/png");
+        assert_eq!(reading.held(), 1, "and taken into its own list");
+    }
+
+    /// The window asks with a zero when it does not know which version is
+    /// current. The face is on this disk under the version it does know.
+    #[test]
+    fn a_face_is_found_under_another_version() {
+        let cache = FileCache::open(scratch("versions"));
+        cache.write("avatar/u1?v=100", b"the old face", "image/png");
+        cache.write("avatar/u1?v=900", b"the new face", "image/png");
+        cache.write("avatar/u2?v=500", b"somebody else", "image/png");
+        assert!(cache.read("avatar/u1?v=0").is_none(), "not under that key");
+        let (bytes, _) = cache.read_like("avatar/u1?v=").expect("held under another");
+        assert_eq!(bytes, b"the new face", "the newest of the two");
+        assert!(cache.read_like("avatar/u3?v=").is_none(), "nobody");
     }
 }

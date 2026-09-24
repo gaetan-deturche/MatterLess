@@ -32,6 +32,7 @@ pub mod menu;
 pub mod moving;
 pub mod offer;
 pub mod open;
+pub mod pack;
 pub mod picker;
 pub mod places;
 pub mod profile;

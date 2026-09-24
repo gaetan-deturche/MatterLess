@@ -226,6 +226,16 @@ pub enum Ask {
         original: bool,
         within: (u32, u32),
     },
+    /// Put these pictures on the disk before anybody asks for them.
+    ///
+    /// For faces, which are the ones that make a channel look half-drawn: a
+    /// face is about 24KB and the link measured 220KB/s, so the first sighting
+    /// of thirty people costs three seconds however it is arranged. Fetched
+    /// ahead of time it costs nothing anybody is waiting on.
+    ///
+    /// Nothing is decoded and nothing is drawn -- this only fills the disk
+    /// cache, so the fetch that follows a real sighting is a file read.
+    Warm { keys: Vec<String> },
     /// What else this name could mean, beyond the conversations already held.
     ///
     /// Public channels the reader is not in, and people they may never have
@@ -333,10 +343,19 @@ pub enum Ask {
         key: String,
         width: u32,
         height: u32,
+        /// A fingerprint of the bytes already drawn under this key, when the
+        /// shelf drew another version of the face while this was on its way.
+        ///
+        /// Carried rather than looked up again on arrival: by then the disk may
+        /// hold a copy somebody else wrote since -- the warm-up, or the same
+        /// face under its other key -- and taking that for what is on screen
+        /// left faces that were never drawn at all.
+        shown: Option<u64>,
     },
 }
 
 /// The window's end of the socket thread. Dropping it closes the connection.
+#[derive(Clone)]
 pub struct Link {
     asks: tokio::sync::mpsc::UnboundedSender<Ask>,
 }
@@ -352,7 +371,7 @@ impl Link {
 ///
 /// A trait rather than winit's proxy directly, so the plumbing can be tested
 /// and so this crate does not need a window to compile.
-pub trait Wake: Send + 'static {
+pub trait Wake: Clone + Send + Sync + 'static {
     fn wake(&self, update: Update);
 }
 
@@ -682,7 +701,7 @@ async fn run(
     wake: impl Wake,
     mut inbox: tokio::sync::mpsc::UnboundedReceiver<Ask>,
 ) {
-    let rest = match RestClient::new(&server) {
+    let rest = match RestClient::new(&server).map(std::sync::Arc::new) {
         Ok(rest) => rest,
         Err(error) => {
             wake.wake(Update::Failed(format!("{server}: {error}")));
@@ -694,7 +713,29 @@ async fn run(
     // Opened once for the life of the socket thread, which is the only thing
     // that fetches a picture. `None` when there is nowhere to put it: a cache
     // that cannot be opened is slow, not broken.
-    let pictures = crate::feed::pictures_dir().map(crate::filecache::FileCache::open);
+    let pictures = crate::filecache::shared();
+    // How many pictures may be in flight at once.
+    //
+    // They used to go one at a time, because every arm of this loop awaits in
+    // place -- so a send or an incoming event queued behind every face in the
+    // channel. That is what this fixes, and it is worth being exact about
+    // what it does *not*:
+    //
+    // **The pictures do not arrive sooner in total.** Measured on 29 faces
+    // with a cold cache: 3204ms serialised, 3184ms six at a time. Each
+    // request simply takes six times as long (120ms alone, 739ms with five
+    // others), so the server hands over about one picture per 110ms however
+    // many are asked for. Decoding is not the cost either -- 3ms a picture,
+    // 101ms for all of them.
+    //
+    // What does change is how long any *one* picture waits: behind at most
+    // five others rather than behind all twenty-eight. A face that appears
+    // while a channel is still loading used to be last in a queue nobody
+    // could jump.
+    //
+    // Six rather than all of them: a browser opens six connections a host for
+    // the same reason, and the measurement says more would not help anyway.
+    let fetching = std::sync::Arc::new(tokio::sync::Semaphore::new(WHILE_FETCHING));
 
     // Who the reader is, which the notification and unread decisions need and
     // which also proves the token is still good before a socket is opened.
@@ -1316,105 +1357,147 @@ async fn run(
                         } else {
                             format!("/files/{file_id}/preview")
                         };
-                        match rest.fetch_bytes(&route).await {
-                            Ok(Some((bytes, _))) => {
-                                match fit(&bytes, within.0.max(1), within.1.max(1)) {
-                                    Some((width, height, rgba)) => wake.wake(Update::Looked {
-                                        file_id,
-                                        width,
-                                        height,
-                                        rgba,
-                                    }),
-                                    None => wake.wake(Update::LookFailed {
-                                        file_id,
-                                        why: format!(
-                                            "{} bytes of {} could not be decoded",
-                                            bytes.len(),
-                                            kind_of(&bytes)
-                                        ),
-                                    }),
+                        // A task of its own, like any picture: awaited here, a
+                        // full-size original held every send and every
+                        // refresh behind its download and then its decode.
+                        let rest = rest.clone();
+                        let wake = wake.clone();
+                        tokio::spawn(async move {
+                            match rest.fetch_bytes(&route).await {
+                                Ok(Some((bytes, _))) => {
+                                    let fitted = off_the_loop(move || {
+                                        let fitted = fit(&bytes, within.0.max(1), within.1.max(1));
+                                        (fitted, bytes.len(), kind_of(&bytes))
+                                    })
+                                    .await;
+                                    match fitted {
+                                        Some((Some((width, height, rgba)), _, _)) => {
+                                            wake.wake(Update::Looked {
+                                                file_id,
+                                                width,
+                                                height,
+                                                rgba,
+                                            })
+                                        }
+                                        Some((None, length, kind)) => wake.wake(Update::LookFailed {
+                                            file_id,
+                                            why: format!("{length} bytes of {kind} could not be decoded"),
+                                        }),
+                                        None => {}
+                                    }
+                                }
+                                Ok(None) => wake.wake(Update::LookFailed {
+                                    file_id,
+                                    why: "the server has no such file".to_string(),
+                                }),
+                                Err(error) => wake.wake(Update::LookFailed {
+                                    file_id,
+                                    why: error.to_string(),
+                                }),
+                            }
+                        });
+                    }
+                    // Behind everything the reader is actually looking at.
+                    // One task for the whole list rather than one each: this
+                    // is work nobody is waiting for, and a hundred tasks
+                    // queued on a semaphore is a hundred tasks the runtime
+                    // has to keep.
+                    Ask::Warm { keys } => {
+                        let rest = rest.clone();
+                        let pictures = pictures.clone();
+                        let fetching = fetching.clone();
+                        tokio::spawn(async move {
+                            let Some(held) = pictures else { return };
+                            let mut got = 0usize;
+                            for key in keys {
+                                if held.read(&key).is_some() {
+                                    continue;
+                                }
+                                let Some(route) = route_for(&key) else {
+                                    continue;
+                                };
+                                // Only while nothing in front is waiting. A
+                                // semaphore hands permits out in order and has
+                                // no notion of priority, so the test is
+                                // whether every permit is free -- which is
+                                // exactly "no picture the reader asked for is
+                                // in flight".
+                                while fetching.available_permits() < WHILE_FETCHING {
+                                    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                                }
+                                let Ok(_room) = fetching.acquire().await else {
+                                    return;
+                                };
+                                if let Ok(Some((bytes, kind))) = rest.fetch_bytes(&route).await {
+                                    held.write(&key, &bytes, &kind);
+                                    got += 1;
                                 }
                             }
-                            Ok(None) => wake.wake(Update::LookFailed {
-                                file_id,
-                                why: "the server has no such file".to_string(),
-                            }),
-                            Err(error) => wake.wake(Update::LookFailed {
-                                file_id,
-                                why: error.to_string(),
-                            }),
-                        }
+                            if got > 0 {
+                                println!("{got} pictures are on the disk before anybody asked");
+                            }
+                        });
                     }
-                    Ask::Fetch { key, width, height } => {
+                    Ask::Fetch {
+                        key,
+                        width,
+                        height,
+                        shown,
+                    } => {
                         let Some(route) = route_for(&key) else {
                             continue;
                         };
-                        // Asked of the disk first. Nothing here changes under
-                        // its key -- a new avatar is a new key, not new bytes
-                        // at an old one -- so a hit is as good as a fetch and
-                        // costs no round trip.
-                        if let Some((bytes, _)) = pictures.as_ref().and_then(|held| held.read(&key))
-                            && let Some((wide, tall, rgba)) = decode(&bytes, width, height)
-                        {
-                            let moves = frames_of(&bytes, width, height);
-                            // The still frame first, so a picture is on screen
-                            // whether or not anything plays it.
-                            wake.wake(Update::Picture {
-                                key: key.clone(),
-                                width: wide,
-                                height: tall,
-                                rgba,
-                            });
-                            if let Some(frames) = moves {
-                                wake.wake(Update::Moving {
-                                    key,
-                                    width: wide,
-                                    height: tall,
-                                    frames,
-                                });
+                        // Off the loop, and several at once. Every arm here
+                        // awaits in place, so a picture used to be fetched
+                        // one at a time *and* to hold up sends and socket
+                        // traffic behind it: 29 faces on opening a channel, a
+                        // median of 120ms each, 3.2 seconds before the last
+                        // one appeared. The disk cache never helped with that
+                        // -- the bytes were already local on the second
+                        // sighting; what was slow was the queue.
+                        let rest = rest.clone();
+                        let wake = wake.clone();
+                        let pictures = pictures.clone();
+                        let fetching = fetching.clone();
+                        tokio::spawn(async move {
+                            // Still read here, as well as on the shelf: a
+                            // fetch asked for from anywhere else, or one the
+                            // shelf passed along while another reader was
+                            // writing the same file, should not go out twice.
+                            let held = {
+                                let (pictures, key, wake) = (pictures.clone(), key.clone(), wake.clone());
+                                off_the_loop(move || {
+                                    pictures
+                                        .as_ref()
+                                        .and_then(|held| held.read(&key))
+                                        .is_some_and(|(bytes, _)| hand_over(&key, &bytes, width, height, &wake))
+                                })
+                                .await
+                            };
+                            if held == Some(true) {
+                                return;
                             }
-                            continue;
-                        }
-                        match rest.fetch_bytes(&route).await {
-                            Ok(Some((bytes, kind))) => match decode(&bytes, width, height) {
-                                Some((wide, tall, rgba)) => {
-                                    // Kept only once it has decoded: bytes this
-                                    // build cannot read are worth nothing on
-                                    // the next start either.
-                                    if let Some(held) = pictures.as_ref() {
-                                        held.write(&key, &bytes, &kind);
-                                    }
-                                    let moves = frames_of(&bytes, width, height);
-                                    wake.wake(Update::Picture {
-                                        key: key.clone(),
-                                        width: wide,
-                                        height: tall,
-                                        rgba,
-                                    });
-                                    if let Some(frames) = moves {
-                                        wake.wake(Update::Moving {
-                                            key,
-                                            width: wide,
-                                            height: tall,
-                                            frames,
-                                        });
-                                    }
+                                                        // Held until there is room to go out. Dropped at
+                            // the end of the task, which is what bounds this.
+                            let _room = match fetching.acquire().await {
+                                Ok(room) => room,
+                                // The semaphore is only closed when the whole
+                                // session is going away.
+                                Err(_) => return,
+                            };
+                            match rest.fetch_bytes(&route).await {
+                                Ok(Some((bytes, kind))) => {
+                                    off_the_loop(move || {
+                                        take_in(&key, &bytes, &kind, width, height, shown, pictures.as_deref(), &wake)
+                                    })
+                                    .await;
                                 }
-                                // Named by what actually came back: a picture
-                                // this build has no decoder for and a picture
-                                // that is really an error page fail the same
-                                // way, and "could not be decoded" said neither.
-                                None => eprintln!(
-                                    "{key}: could not be decoded, {} bytes of {}",
-                                    bytes.len(),
-                                    kind_of(&bytes)
-                                ),
-                            },
-                            // A person with no picture is not an error, and a
-                            // silent gap is the right drawing for one.
-                            Ok(None) => {}
-                            Err(error) => eprintln!("{key}: {error}"),
-                        }
+                                // A person with no picture is not an error, and
+                                // a silent gap is the right drawing for one.
+                                Ok(None) => {}
+                                Err(error) => eprintln!("{key}: {error}"),
+                            }
+                        });
                     }
                 }
             }
@@ -1515,6 +1598,9 @@ pub fn route_for(key: &str) -> Option<String> {
     }
 }
 
+/// How many pictures may be on the wire at once.
+const WHILE_FETCHING: usize = 6;
+
 /// Which channels a batch of changes touched, so only an open one is re-read.
 ///
 /// A channel nobody is looking at still had its post stored -- that is the
@@ -1590,6 +1676,91 @@ pub fn renames_emoji(deltas: &[Delta]) -> bool {
 
 #[cfg(test)]
 mod tests {
+
+    /// A moving picture of `count` frames at `wide` by `tall`, as GIF bytes.
+    fn a_gif(count: u32, wide: u32, tall: u32) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        {
+            let mut encoder = image::codecs::gif::GifEncoder::new(&mut bytes);
+            for at in 0..count {
+                let frame = image::RgbaImage::from_fn(wide, tall, |x, y| {
+                    image::Rgba([(x + at * 7) as u8, (y * 3) as u8, (x ^ y) as u8, 255])
+                });
+                encoder
+                    .encode_frame(image::Frame::new(frame))
+                    .expect("a frame");
+            }
+        }
+        bytes
+    }
+
+    /// The frames of a GIF are scaled by the method now, for the same reason a
+    /// still is. Same filter, same pixels.
+    #[test]
+    fn a_gif_frame_is_scaled_by_the_filter_it_replaced() {
+        use image::AnimationDecoder;
+        let gif = a_gif(3, 96, 64);
+        let ours = super::frames_of(&gif, 24, 16).expect("it moves");
+        let before: Vec<Vec<u8>> = image::codecs::gif::GifDecoder::new(std::io::Cursor::new(&gif))
+            .expect("a gif")
+            .into_frames()
+            .map(|frame| {
+                image::imageops::thumbnail(&frame.expect("a frame").into_buffer(), 24, 16)
+                    .into_raw()
+            })
+            .collect();
+        assert_eq!(ours.len(), before.len());
+        for ((pixels, _), expected) in ours.iter().zip(&before) {
+            assert_eq!(pixels, expected);
+        }
+    }
+
+    /// The scale moved from `imageops::thumbnail` to the method so the dev
+    /// build would run it optimised. It must still be the same filter: the
+    /// same pixels out, whatever the picture was stored as.
+    #[test]
+    fn the_scale_is_the_filter_it_replaced() {
+        let mut rgba = image::RgbaImage::new(128, 128);
+        for (x, y, pixel) in rgba.enumerate_pixels_mut() {
+            *pixel = image::Rgba([
+                (x * 2) as u8,
+                (y * 2) as u8,
+                ((x ^ y) * 3) as u8,
+                (x + y) as u8,
+            ]);
+        }
+        let rgb = image::DynamicImage::ImageRgba8(rgba.clone()).to_rgb8();
+        for stored in [
+            image::DynamicImage::ImageRgba8(rgba),
+            image::DynamicImage::ImageRgb8(rgb),
+        ] {
+            let mut png = Vec::new();
+            stored
+                .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+                .expect("encoded");
+            let (wide, tall, ours) = super::decode(&png, 28, 28).expect("decoded");
+            let before = image::imageops::thumbnail(&stored.to_rgba8(), 28, 28);
+            assert_eq!((wide, tall), (28, 28));
+            assert_eq!(ours, before.into_raw(), "{:?}", stored.color());
+        }
+    }
+
+    #[test]
+    fn a_face_key_gives_up_its_version() {
+        assert_eq!(
+            super::stem_of("avatar/abc?v=17").as_deref(),
+            Some("avatar/abc?v=")
+        );
+        assert_eq!(
+            super::stem_of("avatar/abc?v=0").as_deref(),
+            Some("avatar/abc?v=")
+        );
+        // Nothing else is versioned this way.
+        assert_eq!(super::stem_of("emoji/abc"), None);
+        assert_eq!(super::stem_of("team/abc?v=3"), None);
+        assert_eq!(super::stem_of("mini/file-1/thumbnail"), None);
+    }
+
     use super::*;
     use matterless_store::{PostChange, Unread};
 
@@ -1926,7 +2097,11 @@ fn frames_of(bytes: &[u8], width: u32, height: u32) -> Option<Vec<(Vec<u8>, std:
             height.clamp(1, MAX_SIDE).min(rgba.height()),
         );
         if (rgba.width(), rgba.height()) != wanted {
-            rgba = image::imageops::thumbnail(&rgba, wanted.0, wanted.1);
+            // The method, not `imageops::thumbnail`, for the reason `decode`
+            // gives -- and here it is paid once a frame.
+            rgba = image::DynamicImage::ImageRgba8(rgba)
+                .thumbnail_exact(wanted.0, wanted.1)
+                .into_rgba8();
         }
         frames.push((rgba.into_raw(), delay));
         // A loop longer than this is somebody's video, not an emoji, and the
@@ -1943,21 +2118,223 @@ fn frames_of(bytes: &[u8], width: u32, height: u32) -> Option<Vec<(Vec<u8>, std:
 /// Scaled down to what the atlas can hold rather than refused: an avatar comes
 /// back at whatever size the server keeps, and a face that would not fit is
 /// better small than missing.
+/// Runs decoding on a thread made for blocking, and waits for it there.
+///
+/// Not on the socket thread's own: it is one thread for everything, and a task
+/// that decodes without awaiting holds it for as long as that takes. A 144-frame
+/// GIF and a 104-frame one did exactly that while the reader was opening a
+/// channel with nothing kept locally, and its rows arrived seconds later,
+/// behind the frames and behind every refresh that had queued up meanwhile.
+async fn off_the_loop<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> Option<T> {
+    tokio::task::spawn_blocking(work).await.ok()
+}
+
+/// A picture that has just been fetched: decoded, kept, and handed over.
+#[allow(clippy::too_many_arguments)]
+fn take_in(
+    key: &str,
+    bytes: &[u8],
+    kind: &str,
+    width: u32,
+    height: u32,
+    shown: Option<u64>,
+    pictures: Option<&crate::filecache::FileCache>,
+    wake: &impl Wake,
+) {
+    let Some(decoded) = decode(bytes, width, height) else {
+        // Named by what actually came back: a picture this build has no
+        // decoder for and a picture that is really an error page fail the same
+        // way, and "could not be decoded" said neither.
+        return eprintln!(
+            "{key}: could not be decoded, {} bytes of {}",
+            bytes.len(),
+            kind_of(bytes)
+        );
+    };
+    // Kept only once it has decoded: bytes this build cannot read are worth
+    // nothing on the next start either.
+    if let Some(held) = pictures {
+        held.write(key, bytes, kind);
+    }
+    // The same picture under a version the cache had not seen: kept, so the
+    // next start finds it under the key it will ask with, but not drawn again
+    // over itself.
+    if shown == Some(fingerprint(bytes)) {
+        return;
+    }
+    deliver(key, bytes, width, height, decoded, wake);
+}
+
+/// Decodes a picture and wakes the window with it. False when the bytes are
+/// not a picture this build can read.
+///
+/// Shared by the two readers -- the socket thread and the shelf -- so that a
+/// GIF plays whichever of them got to it.
+fn hand_over(key: &str, bytes: &[u8], width: u32, height: u32, wake: &impl Wake) -> bool {
+    let Some(decoded) = decode(bytes, width, height) else {
+        return false;
+    };
+    deliver(key, bytes, width, height, decoded, wake);
+    true
+}
+
+/// Wakes the window with a decoded picture, and with its frames if it moves.
+fn deliver(
+    key: &str,
+    bytes: &[u8],
+    width: u32,
+    height: u32,
+    (wide, tall, rgba): (u32, u32, Vec<u8>),
+    wake: &impl Wake,
+) {
+    let moves = frames_of(bytes, width, height);
+    // The still frame first, so a picture is on screen whether or not anything
+    // plays it.
+    wake.wake(Update::Picture {
+        key: key.to_string(),
+        width: wide,
+        height: tall,
+        rgba,
+    });
+    if let Some(frames) = moves {
+        wake.wake(Update::Moving {
+            key: key.to_string(),
+            width: wide,
+            height: tall,
+            frames,
+        });
+    }
+}
+
+/// How many pictures are read off the disk at once.
+///
+/// Threads of the window's own rather than the socket thread's: a picture
+/// already on the disk has no business queueing behind the network. Measured at
+/// a start with every face already cached, before this existed: 216ms before
+/// the socket loop so much as looked at the queue -- it was inside `rest.me()`
+/// -- and then 91ms of decoding serialised behind it, because a current-thread
+/// runtime decodes one picture at a time. 312ms to put up a face that was
+/// sitting in a file the whole time.
+///
+/// Decoding is the work, not the disk: 1194us to decode a face against 281us
+/// to read it. So the count is about cores. Forty-nine faces and emoji, read
+/// and decoded, wall clock: 26ms on three, 13ms on six, 9ms on twelve -- and
+/// twelve spends 133ms of thread time to save those 4ms, where six spends 89ms.
+/// Six, then: about a frame, without taking the machine over.
+const READERS: usize = 6;
+
+/// The pictures already on this disk.
+///
+/// Asked first for everything: a hit never touches the socket thread, and a
+/// miss is passed along to it, so the window has one call to make either way.
+pub struct Shelf {
+    wants: std::sync::mpsc::Sender<(String, u32, u32)>,
+}
+
+impl Shelf {
+    /// Queues a picture to be read, decoded and handed to the window.
+    pub fn want(&self, key: String, width: u32, height: u32) -> bool {
+        self.wants.send((key, width, height)).is_ok()
+    }
+}
+
+/// Enough to tell whether two pictures are the same bytes.
+fn fingerprint(bytes: &[u8]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// A face's key without the version on the end, for finding another of the
+/// same person. Only faces: nothing else is versioned this way.
+fn stem_of(key: &str) -> Option<String> {
+    let (path, _) = key.split_once("?v=")?;
+    path.starts_with("avatar/").then(|| format!("{path}?v="))
+}
+
+/// Opens the disk cache on the window's behalf.
+///
+/// The link is held so a miss can be passed along; nothing else here talks to
+/// the server.
+pub fn shelf(link: Link, wake: impl Wake) -> Shelf {
+    let (wants, asked) = std::sync::mpsc::channel::<(String, u32, u32)>();
+    let asked = Arc::new(std::sync::Mutex::new(asked));
+    let pictures = crate::filecache::shared();
+    for _ in 0..READERS {
+        let asked = asked.clone();
+        let pictures = pictures.clone();
+        let wake = wake.clone();
+        let link = link.clone();
+        std::thread::spawn(move || {
+            loop {
+                // The lock is held only long enough to take one, so the three
+                // threads share the queue rather than each owning a part of it:
+                // a thread reading a slow picture must not strand the ones
+                // behind it.
+                let taken = {
+                    let taking = asked.lock().unwrap_or_else(|held| held.into_inner());
+                    taking.recv()
+                };
+                let Ok((key, width, height)) = taken else {
+                    return;
+                };
+                let read = pictures.as_ref().and_then(|held| held.read(&key));
+                match read {
+                    Some((bytes, _)) if hand_over(&key, &bytes, width, height, &wake) => {}
+                    // Either nothing on the disk or nothing readable there.
+                    _ => {
+                        // Another version of the same face, if there is one.
+                        // Shown straight away rather than left blank: what is
+                        // held is the right person, and the version in the key
+                        // decides nothing here -- the ask carries a zero
+                        // whenever the store has not heard of them yet, which
+                        // is not the same as the face being out of date.
+                        let shown = stem_of(&key)
+                            .and_then(|stem| {
+                                pictures.as_ref().and_then(|held| held.read_like(&stem))
+                            })
+                            .filter(|(bytes, _)| hand_over(&key, bytes, width, height, &wake))
+                            .map(|(bytes, _)| fingerprint(&bytes));
+                        // And asked for all the same, because whether a new
+                        // picture has been set is the server's to answer. What
+                        // comes back replaces the face only if it differs.
+                        link.send(Ask::Fetch {
+                            key,
+                            width,
+                            height,
+                            shown,
+                        });
+                    }
+                }
+            }
+        });
+    }
+    Shelf { wants }
+}
+
 fn decode(bytes: &[u8], width: u32, height: u32) -> Option<(u32, u32, Vec<u8>)> {
-    let decoded = image::load_from_memory(bytes).ok()?;
-    let mut rgba = decoded.to_rgba8();
+    let mut decoded = image::load_from_memory(bytes).ok()?;
     // Never enlarged: a picture smaller than its box stays its own size and the
     // sampler stretches it, which costs nothing and keeps the atlas small.
     let wanted = (
-        width.clamp(1, MAX_SIDE).min(rgba.width()),
-        height.clamp(1, MAX_SIDE).min(rgba.height()),
+        width.clamp(1, MAX_SIDE).min(decoded.width()),
+        height.clamp(1, MAX_SIDE).min(decoded.height()),
     );
-    if (rgba.width(), rgba.height()) != wanted {
+    if (decoded.width(), decoded.height()) != wanted {
         // A box filter on the way in, which is a better downscale than the
         // bilinear one the sampler would do on the way out -- and it is done
         // once rather than every frame.
-        rgba = image::imageops::thumbnail(&rgba, wanted.0, wanted.1);
+        //
+        // The method rather than `imageops::thumbnail`: that one is generic, so
+        // it is compiled into this crate, which the dev build leaves
+        // unoptimised -- 1057us to scale a 128px face to 28px, against 28us in
+        // a release build. This one is compiled inside `image`, which the dev
+        // build does optimise. Scaled before the conversion, too, so there are
+        // fewer pixels to convert.
+        decoded = decoded.thumbnail_exact(wanted.0, wanted.1);
     }
+    let rgba = decoded.to_rgba8();
     Some((rgba.width(), rgba.height(), rgba.into_raw()))
 }
 

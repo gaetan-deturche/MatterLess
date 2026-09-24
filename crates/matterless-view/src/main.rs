@@ -549,6 +549,9 @@ struct App {
     clipboard: String,
     /// The socket thread, once it is up. Sends go through it.
     link: Option<matterless_view::live::Link>,
+    /// The pictures already on this disk, read on threads of their own. Every
+    /// picture is asked of this first; a miss goes down the link from there.
+    shelf: Option<matterless_view::live::Shelf>,
     /// Messages written but not yet confirmed, held in memory and nowhere else:
     /// a guess must never reach SQLite.
     outstanding: Arc<matterless_render::pending::PendingPosts>,
@@ -914,6 +917,7 @@ impl App {
             pressed_before: None,
             clipboard: String::new(),
             link: None,
+            shelf: None,
             outstanding: Arc::new(matterless_render::pending::PendingPosts::default()),
             asked: std::collections::HashSet::new(),
             arrived: Vec::new(),
@@ -1533,11 +1537,79 @@ impl App {
         println!("connecting to {server}");
         self.server = server.clone();
         self.link = Some(matterless_view::live::start(
-            store,
+            store.clone(),
             server,
             token,
-            Proxy(proxy),
+            Proxy(proxy.clone()),
         ));
+        self.shelf = self
+            .link
+            .as_ref()
+            .map(|link| matterless_view::live::shelf(link.clone(), Proxy(proxy)));
+        // Every face this machine has heard of, fetched behind everything the
+        // reader is looking at. A face is about 24KB and the link measures
+        // 220KB/s, so the first sighting of thirty people costs three seconds
+        // whatever order they are asked for in -- the only way for that not to
+        // be a wait is for it to have happened already.
+        let mut keys: Vec<String> = match store.everyone_with_a_picture() {
+            Ok(people) => people
+                .into_iter()
+                .map(|(id, stamp)| matterless_view::stream::avatar_key(&id, stamp))
+                .collect(),
+            Err(error) => {
+                eprintln!("asking who has a picture: {error}");
+                Vec::new()
+            }
+        };
+        let faces = keys.len();
+        // The team's own emoji as well. They are pictures like any other, and
+        // one missing is a gap in the middle of a sentence rather than a face
+        // beside it -- the more noticeable of the two, and the reader saw
+        // both still loading when only the faces were warmed.
+        match store.every_custom_emoji() {
+            Ok(emoji) => keys.extend(
+                emoji
+                    .into_iter()
+                    .map(|id| matterless_view::stream::emoji_key(&id)),
+            ),
+            Err(error) => eprintln!("asking which emoji exist: {error}"),
+        }
+        // And every face and emoji already on this disk straight into the
+        // atlas, not just onto the disk. A picture otherwise reaches the atlas
+        // only when a row first asks for it, so the first frame of every
+        // channel was drawn without them and they arrived a frame or two
+        // later -- which reads as loading however fast the read is. The emoji
+        // were left out at first, and the reader saw them still arriving in
+        // the reactions.
+        //
+        // Only what is held: one that is not would be a fetch, and a start
+        // with an empty cache would put all of them ahead of what the reader
+        // is looking at. Those are what the warm-up below is for.
+        if let Some(shelf) = self.shelf.as_ref() {
+            let held = matterless_view::filecache::shared();
+            let face = matterless_view::stream::AVATAR as u32;
+            let emoji = self.stream.emoji_side();
+            let mut preloaded = 0;
+            for (at, key) in keys.iter().enumerate() {
+                let side = if at < faces { face } else { emoji };
+                if held.as_ref().is_some_and(|held| held.holds(key))
+                    && self.asked.insert(key.clone())
+                {
+                    shelf.want(key.clone(), side, side);
+                    preloaded += 1;
+                }
+            }
+            println!("{preloaded} faces and emoji into the atlas before anything asks");
+        }
+        if !keys.is_empty() {
+            println!(
+                "warming {faces} faces and {} emoji onto the disk, behind everything else",
+                keys.len() - faces
+            );
+            if let Some(link) = self.link.as_ref() {
+                link.send(matterless_view::live::Ask::Warm { keys });
+            }
+        }
     }
 
     /// Puts a made-up offer on screen, in a dev build, when asked.
@@ -4054,7 +4126,23 @@ impl App {
         wanted.extend(self.thread_composer.wants());
         for (key, width, height) in wanted {
             if self.asked.insert(key.clone()) {
-                link.send(matterless_view::live::Ask::Fetch { key, width, height });
+                match self.shelf.as_ref() {
+                    // The disk first, always: a face that is already here
+                    // appears in the frame it is asked for rather than a third
+                    // of a second later, and the socket thread never hears
+                    // about it.
+                    Some(shelf) => {
+                        shelf.want(key, width, height);
+                    }
+                    None => {
+                        link.send(matterless_view::live::Ask::Fetch {
+                            key,
+                            width,
+                            height,
+                            shown: None,
+                        });
+                    }
+                }
             }
         }
         self.want_minis();
@@ -8331,6 +8419,10 @@ fn main() {
 ///
 /// The proxy is the only thing the two threads share, and it carries an
 /// already-decided update rather than a lock on anything the window draws from.
+/// Cloneable because a picture is fetched on a task of its own now, and each
+/// one has to be able to wake the window when its bytes land. winit's proxy is
+/// itself a handle, so a clone is another handle to the same loop.
+#[derive(Clone)]
 struct Proxy(winit::event_loop::EventLoopProxy<Update>);
 
 impl matterless_view::live::Wake for Proxy {

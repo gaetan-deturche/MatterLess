@@ -1529,6 +1529,39 @@ impl Store {
     /// Notifications need a channel's name and type, and reaching for the whole
     /// sidebar to find one row cost a scan of every channel plus its unread
     /// derivation, per toast.
+    /// Everyone this machine has heard of, with the stamp on their picture.
+    ///
+    /// For warming the picture cache before anybody scrolls into them. Ids and
+    /// one integer each, so asking about a whole server costs nothing worth
+    /// measuring -- the pictures themselves are the expensive part and that is
+    /// the point of fetching them early.
+    ///
+    /// **Everyone, including a stamp of zero.** That is what somebody who has
+    /// never uploaded a photograph has, and the server draws them an initial
+    /// anyway -- so the window asks for it, and a warm-up that skipped them
+    /// left exactly those faces loading in front of the reader.
+    pub fn everyone_with_a_picture(&self) -> Result<Vec<(String, Timestamp)>> {
+        let connection = self.lock();
+        let mut statement = connection.prepare(
+            "SELECT id, last_picture_update FROM users
+             ORDER BY last_picture_update DESC",
+        )?;
+        let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        Ok(rows.filter_map(std::result::Result::ok).collect())
+    }
+
+    /// Every custom emoji this machine knows, by id.
+    ///
+    /// They are pictures like any other and are warmed the same way: a team's
+    /// own emoji are all over its conversations, and each one missing is a
+    /// gap in a line of text rather than a face at the side of it.
+    pub fn every_custom_emoji(&self) -> Result<Vec<String>> {
+        let connection = self.lock();
+        let mut statement = connection.prepare("SELECT emoji_id FROM custom_emoji")?;
+        let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+        Ok(rows.filter_map(std::result::Result::ok).collect())
+    }
+
     /// People whose username or real name matches `query` as a subsequence.
     ///
     /// Two stages by design: SQLite filters with a wildcard-between-characters
