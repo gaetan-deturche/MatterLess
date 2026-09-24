@@ -6432,6 +6432,11 @@ impl App {
                 if tick.is_multiple_of(40)
                     && let Some(next) = self.another_channel()
                 {
+                    // Selected as a click selects it: `another_channel` walks
+                    // on from the selection, and without this it found the
+                    // same next channel every time -- one channel reopened
+                    // twenty-five times, never one that had not been opened.
+                    self.sidebar.selected = Some(next.clone());
                     self.open_channel(&next);
                     did += 1;
                 }
