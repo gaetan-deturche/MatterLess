@@ -453,7 +453,15 @@ fn tagged(tag: TextSpan, into: &mut Vec<TextSpan>) {
         faint: false,
         emoji: None,
     };
-    into.push(room.clone());
+    // Not at the start of a line, where there is nothing to hold off: the
+    // room pushed a paragraph's first line in by a hair, and a code span that
+    // wrapped started its first line to the right of all the others.
+    if into
+        .last()
+        .is_some_and(|before| !before.text.ends_with('\n'))
+    {
+        into.push(room.clone());
+    }
     into.push(tag);
     into.push(room);
 }
@@ -2250,6 +2258,39 @@ mod tests {
             );
         }
         assert!(spans[at].mono, "the code is not monospaced");
+    }
+
+    /// Code that opens a line has nothing before it to hold off, so it has no
+    /// room there -- or its first line starts right of the lines it wraps to.
+    #[test]
+    fn code_opening_a_line_has_no_room_before_it() {
+        let mut spans = Vec::new();
+        inline(
+            &[
+                Node::InlineCode {
+                    value: "In BP_Upgrade : Error".into(),
+                },
+                Node::HardBreak,
+                Node::InlineCode {
+                    value: "Parent=BP_Harp".into(),
+                },
+            ],
+            false,
+            false,
+            false,
+            None,
+            &mut spans,
+        );
+        assert!(spans[0].mono, "the paragraph starts with room: {spans:?}");
+        let second = spans
+            .iter()
+            .position(|span| span.text == "Parent=BP_Harp")
+            .expect("the second code");
+        assert_eq!(
+            spans[second - 1].text,
+            "\n",
+            "room after a break: {spans:?}"
+        );
     }
 
     /// A card takes room, or the message under it is drawn over.
