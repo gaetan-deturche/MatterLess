@@ -144,6 +144,79 @@ impl Default for Text {
     }
 }
 
+/// How much disk the pictures opened in the viewer may keep.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Kept {
+    Quarter,
+    #[default]
+    Half,
+    One,
+    Two,
+    /// Everything, for good: stored as zero.
+    Unlimited,
+}
+
+impl Kept {
+    /// What this is called in the settings table.
+    pub const SETTING: &'static str = "looked-pictures-bytes";
+
+    pub fn bytes(&self) -> u64 {
+        const MB: u64 = 1024 * 1024;
+        match self {
+            Kept::Quarter => 256 * MB,
+            Kept::Half => 512 * MB,
+            Kept::One => 1024 * MB,
+            Kept::Two => 2048 * MB,
+            Kept::Unlimited => 0,
+        }
+    }
+
+    pub fn stored(&self) -> String {
+        self.bytes().to_string()
+    }
+
+    /// Reads one back. A number this build does not offer is the default: the
+    /// buttons show one of these, and a size none of them names would show
+    /// none chosen.
+    pub fn read(said: Option<&str>) -> Self {
+        let bytes = said.and_then(|said| said.trim().parse::<u64>().ok());
+        Self::all()
+            .into_iter()
+            .find(|one| Some(one.bytes()) == bytes)
+            .unwrap_or_default()
+    }
+
+    fn title(&self) -> &'static str {
+        match self {
+            Kept::Quarter => "256 MB",
+            Kept::Half => "512 MB",
+            Kept::One => "1 GB",
+            Kept::Two => "2 GB",
+            Kept::Unlimited => "No limit",
+        }
+    }
+
+    fn slug(&self) -> &'static str {
+        match self {
+            Kept::Quarter => "kept-256",
+            Kept::Half => "kept-512",
+            Kept::One => "kept-1024",
+            Kept::Two => "kept-2048",
+            Kept::Unlimited => "kept-all",
+        }
+    }
+
+    fn all() -> [Kept; 5] {
+        [
+            Kept::Quarter,
+            Kept::Half,
+            Kept::One,
+            Kept::Two,
+            Kept::Unlimited,
+        ]
+    }
+}
+
 /// One choice, measured: where it sits, and where the two lines in it do.
 #[derive(Debug, Clone, Copy)]
 struct Choice {
@@ -161,6 +234,9 @@ struct Card {
     /// The heading over the group of choices.
     group: Rect,
     choices: Vec<Choice>,
+    /// The heading over how much opened pictures keep, and its buttons.
+    kept: Rect,
+    sizes: Laid,
     /// The heading over the build this is, and the line under it naming it.
     about: Rect,
     build: Rect,
@@ -177,6 +253,7 @@ struct Card {
 pub struct Settings {
     shown: bool,
     pub text: Text,
+    pub kept: Kept,
     /// Whether a look for a newer build is out, so it is not asked for twice
     /// and the button can say what it is doing.
     looking: bool,
@@ -192,6 +269,8 @@ pub enum Did {
     /// Text is to be drawn the other way, and the caller has to say so to
     /// whatever holds the glyphs.
     Text(Text),
+    /// Opened pictures may keep this much on disk from now on.
+    Kept(Kept),
     /// Go and see whether there is a newer build.
     ///
     /// Asked for rather than done here: this widget knows where its buttons
@@ -271,6 +350,8 @@ impl Settings {
             .sum::<f32>()
             + ROW_GAP * (sizes.len().saturating_sub(1) as f32);
 
+        let kept = tall(fonts, KEPT_HEADING, inner, GROUP_SIZE);
+
         // The build this is, and what the last look for a newer one said. The
         // line is only measured into the card when there is something on it:
         // an empty row of air under a button reads as something missing.
@@ -288,6 +369,10 @@ impl Settings {
             + heading
             + ROW_GAP
             + rows
+            + GAP
+            + kept
+            + ROW_GAP
+            + BUTTON_HEIGHT
             + GAP
             + about
             + ROW_GAP
@@ -317,6 +402,28 @@ impl Settings {
             });
             y = row.bottom() + ROW_GAP;
         }
+
+        let kept = Rect::new(rect.x + PAD, y - ROW_GAP + GAP, inner, kept);
+        let chosen = self.kept;
+        let sizes = Kept::all()
+            .into_iter()
+            .fold(
+                Row::new(
+                    NAME,
+                    Rect::new(rect.x, kept.bottom() + ROW_GAP, rect.width, BUTTON_HEIGHT),
+                )
+                .against(matterless_widgets::Against::Left)
+                .pad(PAD)
+                .depth(63),
+                |row, one| {
+                    row.button(match one == chosen {
+                        true => Button::primary(one.slug(), one.title()),
+                        false => Button::plain(one.slug(), one.title()),
+                    })
+                },
+            )
+            .measure(fonts);
+        let y = kept.bottom() + ROW_GAP + BUTTON_HEIGHT + ROW_GAP;
 
         let about = Rect::new(rect.x + PAD, y - ROW_GAP + GAP, inner, about);
         let band = Rect::new(rect.x, about.bottom() + ROW_GAP, rect.width, band);
@@ -362,6 +469,8 @@ impl Settings {
             rect,
             group,
             choices,
+            kept,
+            sizes,
             about,
             build,
             said,
@@ -428,6 +537,7 @@ impl Settings {
         for choice in &card.choices {
             placed.push(named().at(choice.which.slug(), choice.rect, 62));
         }
+        placed.extend(card.sizes.boxes());
         placed.extend(card.look.boxes());
         placed.extend(card.foot.boxes());
         placed
@@ -459,6 +569,14 @@ impl Settings {
             // unchanged reads as a button that missed.
             self.looking();
             return Some(Did::Look);
+        }
+        if let Some(slug) = self.laid().and_then(|card| card.sizes.clicked(input))
+            && let Some(one) = Kept::all().into_iter().find(|one| one.slug() == slug)
+        {
+            self.kept = one;
+            // Measured again, so the chosen button is drawn as chosen.
+            self.placed = None;
+            return Some(Did::Kept(one));
         }
         let clicked = input.clicked()?.to_string();
         if let Some(slug) = named().slug(&clicked) {
@@ -595,6 +713,15 @@ impl Settings {
 
             let glyphs = painter.run(
                 fonts,
+                KEPT_HEADING,
+                card.kept.x,
+                card.kept.y,
+                Run::label(card.kept.width).sized(GROUP_SIZE),
+            );
+            scene.glyphs(glyphs, palette.faint, palette.faint);
+
+            let glyphs = painter.run(
+                fonts,
                 "About",
                 card.about.x,
                 card.about.y,
@@ -622,10 +749,14 @@ impl Settings {
                 scene.glyphs(glyphs, palette.faint, palette.faint);
             }
         }
+        card.sizes.draw(into, input);
         card.look.draw(into, input);
         card.foot.draw(into, input);
     }
 }
+
+/// The heading over how much disk opened pictures may keep.
+const KEPT_HEADING: &str = "Opened pictures kept on disk";
 
 /// The mark saying which choice is in use.
 ///
@@ -688,6 +819,11 @@ mod tests {
         for one in Text::both() {
             assert_eq!(Text::read(Some(one.stored())), one);
         }
+        for one in Kept::all() {
+            assert_eq!(Kept::read(Some(&one.stored())), one);
+        }
+        assert_eq!(Kept::read(Some("0")), Kept::Unlimited, "zero is no limit");
+        assert_eq!(Kept::read(Some("12345")), Kept::default());
     }
 
     /// A store written by a later version, or by nothing at all.
@@ -713,9 +849,22 @@ mod tests {
             );
             floor = choice.rect.bottom();
         }
-        // A box for each, plus the card, the window behind it, and the two
-        // buttons -- the one that looks for a build and the one that shuts it.
-        assert_eq!(settings.boxes(window()).len(), 4 + card.choices.len());
+        // The sizes for opened pictures, under the choices and over About.
+        let sizes = Kept::all().map(|one| card.sizes.rect(one.slug()).expect("a size button"));
+        for size in sizes {
+            assert!(size.y >= floor - 0.5, "a size button sits on the choices");
+            assert!(
+                size.bottom() <= card.about.y + 0.5,
+                "a size button runs into About"
+            );
+        }
+        // A box for each, plus the card, the window behind it, the sizes, and
+        // the two buttons -- the one that looks for a build and the one that
+        // shuts it.
+        assert_eq!(
+            settings.boxes(window()).len(),
+            4 + card.choices.len() + sizes.len()
+        );
     }
 
     /// What a choice says stays inside the choice.

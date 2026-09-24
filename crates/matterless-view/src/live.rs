@@ -169,6 +169,8 @@ pub enum Update {
     /// with no eviction.
     Looked {
         file_id: String,
+        /// The size it was fitted to, so it can be remembered at that size.
+        within: (u32, u32),
         width: u32,
         height: u32,
         rgba: Vec<u8>,
@@ -1397,6 +1399,7 @@ async fn run(
                         } else {
                             format!("/files/{file_id}/preview")
                         };
+                        let key = looked_key(&file_id, original);
                         // A task of its own, like any picture: awaited here, a
                         // full-size original held every send and every
                         // refresh behind its download and then its decode.
@@ -1404,9 +1407,16 @@ async fn run(
                         let wake = wake.clone();
                         tokio::spawn(async move {
                             match rest.fetch_bytes(&route).await {
-                                Ok(Some((bytes, _))) => {
+                                Ok(Some((bytes, content_type))) => {
                                     let fitted = off_the_loop(move || {
                                         let fitted = fit(&bytes, within.0.max(1), within.1.max(1));
+                                        // Kept once it has decoded, so the next
+                                        // time it is opened needs no network.
+                                        if fitted.is_some()
+                                            && let Some(held) = crate::filecache::looked()
+                                        {
+                                            held.write(&key, &bytes, &content_type);
+                                        }
                                         (fitted, bytes.len(), kind_of(&bytes))
                                     })
                                     .await;
@@ -1414,6 +1424,7 @@ async fn run(
                                         Some((Some((width, height, rgba)), _, _)) => {
                                             wake.wake(Update::Looked {
                                                 file_id,
+                                                within,
                                                 width,
                                                 height,
                                                 rgba,
@@ -2323,12 +2334,28 @@ const READERS: usize = 6;
 /// miss is passed along to it, so the window has one call to make either way.
 pub struct Shelf {
     wants: std::sync::mpsc::Sender<(String, u32, u32)>,
+    looks: std::sync::mpsc::Sender<(String, bool, (u32, u32))>,
 }
 
 impl Shelf {
     /// Queues a picture to be read, decoded and handed to the window.
     pub fn want(&self, key: String, width: u32, height: u32) -> bool {
         self.wants.send((key, width, height)).is_ok()
+    }
+
+    /// Queues a picture opened in the viewer: off the disk when it is there,
+    /// from the server when it is not.
+    pub fn look(&self, file_id: String, original: bool, within: (u32, u32)) -> bool {
+        self.looks.send((file_id, original, within)).is_ok()
+    }
+}
+
+/// What an opened picture is kept under on the disk: the rendition and the id,
+/// named as the routes name them.
+fn looked_key(file_id: &str, original: bool) -> String {
+    match original {
+        true => format!("file/{file_id}"),
+        false => format!("preview/{file_id}"),
     }
 }
 
@@ -2439,7 +2466,35 @@ pub fn shelf(link: Link, wake: impl Wake) -> Shelf {
             }
         });
     }
-    Shelf { wants }
+    // The viewer's reader, one of its own: a two-thousand-pixel picture takes
+    // tens of milliseconds to decode, and the faces behind it must not wait.
+    let (looks, looked) = std::sync::mpsc::channel::<(String, bool, (u32, u32))>();
+    std::thread::spawn(move || {
+        let held = crate::filecache::looked();
+        for (file_id, original, within) in looked {
+            let fitted = held
+                .as_ref()
+                .and_then(|held| held.read(&looked_key(&file_id, original)))
+                .and_then(|(bytes, _)| fit(&bytes, within.0.max(1), within.1.max(1)));
+            match fitted {
+                Some((width, height, rgba)) => wake.wake(Update::Looked {
+                    file_id,
+                    within,
+                    width,
+                    height,
+                    rgba,
+                }),
+                None => {
+                    link.send(Ask::Look {
+                        file_id,
+                        original,
+                        within,
+                    });
+                }
+            }
+        }
+    });
+    Shelf { wants, looks }
 }
 
 fn decode(bytes: &[u8], width: u32, height: u32) -> Option<(u32, u32, Vec<u8>)> {

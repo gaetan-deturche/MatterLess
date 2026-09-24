@@ -559,6 +559,8 @@ struct App {
     /// The pictures already on this disk, read on threads of their own. Every
     /// picture is asked of this first; a miss goes down the link from there.
     shelf: Option<matterless_view::live::Shelf>,
+    /// The pictures opened lately, decoded, so opening one again is instant.
+    remembered: matterless_view::viewer::Remembered,
     /// Messages written but not yet confirmed, held in memory and nowhere else:
     /// a guess must never reach SQLite.
     outstanding: Arc<matterless_render::pending::PendingPosts>,
@@ -928,6 +930,7 @@ impl App {
             clipboard: String::new(),
             link: None,
             shelf: None,
+            remembered: matterless_view::viewer::Remembered::default(),
             outstanding: Arc::new(matterless_render::pending::PendingPosts::default()),
             asked: std::collections::HashSet::new(),
             arrived: Vec::new(),
@@ -1851,6 +1854,7 @@ impl App {
             // flicking through outruns the network.
             Update::Looked {
                 file_id,
+                within,
                 width,
                 height,
                 rgba,
@@ -1864,6 +1868,7 @@ impl App {
                     view.show(width, height, &rgba);
                     self.viewer.arrived(&file_id, (width, height));
                 }
+                self.remembered.keep(&file_id, within, width, height, rgba);
             }
             Update::LookFailed { file_id, why } => {
                 eprintln!("looking at {file_id}: {why}");
@@ -3237,7 +3242,23 @@ impl App {
 
     /// Asks for the picture the viewer is showing, at the size this window can
     /// actually draw.
-    fn fetch_looked(&self, one: &matterless_view::viewer::Looking) {
+    ///
+    /// Memory first, then the disk, then the server: a picture opened again
+    /// took seconds each time, fetched afresh behind whatever the socket
+    /// thread was busy with.
+    fn fetch_looked(&mut self, one: &matterless_view::viewer::Looking) {
+        if let Some((width, height, rgba)) = self.remembered.get(&one.file_id, self.size)
+            && let Some(view) = self.view.as_mut()
+        {
+            view.show(width, height, rgba);
+            self.viewer.arrived(&one.file_id, (width, height));
+            return;
+        }
+        if let Some(shelf) = self.shelf.as_ref()
+            && shelf.look(one.file_id.clone(), one.original, self.size)
+        {
+            return;
+        }
         let Some(link) = self.link.as_ref() else {
             return;
         };
@@ -5823,6 +5844,19 @@ impl App {
             if let Some(did) = did {
                 match did {
                     matterless_view::settings::Did::Text(mode) => self.draw_text_as(mode),
+                    matterless_view::settings::Did::Kept(kept) => {
+                        if let Some(held) = matterless_view::filecache::looked() {
+                            held.set_budget(kept.bytes());
+                        }
+                        if let Some(store) = self.store.as_ref()
+                            && let Err(error) = store.remember_setting(
+                                matterless_view::settings::Kept::SETTING,
+                                &kept.stored(),
+                            )
+                        {
+                            eprintln!("keeping the picture budget: {error}");
+                        }
+                    }
                     matterless_view::settings::Did::Look => self.look_for_a_build(),
                     matterless_view::settings::Did::Close => {}
                 }
@@ -8081,6 +8115,22 @@ impl ApplicationHandler<Update> for App {
                 .as_deref(),
         );
         self.settings.text = asked;
+        // How much opened pictures may keep on disk, applied before any is.
+        let kept = matterless_view::settings::Kept::read(
+            self.store
+                .as_ref()
+                .and_then(|store| {
+                    store
+                        .setting(matterless_view::settings::Kept::SETTING)
+                        .ok()
+                        .flatten()
+                })
+                .as_deref(),
+        );
+        self.settings.kept = kept;
+        if let Some(held) = matterless_view::filecache::looked() {
+            held.set_budget(kept.bytes());
+        }
         if let Some(view) = self.view.as_mut() {
             view.atlas
                 .rasterise_subpixel(asked == matterless_view::settings::Text::Subpixel);

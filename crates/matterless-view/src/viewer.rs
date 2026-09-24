@@ -60,6 +60,78 @@ pub enum Did {
     Save { file_id: String, name: String },
 }
 
+/// How much decoded picture is kept in memory. A window-sized picture is a few
+/// megabytes, so this is the last few dozen opened.
+const REMEMBERED_BYTES: usize = 256 * 1024 * 1024;
+
+/// One picture as it was last shown: fitted to `within`, ready for a texture.
+#[derive(Debug)]
+struct Kept {
+    file_id: String,
+    within: (u32, u32),
+    width: u32,
+    height: u32,
+    rgba: Vec<u8>,
+}
+
+/// The pictures opened lately, decoded and fitted, newest first.
+///
+/// Opening one again is then a texture upload and nothing else: no disk, no
+/// decode, and above all no queue -- the socket thread handles one thing at a
+/// time, and a picture asked of it waited behind whatever it was doing.
+#[derive(Debug, Default)]
+pub struct Remembered {
+    kept: std::collections::VecDeque<Kept>,
+    bytes: usize,
+}
+
+impl Remembered {
+    /// A picture as fitted to this window's size, if it is held.
+    pub fn get(&mut self, file_id: &str, within: (u32, u32)) -> Option<(u32, u32, &[u8])> {
+        let at = self
+            .kept
+            .iter()
+            .position(|one| one.file_id == file_id && one.within == within)?;
+        let one = self.kept.remove(at)?;
+        self.kept.push_front(one);
+        let one = self.kept.front()?;
+        Some((one.width, one.height, &one.rgba))
+    }
+
+    /// Keeps a picture, letting the one shown longest ago go when there is
+    /// no room.
+    pub fn keep(
+        &mut self,
+        file_id: &str,
+        within: (u32, u32),
+        width: u32,
+        height: u32,
+        rgba: Vec<u8>,
+    ) {
+        if let Some(at) = self
+            .kept
+            .iter()
+            .position(|one| one.file_id == file_id && one.within == within)
+            && let Some(old) = self.kept.remove(at)
+        {
+            self.bytes -= old.rgba.len();
+        }
+        self.bytes += rgba.len();
+        self.kept.push_front(Kept {
+            file_id: file_id.to_string(),
+            within,
+            width,
+            height,
+            rgba,
+        });
+        while self.bytes > REMEMBERED_BYTES && self.kept.len() > 1 {
+            if let Some(old) = self.kept.pop_back() {
+                self.bytes -= old.rgba.len();
+            }
+        }
+    }
+}
+
 /// The viewer, open or shut.
 #[derive(Debug, Default)]
 pub struct Viewer {
@@ -508,5 +580,37 @@ mod tests {
         let mut viewer = Viewer::default();
         assert!(viewer.boxes(window()).is_empty());
         assert_eq!(viewer.react(&Input::default()), None);
+    }
+}
+
+#[cfg(test)]
+mod remembering {
+    use super::*;
+
+    /// A picture opened again comes back as it was, and only at the size it
+    /// was fitted to: a window that has grown wants it fitted again.
+    #[test]
+    fn a_picture_opened_again_comes_from_memory() {
+        let mut held = Remembered::default();
+        held.keep("f1", (800, 600), 2, 1, vec![1; 8]);
+        let (width, height, rgba) = held.get("f1", (800, 600)).expect("held");
+        assert_eq!((width, height, rgba.len()), (2, 1, 8));
+        assert!(held.get("f1", (1000, 700)).is_none(), "another size");
+        assert!(held.get("f2", (800, 600)).is_none());
+    }
+
+    /// Past the budget, the one shown longest ago goes -- not the one shown
+    /// first, since showing one again makes it new.
+    #[test]
+    fn the_one_shown_longest_ago_goes_first() {
+        let mut held = Remembered::default();
+        let third = REMEMBERED_BYTES / 3 + 1;
+        held.keep("a", (1, 1), 1, 1, vec![0; third]);
+        held.keep("b", (1, 1), 1, 1, vec![0; third]);
+        assert!(held.get("a", (1, 1)).is_some());
+        held.keep("c", (1, 1), 1, 1, vec![0; third]);
+        assert!(held.get("b", (1, 1)).is_none(), "b was shown longest ago");
+        assert!(held.get("a", (1, 1)).is_some());
+        assert!(held.get("c", (1, 1)).is_some());
     }
 }

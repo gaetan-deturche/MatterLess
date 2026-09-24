@@ -30,14 +30,22 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// scrolls back to.
 const BUDGET_BYTES: u64 = 256 * 1024 * 1024;
 
+/// How much disk the pictures a reader opened may hold until Settings says
+/// otherwise.
+///
+/// Apart from the rest so a run of large originals cannot push out the faces
+/// and emoji every channel draws. Half a gigabyte, as the shell held.
+pub const LOOKED_BYTES: u64 = 512 * 1024 * 1024;
+
 pub struct FileCache {
     root: PathBuf,
     /// Where everything small lives. `None` only when it could not be opened,
     /// which costs speed rather than correctness: entries go one to a file.
     small: Option<crate::pack::Pack>,
     /// How much it may hold. A field rather than the constant so the rule can
-    /// be tested without writing a quarter of a gigabyte to find out.
-    budget: u64,
+    /// be tested without writing a quarter of a gigabyte to find out. Zero is
+    /// no limit at all.
+    budget: AtomicU64,
     entries: Mutex<HashMap<String, Entry>>,
     /// A monotonic stamp, not a clock: all that matters is the order entries
     /// were last touched, and a clock can go backwards.
@@ -66,6 +74,17 @@ pub fn shared() -> Option<std::sync::Arc<FileCache>> {
     .clone()
 }
 
+/// The cache for pictures opened in the viewer, beside the one for everything
+/// else and with a budget of its own.
+pub fn looked() -> Option<std::sync::Arc<FileCache>> {
+    static ONE: std::sync::OnceLock<Option<std::sync::Arc<FileCache>>> = std::sync::OnceLock::new();
+    ONE.get_or_init(|| {
+        let root = crate::feed::pictures_dir()?.parent()?.join("looked");
+        Some(std::sync::Arc::new(FileCache::holding(root, LOOKED_BYTES)))
+    })
+    .clone()
+}
+
 impl FileCache {
     /// Opens the cache in `root`, adopting whatever is already there.
     ///
@@ -90,7 +109,7 @@ impl FileCache {
         let cache = Self {
             root,
             small,
-            budget,
+            budget: AtomicU64::new(budget),
             entries: Mutex::new(HashMap::new()),
             tick: AtomicU64::new(1),
         };
@@ -103,7 +122,21 @@ impl FileCache {
     /// cache to store something that is almost certainly watched once, and the
     /// fetch path works perfectly well without an entry.
     fn largest(&self) -> u64 {
-        self.budget / 8
+        self.budget() / 8
+    }
+
+    fn budget(&self) -> u64 {
+        match self.budget.load(Ordering::Relaxed) {
+            0 => u64::MAX,
+            bytes => bytes,
+        }
+    }
+
+    /// Holds this much from now on, zero for no limit, letting whatever no
+    /// longer fits go at once rather than at the next write.
+    pub fn set_budget(&self, bytes: u64) {
+        self.budget.store(bytes, Ordering::Relaxed);
+        self.evict_for(0);
     }
 
     fn seed(&self) {
@@ -263,6 +296,13 @@ impl FileCache {
                 if !known {
                     self.adopt(key, held.0.len() as u64, false);
                 }
+                // Its age is how the next start orders what to evict, and only
+                // a write set it: a picture opened every day but fetched long
+                // ago was the first to go.
+                let _ = std::fs::File::options()
+                    .write(true)
+                    .open(self.path_for(key))
+                    .and_then(|file| file.set_modified(std::time::SystemTime::now()));
                 Some(held)
             }
             // Never claimed to hold it, so its absence is the ordinary answer
@@ -373,14 +413,15 @@ impl FileCache {
         let doomed: Vec<String> = {
             let entries = self.entries.lock().expect("the picture cache");
             let mut total: u64 = entries.values().map(|entry| entry.bytes).sum();
-            if total + incoming <= self.budget {
+            let budget = self.budget();
+            if total.saturating_add(incoming) <= budget {
                 return;
             }
             let mut order: Vec<(&String, &Entry)> = entries.iter().collect();
             order.sort_by_key(|(_, entry)| entry.used);
             let mut chosen = Vec::new();
             for (key, entry) in order {
-                if total + incoming <= self.budget {
+                if total.saturating_add(incoming) <= budget {
                     break;
                 }
                 total = total.saturating_sub(entry.bytes);
@@ -554,6 +595,62 @@ mod tests {
         // And it was dropped rather than left to fail again.
         assert_eq!(cache.held(), 0);
         assert!(!root.join(name_of("file/one")).exists());
+    }
+
+    /// A budget lowered while running lets the oldest go straight away, and a
+    /// budget of zero keeps everything.
+    #[test]
+    fn a_budget_can_change_and_zero_is_no_limit() {
+        let root = scratch("budget-change");
+        let big = vec![3u8; crate::pack::LARGEST + 1];
+        let cache = FileCache::holding(root, 0);
+        for at in 0..6 {
+            cache.write(&format!("file/{at}"), &big, "image/png");
+        }
+        assert_eq!(cache.held(), 6, "no limit kept everything");
+        cache.set_budget(2 * big.len() as u64);
+        assert_eq!(cache.held(), 2, "lowered, the oldest went at once");
+        assert!(cache.read("file/5").is_some() && cache.read("file/4").is_some());
+    }
+
+    /// Reading a loose entry makes it recent for the next start too, not only
+    /// for this one.
+    #[test]
+    fn a_read_survives_a_restart_as_recency() {
+        let root = scratch("read-recency");
+        let big = vec![7u8; crate::pack::LARGEST + 1];
+        {
+            let cache = FileCache::holding(root.clone(), 16 * big.len() as u64);
+            cache.write("file/old", &big, "image/png");
+            cache.write("file/new", &big, "image/png");
+            // The one written first is read, as a picture opened again is.
+            let long_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+            for key in ["file/old", "file/new"] {
+                std::fs::File::options()
+                    .write(true)
+                    .open(cache.path_for(key))
+                    .and_then(|file| file.set_modified(long_ago))
+                    .expect("aged");
+            }
+            let hour_later = long_ago + std::time::Duration::from_secs(60);
+            std::fs::File::options()
+                .write(true)
+                .open(cache.path_for("file/new"))
+                .and_then(|file| file.set_modified(hour_later))
+                .expect("aged");
+            assert!(cache.read("file/old").is_some());
+        }
+        // Fifteen more against room for sixteen, and a little over for the
+        // headers the files carry: exactly one of the first two goes.
+        let cache = FileCache::holding(root, 16 * big.len() as u64 + 1024);
+        for at in 0..15 {
+            cache.write(&format!("file/more{at}"), &big, "image/png");
+        }
+        assert!(cache.read("file/old").is_some(), "the one read was evicted");
+        assert!(
+            cache.read("file/new").is_none(),
+            "the one not read was kept"
+        );
     }
 
     /// Past the budget, the entry nobody has asked for in longest goes first.
