@@ -91,6 +91,10 @@ pub enum Entry {
     },
 }
 
+/// What the group of conversations with something waiting is called, where
+/// the reader has the list gather them.
+pub const UNREADS: &str = "Unreads";
+
 /// The list, and where the reader is in it.
 pub struct Sidebar {
     pub entries: Vec<Entry>,
@@ -308,6 +312,34 @@ impl Sidebar {
             Entry::Drafts { .. } => None,
             _ => None,
         }
+    }
+
+    /// Scrolls the list to the conversations with something waiting: the
+    /// Unreads group when the list gathers them there, or the first of them
+    /// otherwise. Answers whether there was anything to scroll to.
+    ///
+    /// What the rail's unread button is for -- the list, not the page. Muted
+    /// conversations do not count, for the reason the walk passes over them.
+    pub fn scroll_to_unread(&mut self, within: Rect) -> bool {
+        let mut above = PADDING;
+        let mut first = None;
+        for (at, entry) in self.entries.iter().enumerate() {
+            if let Entry::Heading { label, .. } = entry
+                && label == UNREADS
+            {
+                first = Some(above);
+                break;
+            }
+            if first.is_none() && self.waiting_at(at).is_some() {
+                first = Some(above);
+            }
+            above += height_of(entry);
+        }
+        let Some(top) = first else {
+            return false;
+        };
+        self.scroll = top.clamp(0.0, self.reach(within));
+        true
     }
 
     pub fn scroll_to(&mut self, wanted: &str, within: Rect) {
@@ -1212,6 +1244,74 @@ pub fn dot(status: &str, palette: &matterless_paint::Palette) -> Option<[u8; 4]>
 mod tests {
     use super::asking;
     use super::{Entry, Sidebar, THREADS};
+
+    /// A list long enough to scroll, with its waiting rows well down it.
+    fn long(gathered: bool) -> Sidebar {
+        let mut entries = vec![Entry::Heading {
+            label: "Channels".into(),
+            directs: false,
+        }];
+        for at in 0..40 {
+            entries.push(channel(&format!("read{at}"), 0, false));
+        }
+        entries.push(channel("hushed", 4, true));
+        if gathered {
+            entries.push(Entry::Heading {
+                label: UNREADS.into(),
+                directs: false,
+            });
+        }
+        entries.push(channel("waiting", 2, false));
+        Sidebar::new(entries)
+    }
+
+    /// The rail's unread button scrolls the list to what is waiting: to the
+    /// Unreads group where there is one, to the first waiting row where there
+    /// is not -- past a muted one, which is not waiting on anybody.
+    #[test]
+    fn the_unread_button_scrolls_the_list_to_what_is_waiting() {
+        let within = Rect::new(0.0, 0.0, 260.0, 300.0);
+        let row_at = |sidebar: &Sidebar, wanted: &str| {
+            let mut above = PADDING;
+            for entry in &sidebar.entries {
+                let hit = match entry {
+                    Entry::Channel { id, .. } => id == wanted,
+                    Entry::Heading { label, .. } => label == wanted,
+                    _ => false,
+                };
+                if hit {
+                    return above;
+                }
+                above += height_of(entry);
+            }
+            panic!("no {wanted}");
+        };
+
+        let mut gathered = long(true);
+        assert!(gathered.scroll_to_unread(within));
+        assert_eq!(
+            gathered.scroll,
+            row_at(&gathered, UNREADS).min(gathered.reach(within))
+        );
+
+        let mut scattered = long(false);
+        assert!(scattered.scroll_to_unread(within));
+        assert_eq!(
+            scattered.scroll,
+            row_at(&scattered, "waiting").min(scattered.reach(within))
+        );
+        assert!(scattered.scroll > 0.0, "it did not move");
+
+        let mut quiet = list("quiet");
+        for entry in &mut quiet.entries {
+            if let Entry::Channel { unread, .. } = entry {
+                *unread = 0;
+            }
+        }
+        quiet.scroll = 12.0;
+        assert!(!quiet.scroll_to_unread(within), "nothing is waiting");
+        assert_eq!(quiet.scroll, 12.0, "and the list stays where it was");
+    }
 
     /// A channel row, said once so the walk's tests read as what they test.
     fn channel(id: &str, unread: i64, muted: bool) -> Entry {

@@ -47,7 +47,8 @@ pub enum Kind {
     Team,
     /// Direct messages, which are not a team and so have no icon of their own.
     Directs,
-    /// Where the reader stopped reading in the conversation they have open.
+    /// The conversations with something waiting, brought into view in the
+    /// list.
     ///
     /// The one square here that is a thing to *do* rather than a place to be,
     /// so it is never the chosen one and carries no count: what is waiting is

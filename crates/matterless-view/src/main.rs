@@ -1374,7 +1374,7 @@ impl App {
             if !waiting.is_empty() {
                 waiting.sort_by_key(|channel| std::cmp::Reverse(channel.last_post_at));
                 entries.push(Entry::Heading {
-                    label: "Unreads".to_string(),
+                    label: matterless_view::sidebar::UNREADS.to_string(),
                     directs: false,
                 });
                 entries.extend(waiting.into_iter().map(row));
@@ -3168,7 +3168,7 @@ impl App {
                 return Some("Direct messages".to_string());
             }
             if id == matterless_view::rail::UNREAD {
-                return Some("Where you stopped reading".to_string());
+                return Some("Unread channels".to_string());
             }
             return self
                 .rail
@@ -8228,8 +8228,14 @@ impl ApplicationHandler<Update> for App {
                     // Every other square on the rail is somewhere to be, and
                     // this one is something to do -- so it is answered before
                     // the sidebar is scrolled to a heading that does not exist.
+                    // What it does is bring the conversations with something
+                    // waiting into view in the list, as the reader asked of
+                    // it; where they stopped reading inside one is `u`.
                     if pressed == matterless_view::rail::UNREAD {
-                        self.show_unread_mark();
+                        let within = self.sidebar_rect();
+                        if !self.sidebar.scroll_to_unread(within) {
+                            println!("nothing unread to scroll to");
+                        }
                     } else if pressed == matterless_view::rail::SETTINGS {
                         self.settings.show();
                         let window = self.window_rect();
