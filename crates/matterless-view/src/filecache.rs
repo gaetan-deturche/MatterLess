@@ -360,7 +360,7 @@ impl FileCache {
         if size > self.largest() {
             return;
         }
-        self.evict_for(size);
+        self.evict_for(if contained(key) { 0 } else { size });
         let used = self.tick.fetch_add(1, Ordering::Relaxed);
         let packed = bytes.len() <= crate::pack::LARGEST
             && self.small.as_ref().is_some_and(crate::pack::Pack::writable);
@@ -412,12 +412,17 @@ impl FileCache {
     fn evict_for(&self, incoming: u64) {
         let doomed: Vec<String> = {
             let entries = self.entries.lock().expect("the picture cache");
-            let mut total: u64 = entries.values().map(|entry| entry.bytes).sum();
+            let mut total: u64 = entries
+                .iter()
+                .filter(|(key, _)| !contained(key))
+                .map(|(_, entry)| entry.bytes)
+                .sum();
             let budget = self.budget();
             if total.saturating_add(incoming) <= budget {
                 return;
             }
-            let mut order: Vec<(&String, &Entry)> = entries.iter().collect();
+            let mut order: Vec<(&String, &Entry)> =
+                entries.iter().filter(|(key, _)| !contained(key)).collect();
             order.sort_by_key(|(_, entry)| entry.used);
             let mut chosen = Vec::new();
             for (key, entry) in order {
@@ -437,6 +442,15 @@ impl FileCache {
     fn path_for(&self, key: &str) -> PathBuf {
         self.root.join(name_of(key))
     }
+}
+
+/// Faces, emoji and team icons: a few thousand of them at most, each a few
+/// kilobytes, and drawn on every channel. Outside the budget, so a scroll
+/// through a channel of screenshots can never push them out.
+fn contained(key: &str) -> bool {
+    ["avatar/", "emoji/", "team/"]
+        .iter()
+        .any(|kind| key.starts_with(kind))
 }
 
 /// What an interrupted write is called while it is being written.
@@ -595,6 +609,34 @@ mod tests {
         // And it was dropped rather than left to fail again.
         assert_eq!(cache.held(), 0);
         assert!(!root.join(name_of("file/one")).exists());
+    }
+
+    /// Faces and emoji are never evicted, however many message pictures come
+    /// after them: only the pictures compete for the budget.
+    #[test]
+    fn faces_and_emoji_stay_outside_the_budget() {
+        let root = scratch("contained");
+        let big = vec![5u8; crate::pack::LARGEST + 1];
+        let cache = FileCache::holding(root, 16 * big.len() as u64 + 1024);
+        for at in 0..20 {
+            cache.write(&format!("avatar/u{at}?v=1"), &big, "image/png");
+        }
+        cache.write("emoji/abc", &big, "image/png");
+        for at in 0..40 {
+            cache.write(&format!("thumb/f{at}"), &big, "image/jpeg");
+        }
+        for at in 0..20 {
+            assert!(
+                cache.read(&format!("avatar/u{at}?v=1")).is_some(),
+                "face {at} went"
+            );
+        }
+        assert!(cache.read("emoji/abc").is_some(), "the emoji went");
+        assert!(
+            cache.read("thumb/f0").is_none(),
+            "the oldest picture stayed"
+        );
+        assert!(cache.read("thumb/f39").is_some(), "the newest picture went");
     }
 
     /// A budget lowered while running lets the oldest go straight away, and a
