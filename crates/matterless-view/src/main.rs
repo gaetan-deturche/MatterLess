@@ -5832,6 +5832,12 @@ impl App {
             let pane = matterless_view::aside::rect(self.column_rect(), self.pane_width);
             let boxes = self.placed.clone();
             let did = self.listing.react(&input, &boxes, pane);
+            if let Some(matterless_view::listing::Did::Clear(found)) = did {
+                self.input = input;
+                self.clear_draft(&found);
+                self.redraw();
+                return;
+            }
             if matches!(did, Some(matterless_view::listing::Did::Close)) {
                 input.focus_on(composer::NAME);
                 self.input = input;
@@ -6201,6 +6207,8 @@ impl App {
             return;
         };
         self.show_the_list("Drafts");
+        // The one list whose rows can be thrown away from it.
+        self.listing.clearable = true;
         let named = |conversation: &str| -> (String, String) {
             // A reply's conversation is the thread's own name, which carries
             // the root it hangs from.
@@ -6261,6 +6269,35 @@ impl App {
             .collect();
         println!("Drafts: {} unfinished", found.len());
         self.listing.fill(found);
+    }
+
+    /// Throws away a draft from the Drafts list, and whatever was attached to it.
+    ///
+    /// Out of the box as well, when the box is showing it: a draft cleared from
+    /// the list and still sitting in the message box is not cleared. The list
+    /// is read again, so the row goes.
+    fn clear_draft(&mut self, found: &matterless_view::listing::Found) {
+        let conversation = match found.root_id.is_empty() {
+            true => found.channel_id.clone(),
+            false => format!("{THREAD_PREFIX}{}", found.root_id),
+        };
+        // Its attachments first: `park` keeps a draft that still has any.
+        self.attached.remove(&conversation);
+        self.park(Some(conversation.clone()), String::new());
+        let open = self.sidebar.selected.as_deref() == Some(conversation.as_str());
+        let open_thread = self
+            .open_root()
+            .is_some_and(|root| format!("{THREAD_PREFIX}{root}") == conversation);
+        if open {
+            self.composer.clear(&mut self.fonts);
+        }
+        if open_thread {
+            self.thread_composer.clear(&mut self.fonts);
+        }
+        println!("cleared a draft");
+        self.open_drafts();
+        self.rebuild_sidebar();
+        self.relayout();
     }
 
     /// Reads a channel and lays it out, then shows its newest message.

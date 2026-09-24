@@ -26,9 +26,14 @@ const PADDING: f32 = aside::PADDING;
 pub enum Did {
     /// Go to this message.
     Open(Box<Found>),
+    /// Throw this row's thing away -- a draft, from the Drafts list.
+    Clear(Box<Found>),
     /// Shut the pane.
     Close,
 }
+
+/// The cross at the end of a row that can be thrown away.
+const CROSS: f32 = 28.0;
 
 /// One message in a list, resolved to what a row needs.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -348,6 +353,9 @@ pub struct Listing {
     /// True while the answer is still on its way, so an empty list can be told
     /// from one that came back empty.
     pub waiting: bool,
+    /// Whether each row carries a cross that throws it away. The Drafts list
+    /// only: a saved message or a pinned one is not this list's to discard.
+    pub clearable: bool,
     scroll: f32,
     bar: crate::scrollbar::Scrollbar,
 }
@@ -366,6 +374,7 @@ impl Listing {
             found: Vec::new(),
             chosen: 0,
             waiting: false,
+            clearable: false,
             scroll: 0.0,
             bar: crate::scrollbar::Scrollbar::default(),
         }
@@ -381,6 +390,8 @@ impl Listing {
         self.found.clear();
         self.chosen = 0;
         self.waiting = true;
+        // Whoever opens the one list that can discard says so after this.
+        self.clearable = false;
     }
 
     pub fn fill(&mut self, found: Vec<Found>) {
@@ -401,6 +412,17 @@ impl Listing {
     fn reach(&self, body: Rect) -> f32 {
         let wanted = self.found.len() as f32 * ROW + PADDING * 2.0;
         (wanted - body.height).max(0.0)
+    }
+
+    /// Where one row's cross sits, at its right end, clear of the bar.
+    fn cross_rect(&self, body: Rect, at: usize) -> Rect {
+        let row = self.row_rect(body, at);
+        Rect::new(
+            row.right() - crate::scrollbar::TRACK - CROSS,
+            row.y + (row.height - CROSS) / 2.0,
+            CROSS,
+            CROSS,
+        )
     }
 
     /// Where one row sits, wherever the list has been scrolled to.
@@ -444,6 +466,13 @@ impl Listing {
         if let Some(clicked) = input.clicked() {
             if clicked == format!("{}/close", self.name) {
                 return Some(Did::Close);
+            }
+            if let Some(at) = clicked
+                .strip_prefix(&format!("{}/", self.name))
+                .and_then(|rest| rest.strip_suffix("/clear"))
+                .and_then(|at| at.parse::<usize>().ok())
+            {
+                return self.found.get(at).cloned().map(Box::new).map(Did::Clear);
             }
             if let Some(at) = clicked
                 .strip_prefix(&format!("{}/", self.name))
@@ -507,6 +536,14 @@ impl Listing {
                 rect: row,
                 depth,
             });
+            // After the row it sits on: a hit takes the last box it lands in.
+            if self.clearable {
+                placed.push(Placed {
+                    name: format!("{}/{at}/clear", self.name),
+                    rect: self.cross_rect(body, at),
+                    depth,
+                });
+            }
         }
         placed
     }
@@ -573,7 +610,11 @@ impl Listing {
         scene.clip_to(body.x, body.y, body.width, body.height);
         // The room one line gets: the pane less its padding both sides and the
         // bar that floats over the right of it.
-        let room = body.width - PADDING * 2.0 - crate::scrollbar::TRACK;
+        // And the cross, where there is one, so a long line stops short of it.
+        let room = body.width
+            - PADDING * 2.0
+            - crate::scrollbar::TRACK
+            - if self.clearable { CROSS } else { 0.0 };
         for (at, found) in self.found.iter().enumerate() {
             let row = self.row_rect(body, at);
             if row.bottom() <= body.y || row.y >= body.bottom() {
@@ -607,6 +648,22 @@ impl Listing {
                 Run::label(f32::MAX),
             );
             scene.glyphs(what, palette.faint, palette.faint);
+            if self.clearable {
+                let cross = self.cross_rect(body, at);
+                let under = input.hovered() == Some(format!("{}/{at}/clear", self.name).as_str());
+                let mark = painter.run(
+                    fonts,
+                    matterless_layout::marks::CLOSE,
+                    cross.x + 8.0,
+                    cross.y + 6.0,
+                    Run::mark(12.0),
+                );
+                scene.glyphs(
+                    mark,
+                    if under { palette.ink } else { palette.faint },
+                    palette.faint,
+                );
+            }
         }
         let mut canvas = Canvas {
             scene,
@@ -652,6 +709,66 @@ mod tests {
 
     fn pane() -> Rect {
         aside::rect(Rect::new(300.0, 0.0, 1000.0, 700.0), aside::WIDTH)
+    }
+
+    /// A click where the pointer is, as the window's input sees one.
+    fn click(input: &mut Input, placed: &[Placed], x: f32, y: f32) {
+        input.apply(matterless_ui::input::Event::PointerMoved { x, y }, placed);
+        input.apply(matterless_ui::input::Event::PointerPressed, placed);
+        input.apply(matterless_ui::input::Event::PointerReleased, placed);
+    }
+
+    /// A draft is thrown away from its own row: the cross at its end answers
+    /// that row, and it wins over the row it sits on -- a press on it must
+    /// not also open the conversation.
+    #[test]
+    fn a_draft_is_thrown_away_from_its_own_row() {
+        let mut listing = Listing::default();
+        listing.expect("Drafts");
+        listing.clearable = true;
+        listing.fill(found(3));
+        let placed = listing.boxes(pane());
+        let cross = placed
+            .iter()
+            .find(|one| one.name == format!("{NAME}/1/clear"))
+            .expect("a cross on the second row")
+            .rect;
+        let mut input = Input::default();
+        click(
+            &mut input,
+            &placed,
+            cross.x + cross.width / 2.0,
+            cross.y + cross.height / 2.0,
+        );
+        match listing.react(&input, &placed, pane()) {
+            Some(Did::Clear(row)) => assert_eq!(row.post_id, "p1", "the wrong row"),
+            other => panic!("pressing the cross did {other:?}"),
+        }
+    }
+
+    /// Only the list that says so has crosses: a saved or pinned message is
+    /// not this list's to discard, and the pane is the same pane.
+    #[test]
+    fn only_a_list_that_says_so_has_crosses() {
+        let mut listing = Listing::default();
+        listing.expect("Drafts");
+        listing.clearable = true;
+        listing.fill(found(2));
+        assert!(
+            listing
+                .boxes(pane())
+                .iter()
+                .any(|one| one.name.ends_with("/clear"))
+        );
+        listing.expect("Saved");
+        listing.fill(found(2));
+        assert!(
+            !listing
+                .boxes(pane())
+                .iter()
+                .any(|one| one.name.ends_with("/clear")),
+            "the Saved list kept the Drafts list's crosses"
+        );
     }
 
     /// A shut panel answers nothing and places nothing, whatever is pressed.
