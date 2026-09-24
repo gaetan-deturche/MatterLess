@@ -4055,6 +4055,16 @@ impl App {
             String::new()
         };
         let mut asked = false;
+        // A window opened quietly is one opened beside the real client -- a
+        // build from the tree, run to be measured. It raised every toast the
+        // installed client was raising at the same moment, so the reader got
+        // each notification twice, the second for a message already read.
+        // It still decides, and says so in the log; it does not interrupt.
+        let quiet = std::env::var_os("MATTERLESS_QUIET").is_some();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|since| since.as_millis() as i64)
+            .unwrap_or(0);
         for delta in deltas {
             let matterless_sync::Delta::PostUpserted {
                 post_id,
@@ -4072,11 +4082,24 @@ impl App {
             let (title, body) = matterless_view::toast::wording(&said);
             // The count, never the words: a notification carries the message
             // and the log must not.
+            // And how old the message is, which is what tells a live one
+            // from a message the reader has had for hours being announced
+            // again at startup.
+            let age = store
+                .post(post_id)
+                .ok()
+                .flatten()
+                .map(|post| (now - post.create_at) / 1000);
             println!(
-                "notifying about {channel_id} ({} characters, named: {})",
+                "notifying about {channel_id} ({} characters, named: {}, {} seconds old){}",
                 said.preview.chars().count(),
-                said.resolved
+                said.resolved,
+                age.map_or_else(|| "?".to_string(), |age| age.to_string()),
+                if quiet { ", quietly" } else { "" }
             );
+            if quiet {
+                continue;
+            }
             asked = true;
             let Some(clicked) = self.clicked.clone() else {
                 continue;
