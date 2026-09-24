@@ -596,6 +596,7 @@ impl View {
         // Cloned rather than borrowed: the context is a handle, and holding a
         // borrow of it would stop the buffer being grown while it is bound.
         let context = self.gpu.context.clone();
+        self.gpu.ground(ground);
         // Cleared first, whatever is drawn after.
         let clear = [
             ground[0] as f32 / 255.0,

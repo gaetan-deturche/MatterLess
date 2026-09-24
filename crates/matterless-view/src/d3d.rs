@@ -29,7 +29,7 @@ use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_ALPHA_MODE_IGNORE, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC,
 };
 use windows::Win32::Graphics::Dxgi::{
-    CreateDXGIFactory1, DXGI_SCALING_NONE, DXGI_SWAP_CHAIN_DESC1, DXGI_SWAP_CHAIN_FLAG,
+    CreateDXGIFactory1, DXGI_RGBA, DXGI_SCALING_NONE, DXGI_SWAP_CHAIN_DESC1, DXGI_SWAP_CHAIN_FLAG,
     DXGI_SWAP_EFFECT_FLIP_DISCARD, DXGI_USAGE_RENDER_TARGET_OUTPUT, IDXGIAdapter, IDXGIFactory1,
     IDXGIFactory2, IDXGISwapChain1,
 };
@@ -46,6 +46,8 @@ pub struct Gpu {
     /// swapchain because it names a texture that the resize replaces.
     pub target: Option<ID3D11RenderTargetView>,
     pub size: (u32, u32),
+    /// The colour last given to the compositor for where no frame is yet.
+    ground: Option<[u8; 4]>,
 }
 
 impl Gpu {
@@ -123,9 +125,32 @@ impl Gpu {
             chain,
             target: None,
             size,
+            ground: None,
         };
         gpu.retarget()?;
         Ok(gpu)
+    }
+
+    /// What the compositor fills the window with where no frame has been drawn
+    /// yet: the strip a drag has just added, before the frame for it lands.
+    ///
+    /// Black by default, which is a band along the edge being dragged on a
+    /// window that is anything but black. The frame's own ground instead, so
+    /// the band is the colour the window is anyway.
+    pub fn ground(&mut self, ground: [u8; 4]) {
+        if self.ground == Some(ground) {
+            return;
+        }
+        self.ground = Some(ground);
+        let color = DXGI_RGBA {
+            r: ground[0] as f32 / 255.0,
+            g: ground[1] as f32 / 255.0,
+            b: ground[2] as f32 / 255.0,
+            a: 1.0,
+        };
+        if let Err(why) = unsafe { self.chain.SetBackgroundColor(&color) } {
+            eprintln!("the window's ground could not be set: {why}");
+        }
     }
 
     /// Points the target view at the swapchain's current back buffer.

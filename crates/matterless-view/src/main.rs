@@ -7502,7 +7502,13 @@ const BIG_ICON: u32 = 32;
 #[cfg(windows)]
 fn window_attributes() -> winit::window::WindowAttributes {
     use winit::platform::windows::WindowAttributesExtWindows;
-    Window::default_attributes().with_taskbar_icon(window_icon(BIG_ICON))
+    Window::default_attributes()
+        .with_taskbar_icon(window_icon(BIG_ICON))
+        // Everything in here is drawn through the swapchain, so the surface
+        // the system keeps for GDI to paint into is only ever seen where the
+        // swapchain has not covered yet -- the strip a drag has just added,
+        // which nothing paints, and which showed as a white band.
+        .with_no_redirection_bitmap(true)
 }
 
 #[cfg(not(windows))]
@@ -7813,14 +7819,6 @@ impl ApplicationHandler<Update> for App {
                 }
             }
             WindowEvent::Resized(size) => {
-                // Minimising is reported as a resize to nothing, and a
-                // conversation re-wrapped to a column one pixel wide is worse
-                // than wasted work: the anchor for putting the reader back is
-                // taken against that panel on the way out *and* on the way in,
-                // and an anchor measured against a panel nobody is looking at
-                // says nothing at all. That is the frame of broken layout
-                // after a restore. It also filled a slot of the per-width
-                // cache with a width no reader will ever see.
                 // Minimising is reported as a resize to nothing -- measured:
                 // 0x0 on the way down, then the real size on the way back --
                 // and a conversation re-wrapped to a column one pixel wide is
