@@ -634,7 +634,8 @@ struct App {
     /// seconds while they keep going, so a lookup per person costs one read
     /// per typing run rather than one per signal.
     typing_names: std::collections::HashMap<String, String>,
-    /// Who is around, and the set last asked about.
+    /// Who is around, and everybody ever asked about -- so a face is asked
+    /// about once, and the socket thread's beat keeps it current after that.
     presence: std::collections::HashMap<String, String>,
     asked_about: Vec<String>,
     /// Saved or pinned messages, whichever was last asked for. An aside,
@@ -1562,6 +1563,23 @@ impl App {
             }
         };
         let faces = keys.len();
+        // Everybody is asked about once, now, rather than as each face
+        // appears. A dot was asked for as its face came into view and drawn
+        // only once the answer was back -- a couple of seconds of faces with no
+        // dot on a busy start, in every channel opened. Asked up front, a
+        // channel opened later finds them answered; the socket thread asks
+        // again on a beat, because a status does not stay true for long. In
+        // slices, because one request naming everybody a big server knows is
+        // one a server may refuse.
+        if let (Some(link), Ok(people)) = (self.link.as_ref(), store.everyone_with_a_picture()) {
+            let everybody: Vec<String> = people.into_iter().map(|(id, _)| id).collect();
+            for slice in everybody.chunks(matterless_view::live::STATUSES_AT_ONCE) {
+                link.send(matterless_view::live::Ask::Statuses {
+                    user_ids: slice.to_vec(),
+                });
+            }
+            self.asked_about.extend(everybody);
+        }
         // The team's own emoji as well. They are pictures like any other, and
         // one missing is a gap in the middle of a sentence rather than a face
         // beside it -- the more noticeable of the two, and the reader saw
@@ -2043,14 +2061,17 @@ impl App {
         // The reader themselves, because their own presence is on the strip
         // at the top of the sidebar and nothing else would ask for it.
         wanted.push(self.me.clone());
+        // Only whoever nobody has asked about yet. Everybody the store knew was
+        // asked about at sign-in and the socket thread asks again on a beat,
+        // so what is left is somebody new -- and asking again every time the
+        // faces on screen changed was 705 requests in one walk of the sidebar.
+        wanted.retain(|id| !self.presence.contains_key(id) && !self.asked_about.contains(id));
         wanted.sort();
         wanted.dedup();
-        // An unchanged set costs no request, which is the whole point: this is
-        // called from the frame loop.
-        if wanted.is_empty() || wanted == self.asked_about {
+        if wanted.is_empty() {
             return;
         }
-        self.asked_about = wanted.clone();
+        self.asked_about.extend(wanted.iter().cloned());
         link.send(matterless_view::live::Ask::Statuses { user_ids: wanted });
     }
 

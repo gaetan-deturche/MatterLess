@@ -775,6 +775,10 @@ async fn run(
         }
     };
 
+    // Held apart from the engine's for the work that runs on tasks of its
+    // own and has to read or write the store while the loop does something
+    // else.
+    let kept = Arc::clone(&store);
     let engine = SyncEngine::new(store);
     let mut context = reader_context(me, engine.store());
     println!(
@@ -785,8 +789,22 @@ async fn run(
     let (signals_tx, mut signals) = tokio::sync::mpsc::channel(1024);
     let handle = session.spawn(signals_tx);
 
+    // Everybody the window has asked about, asked about again on a beat.
+    let mut watched: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut again = tokio::time::interval(STATUSES_AGAIN);
+    again.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // The first beat is immediate, and sign-in has just asked.
+    again.tick().await;
+
     loop {
         tokio::select! {
+            _ = again.tick() => {
+                let everybody: Vec<String> = watched.iter().cloned().collect();
+                for slice in everybody.chunks(STATUSES_AT_ONCE) {
+                    let (rest, wake, slice) = (rest.clone(), wake.clone(), slice.to_vec());
+                    tokio::spawn(async move { who_is_around(&rest, &slice, &wake).await });
+                }
+            }
             // Sends and socket traffic on one thread: a send has to be able to
             // go out while the socket is quiet, and its echo has to be able to
             // arrive while a send is in flight.
@@ -1137,23 +1155,17 @@ async fn run(
                         // which is exactly the set whose names are wanted. And
                         // only the ones the store has not met, so this costs
                         // one request on a fresh store and nothing after.
-                        met(&rest, engine.store(), &user_ids, &wake).await;
-                        match rest.statuses_by_ids(&user_ids).await {
-                            Ok(found) => {
-                                println!(
-                                    "asked about {} people, {} answered",
-                                    user_ids.len(),
-                                    found.len()
-                                );
-                                wake.wake(Update::Statuses(
-                                    found
-                                        .into_iter()
-                                        .map(|status| (status.user_id, status.status))
-                                        .collect(),
-                                ));
-                            }
-                            Err(error) => eprintln!("asking who is around: {error}"),
-                        }
+                        //
+                        // On a task of its own: awaited here, it waited behind
+                        // every refresh ahead of it in the queue and held up
+                        // every one behind it, and a dot is the one thing on
+                        // screen that is out of date the moment it is late.
+                        watched.extend(user_ids.iter().cloned());
+                        let (rest, store, wake) = (rest.clone(), Arc::clone(&kept), wake.clone());
+                        tokio::spawn(async move {
+                            met(&rest, &store, &user_ids, &wake).await;
+                            who_is_around(&rest, &user_ids, &wake).await;
+                        });
                     }
                     Ask::Typing {
                         channel_id,
@@ -2237,6 +2249,41 @@ impl Shelf {
         self.wants.send((key, width, height)).is_ok()
     }
 }
+
+/// Asks the server who of these is around, and tells the window.
+async fn who_is_around(rest: &RestClient, user_ids: &[String], wake: &impl Wake) {
+    match rest.statuses_by_ids(user_ids).await {
+        Ok(found) => {
+            println!(
+                "asked about {} people, {} answered",
+                user_ids.len(),
+                found.len()
+            );
+            wake.wake(Update::Statuses(
+                found
+                    .into_iter()
+                    .map(|status| (status.user_id, status.status))
+                    .collect(),
+            ));
+        }
+        Err(error) => eprintln!("asking who is around: {error}"),
+    }
+}
+
+/// How often everybody asked about is asked about again.
+///
+/// A status is volatile and the socket does not carry everybody's changes,
+/// so it is asked for rather than waited for: once for everybody at sign-in,
+/// then again on this beat. The official web client polls statuses every
+/// minute too.
+const STATUSES_AGAIN: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// How many people one status request names.
+///
+/// Everybody is asked about at sign-in and again on the beat; a hundred people
+/// is one request, and a server with thousands gets several rather than one it
+/// might refuse for its size.
+pub const STATUSES_AT_ONCE: usize = 200;
 
 /// Enough to tell whether two pictures are the same bytes.
 fn fingerprint(bytes: &[u8]) -> u64 {
