@@ -117,8 +117,11 @@ pub enum Update {
     /// Older history arrived and is in the store. `more` is false once the
     /// beginning of the channel has been reached, so the window stops asking.
     Older { channel_id: String, more: bool },
-    /// Who is around, by user id.
-    Statuses(Vec<(String, String)>),
+    /// Somebody's record was fetched again and is in the store.
+    Person { user_id: String },
+    /// Who is around: each person, their status, and when they were last
+    /// active -- which is what "last online 7 min. ago" is worked out from.
+    Statuses(Vec<(String, String, i64)>),
     /// What else a name could mean, for the query that was asked.
     Discovered {
         query: String,
@@ -297,6 +300,13 @@ pub enum Ask {
     /// Batched rather than one call per person: the sidebar asks about every
     /// direct conversation at once, and that is one request rather than forty.
     Statuses { user_ids: Vec<String> },
+    /// Fetch one person's record again, whether or not the store has met them.
+    ///
+    /// For the card a name opens: a record is otherwise fetched only the
+    /// first time somebody is met, so a position or a name changed since --
+    /// or a field this build did not keep when it was fetched -- would never
+    /// arrive.
+    Person { user_id: String },
     /// Say that this reader is typing, so the other clients can show it.
     ///
     /// Fire and forget: nothing depends on it arriving, and a typing signal
@@ -1171,6 +1181,22 @@ async fn run(
                         channel_id,
                         root_id,
                     } => handle.typing(&channel_id, &root_id),
+                    Ask::Person { user_id } => {
+                        let (rest, store, wake) = (rest.clone(), Arc::clone(&kept), wake.clone());
+                        tokio::spawn(async move {
+                            match rest.users_by_ids(std::slice::from_ref(&user_id)).await {
+                                Ok(people) if !people.is_empty() => {
+                                    if let Err(error) = store.upsert_users(&people) {
+                                        eprintln!("keeping a person: {error}");
+                                        return;
+                                    }
+                                    wake.wake(Update::Person { user_id });
+                                }
+                                Ok(_) => {}
+                                Err(error) => eprintln!("asking about a person: {error}"),
+                            }
+                        });
+                    }
                     Ask::Thread {
                         root_id,
                         channel_id,
@@ -1481,7 +1507,7 @@ async fn run(
                                 off_the_loop(move || {
                                     pictures
                                         .as_ref()
-                                        .and_then(|held| held.read(&key))
+                                        .and_then(|held| held.read(on_disk(&key)))
                                         .is_some_and(|(bytes, _)| hand_over(&key, &bytes, width, height, &wake))
                                 })
                                 .await
@@ -1591,6 +1617,13 @@ async fn run(
 /// A pure function, so the routing is testable without a network or a token,
 /// and so nothing a window asks for can leave the routes listed here. Ids are
 /// server-generated tokens; anything else is malformed and gets no request.
+/// What a picture is kept under on the disk: its name without a size on the
+/// end. A face drawn large and the same face drawn small are two pictures in
+/// the atlas and one file, fetched once.
+pub fn on_disk(key: &str) -> &str {
+    key.split_once('@').map_or(key, |(file, _)| file)
+}
+
 pub fn route_for(key: &str) -> Option<String> {
     let path = key.split('?').next()?;
     let (kind, id) = path.trim_start_matches('/').split_once('/')?;
@@ -1688,6 +1721,20 @@ pub fn renames_emoji(deltas: &[Delta]) -> bool {
 
 #[cfg(test)]
 mod tests {
+
+    /// A face drawn large is its own picture in the atlas and the same file on
+    /// the disk and on the server: asked for at another size, it is neither
+    /// downloaded nor kept a second time.
+    #[test]
+    fn a_face_at_another_size_is_the_same_file() {
+        let small = crate::stream::avatar_key("u1abc", 7);
+        let large = crate::stream::avatar_key_sized("u1abc", 7, 120);
+        assert_ne!(small, large, "the atlas would hand back the small one");
+        assert_eq!(super::on_disk(&large), small);
+        assert_eq!(super::on_disk(&small), small);
+        assert_eq!(super::route_for(&large), super::route_for(&small));
+        assert!(super::route_for(&large).is_some());
+    }
 
     /// A moving picture of `count` frames at `wide` by `tall`, as GIF bytes.
     fn a_gif(count: u32, wide: u32, tall: u32) -> Vec<u8> {
@@ -2166,7 +2213,7 @@ fn take_in(
     // Kept only once it has decoded: bytes this build cannot read are worth
     // nothing on the next start either.
     if let Some(held) = pictures {
-        held.write(key, bytes, kind);
+        held.write(on_disk(key), bytes, kind);
     }
     // The same picture under a version the cache had not seen: kept, so the
     // next start finds it under the key it will ask with, but not drawn again
@@ -2262,7 +2309,7 @@ async fn who_is_around(rest: &RestClient, user_ids: &[String], wake: &impl Wake)
             wake.wake(Update::Statuses(
                 found
                     .into_iter()
-                    .map(|status| (status.user_id, status.status))
+                    .map(|status| (status.user_id, status.status, status.last_activity_at))
                     .collect(),
             ));
         }
@@ -2326,7 +2373,7 @@ pub fn shelf(link: Link, wake: impl Wake) -> Shelf {
                 let Ok((key, width, height)) = taken else {
                     return;
                 };
-                let read = pictures.as_ref().and_then(|held| held.read(&key));
+                let read = pictures.as_ref().and_then(|held| held.read(on_disk(&key)));
                 match read {
                     Some((bytes, _)) if hand_over(&key, &bytes, width, height, &wake) => {}
                     // Either nothing on the disk or nothing readable there.

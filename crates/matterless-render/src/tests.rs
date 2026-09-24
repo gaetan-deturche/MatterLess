@@ -461,6 +461,7 @@ fn the_display_preference_decides_which_name_is_shown() {
         last_name: "Jones".into(),
         nickname: "Ace".into(),
         email: String::new(),
+        position: String::new(),
         last_picture_update: 0,
         notify_props: std::collections::HashMap::new(),
         roles: String::new(),

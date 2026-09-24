@@ -637,6 +637,8 @@ struct App {
     /// Who is around, and everybody ever asked about -- so a face is asked
     /// about once, and the socket thread's beat keeps it current after that.
     presence: std::collections::HashMap<String, String>,
+    /// When each of them was last active, as the server said with their status.
+    active_at: std::collections::HashMap<String, i64>,
     asked_about: Vec<String>,
     /// Saved or pinned messages, whichever was last asked for. An aside,
     /// read against whatever conversation is open.
@@ -949,6 +951,7 @@ impl App {
             visited: matterless_view::places::Places::default(),
             stepping: false,
             presence: std::collections::HashMap::new(),
+            active_at: std::collections::HashMap::new(),
             asked_about: Vec::new(),
             listing: matterless_view::listing::Listing::default(),
             viewer: matterless_view::viewer::Viewer::default(),
@@ -1755,9 +1758,37 @@ impl App {
                     self.reread_channel(&channel);
                 }
             }
+            Update::Person { user_id } => {
+                // Refreshed in place, if the card is still open on them. Not
+                // through `show_profile`, which would ask about them again.
+                let fresh = self
+                    .profile
+                    .of
+                    .as_ref()
+                    .filter(|card| card.user_id == user_id)
+                    .and_then(|card| {
+                        self.store
+                            .as_ref()?
+                            .user_by_username(&card.username)
+                            .ok()
+                            .flatten()
+                    });
+                if let (Some(user), Some(card)) = (fresh, self.profile.of.as_mut()) {
+                    card.full_name = format!("{} {}", user.first_name, user.last_name)
+                        .trim()
+                        .to_string();
+                    card.nickname = user.nickname;
+                    card.email = user.email;
+                    card.position = user.position;
+                    card.avatar_at = user.last_picture_update;
+                }
+            }
             Update::Statuses(found) => {
-                let mine = found.iter().any(|(user_id, _)| user_id == &self.me);
-                for (user_id, status) in found {
+                let mine = found.iter().any(|(user_id, _, _)| user_id == &self.me);
+                for (user_id, status, active) in found {
+                    if active > 0 {
+                        self.active_at.insert(user_id.clone(), active);
+                    }
                     self.presence.insert(user_id, status);
                 }
                 // The reader's own presence is on the strip, so learning it is
@@ -2183,17 +2214,23 @@ impl App {
                 full_name: format!("{} {}", user.first_name, user.last_name)
                     .trim()
                     .to_string(),
-                // This client does not model a job title, so the nickname
-                // is what it has that is worth a line. Empty far more often
-                // than not, which the card is built to handle.
                 nickname: user.nickname.clone(),
                 status: self.presence.get(&user.id).cloned().unwrap_or_default(),
                 avatar_at: user.last_picture_update,
+                email: user.email.clone(),
+                position: user.position.clone(),
+                last_active: self.active_at.get(&user.id).copied().unwrap_or(0),
                 username: user.username,
-                user_id: user.id,
+                user_id: user.id.clone(),
             },
             near,
         );
+        // Shown from what is held, and asked about again behind it: a record
+        // is fetched only the first time somebody is met, so their position
+        // and anything changed since would otherwise never arrive.
+        if let Some(link) = self.link.as_ref() {
+            link.send(matterless_view::live::Ask::Person { user_id: user.id });
+        }
         self.want_faces();
     }
 
@@ -5729,10 +5766,20 @@ impl App {
             return;
         }
 
-        // The card is dismissed rather than interacted with: it says who
-        // somebody is and has nothing to press. Escape, or a click anywhere
-        // that is not on it -- which is what a reader expects of a popover and
-        // means it never has to be closed deliberately.
+        // The one thing the card offers: a conversation with whoever it is
+        // about, opened the way the switcher opens one -- the server makes or
+        // finds the direct channel, and the window lands in it when it does.
+        if self.input.clicked() == Some(matterless_view::profile::MESSAGE)
+            && let (Some(card), Some(link)) = (self.profile.of.as_ref(), self.link.as_ref())
+        {
+            link.send(matterless_view::live::Ask::Direct {
+                user_id: card.user_id.clone(),
+            });
+        }
+        // Dismissed by Escape, by its cross, by its button once that has done
+        // its work, or by a click anywhere that is not on it -- which is what a
+        // reader expects of a popover and means it never has to be closed
+        // deliberately.
         let dismissed = self.input.struck(Key::Escape)
             || self
                 .input

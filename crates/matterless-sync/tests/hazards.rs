@@ -28,6 +28,7 @@ fn harness() -> (SyncEngine, SyncContext) {
         last_name: "Deturche".into(),
         nickname: String::new(),
         email: String::new(),
+        position: String::new(),
         last_picture_update: 0,
         notify_props,
         roles: String::new(),

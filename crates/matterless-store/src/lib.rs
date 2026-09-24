@@ -202,8 +202,8 @@ impl Store {
         for user in users {
             transaction.execute(
                 "INSERT INTO users (id, username, first_name, last_name, nickname, email,
-                                    last_picture_update, notify_props, roles)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                                    last_picture_update, notify_props, roles, position)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
                  ON CONFLICT(id) DO UPDATE SET
                     username = excluded.username,
                     first_name = excluded.first_name,
@@ -212,7 +212,8 @@ impl Store {
                     email = excluded.email,
                     last_picture_update = excluded.last_picture_update,
                     notify_props = excluded.notify_props,
-                    roles = excluded.roles",
+                    roles = excluded.roles,
+                    position = excluded.position",
                 params![
                     user.id,
                     user.username,
@@ -223,6 +224,7 @@ impl Store {
                     user.last_picture_update,
                     serde_json::to_string(&user.notify_props)?,
                     user.roles,
+                    user.position,
                 ],
             )?;
         }
@@ -337,7 +339,7 @@ impl Store {
         let placeholders = vec!["?"; ids.len()].join(",");
         let mut statement = connection.prepare(&format!(
             "SELECT id, username, first_name, last_name, nickname, email,
-                    last_picture_update, notify_props, roles
+                    last_picture_update, notify_props, roles, position
              FROM users WHERE id IN ({placeholders})"
         ))?;
         let rows = statement.query_map(rusqlite::params_from_iter(ids), |row| {
@@ -352,7 +354,7 @@ impl Store {
         Ok(connection
             .query_row(
                 "SELECT id, username, first_name, last_name, nickname, email,
-                        last_picture_update, notify_props, roles
+                        last_picture_update, notify_props, roles, position
                  FROM users WHERE lower(username) = ?1",
                 params![username.to_lowercase()],
                 row_to_user,
@@ -1574,7 +1576,7 @@ impl Store {
         let pattern = matterless_core::fuzzy::like_pattern(query);
         let mut statement = connection.prepare(
             "SELECT id, username, first_name, last_name, nickname, email,
-                    last_picture_update, notify_props, roles
+                    last_picture_update, notify_props, roles, position
              FROM users
              WHERE lower(username) LIKE ?1 ESCAPE '\\'
                 OR lower(first_name || ' ' || last_name) LIKE ?1 ESCAPE '\\'
@@ -2343,6 +2345,7 @@ fn row_to_user(row: &rusqlite::Row<'_>) -> rusqlite::Result<User> {
         last_picture_update: row.get(6)?,
         notify_props: serde_json::from_str(&notify_props).unwrap_or_default(),
         roles: row.get(8)?,
+        position: row.get(9)?,
     })
 }
 

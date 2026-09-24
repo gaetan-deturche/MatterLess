@@ -2783,6 +2783,17 @@ pub fn avatar_key(user_id: &str, version: i64) -> String {
     format!("avatar/{user_id}?v={version}")
 }
 
+/// A face at a size of its own, for somewhere that draws it large.
+///
+/// The atlas holds one picture per name, decoded at the size first asked for,
+/// and every face is asked for at a conversation's 28px first -- so the card
+/// a name opens drew that 28px face stretched to 120 and blurred. A size on
+/// the end is another name to the atlas, and nothing to the disk: the bytes
+/// behind it are the same file, read by `live::on_disk`.
+pub fn avatar_key_sized(user_id: &str, version: i64, side: u32) -> String {
+    format!("{}@{side}", avatar_key(user_id, version))
+}
+
 /// Every picture on one message, in the order they were attached.
 ///
 /// A file card is not among them: there is nothing to magnify about one, so

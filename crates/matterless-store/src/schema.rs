@@ -86,7 +86,7 @@ const MIGRATION_7: &str = "
 ALTER TABLE posts ADD COLUMN is_pinned INTEGER NOT NULL DEFAULT 0;
 ";
 
-pub const TARGET_VERSION: i64 = 12;
+pub const TARGET_VERSION: i64 = 13;
 
 // Migration 1 is frozen: the shell now keeps a real database with real history,
 // so every change gets its own step from here.
@@ -255,7 +255,11 @@ DROP TABLE IF EXISTS post_render;
 /// Columns added after their table, checked the same way tables are: a version
 /// number is a claim, and this is the evidence.
 fn missing_columns(connection: &Connection) -> rusqlite::Result<Vec<String>> {
-    const REQUIRED: [(&str, &str); 2] = [("posts", "is_pinned"), ("drafts", "files")];
+    const REQUIRED: [(&str, &str); 3] = [
+        ("posts", "is_pinned"),
+        ("drafts", "files"),
+        ("users", "position"),
+    ];
     let mut absent = Vec::new();
     for (table, column) in REQUIRED {
         let present: i64 = connection.query_row(
@@ -415,6 +419,14 @@ const MIGRATION_11: &str = "
 ALTER TABLE drafts ADD COLUMN files TEXT NOT NULL DEFAULT '[]';
 ";
 
+/// What somebody does there, for the card a name opens.
+///
+/// On the column rather than the version, as for migration 11: a store can be
+/// stamped with a version whose migration it never ran.
+const MIGRATION_13: &str = "
+ALTER TABLE users ADD COLUMN position TEXT NOT NULL DEFAULT '';
+";
+
 /// What this install has been told to do, as opposed to what the server says.
 ///
 /// Apart from `preferences`, which holds the reader's settings on the server
@@ -496,6 +508,9 @@ fn migrate(connection: &Connection) -> rusqlite::Result<()> {
     // On the column, not the version, for the reason migration 7 gives.
     if absent_columns.iter().any(|name| name == "drafts.files") {
         connection.execute_batch(MIGRATION_11)?;
+    }
+    if absent_columns.iter().any(|name| name == "users.position") {
+        connection.execute_batch(MIGRATION_13)?;
     }
     if version < 12 || missing.iter().any(|name| name == "row_heights") {
         connection.execute_batch(MIGRATION_12)?;

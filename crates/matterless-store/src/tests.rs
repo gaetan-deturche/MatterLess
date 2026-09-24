@@ -617,6 +617,7 @@ fn a_channel_on_default_counts_mentions_only_whatever_the_account_says() {
                 last_name: String::new(),
                 nickname: String::new(),
                 email: String::new(),
+                position: String::new(),
                 last_picture_update: 0,
                 notify_props: notify,
                 roles: String::new(),
@@ -920,6 +921,57 @@ fn a_stamped_but_missing_table_is_repaired_rather_than_trusted() {
     }
     // The repair ran, so thread queries work again.
     assert_eq!(store.thread_unread_totals().unwrap(), (0, 0));
+}
+
+/// What somebody does there, for the card a name opens -- kept, and read
+/// back by every query that reads a person.
+///
+/// And added to a store that is stamped with this version without having run
+/// its migration, which is not hypothetical: a build that was never committed
+/// stamped the reader's store 13 for a table of its own. Keyed on the column,
+/// the upgrade still runs.
+#[test]
+fn a_position_is_kept_and_added_where_it_is_missing() {
+    let store = store();
+    {
+        let connection = store.connection.lock().unwrap();
+        connection
+            .execute_batch(
+                "ALTER TABLE users DROP COLUMN position;
+                 INSERT INTO users (id, username, first_name, last_name, nickname, email,
+                                    last_picture_update, notify_props, roles)
+                 VALUES ('u1', 'ada', 'Ada', 'Lovelace', '', '', 0, '{}', '');",
+            )
+            .unwrap();
+        connection
+            .pragma_update(None, "user_version", crate::schema::TARGET_VERSION)
+            .unwrap();
+        crate::schema::prepare(&connection).unwrap();
+    }
+    let before = store
+        .user_by_username("ada")
+        .unwrap()
+        .expect("kept through the upgrade");
+    assert_eq!(
+        before.position, "",
+        "a row from before the column has no position"
+    );
+
+    let mut ada = before.clone();
+    ada.position = "Lead Character Artist".into();
+    store.upsert_users(std::slice::from_ref(&ada)).unwrap();
+    assert_eq!(
+        store
+            .user_by_username("ada")
+            .unwrap()
+            .expect("there")
+            .position,
+        "Lead Character Artist"
+    );
+    assert_eq!(
+        store.users_by_ids(&["u1".to_string()]).unwrap()["u1"].position,
+        "Lead Character Artist"
+    );
 }
 
 /// The upgrade path, which is the one that runs on a database somebody has.
@@ -1353,6 +1405,7 @@ mod completion {
             last_name: last.into(),
             nickname: String::new(),
             email: format!("{username}@example.test"),
+            position: String::new(),
             last_picture_update: 0,
             notify_props: Default::default(),
             roles: String::new(),
@@ -1501,6 +1554,7 @@ fn a_local_search_honours_from_in_and_dates() {
                 last_name: "Smith".into(),
                 nickname: String::new(),
                 email: "amy@example.test".into(),
+                position: String::new(),
                 last_picture_update: 0,
                 notify_props: Default::default(),
                 roles: String::new(),
@@ -1512,6 +1566,7 @@ fn a_local_search_honours_from_in_and_dates() {
                 last_name: "Jones".into(),
                 nickname: String::new(),
                 email: "bob@example.test".into(),
+                position: String::new(),
                 last_picture_update: 0,
                 notify_props: Default::default(),
                 roles: String::new(),

@@ -19,6 +19,10 @@ pub struct User {
     pub nickname: String,
     #[serde(default)]
     pub email: String,
+    /// What they do, as they wrote it on their profile: "Lead Character
+    /// Artist". Empty is ordinary.
+    #[serde(default)]
+    pub position: String,
     #[serde(default)]
     pub last_picture_update: Timestamp,
     #[serde(default)]

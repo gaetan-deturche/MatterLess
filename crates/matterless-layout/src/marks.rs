@@ -47,6 +47,9 @@ pub const BELL_OFF: &str = "\u{e05a}";
 pub const LEAVE: &str = "\u{e10e}";
 /// Shut whatever is open.  `x`
 pub const CLOSE: &str = "\u{e1b2}";
+/// An envelope, for an address: `mail`, read out of the font. The same glyph as
+/// `UNREAD`, which is an envelope for the same reason.
+pub const MAIL: &str = "\u{e10f}";
 /// Attach a file to what is being written.  `paperclip`
 pub const ATTACH: &str = "\u{e12d}";
 /// Add a reaction to a message.  `smile`
