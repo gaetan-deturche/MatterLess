@@ -1445,7 +1445,8 @@ impl Stream {
     /// taking somebody to a row they have asked for -- and a row asked for
     /// belongs near the top, with what it follows still visible above it.
     pub fn to_row(&mut self, key: &str, above: f32, within: Rect) -> bool {
-        let mut top = self.theme.pad_top;
+        // Below whatever is still only remembered, as `first_row_at` draws it.
+        let mut top = self.theme.pad_top + self.foreseen;
         for (index, laid) in self.laid.iter().enumerate() {
             if self.rows.get(index).map(key_of).as_deref() == Some(key) {
                 self.scroll = (top - above).clamp(0.0, self.reach(within));
@@ -1481,7 +1482,9 @@ impl Stream {
         // so putting the row back means putting the middle back on it -- which
         // is the half of this that makes a panel of a different height work.
         let middle = within.height / 2.0;
-        let mut top = self.theme.pad_top;
+        // Below whatever is still only remembered: `holding` measured the
+        // reader's place that way, and it has to be put back the same way.
+        let mut top = self.theme.pad_top + self.foreseen;
         for (index, laid) in self.laid.iter().enumerate() {
             if self.rows.get(index).map(key_of).as_deref() == Some(key.as_str()) {
                 self.scroll = (top + under - middle).clamp(0.0, self.reach(within));

@@ -805,6 +805,74 @@ fn a_remembered_length_leaves_as_the_rows_are_shaped() {
     }
 }
 
+/// A channel opened on its newest rows, with the rest waiting and their
+/// heights remembered: the rows it has are drawn below all of that.
+fn opened_with_a_memory(fonts: &mut Fonts, within: Rect) -> Stream {
+    let whole = wordy(fonts, within.width);
+    let measured: std::collections::HashMap<String, f32> = whole.measured().into_iter().collect();
+    let mut opened = Stream::new("stream");
+    opened.plan(whole.rows.clone(), true);
+    opened.lay_out(fonts, within.width);
+    opened.foresee(&measured);
+    assert!(
+        opened.waiting() > 0 && opened.knows_its_length(),
+        "the fixture is not what it says"
+    );
+    opened
+}
+
+/// Taking the reader to a row lands them on that row, however much of the
+/// channel above it is still only remembered. It started counting from the
+/// top of what was shaped, so the rail's "where you stopped reading" aimed the
+/// whole remembered length too high and the divider was never on screen.
+#[test]
+fn going_to_a_row_lands_on_it_while_the_rest_is_remembered() {
+    let mut fonts = Fonts::new();
+    let within = panel();
+    let mut stream = opened_with_a_memory(&mut fonts, within);
+    let key = stream.measured()[2].0.clone();
+    let above = 30.0;
+    assert!(stream.to_row(&key, above, within));
+    // A strip whose middle is half a pixel below `above`: the row asked for
+    // starts at `above`, so the strip's middle is half a pixel into it.
+    let (held, under) = stream
+        .holding(Rect::new(
+            within.x,
+            within.y,
+            within.width,
+            2.0 * above + 1.0,
+        ))
+        .expect("something at the top");
+    assert_eq!(
+        held, key,
+        "the panel's top is not at the row that was asked for"
+    );
+    assert!(
+        (under - 0.5).abs() < 1.0,
+        "the row starts {}px from where it should",
+        under - 0.5
+    );
+}
+
+/// Putting a reader back after a relayout puts them where they were, while
+/// the rows above are only remembered.
+#[test]
+fn a_reader_is_put_back_where_they_were_while_the_rest_is_remembered() {
+    let mut fonts = Fonts::new();
+    let within = panel();
+    let mut stream = opened_with_a_memory(&mut fonts, within);
+    stream.scroll = (stream.reach(within) - 300.0).max(0.0);
+    let before = stream.holding(within).expect("a row across the middle");
+    stream.hold(Some(before.clone()), within);
+    let after = stream.holding(within).expect("a row across the middle");
+    assert_eq!(after.0, before.0, "a different row across the middle");
+    assert!(
+        (after.1 - before.1).abs() < 0.5,
+        "moved by {}px",
+        after.1 - before.1
+    );
+}
+
 /// An attachment's colour is what the integration wrote, in any of the forms
 /// integrations write it -- and nothing at all for anything else, so a typo
 /// falls back to the quiet bar rather than to black.
