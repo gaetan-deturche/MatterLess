@@ -805,6 +805,25 @@ fn a_remembered_length_leaves_as_the_rows_are_shaped() {
     }
 }
 
+/// An attachment's colour is what the integration wrote, in any of the forms
+/// integrations write it -- and nothing at all for anything else, so a typo
+/// falls back to the quiet bar rather than to black.
+#[test]
+fn an_attachment_colour_is_read_as_written() {
+    use super::stream::attachment_colour;
+    assert_eq!(attachment_colour("#e01e5a"), Some([0xe0, 0x1e, 0x5a, 0xff]));
+    assert_eq!(attachment_colour("#f00"), Some([0xff, 0x00, 0x00, 0xff]));
+    assert_eq!(
+        attachment_colour(" #36A64F "),
+        Some([0x36, 0xa6, 0x4f, 0xff])
+    );
+    assert!(attachment_colour("danger").is_some());
+    assert!(attachment_colour("Good").is_some());
+    assert_eq!(attachment_colour("#12345"), None);
+    assert_eq!(attachment_colour("red"), None);
+    assert_eq!(attachment_colour("#gg0000"), None);
+}
+
 /// The next conversation is not the last one. Opening a channel with nothing
 /// waiting kept the length remembered for the channel before it, and drew its
 /// one message that far down the panel.

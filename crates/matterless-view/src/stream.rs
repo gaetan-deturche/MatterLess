@@ -1186,54 +1186,41 @@ impl Stream {
         })
     }
 
-    /// The ground and the bar behind a webhook's attachment.
+    /// The ground and the bar behind each of a webhook's attachments.
     ///
-    /// Drawn over the run of consecutive `Attached` blocks for the same reason
-    /// the quote bars are: a notice of four lines is one card, not four.
+    /// One `Card` block per attachment, in order, spanning everything in it --
+    /// its padding included, which the layout reserved rather than borrowed
+    /// from the author's name above. The bar is the colour the integration
+    /// gave, as the official client draws it: red for a failed build, the
+    /// priority's colour on a Jira notice. Without one it is the quiet rule
+    /// every other bar here is drawn in.
     fn attached(&self, into: &mut Canvas<'_>, index: usize, top: f32, left: f32) {
-        let Some(laid) = self.laid.get(index) else {
+        let (Some(laid), Some(Row::Post { post } | Row::Continuation { post })) =
+            (self.laid.get(index), self.rows.get(index))
+        else {
             return;
         };
-        let mut run: Option<(f32, f32)> = None;
-        for block in laid
+        let cards = laid
             .blocks
             .iter()
-            .filter(|block| block.kind == matterless_layout::row::Kind::Attached)
-            .map(Some)
-            .chain(std::iter::once(None))
-        {
-            match (block, run) {
-                (Some(block), Some((start, end))) if (block.y - end).abs() < 0.5 => {
-                    run = Some((start, block.y + block.height));
-                }
-                (block, finished) => {
-                    if let Some((start, end)) = finished {
-                        let x = left + self.theme.gutter;
-                        // Padded, so the ground reaches beyond the words on
-                        // every side rather than hugging them -- into room the
-                        // layout set aside for it. Reaching into room nobody
-                        // reserved is how this came to be drawn over the name
-                        // of whoever sent it.
-                        let pad = self.theme.attached_padding;
-                        into.scene.rounded(
-                            x,
-                            top + start - pad,
-                            self.theme.text_width(),
-                            end - start + pad * 2.0,
-                            into.palette.surface,
-                            CARD,
-                        );
-                        into.scene.fill(
-                            x,
-                            top + start - pad,
-                            self.theme.quote_bar,
-                            end - start + pad * 2.0,
-                            into.palette.rule,
-                        );
-                    }
-                    run = block.map(|block| (block.y, block.y + block.height));
-                }
-            }
+            .filter(|block| block.kind == matterless_layout::row::Kind::Card);
+        for (card, attached) in cards.zip(&post.attachments) {
+            let x = left + self.theme.gutter;
+            into.scene.rounded(
+                x,
+                top + card.y,
+                self.theme.text_width(),
+                card.height,
+                into.palette.surface,
+                CARD,
+            );
+            let bar = attached
+                .color
+                .as_deref()
+                .and_then(attachment_colour)
+                .unwrap_or(into.palette.rule);
+            into.scene
+                .fill(x, top + card.y, self.theme.quote_bar, card.height, bar);
         }
     }
 
@@ -2759,6 +2746,30 @@ const FACE_STEP: f32 = 12.0;
 /// The ring of row-coloured ground each face is drawn inside, which is what
 /// separates one from the one it overlaps.
 const RING: f32 = 1.5;
+
+/// The colour an integration gave its attachment: `#rrggbb`, `#rgb`, or one of
+/// the three names Slack defined and the official client still honours.
+pub fn attachment_colour(said: &str) -> Option<[u8; 4]> {
+    let said = said.trim();
+    match said.to_ascii_lowercase().as_str() {
+        "good" => return Some([0x2e, 0xb6, 0x7d, 0xff]),
+        "warning" => return Some([0xec, 0xb2, 0x2e, 0xff]),
+        "danger" => return Some([0xe0, 0x1e, 0x5a, 0xff]),
+        _ => {}
+    }
+    let hex = said.strip_prefix('#')?;
+    let digit = |at: usize, width: usize| u8::from_str_radix(hex.get(at..at + width)?, 16).ok();
+    match hex.len() {
+        6 => Some([digit(0, 2)?, digit(2, 2)?, digit(4, 2)?, 0xff]),
+        3 => Some([
+            digit(0, 1)? * 17,
+            digit(1, 1)? * 17,
+            digit(2, 1)? * 17,
+            0xff,
+        ]),
+        _ => None,
+    }
+}
 
 /// What a user's picture is called, versioned so a new picture is a new name.
 ///

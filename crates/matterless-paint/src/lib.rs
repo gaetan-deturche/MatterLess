@@ -1011,21 +1011,10 @@ impl Painter {
                         });
                     }
                 }
-                // One line of a card: the bar beside it is drawn by whoever
-                // owns the row, because it spans the whole run of them and a
-                // single line does not know it is the first or the last.
-                // Its own ground and its own bar, as `.attachment` has them:
-                // a border down the left, the panel behind it, and the corners
-                // cut on the right only -- which is what `0 4px 4px 0` says.
-                Kind::Attached => {
-                    let (glyphs, _, _, _) = self.glyphs_of(fonts, block, x, y, theme);
-                    pieces.push(Piece::Text {
-                        glyphs,
-                        ink: palette.ink,
-                        faint: palette.soft,
-                        signal: palette.signal,
-                    });
-                }
+                // A webhook's card is drawn by whoever owns the row: its bar
+                // is the attachment's own colour, and only the caller has the
+                // attachment. The words in it are ordinary text blocks.
+                Kind::Card => {}
                 Kind::Preview => {
                     let (glyphs, _, _, _) = self.glyphs_of(fonts, block, x, y, theme);
                     pieces.push(Piece::Text {

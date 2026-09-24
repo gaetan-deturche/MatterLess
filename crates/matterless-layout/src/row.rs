@@ -323,9 +323,12 @@ pub enum Kind {
     /// One line of a link or permalink card. A card is several of these
     /// stacked with no gap, so the bar drawn beside them reads as one.
     Preview,
-    /// One line of a webhook's attachment -- a Jira notice, a build result.
-    /// Stacked the same way, on its own ground with a bar down its left.
-    Attached,
+    /// The box a webhook's attachment is drawn in -- a Jira notice, a build
+    /// result. It has no words of its own: what is in it is laid out as
+    /// ordinary text inside it, and this is what the ground and the bar in the
+    /// attachment's own colour are drawn to. The nth card is the nth
+    /// attachment.
+    Card,
     /// A horizontal rule written in the message: `---`, and `<hr>` in the
     /// app. A kind of its own because it is the one block with no words in
     /// it, and it used to be a blank line pretending -- which reserved the
@@ -453,6 +456,252 @@ fn tagged(tag: TextSpan, into: &mut Vec<TextSpan>) {
     into.push(room.clone());
     into.push(tag);
     into.push(room);
+}
+
+/// Words with no styling and nothing to press.
+fn plain(text: String) -> TextSpan {
+    TextSpan {
+        text,
+        bold: false,
+        italic: false,
+        mono: false,
+        press: None,
+        faint: false,
+        emoji: None,
+    }
+}
+
+/// Markdown laid out as a message's body is, `inset` from the row's left and
+/// `width` wide, from `y` down; answers where it ended.
+///
+/// The body goes through this and so does what a webhook's attachment
+/// carries. The attachment used to be flattened to plain lines on the way in,
+/// which is why a Jira notice lost its bullets and its italics and a link in
+/// it could not be pressed.
+#[allow(clippy::too_many_arguments)]
+fn flow(
+    fonts: &mut Fonts,
+    nodes: &[Node],
+    inset: f32,
+    width: f32,
+    mut y: f32,
+    theme: &Theme,
+    opened: bool,
+    said: &str,
+    blocks: &mut Vec<Block>,
+) -> f32 {
+    let mut pieces = Vec::new();
+    lines_of(nodes, 0.0, &mut pieces);
+
+    // Which pieces sit tight against the one after them, worked out before the
+    // pass so each can be asked about its neighbour.
+    let tight: Vec<bool> = pieces
+        .iter()
+        .map(|piece| matches!(piece, Piece::Line(line) if line.tight))
+        .collect();
+
+    // One pass, in the order the message was written. Two passes -- every line
+    // and then every code block -- is what put a message's names above all of
+    // its blocks instead of each name above its own.
+    for (at, piece) in pieces.into_iter().enumerate() {
+        // Nothing between two lines of one list. The ordinary gap everywhere
+        // else, the end of a list included.
+        let gap = match (tight.get(at), tight.get(at + 1)) {
+            (Some(true), Some(true)) => 0.0,
+            _ => theme.block_gap,
+        };
+        let line = match piece {
+            Piece::Line(line) => line,
+            Piece::Code(block) => {
+                let from = blocks.len();
+                y += code_block(fonts, &block, y, theme, opened, said, blocks);
+                // Laid for the message's own column; inside a card it moves in
+                // with everything else and is cut to the card's width.
+                if inset > 0.0 {
+                    for block in &mut blocks[from..] {
+                        block.x += inset;
+                        block.wrap = (block.wrap - inset).max(40.0);
+                    }
+                }
+                continue;
+            }
+            // A hairline across the column, and the air either side of it is
+            // the gap every block gets. It used to be a blank line: the room a
+            // rule takes, with no rule drawn in it.
+            Piece::Rule => {
+                blocks.push(Block {
+                    y,
+                    x: inset,
+                    height: theme.rule_height,
+                    lines: 0,
+                    kind: Kind::Rule,
+                    spans: Vec::new(),
+                    size: theme.body_size,
+                    wrap: width,
+                });
+                y += theme.rule_height + gap;
+                continue;
+            }
+        };
+        let x = inset + line.indent * theme.indent;
+        let wrap = inset + width - x;
+        let count = line_count(fonts, &line, wrap, theme);
+        let height = count as f32 * theme.line_height;
+        // In the room the indent already made, at the same height as the first
+        // line of the item -- so the words wrap under themselves rather than
+        // under the dot, which is what a hanging indent is.
+        if !line.marker.is_empty() {
+            blocks.push(Block {
+                y,
+                x: (x - theme.indent).max(inset),
+                height: theme.line_height,
+                lines: 1,
+                kind: Kind::Text,
+                spans: vec![plain(line.marker.clone())],
+                size: theme.body_size,
+                wrap: theme.indent,
+            });
+        }
+        // A heading is not bigger, only heavier: `.heading { font-weight:
+        // 600 }` and nothing about size. Scaling it by 1.15 made every `#` in
+        // a message louder than the app draws it.
+        let size = theme.body_size;
+        blocks.push(Block {
+            y,
+            x,
+            height,
+            lines: count,
+            kind: if line.quoted { Kind::Quote } else { Kind::Text },
+            spans: line.spans,
+            size,
+            wrap,
+        });
+        y += height + gap;
+    }
+    y
+}
+
+/// One run of words as a block of its own, measured where it lands: a card's
+/// title, a field's name. Answers where it ended.
+#[allow(clippy::too_many_arguments)]
+fn words(
+    fonts: &mut Fonts,
+    text: &str,
+    bold: bool,
+    press: Option<Press>,
+    x: f32,
+    width: f32,
+    y: f32,
+    theme: &Theme,
+    blocks: &mut Vec<Block>,
+) -> f32 {
+    let line = Line {
+        quoted: false,
+        spans: vec![TextSpan {
+            text: text.to_string(),
+            bold,
+            italic: false,
+            mono: false,
+            press,
+            faint: false,
+            emoji: None,
+        }],
+        indent: 0.0,
+        heading: false,
+        marker: String::new(),
+        tight: false,
+    };
+    let count = line_count(fonts, &line, width, theme);
+    let height = count as f32 * theme.line_height;
+    blocks.push(Block {
+        y,
+        x,
+        height,
+        lines: count,
+        kind: Kind::Text,
+        spans: line.spans,
+        size: theme.body_size,
+        wrap: width,
+    });
+    y + height
+}
+
+/// An attachment's fields: the name over the value, two to a row when both
+/// say they are short, the whole width when not -- which is how the official
+/// client sets out a Jira notice's Assignee beside its Priority.
+#[allow(clippy::too_many_arguments)]
+fn fields(
+    fonts: &mut Fonts,
+    fields: &[matterless_render::AttachmentField],
+    inset: f32,
+    width: f32,
+    mut y: f32,
+    theme: &Theme,
+    opened: bool,
+    said: &str,
+    blocks: &mut Vec<Block>,
+) -> f32 {
+    let mut at = 0;
+    while at < fields.len() {
+        let field = &fields[at];
+        let beside = fields.get(at + 1).filter(|next| field.short && next.short);
+        match beside {
+            Some(next) => {
+                let column = ((width - theme.indent) / 2.0).max(40.0);
+                let left = field_cell(fonts, field, inset, column, y, theme, opened, said, blocks);
+                let right = field_cell(
+                    fonts,
+                    next,
+                    inset + column + theme.indent,
+                    column,
+                    y,
+                    theme,
+                    opened,
+                    said,
+                    blocks,
+                );
+                y = left.max(right);
+                at += 2;
+            }
+            None => {
+                y = field_cell(fonts, field, inset, width, y, theme, opened, said, blocks);
+                at += 1;
+            }
+        }
+    }
+    y
+}
+
+/// One field: its name in bold, and under it the value as markdown.
+#[allow(clippy::too_many_arguments)]
+fn field_cell(
+    fonts: &mut Fonts,
+    field: &matterless_render::AttachmentField,
+    x: f32,
+    width: f32,
+    mut y: f32,
+    theme: &Theme,
+    opened: bool,
+    said: &str,
+    blocks: &mut Vec<Block>,
+) -> f32 {
+    if !field.title.trim().is_empty() {
+        y = words(fonts, &field.title, true, None, x, width, y, theme, blocks);
+    }
+    if field.value.is_empty() {
+        return y + theme.block_gap;
+    }
+    flow(
+        fonts,
+        &field.value,
+        x,
+        width,
+        y,
+        theme,
+        opened,
+        said,
+        blocks,
+    )
 }
 
 /// One paragraph-like run of inline content, and how far it is pushed in.
@@ -1024,18 +1273,6 @@ pub fn lay_out_opened(fonts: &mut Fonts, row: &Row, theme: &Theme, opened: bool)
         format!("{:02}:{:02}", day / 3600, (day % 3600) / 60)
     }
 
-    fn plain(text: String) -> TextSpan {
-        TextSpan {
-            text,
-            bold: false,
-            italic: false,
-            mono: false,
-            press: None,
-            faint: false,
-            emoji: None,
-        }
-    }
-
     let (nodes, post, header) = match row {
         Row::DateSeparator { epoch_day } => {
             return RowLayout {
@@ -1174,6 +1411,19 @@ pub fn lay_out_opened(fonts: &mut Fonts, row: &Row, theme: &Theme, opened: bool)
                 faint: false,
                 emoji: None,
             });
+            // As the official client marks one: the name is the integration's
+            // own, and nothing else would say that no person wrote this.
+            if post.bot {
+                spans.push(TextSpan {
+                    text: "  BOT".to_string(),
+                    bold: true,
+                    italic: false,
+                    mono: false,
+                    press: None,
+                    faint: true,
+                    emoji: None,
+                });
+            }
             spans.push(plain("   ".to_string()));
             spans.push(TextSpan {
                 text: clock(post.create_at, theme.utc_offset_minutes),
@@ -1217,85 +1467,17 @@ pub fn lay_out_opened(fonts: &mut Fonts, row: &Row, theme: &Theme, opened: bool)
     // Which message a "show the rest" would be about.
     let said = post.map(|post| post.post_id.as_str()).unwrap_or_default();
 
-    let mut pieces = Vec::new();
-    lines_of(nodes, 0.0, &mut pieces);
-
-    // Which pieces sit tight against the one after them, worked out before the
-    // pass so each can be asked about its neighbour.
-    let tight: Vec<bool> = pieces
-        .iter()
-        .map(|piece| matches!(piece, Piece::Line(line) if line.tight))
-        .collect();
-
-    // One pass, in the order the message was written. Two passes -- every line
-    // and then every code block -- is what put a message's names above all of
-    // its blocks instead of each name above its own.
-    for (at, piece) in pieces.into_iter().enumerate() {
-        // Nothing between two lines of one list. The ordinary gap everywhere
-        // else, the end of a list included.
-        let gap = match (tight.get(at), tight.get(at + 1)) {
-            (Some(true), Some(true)) => 0.0,
-            _ => theme.block_gap,
-        };
-        let line = match piece {
-            Piece::Line(line) => line,
-            Piece::Code(block) => {
-                y += code_block(fonts, &block, y, theme, opened, said, &mut blocks);
-                continue;
-            }
-            // A hairline across the column, and the air either side of it is
-            // the gap every block gets. It used to be a blank line: the room a
-            // rule takes, with no rule drawn in it.
-            Piece::Rule => {
-                blocks.push(Block {
-                    y,
-                    x: 0.0,
-                    height: theme.rule_height,
-                    lines: 0,
-                    kind: Kind::Rule,
-                    spans: Vec::new(),
-                    size: theme.body_size,
-                    wrap: theme.text_width(),
-                });
-                y += theme.rule_height + gap;
-                continue;
-            }
-        };
-        let x = line.indent * theme.indent;
-        let wrap = theme.text_width() - x;
-        let count = line_count(fonts, &line, wrap, theme);
-        let height = count as f32 * theme.line_height;
-        // In the room the indent already made, at the same height as the first
-        // line of the item -- so the words wrap under themselves rather than
-        // under the dot, which is what a hanging indent is.
-        if !line.marker.is_empty() {
-            blocks.push(Block {
-                y,
-                x: (x - theme.indent).max(0.0),
-                height: theme.line_height,
-                lines: 1,
-                kind: Kind::Text,
-                spans: vec![plain(line.marker.clone())],
-                size: theme.body_size,
-                wrap: theme.indent,
-            });
-        }
-        // A heading is not bigger, only heavier: `.heading { font-weight:
-        // 600 }` and nothing about size. Scaling it by 1.15 made every `#` in
-        // a message louder than the app draws it.
-        let size = theme.body_size;
-        blocks.push(Block {
-            y,
-            x,
-            height,
-            lines: count,
-            kind: if line.quoted { Kind::Quote } else { Kind::Text },
-            spans: line.spans,
-            size,
-            wrap,
-        });
-        y += height + gap;
-    }
+    y = flow(
+        fonts,
+        nodes,
+        0.0,
+        theme.text_width(),
+        y,
+        theme,
+        opened,
+        said,
+        &mut blocks,
+    );
 
     if attachments > 0 {
         // The server gives every attachment its drawn size, so this is the one
@@ -1404,67 +1586,97 @@ pub fn lay_out_opened(fonts: &mut Fonts, row: &Row, theme: &Theme, opened: bool)
     // What a webhook sent, which for a great many posts here *is* the message:
     // a bot puts its whole payload in `attachments` and leaves the body empty,
     // so a post with none of this drawn is a post with nothing on it at all.
+    //
+    // As the official client sets it out: the pretext above the card in the
+    // message's own column, and inside the card a title that is a link when it
+    // has one, the text as markdown, and the fields as a grid of name over
+    // value. Each card is one `Card` block spanning the lot, which is what its
+    // ground and its coloured bar are drawn to; the words inside are ordinary
+    // text, so a link in them can be pressed and an emoji in them drawn.
     for attached in post.map(|post| post.attachments.as_slice()).unwrap_or(&[]) {
+        if !attached.pretext.is_empty() {
+            y = flow(
+                fonts,
+                &attached.pretext,
+                0.0,
+                theme.text_width(),
+                y,
+                theme,
+                opened,
+                said,
+                &mut blocks,
+            );
+        }
+        let top = y;
+        let card = blocks.len();
+        blocks.push(Block {
+            y: top,
+            x: 0.0,
+            height: 0.0,
+            lines: 0,
+            kind: Kind::Card,
+            spans: Vec::new(),
+            size: theme.body_size,
+            wrap: theme.text_width(),
+        });
         // The card's own room, set aside before its first line so that the
         // ground drawn behind it lands on space this reserved rather than on
         // the author's name above.
         y += theme.attached_padding;
-        let x = theme.quote_bar + theme.indent / 2.0;
-        let wrap = (theme.text_width() - x - theme.indent / 2.0).max(40.0);
-        let mut push = |text: &str, bold: bool, faint: bool, fonts: &mut Fonts| {
-            if text.trim().is_empty() {
-                return;
-            }
-            let style = crate::Style {
-                size: theme.attached_size,
-                line_height: theme.line_height,
-                bold,
-                italic: false,
-                mono: false,
-            };
-            let count = crate::extent_of(fonts, text, wrap, style).lines.max(1);
-            blocks.push(Block {
-                y,
-                x,
-                height: count as f32 * theme.line_height,
-                lines: count,
-                kind: Kind::Attached,
-                spans: vec![TextSpan {
-                    text: text.to_string(),
-                    bold,
-                    italic: false,
-                    mono: false,
-                    faint,
-                    press: None,
-                    emoji: None,
-                }],
-                size: theme.attached_size,
-                wrap,
-            });
-            y += count as f32 * theme.line_height;
-        };
-        // Keeping the lines: a notice is written in them, and this is the
-        // whole of the message when a webhook leaves the body empty.
-        let plain_of = matterless_render::markdown::plain_lines;
-        push(&plain_of(&attached.pretext), false, true, fonts);
-        push(
-            attached.title.as_deref().unwrap_or_default(),
-            true,
-            false,
-            fonts,
-        );
-        push(&plain_of(&attached.text), false, false, fonts);
-        // A field is a name and a value, and the app sets them as a pair on
-        // one line rather than as a table this renderer has no grid for.
-        for field in &attached.fields {
-            push(
-                &format!("{}: {}", field.title, plain_of(&field.value)),
-                false,
-                false,
+        let inset = theme.quote_bar + theme.indent / 2.0;
+        let inner = (theme.text_width() - inset - theme.indent / 2.0).max(40.0);
+        let first = y;
+        if let Some(title) = attached
+            .title
+            .as_deref()
+            .filter(|title| !title.trim().is_empty())
+        {
+            let press = attached.title_link.as_deref().and_then(openable);
+            y = words(
                 fonts,
+                title,
+                true,
+                press,
+                inset,
+                inner,
+                y,
+                theme,
+                &mut blocks,
+            );
+            y += theme.block_gap;
+        }
+        if !attached.text.is_empty() {
+            y = flow(
+                fonts,
+                &attached.text,
+                inset,
+                inner,
+                y,
+                theme,
+                opened,
+                said,
+                &mut blocks,
             );
         }
-        y += theme.attached_padding + theme.block_gap;
+        y = fields(
+            fonts,
+            &attached.fields,
+            inset,
+            inner,
+            y,
+            theme,
+            opened,
+            said,
+            &mut blocks,
+        );
+        // Every piece leaves a gap after itself for whatever follows, and what
+        // follows the last one is the card's own padding instead.
+        if y > first {
+            y -= theme.block_gap;
+        }
+        y += theme.attached_padding;
+        blocks[card].height = y - top;
+        y += theme.block_gap;
     }
 
     // A link or permalink card, as a stack of lines rather than one block: a
@@ -2961,17 +3173,223 @@ mod tests {
             .iter()
             .find(|block| block.kind == Kind::Header)
             .expect("a header");
-        let first = laid
+        let card = laid
             .blocks
             .iter()
-            .find(|block| block.kind == Kind::Attached)
-            .expect("an attachment");
+            .find(|block| block.kind == Kind::Card)
+            .expect("a card");
         assert!(
-            first.y - (header.y + header.height) >= theme.attached_padding,
-            "the card starts {}px below the header and reaches {}px up for its \
-             padding, so it is drawn over the name",
-            first.y - (header.y + header.height),
+            card.y >= header.y + header.height,
+            "the card starts {}px above the header's foot, so it is drawn over the name",
+            header.y + header.height - card.y
+        );
+        let first = words_in(&laid, card).next().expect("something in the card");
+        assert!(
+            first.y - card.y >= theme.attached_padding,
+            "the card's first words are {}px inside its top, not {}",
+            first.y - card.y,
             theme.attached_padding
+        );
+    }
+
+    /// The words inside a card, in order.
+    fn words_in<'a>(laid: &'a RowLayout, card: &'a Block) -> impl Iterator<Item = &'a Block> {
+        laid.blocks.iter().filter(move |block| {
+            block.kind == Kind::Text
+                && block.y >= card.y
+                && block.y + block.height <= card.y + card.height + 0.5
+        })
+    }
+
+    /// A webhook post with one attachment built from these parts.
+    fn attached(
+        theme: &Theme,
+        fonts: &mut Fonts,
+        title: Option<(&str, Option<&str>)>,
+        text: &str,
+        fields: Vec<matterless_render::AttachmentField>,
+    ) -> RowLayout {
+        let mut said = post(Vec::new());
+        said.bot = true;
+        said.author_name = "jira".into();
+        said.body_is_attachment_only = true;
+        said.attachments = vec![matterless_render::Attachment {
+            color: Some("#e01e5a".into()),
+            pretext: Vec::new(),
+            title: title.map(|(title, _)| title.to_string()),
+            title_link: title.and_then(|(_, link)| link.map(str::to_string)),
+            text: matterless_render::markdown::parse(text),
+            fields,
+        }];
+        lay_out(fonts, &Row::Post { post: said }, theme)
+    }
+
+    fn field(title: &str, value: &str, short: bool) -> matterless_render::AttachmentField {
+        matterless_render::AttachmentField {
+            title: title.into(),
+            value: matterless_render::markdown::parse(value),
+            short,
+        }
+    }
+
+    /// What an attachment says is markdown, and it is drawn as markdown: the
+    /// steps of a Jira bug keep their bullets and read as three lines, not as
+    /// one run-on paragraph, and an emphasis stays emphasised.
+    #[test]
+    fn an_attachment_keeps_its_markdown() {
+        let mut fonts = Fonts::new();
+        let theme = Theme::default();
+        let laid = attached(
+            &theme,
+            &mut fonts,
+            None,
+            "Steps to reproduce\n\n- open the map\n- zoom out\n- crash\n\n*seen twice*",
+            Vec::new(),
+        );
+        let card = laid
+            .blocks
+            .iter()
+            .find(|block| block.kind == Kind::Card)
+            .expect("a card");
+        let inside: Vec<&Block> = words_in(&laid, card).collect();
+        let bullets = inside
+            .iter()
+            .filter(|block| {
+                block
+                    .spans
+                    .iter()
+                    .any(|span| span.text.contains('\u{2022}'))
+            })
+            .count();
+        assert_eq!(bullets, 3, "one bullet for each step");
+        assert!(
+            inside
+                .iter()
+                .flat_map(|block| &block.spans)
+                .any(|span| span.italic && span.text.contains("seen twice")),
+            "the emphasis was flattened"
+        );
+    }
+
+    /// A title with somewhere to go is a link, as the official client draws the
+    /// bug's id and summary at the top of a Jira notice.
+    #[test]
+    fn an_attachment_title_is_a_link_when_it_has_one() {
+        let mut fonts = Fonts::new();
+        let theme = Theme::default();
+        let laid = attached(
+            &theme,
+            &mut fonts,
+            Some((
+                "CUR-1234 The map crashes",
+                Some("https://example.invalid/CUR-1234"),
+            )),
+            "",
+            Vec::new(),
+        );
+        let title = laid
+            .blocks
+            .iter()
+            .flat_map(|block| &block.spans)
+            .find(|span| span.text == "CUR-1234 The map crashes")
+            .expect("the title");
+        assert!(title.bold);
+        assert_eq!(
+            title.press,
+            Some(Press::Link("https://example.invalid/CUR-1234".into()))
+        );
+        // And never a scheme this window would hand to the shell.
+        let laid = attached(
+            &theme,
+            &mut fonts,
+            Some(("Run me", Some("file:///C:/Windows/System32/calc.exe"))),
+            "",
+            Vec::new(),
+        );
+        let title = laid
+            .blocks
+            .iter()
+            .flat_map(|block| &block.spans)
+            .find(|span| span.text == "Run me")
+            .expect("the title");
+        assert_eq!(title.press, None);
+    }
+
+    /// Two short fields share a row, name over value; a long one takes the
+    /// whole width below them.
+    #[test]
+    fn short_fields_sit_side_by_side() {
+        let mut fonts = Fonts::new();
+        let theme = Theme::default();
+        let laid = attached(
+            &theme,
+            &mut fonts,
+            None,
+            "",
+            vec![
+                field("Assignee", "ada", true),
+                field("Priority", "High", true),
+                field(
+                    "Description",
+                    "It crashes when the map is zoomed out.",
+                    false,
+                ),
+            ],
+        );
+        let named = |name: &str| {
+            laid.blocks
+                .iter()
+                .find(|block| block.spans.iter().any(|span| span.text == name))
+                .unwrap_or_else(|| panic!("no {name}"))
+        };
+        let (assignee, priority, description) =
+            (named("Assignee"), named("Priority"), named("Description"));
+        assert_eq!(assignee.y, priority.y, "the two short fields are one row");
+        assert!(
+            priority.x > assignee.x + assignee.wrap - 1.0,
+            "and side by side"
+        );
+        assert!(description.y > assignee.y, "the long one is below them");
+        assert_eq!(description.x, assignee.x, "starting at the card's left");
+        assert!(assignee.spans[0].bold, "a field's name is bold");
+        let value = named("ada");
+        assert!(value.y > assignee.y, "the value is under its name");
+        assert_eq!(value.x, assignee.x);
+    }
+
+    /// The card spans everything in it, so its ground and its bar reach the
+    /// last line and no further than the next thing on the row.
+    #[test]
+    fn a_card_spans_what_is_in_it() {
+        let mut fonts = Fonts::new();
+        let theme = Theme::default();
+        let laid = attached(
+            &theme,
+            &mut fonts,
+            Some(("A title", None)),
+            "one line\n\nand another",
+            vec![field("Status", "Open", true)],
+        );
+        let card = laid
+            .blocks
+            .iter()
+            .find(|block| block.kind == Kind::Card)
+            .expect("a card");
+        let last = laid
+            .blocks
+            .iter()
+            .filter(|block| block.kind == Kind::Text && block.y >= card.y)
+            .map(|block| block.y + block.height)
+            .fold(0.0_f32, f32::max);
+        assert!(
+            (card.y + card.height - last - theme.attached_padding).abs() < 0.5,
+            "the card ends {}px below its last line, not its padding of {}",
+            card.y + card.height - last,
+            theme.attached_padding
+        );
+        assert!(
+            laid.height >= card.y + card.height,
+            "and the row makes room for it"
         );
     }
 
@@ -2981,12 +3399,19 @@ mod tests {
         let mut fonts = Fonts::new();
         let theme = Theme::default();
         let laid = webhook(&theme, &mut fonts);
-        let attached = laid
+        let card = laid
             .blocks
             .iter()
-            .find(|block| block.kind == Kind::Attached)
-            .expect("an attachment");
-        let said = &attached.spans.first().expect("some words").text;
+            .find(|block| block.kind == Kind::Card)
+            .expect("a card");
+        let attached = words_in(&laid, card).next().expect("some words");
+        // Across its spans: through the body's path a soft break is a span of
+        // its own rather than a character inside one.
+        let said: String = attached
+            .spans
+            .iter()
+            .map(|span| span.text.as_str())
+            .collect();
         assert!(
             said.contains('\n'),
             "the two lines were run together: {said:?}"
