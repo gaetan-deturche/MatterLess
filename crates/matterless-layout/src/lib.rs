@@ -125,20 +125,36 @@ impl Fonts {
 
     pub fn new() -> Self {
         let mut system = FontSystem::new();
-        MONO.get_or_init(|| {
-            let query = cosmic_text::fontdb::Query {
-                families: &[cosmic_text::fontdb::Family::Monospace],
-                ..Default::default()
+        let mono = MONO.get_or_init(|| {
+            let db = system.db();
+            let named = |family| {
+                let query = cosmic_text::fontdb::Query {
+                    families: &[family],
+                    ..Default::default()
+                };
+                db.query(&query)
+                    .and_then(|id| db.face(id))
+                    .map(|face| face.families[0].0.clone())
             };
-            system
-                .db()
-                .query(&query)
-                .and_then(|id| system.db().face(id))
-                .map(|face| face.families[0].0.clone())
-                // No monospace face at all. `Family::Monospace` would find
-                // nothing either, so the name is only a label.
+            // The generic names a face this machine may not have: on Windows it
+            // found nothing, and every piece of code was set in the body face
+            // with a code ground behind it. Then the faces Mattermost itself
+            // asks for on Windows, then anything that says it is monospaced.
+            named(cosmic_text::fontdb::Family::Monospace)
+                .or_else(|| {
+                    ["Consolas", "Cascadia Mono", "Courier New"]
+                        .into_iter()
+                        .find_map(|name| named(cosmic_text::fontdb::Family::Name(name)))
+                })
+                .or_else(|| {
+                    db.faces()
+                        .find(|face| face.monospaced)
+                        .map(|face| face.families[0].0.clone())
+                })
+                // No monospace face at all, so the name is only a label.
                 .unwrap_or_else(|| "monospace".to_string())
         });
+        system.db_mut().set_monospace_family(mono.clone());
         // The interface's own marks, bundled rather than hoped for: a system
         // symbol font has *a* glyph for most of these and they do not belong
         // to one another. Loaded into the same `FontSystem` everything else
