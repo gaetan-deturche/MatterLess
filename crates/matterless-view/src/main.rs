@@ -2893,6 +2893,11 @@ impl App {
         } else if name == THREAD_COMPOSER {
             self.thread_body()
                 .and_then(|body| self.thread_composer.misspelled_at(body, x, y))
+        } else if name == matterless_view::edit::NAME {
+            self.edited_row().and_then(|row| {
+                let field = self.edit.field(row, self.stream_rect());
+                self.edit.box_of.misspelled_at(field, x, y)
+            })
         } else {
             return;
         };
@@ -2961,6 +2966,7 @@ impl App {
             let box_of = match *name {
                 composer::NAME => &mut self.composer,
                 THREAD_COMPOSER => &mut self.thread_composer,
+                matterless_view::edit::NAME => &mut self.edit.box_of,
                 _ => return,
             };
             box_of.replace_word(&mut self.fonts, line, start..end, with);

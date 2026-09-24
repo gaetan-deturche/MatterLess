@@ -161,9 +161,9 @@ impl Speller {
                     out.push(one);
                 }
             }
-            // Enough from the language the sentence is in: the other one only
-            // tops the list up.
-            if leaning.is_some() && out.len() >= SUGGESTIONS {
+            // The language the sentence is in answers alone when it has an
+            // answer: topping it up put "magneto" under a French "netoyage".
+            if leaning.is_some() && !out.is_empty() {
                 break;
             }
         }
@@ -401,6 +401,10 @@ mod tests {
             french.first().map(String::as_str),
             Some("nettoyage"),
             "{french:?}"
+        );
+        assert!(
+            !french.iter().any(|one| one == "magneto"),
+            "the English dictionary answered a French sentence: {french:?}"
         );
         let english = speller().suggest("crsh", "I have a crsh when moving");
         assert_eq!(
