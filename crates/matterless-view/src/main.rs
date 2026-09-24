@@ -7115,9 +7115,10 @@ impl App {
         }
 
         drop(probe);
-        if self.on_threads() {
-            return scene;
-        }
+        // Every overlay after this is drawn on the Threads view too. It used to
+        // stop here when the view was open, which left the Drafts pane an empty
+        // band beside the list -- its room taken, nothing drawn in it -- and the
+        // switcher, the profile card, Settings, menus and tooltips invisible.
         let _probe = matterless_view::timing::watch("  the overlays", 0, "");
 
         // The list under the strip's field, over the conversation: it hangs
