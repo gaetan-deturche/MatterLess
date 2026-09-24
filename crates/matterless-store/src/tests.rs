@@ -1857,3 +1857,37 @@ fn membership_is_asked_of_the_member_rows() {
     assert!(store.is_member("c1", "me").unwrap());
     assert!(!store.is_member("c1", "somebody-else").unwrap());
 }
+
+/// A post held from before picture sizes were kept is rewritten when the
+/// server's copy has them, though nothing about the post moved -- and a copy
+/// that adds nothing is still no change.
+#[test]
+fn a_post_missing_its_picture_sizes_takes_them() {
+    let store = store();
+    let held = post("p1", "c1", 100, 100);
+    store.upsert_posts(std::slice::from_ref(&held)).unwrap();
+    let mut measured = held.clone();
+    measured.metadata.images.insert(
+        "https://media.example.com/a.gif".into(),
+        matterless_core::model::ImageMeta {
+            width: 216,
+            height: 200,
+            format: "gif".into(),
+            frame_count: 71,
+        },
+    );
+    let outcomes = store.upsert_posts(&[measured.clone()]).unwrap();
+    assert_eq!(
+        outcomes[0].change,
+        PostChange::Updated,
+        "the sizes were not taken"
+    );
+    let kept = store.post("p1").unwrap().expect("held");
+    assert_eq!(kept.metadata.images.len(), 1);
+    let outcomes = store.upsert_posts(&[measured]).unwrap();
+    assert_eq!(
+        outcomes[0].change,
+        PostChange::Unchanged,
+        "the same copy again"
+    );
+}

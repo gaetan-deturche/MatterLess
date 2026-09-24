@@ -267,6 +267,9 @@ pub enum ImageVariant {
     /// animation or a vector, whose "preview" would be a still frame or
     /// nothing at all.
     Original,
+    /// A picture the message's text links to, from its own host: the file's
+    /// id is its URL. What Mattermost's GIF picker posts.
+    Linked,
 }
 
 /// The largest a lone inline image is drawn.
@@ -441,6 +444,128 @@ fn files_of(post: &Post, options: &PlanOptions) -> Vec<FileRef> {
         .iter()
         .map(|file| FileRef::from_info(file, layout))
         .collect()
+}
+
+/// The pictures a message's text links to that the server measured, in the
+/// order they appear. Only those: the size is what lets the row reserve its
+/// height, and a URL the server did not look at is not fetched from here.
+fn linked_pictures(nodes: &[markdown::Node], post: &Post) -> Vec<FileRef> {
+    fn walk<'a>(nodes: &'a [markdown::Node], into: &mut Vec<(&'a str, &'a str)>) {
+        for node in nodes {
+            match node {
+                markdown::Node::Image { url, alt } => into.push((url, alt)),
+                markdown::Node::Emphasis { children }
+                | markdown::Node::Strong { children }
+                | markdown::Node::Strike { children }
+                | markdown::Node::Link { children, .. }
+                | markdown::Node::Paragraph { children }
+                | markdown::Node::Heading { children, .. }
+                | markdown::Node::Blockquote { children } => walk(children, into),
+                markdown::Node::List { items, .. } => {
+                    for item in items {
+                        walk(item, into);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    if post.metadata.images.is_empty() {
+        return Vec::new();
+    }
+    let mut found = Vec::new();
+    walk(nodes, &mut found);
+    let mut seen = std::collections::HashSet::new();
+    found
+        .into_iter()
+        .filter(|(url, _)| url.starts_with("https://") && seen.insert(*url))
+        .filter_map(|(url, alt)| {
+            let measured = post.metadata.images.get(url)?;
+            if measured.width <= 0 || measured.height <= 0 {
+                return None;
+            }
+            let (box_width, box_height) = fit_box(measured.width, measured.height, IMAGE_BOX);
+            Some(FileRef {
+                id: url.to_string(),
+                name: alt.to_string(),
+                extension: measured.format.clone(),
+                size: 0,
+                mime_type: format!("image/{}", measured.format),
+                width: measured.width,
+                height: measured.height,
+                image: true,
+                video: false,
+                variant: ImageVariant::Linked,
+                mini_preview: None,
+                box_width,
+                box_height,
+                archived: false,
+            })
+        })
+        .collect()
+}
+
+/// The text without the pictures drawn below it: a paragraph that held only a
+/// picture goes, and one left ending in a line break loses the break.
+fn without_pictures(
+    nodes: &[markdown::Node],
+    urls: &std::collections::HashSet<&str>,
+) -> Vec<markdown::Node> {
+    use markdown::Node;
+    let blank = |node: &Node| match node {
+        Node::SoftBreak | Node::HardBreak => true,
+        Node::Text { value } => value.trim().is_empty(),
+        _ => false,
+    };
+    let mut out = Vec::with_capacity(nodes.len());
+    for node in nodes {
+        let kept = match node {
+            Node::Image { url, .. } if urls.contains(url.as_str()) => None,
+            Node::Paragraph { children } => {
+                let mut children = without_pictures(children, urls);
+                while children.last().is_some_and(blank) {
+                    children.pop();
+                }
+                while children.first().is_some_and(blank) {
+                    children.remove(0);
+                }
+                (!children.is_empty()).then_some(Node::Paragraph { children })
+            }
+            Node::Link { href, children } => {
+                let children = without_pictures(children, urls);
+                (!children.is_empty()).then(|| Node::Link {
+                    href: href.clone(),
+                    children,
+                })
+            }
+            Node::Emphasis { children } => Some(Node::Emphasis {
+                children: without_pictures(children, urls),
+            }),
+            Node::Strong { children } => Some(Node::Strong {
+                children: without_pictures(children, urls),
+            }),
+            Node::Strike { children } => Some(Node::Strike {
+                children: without_pictures(children, urls),
+            }),
+            Node::Heading { level, children } => Some(Node::Heading {
+                level: *level,
+                children: without_pictures(children, urls),
+            }),
+            Node::Blockquote { children } => Some(Node::Blockquote {
+                children: without_pictures(children, urls),
+            }),
+            Node::List { ordered, items } => Some(Node::List {
+                ordered: *ordered,
+                items: items
+                    .iter()
+                    .map(|item| without_pictures(item, urls))
+                    .collect(),
+            }),
+            other => Some(other.clone()),
+        };
+        out.extend(kept);
+    }
+    out
 }
 
 /// Whether a file can be drawn as a picture at all.
@@ -1095,6 +1220,17 @@ fn build_post_row(post: &Post, options: &PlanOptions) -> PostRow {
         Some(cached) => Arc::clone(cached),
         None => Arc::new(markdown::parse(&post.message)),
     };
+    // Pictures the text links to are drawn as pictures, and their alt text
+    // leaves the prose: a GIF from the picker read as "Sad Mad Men GIF".
+    let linked = linked_pictures(&nodes, post);
+    let nodes = match linked.is_empty() {
+        true => nodes,
+        false => {
+            let urls: std::collections::HashSet<&str> =
+                linked.iter().map(|file| file.id.as_str()).collect();
+            Arc::new(without_pictures(&nodes, &urls))
+        }
+    };
     let (author_name, bot) = author_of(post, options);
     PostRow {
         post_id: post.id.clone(),
@@ -1113,7 +1249,7 @@ fn build_post_row(post: &Post, options: &PlanOptions) -> PostRow {
         body_is_attachment_only: nodes.is_empty() && !attachments.is_empty(),
         nodes,
         reactions: summarise_reactions(post, options),
-        files: files_of(post, options),
+        files: linked.into_iter().chain(files_of(post, options)).collect(),
         attachments,
         pending: options.pending.contains(&post.id),
         failed: options.failed.contains(&post.id),

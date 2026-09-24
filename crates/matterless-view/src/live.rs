@@ -1536,7 +1536,7 @@ async fn run(
                                 // session is going away.
                                 Err(_) => return,
                             };
-                            match rest.fetch_bytes(&route).await {
+                            match fetch_route(&rest, &route).await {
                                 Ok(Some((bytes, kind))) => {
                                     off_the_loop(move || {
                                         take_in(&key, &bytes, &kind, width, height, shown, pictures.as_deref(), &wake)
@@ -1670,6 +1670,41 @@ pub fn on_disk(key: &str) -> &str {
     key.split_once('@').map_or(key, |(file, _)| file)
 }
 
+/// Where a linked picture's key leads. Filled by `linked_key` from URLs the
+/// server measured, so a key only ever resolves to one of those.
+static LINKS: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, String>>> =
+    std::sync::LazyLock::new(Default::default);
+
+/// The key for a picture a message links to: a hash of its URL, because the
+/// URL itself is often longer than a file name may be on this system.
+pub fn linked_key(url: &str) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    url.hash(&mut hasher);
+    let key = format!("link/{:016x}", hasher.finish());
+    LINKS
+        .lock()
+        .unwrap_or_else(|held| held.into_inner())
+        .insert(key.clone(), url.to_string());
+    key
+}
+
+/// The most a linked picture may weigh. A GIF from the picker is well under a
+/// megabyte; this is for the one that is somebody's screen recording.
+const LINKED_BYTES: usize = 32 * 1024 * 1024;
+
+/// Fetches whatever a route names: this server's for a path, the picture's own
+/// host -- without the session -- for a linked one.
+async fn fetch_route(
+    rest: &RestClient,
+    route: &str,
+) -> matterless_core::Result<Option<(Vec<u8>, String)>> {
+    match route.starts_with("https://") {
+        true => rest.fetch_outside(route, LINKED_BYTES).await,
+        false => rest.fetch_bytes(route).await,
+    }
+}
+
 pub fn route_for(key: &str) -> Option<String> {
     let path = key.split('?').next()?;
     let (kind, id) = path.trim_start_matches('/').split_once('/')?;
@@ -1677,6 +1712,12 @@ pub fn route_for(key: &str) -> Option<String> {
         return None;
     }
     match kind {
+        // Somewhere else, and only where `linked_key` said.
+        "link" => LINKS
+            .lock()
+            .unwrap_or_else(|held| held.into_inner())
+            .get(path)
+            .cloned(),
         "avatar" => Some(format!("/users/{id}/image")),
         "team" => Some(format!("/teams/{id}/image")),
         "emoji" => Some(format!("/emoji/{id}/image")),
@@ -2669,6 +2710,17 @@ mod routes {
 
     /// Nothing a window asks for may leave the routes listed here: an id is a
     /// server-generated token, and anything else gets no request made for it.
+    /// A linked picture's key leads to the URL it was made from, and a key of
+    /// that shape nobody made leads nowhere.
+    #[test]
+    fn a_linked_key_leads_only_where_it_was_made() {
+        let url = "https://media0.giphy.com/media/H1YuBxdnlHITC/200.gif?cid=abc&ct=g";
+        let key = super::linked_key(url);
+        assert!(key.len() < 40, "a file name, not a URL: {key}");
+        assert_eq!(route_for(&key).as_deref(), Some(url));
+        assert_eq!(route_for("link/0123456789abcdef"), None);
+    }
+
     #[test]
     fn a_malformed_key_asks_for_nothing() {
         assert_eq!(

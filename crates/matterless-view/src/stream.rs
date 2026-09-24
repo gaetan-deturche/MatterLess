@@ -2801,7 +2801,12 @@ pub fn avatar_key_sized(user_id: &str, version: i64, side: u32) -> String {
 pub fn looking_at(post: &matterless_render::PostRow) -> Vec<crate::viewer::Looking> {
     post.files
         .iter()
-        .filter(|file| (file.image || file.video) && !file.archived)
+        // Not a picture from the text: the viewer fetches from this server.
+        .filter(|file| {
+            (file.image || file.video)
+                && !file.archived
+                && file.variant != matterless_render::ImageVariant::Linked
+        })
         .map(|file| crate::viewer::Looking {
             file_id: file.id.clone(),
             name: file.name.clone(),
@@ -2835,6 +2840,7 @@ pub fn picture_key(file: &matterless_render::FileRef) -> String {
         // An animation or a vector, whose preview would be a still frame or
         // nothing at all.
         matterless_render::ImageVariant::Original => format!("file/{}", file.id),
+        matterless_render::ImageVariant::Linked => crate::live::linked_key(&file.id),
     }
 }
 

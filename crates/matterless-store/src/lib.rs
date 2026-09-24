@@ -411,16 +411,16 @@ impl Store {
         let mut outcomes = Vec::with_capacity(posts.len());
 
         for post in posts {
-            let existing: Option<(Timestamp, Timestamp)> = transaction
+            let existing: Option<(Timestamp, Timestamp, String)> = transaction
                 .query_row(
-                    "SELECT update_at, delete_at FROM posts WHERE id = ?1",
+                    "SELECT update_at, delete_at, metadata FROM posts WHERE id = ?1",
                     params![post.id],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
                 )
                 .optional()?;
 
             let change = match existing {
-                Some((held_update_at, held_delete_at)) => {
+                Some((held_update_at, held_delete_at, held_metadata)) => {
                     // A delete is answered first, before anything looks at the
                     // timestamps. `post_deleted` carries the post with
                     // `delete_at` set and `update_at` exactly as it was --
@@ -435,7 +435,18 @@ impl Store {
                         // event. Never let it overwrite.
                         PostChange::Unchanged
                     } else if post.update_at == held_update_at {
-                        PostChange::Unchanged
+                        // The same post, but held from before the sizes of the
+                        // pictures its text links to were kept: without them a
+                        // GIF from the picker stays its alt text for good,
+                        // since nothing moves `update_at` to rewrite it.
+                        let sizes_missing = !post.metadata.images.is_empty()
+                            && serde_json::from_str::<PostMetadata>(&held_metadata)
+                                .map(|held| held.images.is_empty())
+                                .unwrap_or(true);
+                        match sizes_missing {
+                            true => PostChange::Updated,
+                            false => PostChange::Unchanged,
+                        }
                     } else {
                         PostChange::Updated
                     }

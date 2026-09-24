@@ -453,6 +453,61 @@ impl RestClient {
         }))
     }
 
+    /// A picture from another host: one a message links to.
+    ///
+    /// Never through `builder`, so never with the session -- the token is this
+    /// server's and must not go anywhere else. HTTPS only, pictures only, and
+    /// no more than `limit` bytes.
+    pub async fn fetch_outside(
+        &self,
+        url: &str,
+        limit: usize,
+    ) -> Result<Option<(Vec<u8>, String)>> {
+        let parsed = Url::parse(url)?;
+        if parsed.scheme() != "https" {
+            return Err(Error::Protocol(format!("not https: {url}")));
+        }
+        let mut response = self.http.get(parsed).send().await?;
+        // A redirect is followed by the client; where it ended is checked here.
+        if response.url().scheme() != "https" {
+            return Err(Error::Protocol(format!("redirected off https: {url}")));
+        }
+        if response.status() == StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        if !response.status().is_success() {
+            return Err(Error::Protocol(format!(
+                "fetch {url}: {}",
+                response.status()
+            )));
+        }
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        if !content_type.starts_with("image/") {
+            return Err(Error::Protocol(format!(
+                "not a picture ({content_type}): {url}"
+            )));
+        }
+        if response
+            .content_length()
+            .is_some_and(|length| length > limit as u64)
+        {
+            return Err(Error::Protocol(format!("larger than {limit} bytes: {url}")));
+        }
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response.chunk().await? {
+            bytes.extend_from_slice(&chunk);
+            if bytes.len() > limit {
+                return Err(Error::Protocol(format!("larger than {limit} bytes: {url}")));
+            }
+        }
+        Ok(Some((bytes, content_type)))
+    }
+
     pub async fn fetch_bytes(&self, path: &str) -> Result<Option<(Vec<u8>, String)>> {
         let response = self.send(self.builder(Method::GET, path)?).await?;
         if response.status() == StatusCode::NOT_FOUND {

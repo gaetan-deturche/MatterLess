@@ -1764,3 +1764,61 @@ fn a_deleted_message_is_not_quoted() {
     };
     assert!(post.previews.is_empty(), "a tombstone is not a preview");
 }
+
+/// What Mattermost's GIF picker posts: a markdown image the server measured.
+/// It is a picture on the post, and its alt text is not left in the prose --
+/// while the words before it stay.
+#[test]
+fn a_linked_gif_is_a_picture_not_its_alt_text() {
+    let url = "https://media2.giphy.com/media/uBxj/200.gif?cid=1&ct=g";
+    let mut carrier = post("p1", "u1", 1_000);
+    carrier.message = format!("persuaded I fixed it\n![Spongebob Stare GIF]({url})");
+    carrier.metadata.images.insert(
+        url.to_string(),
+        matterless_core::model::ImageMeta {
+            width: 216,
+            height: 200,
+            format: "gif".into(),
+            frame_count: 71,
+        },
+    );
+    let rows = plan_channel(&[carrier], &HashMap::new(), &options(ThreadMode::Flat));
+    let row = rows
+        .iter()
+        .find_map(|row| match row {
+            Row::Post { post } => Some(post),
+            _ => None,
+        })
+        .expect("a post row");
+    assert_eq!(row.files.len(), 1, "the GIF is a picture on the post");
+    let picture = &row.files[0];
+    assert_eq!(picture.variant, ImageVariant::Linked);
+    assert_eq!(picture.id, url);
+    assert_eq!((picture.box_width, picture.box_height), (216, 200));
+    let words = crate::markdown::plain_lines(&row.nodes);
+    assert!(
+        !words.contains("Spongebob"),
+        "the alt text is still in the prose: {words}"
+    );
+    assert!(
+        words.contains("persuaded I fixed it"),
+        "the words before it went: {words}"
+    );
+}
+
+/// An image the server did not measure is left as it was: nothing reserves
+/// its height, and nothing fetches from a URL the server never looked at.
+#[test]
+fn an_unmeasured_image_is_not_fetched() {
+    let mut carrier = post("p1", "u1", 1_000);
+    carrier.message = "![a picture](https://example.com/x.png)".into();
+    let rows = plan_channel(&[carrier], &HashMap::new(), &options(ThreadMode::Flat));
+    let row = rows
+        .iter()
+        .find_map(|row| match row {
+            Row::Post { post } => Some(post),
+            _ => None,
+        })
+        .expect("a post row");
+    assert!(row.files.is_empty());
+}

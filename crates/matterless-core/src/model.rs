@@ -98,6 +98,23 @@ pub struct PostMetadata {
     pub embeds: Vec<Embed>,
     #[serde(default)]
     pub emojis: Vec<serde_json::Value>,
+    /// Every picture the message's text links to, by URL, as the server
+    /// measured it when the post was saved.
+    #[serde(default)]
+    pub images: HashMap<String, ImageMeta>,
+}
+
+/// A picture linked from a message, measured by the server.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct ImageMeta {
+    #[serde(default)]
+    pub width: i32,
+    #[serde(default)]
+    pub height: i32,
+    #[serde(default)]
+    pub format: String,
+    #[serde(default)]
+    pub frame_count: i32,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

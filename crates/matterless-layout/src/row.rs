@@ -1554,6 +1554,13 @@ pub fn lay_out_opened(fonts: &mut Fonts, row: &Row, theme: &Theme, opened: bool)
                 size: theme.body_size,
                 wrap: width,
             });
+            // A picture from the text has no file name, and the official client
+            // draws none under it.
+            if file.variant == matterless_render::ImageVariant::Linked {
+                along += width + theme.block_gap;
+                tallest = tallest.max(height);
+                continue;
+            }
             // What it is called, under it, elided to the picture's own width.
             //
             // A line of the layout rather than something the painter adds, so
