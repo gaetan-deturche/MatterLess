@@ -114,6 +114,12 @@ pub enum Delta {
         root_id: String,
         channel_id: String,
     },
+    /// The reader joined or left a channel, or something named a channel the
+    /// store has never heard of. The engine holds no network, so the caller
+    /// asks the server what the reader is a member of now.
+    MembershipChanged {
+        channel_id: String,
+    },
 }
 
 /// Runtime state the decision functions need. Kept small and cheap to clone.
@@ -429,6 +435,13 @@ impl SyncEngine {
             Event::ThreadUpdated { thread_id, thread } => {
                 let channel_id = match thread {
                     Some(thread) => {
+                        // Its root too, as the sign-in pull does: a thread row
+                        // without one listed no author and no words, and could
+                        // not be opened.
+                        if !thread.post.id.is_empty() {
+                            self.store
+                                .upsert_posts(std::slice::from_ref(&thread.post))?;
+                        }
                         self.store
                             .upsert_threads(std::slice::from_ref(thread.as_ref()))?;
                         thread.post.channel_id.clone()
@@ -437,9 +450,28 @@ impl SyncEngine {
                     // that root still has to be re-read.
                     None => self.store.thread_channel(thread_id)?.unwrap_or_default(),
                 };
-                Ok(vec![Delta::ThreadChanged {
+                let mut deltas = vec![Delta::ThreadChanged {
                     root_id: thread_id.clone(),
-                    channel_id,
+                    channel_id: channel_id.clone(),
+                }];
+                // A thread in a channel this store never heard of: the reader
+                // was added to it while the window ran and the news was missed.
+                if !channel_id.is_empty() && self.store.channel(&channel_id)?.is_none() {
+                    deltas.push(Delta::MembershipChanged { channel_id });
+                }
+                Ok(deltas)
+            }
+            Event::MembershipChanged {
+                channel_id,
+                user_id,
+            } => {
+                // Somebody else coming or going changes nothing this store
+                // holds about the reader.
+                if channel_id.is_empty() || !(user_id.is_empty() || *user_id == context.me.id) {
+                    return Ok(Vec::new());
+                }
+                Ok(vec![Delta::MembershipChanged {
+                    channel_id: channel_id.clone(),
                 }])
             }
             Event::ThreadReadChanged {

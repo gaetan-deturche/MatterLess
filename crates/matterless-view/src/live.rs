@@ -805,6 +805,8 @@ async fn run(
     again.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     // The first beat is immediate, and sign-in has just asked.
     again.tick().await;
+    // Channels a membership pull was made for and did not bring back.
+    let mut strangers: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     loop {
         tokio::select! {
@@ -1599,6 +1601,39 @@ async fn run(
                                 .any(|delta| matches!(delta, Delta::ThreadChanged { .. }))
                             {
                                 context.followed_threads = followed(engine.store());
+                            }
+                            // Joined or left something, or a thread named a
+                            // channel never stored. The same pull a leave
+                            // makes: channels, categories, followed threads
+                            // and their roots. Once per channel that the pull
+                            // does not bring, so a thread somewhere the reader
+                            // is not a member cannot ask on every reply.
+                            let asked: Vec<String> = deltas
+                                .iter()
+                                .filter_map(|delta| match delta {
+                                    Delta::MembershipChanged { channel_id }
+                                        if !strangers.contains(channel_id) =>
+                                    {
+                                        Some(channel_id.clone())
+                                    }
+                                    _ => None,
+                                })
+                                .collect();
+                            if !asked.is_empty() {
+                                let me_id = context.me.id.clone();
+                                match membership(&rest, engine.store(), &me_id).await {
+                                    Ok((_, mode)) => {
+                                        println!("membership changed: {} channel(s)", asked.len());
+                                        context.followed_threads = followed(engine.store());
+                                        wake.wake(Update::Membership(mode));
+                                    }
+                                    Err(error) => eprintln!("membership after a change: {error}"),
+                                }
+                                for channel_id in asked {
+                                    if engine.store().channel(&channel_id).ok().flatten().is_none() {
+                                        strangers.insert(channel_id);
+                                    }
+                                }
                             }
                             wake.wake(Update::Changed(deltas));
                         }

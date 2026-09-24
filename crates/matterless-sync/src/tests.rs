@@ -806,3 +806,68 @@ fn my_own_post_does_not_count_as_unread() {
         "my own message must not appear as unread to me"
     );
 }
+
+fn followed_thread(root: Post) -> matterless_core::model::UserThread {
+    matterless_core::model::UserThread {
+        id: root.id.clone(),
+        reply_count: 6,
+        last_reply_at: 500,
+        last_viewed_at: 0,
+        unread_replies: 6,
+        unread_mentions: 0,
+        is_urgent: false,
+        delete_at: 0,
+        post: root,
+        participants: None,
+    }
+}
+
+/// A thread arriving down the socket brings its root, so the Threads list has
+/// an author and words for it and it can be opened -- and one in a channel the
+/// store has never heard of asks for the reader's channels again.
+#[test]
+fn a_thread_update_keeps_its_root_and_asks_after_an_unknown_channel() {
+    let engine = engine();
+    let context = SyncContext::new(me(), ThreadMode::Collapsed);
+    let event = Event::ThreadUpdated {
+        thread_id: "root".into(),
+        thread: Some(Box::new(followed_thread(post("root", 100, "")))),
+    };
+    let deltas = engine.apply_event(&event, &context).unwrap();
+    let root = engine
+        .store()
+        .post("root")
+        .unwrap()
+        .expect("the root is kept");
+    assert_eq!(root.message, "body of root");
+    assert!(
+        deltas.iter().any(|delta| matches!(
+            delta,
+            Delta::MembershipChanged { channel_id } if channel_id == "c1"
+        )),
+        "a channel nobody stored was not asked about: {deltas:?}"
+    );
+}
+
+/// Only the reader's own comings and goings are worth a membership pull.
+#[test]
+fn only_the_readers_own_membership_changes_count() {
+    let engine = engine();
+    let context = SyncContext::new(me(), ThreadMode::Flat);
+    let someone = Event::MembershipChanged {
+        channel_id: "c1".into(),
+        user_id: "someone".into(),
+    };
+    assert!(engine.apply_event(&someone, &context).unwrap().is_empty());
+    for user_id in ["me", ""] {
+        let mine = Event::MembershipChanged {
+            channel_id: "c1".into(),
+            user_id: user_id.into(),
+        };
+        let deltas = engine.apply_event(&mine, &context).unwrap();
+        assert!(
+            matches!(deltas.as_slice(), [Delta::MembershipChanged { channel_id }] if channel_id == "c1"),
+            "{user_id:?}: {deltas:?}"
+        );
+    }
+}

@@ -122,6 +122,16 @@ pub enum Event {
     SidebarCategoriesUpdated {
         team_id: String,
     },
+    /// Somebody was added to a channel or taken out of one, or a direct or
+    /// group conversation was opened with this reader.
+    ///
+    /// `user_id` is empty when the event was addressed to the reader alone,
+    /// which is how the server sends `direct_added`, `group_added` and the
+    /// copy of `user_removed` that goes to the person removed.
+    MembershipChanged {
+        channel_id: String,
+        user_id: String,
+    },
     /// Custom emoji added: invalidate the emoji cache.
     EmojiAdded {
         emoji_id: String,
@@ -157,6 +167,7 @@ impl Event {
             Event::ThreadFollowChanged { .. } => "thread_follow_changed",
             Event::PreferencesChanged { .. } => "preferences_changed",
             Event::SidebarCategoriesUpdated { .. } => "sidebar_category_updated",
+            Event::MembershipChanged { .. } => "membership_changed",
             Event::EmojiAdded { .. } => "emoji_added",
             Event::UserUpdated { .. } => "user_updated",
             Event::Other { name } => name,
@@ -368,6 +379,23 @@ pub fn parse(envelope: &Envelope) -> Result<Option<Event>> {
         | "sidebar_category_order_updated" => Event::SidebarCategoriesUpdated {
             team_id: broadcast_team,
         },
+        // Sent to the channel, naming who was added or removed.
+        "user_added" | "user_removed" if !broadcast_channel.is_empty() => {
+            Event::MembershipChanged {
+                channel_id: broadcast_channel,
+                user_id: string_field(data, "user_id"),
+            }
+        }
+        // The copy of a removal sent to the person removed: the channel is in
+        // the data, because the broadcast names the person.
+        "user_removed" => Event::MembershipChanged {
+            channel_id: string_field(data, "channel_id"),
+            user_id: String::new(),
+        },
+        "direct_added" | "group_added" => Event::MembershipChanged {
+            channel_id: broadcast_channel,
+            user_id: String::new(),
+        },
         "emoji_added" => Event::EmojiAdded {
             emoji_id: nested_id(data, "emoji"),
         },
@@ -557,6 +585,35 @@ mod thread_event_tests {
     /// scope. They now mean different things, and the shapes are written from
     /// the documented ones -- so each is pinned, and each tolerates the field
     /// being absent rather than dropping the event.
+    /// Being added to a channel names the channel and who was added; a
+    /// removal sent to the person removed names nobody, because it is them.
+    #[test]
+    fn membership_events_name_the_channel() {
+        let frame = r#"{"event":"user_added","data":{"user_id":"me","team_id":"t1"},
+            "broadcast":{"channel_id":"chan1"},"seq":3}"#;
+        let envelope: Envelope = serde_json::from_str(frame).unwrap();
+        let Some(Event::MembershipChanged {
+            channel_id,
+            user_id,
+        }) = parse(&envelope).unwrap()
+        else {
+            panic!("user_added was not understood");
+        };
+        assert_eq!((channel_id.as_str(), user_id.as_str()), ("chan1", "me"));
+
+        let frame = r#"{"event":"user_removed","data":{"channel_id":"chan2","remover_id":"x"},
+            "broadcast":{"user_id":"me"},"seq":4}"#;
+        let envelope: Envelope = serde_json::from_str(frame).unwrap();
+        let Some(Event::MembershipChanged {
+            channel_id,
+            user_id,
+        }) = parse(&envelope).unwrap()
+        else {
+            panic!("user_removed was not understood");
+        };
+        assert_eq!((channel_id.as_str(), user_id.as_str()), ("chan2", ""));
+    }
+
     #[test]
     fn thread_updated_carries_the_servers_own_counts() {
         let frame = r#"{"event":"thread_updated","data":{"thread":{"id":"root1",
