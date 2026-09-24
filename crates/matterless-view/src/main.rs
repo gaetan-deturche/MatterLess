@@ -1745,9 +1745,14 @@ impl App {
                 // The sidebar labels its conversations from the store, and so
                 // does the plan for the one that is open: both were built
                 // before these names existed.
+                //
+                // Re-read rather than reopened. Opening a channel puts the
+                // reader at its newest message, so every name learnt -- which
+                // happens whenever somebody new comes into view -- threw a
+                // reader who had scrolled away back to the bottom.
                 self.rebuild_sidebar();
                 if let Some(channel) = self.sidebar.selected.clone() {
-                    self.open_channel(&channel);
+                    self.reread_channel(&channel);
                 }
             }
             Update::Statuses(found) => {
@@ -4387,6 +4392,13 @@ impl App {
         self.recall_watermark(channel, &store);
         let within = self.stream_rect();
         let was_at_end = self.stream.scroll >= self.stream.reach(within) - 1.0;
+        // Where the reader is, taken before the rows are replaced. Taken
+        // after, by `relayout`, it was measured against the new rows and the
+        // old layouts, came back as nothing, and every re-read put a reader in
+        // the middle of the channel at its foot -- any message landing, any
+        // edit, any reaction, any name learnt. The same "asked too late" fault
+        // as the drag anchor, the stale hit box and the growing box.
+        let held = self.anchors();
         match matterless_view::feed::rows_of(
             &store,
             channel,
@@ -4400,7 +4412,7 @@ impl App {
                 self.stream.custom = matterless_view::feed::custom_emoji(&store, &rows);
                 self.stream.plan(rows, was_at_end);
                 self.watch_divider();
-                self.relayout();
+                self.shape(Shaping::Everything, held);
                 if was_at_end {
                     let within = self.stream_rect();
                     self.stream.cover(&mut self.fonts, within.width, within);
