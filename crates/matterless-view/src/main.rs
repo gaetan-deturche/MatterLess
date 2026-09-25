@@ -3956,8 +3956,19 @@ impl App {
                     if let Some(frame) = player.due()
                         && let Some(view) = self.view.as_mut()
                     {
-                        match view.show_frame(frame.texture, frame.index, frame.width, frame.height)
-                        {
+                        let shown = match frame.rgba.as_deref() {
+                            Some(rgba) => {
+                                view.show(frame.width, frame.height, rgba);
+                                Ok(())
+                            }
+                            None => view.show_frame(
+                                frame.texture,
+                                frame.index,
+                                frame.width,
+                                frame.height,
+                            ),
+                        };
+                        match shown {
                             Ok(()) => self.viewer.arrived(file_id, (frame.width, frame.height)),
                             Err(why) => self.viewer.gave_up(file_id, &why),
                         }

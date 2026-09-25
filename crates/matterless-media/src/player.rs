@@ -1,8 +1,8 @@
 //! One video, decoded on the GPU and handed over frame by frame.
 //!
 //! A thread of its own reads the file and decodes: the picture through
-//! D3D11VA into textures on the window's own device, the sound into floats
-//! for the audio output. The window asks each frame which picture is due and
+//! D3D11VA into textures on the window's own device (or on the CPU into RGBA,
+//! for what the GPU cannot decode), the sound into floats for the audio output. The window asks each frame which picture is due and
 //! draws it; nothing here draws.
 //!
 //! The clock is the wall clock while playing, restarted at the first frame
@@ -37,17 +37,21 @@ const AHEAD: f64 = 1.0;
 /// read ahead: several seconds of video at any ordinary rate.
 const PENDING: usize = 600;
 
-/// A decoded picture: one slice of a texture array on the window's device.
+/// A decoded picture: one slice of a texture array on the window's device, or
+/// RGBA when the GPU could not decode it.
 pub struct Frame {
     frame: *mut AVFrame,
     /// When it is shown, in seconds from the start of the video.
     pub pts: f64,
     /// The `ID3D11Texture2D` it is in, borrowed for as long as this lives.
+    /// Null for a picture decoded on the CPU.
     pub texture: *mut c_void,
     /// Which slice of that texture array.
     pub index: u32,
     pub width: u32,
     pub height: u32,
+    /// The picture decoded on the CPU, `width` by `height`.
+    pub rgba: Option<Vec<u8>>,
 }
 
 // The texture is the window's device's, and the frame only keeps it alive.
@@ -555,20 +559,40 @@ unsafe extern "C" fn leave(lock: *mut c_void) {
     }
 }
 
-/// Picks the GPU's surfaces out of what the decoder offers, or nothing.
+/// Picks the GPU's surfaces out of what the decoder offers, or else the CPU's
+/// format, which ffmpeg lists last. It asks again without the GPU's when this
+/// GPU turns out not to decode the codec.
 unsafe extern "C" fn on_the_gpu(
     _: *mut AVCodecContext,
     offered: *const AVPixelFormat,
 ) -> AVPixelFormat {
     let mut at = offered;
+    let mut last = AV_PIX_FMT_NONE;
     while !at.is_null() && unsafe { *at } != AV_PIX_FMT_NONE {
         if unsafe { *at } == AV_PIX_FMT_D3D11 {
             return AV_PIX_FMT_D3D11;
         }
+        last = unsafe { *at };
         at = unsafe { at.add(1) };
     }
-    AV_PIX_FMT_NONE
+    last
 }
+
+/// Whether ffmpeg has a D3D11VA path for the codec at all. The rest are
+/// decoded on the CPU from the start, with every core.
+fn gpu_decodes(codec: AVCodecID) -> bool {
+    matches!(
+        codec,
+        AV_CODEC_ID_H264
+            | AV_CODEC_ID_HEVC
+            | AV_CODEC_ID_VP9
+            | AV_CODEC_ID_AV1
+            | AV_CODEC_ID_MPEG2VIDEO
+    )
+}
+
+/// `SWS_BILINEAR`: the scaler, for a conversion at the same size.
+const SWS_BILINEAR: c_int = 2;
 
 fn check(api: &Api, code: c_int, doing: &str) -> Result<c_int, String> {
     match code < 0 {
@@ -589,6 +613,10 @@ struct Owned<'a> {
     frame: *mut AVFrame,
     /// Compressed pictures read but not yet decoded.
     pending: VecDeque<*mut AVPacket>,
+    /// Turns a picture decoded on the CPU into RGBA, and the width, height and
+    /// format it was made for.
+    scaler: *mut c_void,
+    scaling: (c_int, c_int, AVPixelFormat),
 }
 
 impl Owned<'_> {
@@ -606,6 +634,9 @@ impl Drop for Owned<'_> {
         self.drop_pending();
         let api = self.api;
         unsafe {
+            if !self.scaler.is_null() {
+                (api.sws_free_context)(self.scaler);
+            }
             if !self.frame.is_null() {
                 (api.av_frame_free)(&mut self.frame);
             }
@@ -656,6 +687,8 @@ fn decode(
         packet: null_mut(),
         frame: null_mut(),
         pending: VecDeque::new(),
+        scaler: null_mut(),
+        scaling: (0, 0, AV_PIX_FMT_NONE),
     };
     let name = CString::new(path.to_string_lossy().as_bytes()).map_err(|why| why.to_string())?;
     unsafe {
@@ -712,6 +745,9 @@ fn decode(
         (*owned.video).hw_device_ctx = (api.av_buffer_ref)(owned.hardware);
         (*owned.video).get_format = Some(on_the_gpu);
         (*owned.video).extra_hw_frames = QUEUE as c_int + 8;
+        if !gpu_decodes((*codec).id) {
+            (*owned.video).thread_count = 0;
+        }
         check(
             api,
             (api.avcodec_open2)(owned.video, codec, null_mut()),
@@ -884,10 +920,6 @@ unsafe fn take_pictures(
             unsafe { (api.av_frame_free)(&mut frame) };
             return Ok(());
         }
-        if unsafe { (*frame).format } != AV_PIX_FMT_D3D11 {
-            unsafe { (api.av_frame_free)(&mut frame) };
-            return Err("this video cannot be decoded on this GPU".to_string());
-        }
         let pts = seconds(unsafe { (*frame).best_effort_timestamp }, base);
         let mut state = lock_state(shared);
         state.decoded = pts;
@@ -898,18 +930,89 @@ unsafe fn take_pictures(
             unsafe { (api.av_frame_free)(&mut frame) };
             continue;
         }
-        let picture = unsafe {
-            Frame {
-                frame,
+        let (width, height) =
+            unsafe { ((*frame).width.max(0) as u32, (*frame).height.max(0) as u32) };
+        if unsafe { (*frame).format } == AV_PIX_FMT_D3D11 {
+            let picture = unsafe {
+                Frame {
+                    frame,
+                    pts,
+                    texture: (*frame).data[0] as *mut c_void,
+                    index: (*frame).data[1] as usize as u32,
+                    width,
+                    height,
+                    rgba: None,
+                }
+            };
+            state.frames.push_back(picture);
+            continue;
+        }
+        // Decoded on the CPU: converted outside the lock, which the window
+        // takes every frame.
+        drop(state);
+        let rgba = unsafe { to_rgba(api, owned, frame) };
+        unsafe { (api.av_frame_free)(&mut frame) };
+        let rgba = rgba?;
+        let mut state = lock_state(shared);
+        // Unless the window sent it somewhere else meanwhile.
+        if state.seek.is_none() && pts + 0.001 >= state.hide_before {
+            state.frames.push_back(Frame {
+                frame: null_mut(),
                 pts,
-                texture: (*frame).data[0] as *mut c_void,
-                index: (*frame).data[1] as usize as u32,
-                width: (*frame).width.max(0) as u32,
-                height: (*frame).height.max(0) as u32,
-            }
-        };
-        state.frames.push_back(picture);
+                texture: null_mut(),
+                index: 0,
+                width,
+                height,
+                rgba: Some(rgba),
+            });
+        }
     }
+}
+
+/// A picture decoded on the CPU, as RGBA of its own size.
+unsafe fn to_rgba(api: &Api, owned: &mut Owned, frame: *const AVFrame) -> Result<Vec<u8>, String> {
+    let (width, height, format) = unsafe { ((*frame).width, (*frame).height, (*frame).format) };
+    if width <= 0 || height <= 0 {
+        return Err("a picture of no size".to_string());
+    }
+    if owned.scaler.is_null() || owned.scaling != (width, height, format) {
+        if !owned.scaler.is_null() {
+            unsafe { (api.sws_free_context)(owned.scaler) };
+        }
+        owned.scaler = unsafe {
+            (api.sws_get_context)(
+                width,
+                height,
+                format,
+                width,
+                height,
+                AV_PIX_FMT_RGBA,
+                SWS_BILINEAR,
+                null_mut(),
+                null_mut(),
+                null(),
+            )
+        };
+        owned.scaling = (width, height, format);
+        if owned.scaler.is_null() {
+            return Err("no conversion for this video's pictures".to_string());
+        }
+    }
+    let mut rgba = vec![0u8; width as usize * height as usize * 4];
+    let out = [rgba.as_mut_ptr()];
+    let stride = [width * 4];
+    unsafe {
+        (api.sws_scale)(
+            owned.scaler,
+            (*frame).data.as_ptr() as *const *const u8,
+            (*frame).linesize.as_ptr(),
+            0,
+            height,
+            out.as_ptr(),
+            stride.as_ptr(),
+        )
+    };
+    Ok(rgba)
 }
 
 /// Every stretch of sound the decoder has ready, resampled onto the queue.

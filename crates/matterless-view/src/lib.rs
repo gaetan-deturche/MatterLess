@@ -520,6 +520,9 @@ pub struct View {
     shown: Option<ID3D11ShaderResourceView>,
     /// What turns a decoded video frame into the picture `shown` names.
     film: Option<Film>,
+    /// The texture `show` made last, written over by the next picture of its
+    /// size: a moving one sends a picture every frame.
+    still: Option<(ID3D11Texture2D, ID3D11ShaderResourceView, (u32, u32))>,
     /// What stands in the fourth slot while nothing is open. A slot left empty
     /// is a shader reading from nothing, which draws a black rectangle.
     nothing: ID3D11ShaderResourceView,
@@ -541,6 +544,7 @@ impl View {
             capacity: 0,
             shown: None,
             film: None,
+            still: None,
             nothing,
         })
     }
@@ -573,6 +577,23 @@ impl View {
     pub fn show(&mut self, width: u32, height: u32, rgba: &[u8]) {
         let wanted = (width as usize) * (height as usize) * 4;
         if rgba.len() < wanted || width == 0 || height == 0 {
+            return;
+        }
+        if let Some((texture, view, size)) = self.still.as_ref()
+            && *size == (width, height)
+        {
+            unsafe {
+                self.gpu.context.UpdateSubresource(
+                    texture,
+                    0,
+                    None,
+                    rgba.as_ptr() as *const _,
+                    width * 4,
+                    0,
+                )
+            };
+            self.shown = Some(view.clone());
+            self.film = None;
             return;
         }
         let how = D3D11_TEXTURE2D_DESC {
@@ -616,6 +637,7 @@ impl View {
         {
             return;
         }
+        self.still = view.clone().map(|view| (texture, view, (width, height)));
         self.shown = view;
         self.film = None;
     }
@@ -623,6 +645,7 @@ impl View {
     pub fn stop_showing(&mut self) {
         self.shown = None;
         self.film = None;
+        self.still = None;
     }
 
     /// Paints a decoded video frame -- one slice of a texture array on this
