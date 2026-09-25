@@ -1,0 +1,101 @@
+# The video player's ffmpeg, built here rather than downloaded: a full build
+# is 112 MB of DLLs, nearly all of it encoders, filters and devices nothing
+# here calls. tools/build-ffmpeg.sh has what goes in.
+#
+# Built once per version of the script and cached; the release workflow calls
+# this and ships what it leaves. Then each kind of video the build is meant
+# to read is made with Ubuntu's own ffmpeg and a poster is taken of it on
+# Windows, through the same code the message list uses.
+name: ffmpeg
+
+on:
+  workflow_call:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - tools/build-ffmpeg.sh
+      - .github/workflows/ffmpeg.yml
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: cache
+        uses: actions/cache@v4
+        with:
+          path: out/ffmpeg
+          key: ffmpeg-${{ hashFiles('tools/build-ffmpeg.sh') }}
+
+      - name: Build
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends gcc-mingw-w64-x86-64 nasm meson ninja-build pkg-config
+          bash tools/build-ffmpeg.sh out/ffmpeg
+
+      - name: Videos to read
+        run: |
+          sudo apt-get install -y --no-install-recommends ffmpeg
+          mkdir -p out/clips && cd out/clips
+          picture="-f lavfi -i testsrc2=size=640x360:rate=30 -f lavfi -i sine=frequency=440 -t 2"
+          ffmpeg -loglevel error $picture -c:v libx264 -pix_fmt yuv420p -c:a aac h264.mp4
+          ffmpeg -loglevel error $picture -c:v libx265 -pix_fmt yuv420p -tag:v hvc1 -c:a aac hevc.mp4
+          ffmpeg -loglevel error $picture -c:v libvpx-vp9 -c:a libopus vp9.webm
+          ffmpeg -loglevel error $picture -c:v libvpx -c:a libvorbis vp8.webm
+          ffmpeg -loglevel error $picture -c:v libaom-av1 -cpu-used 8 -row-mt 1 -c:a libopus av1.mp4
+          ffmpeg -loglevel error $picture -c:v libx264 -pix_fmt yuv420p -c:a ac3 h264.ts
+          ffmpeg -loglevel error $picture -c:v libx264 -pix_fmt yuv420p -c:a pcm_s16le h264.mov
+          ffmpeg -loglevel error $picture -c:v mpeg4 -c:a libmp3lame mpeg4.avi
+          ffmpeg -loglevel error $picture -c:v mjpeg -c:a pcm_s16le mjpeg.avi
+          ffmpeg -loglevel error $picture -c:v mpeg2video -c:a mp2 mpeg2.mpg
+          ls -l
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ffmpeg
+          path: out/ffmpeg
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: clips
+          path: out/clips
+
+  check:
+    needs: build
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: matterless-windows
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: ffmpeg
+          path: third_party/ffmpeg
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: clips
+          path: clips
+
+      # A debug build finds the DLLs in third_party/ffmpeg/bin by itself.
+      - name: A poster of each
+        shell: pwsh
+        run: |
+          cargo build -p matterless-media --example poster
+          if ($LASTEXITCODE -ne 0) { throw "the example did not build" }
+          $failed = @()
+          foreach ($clip in Get-ChildItem clips) {
+            $said = & target\debug\examples\poster.exe $clip.FullName | Out-String
+            "$($clip.Name): $($said.Trim())"
+            if ($said -notmatch '^poster ') { $failed += $clip.Name }
+          }
+          Get-ChildItem third_party\ffmpeg\bin | ForEach-Object { "{0} {1:N1} MB" -f $_.Name, ($_.Length / 1MB) }
+          if ($failed) { throw "no poster from: $($failed -join ', ')" }

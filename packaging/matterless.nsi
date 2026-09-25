@@ -157,6 +157,9 @@ Section "${APP}"
   File "${FFMPEG}\bin\avformat-63.dll"
   File "/oname=ffmpeg-LICENSE.txt" "${FFMPEG}\LICENSE.txt"
   File "/oname=ffmpeg-NOTICE.txt" "${__FILEDIR__}\ffmpeg-NOTICE.txt"
+!if /FileExists "${FFMPEG}\dav1d-LICENSE.txt"
+  File "${FFMPEG}\dav1d-LICENSE.txt"
+!endif
 !endif
   WriteUninstaller "$INSTDIR\uninstall.exe"
 
@@ -205,6 +208,7 @@ Section "Uninstall"
   Delete "$INSTDIR\avformat-63.dll"
   Delete "$INSTDIR\ffmpeg-LICENSE.txt"
   Delete "$INSTDIR\ffmpeg-NOTICE.txt"
+  Delete "$INSTDIR\dav1d-LICENSE.txt"
   Delete "$INSTDIR\uninstall.exe"
   ; Only if it is empty: whatever else somebody put there is theirs.
   RMDir "$INSTDIR"

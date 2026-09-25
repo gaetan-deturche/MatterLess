@@ -1,6 +1,8 @@
-# Fetches the ffmpeg build the video player loads -- the exact one its struct
-# bindings were generated from -- into third_party/ffmpeg, and checks that it
-# is that build. Run by the release workflow, and by hand on a new checkout:
+# Fetches the full ffmpeg build the video player's struct bindings were
+# generated from into third_party/ffmpeg, and checks that it is that build.
+# For development: the release ships tools/build-ffmpeg.sh's decode-only build
+# of the same source, which this is a superset of. Run by hand on a new
+# checkout:
 #
 #   pwsh tools/fetch-ffmpeg.ps1
 #

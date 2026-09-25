@@ -25,7 +25,12 @@ on:
         required: true
 
 jobs:
+  # The video player's ffmpeg, built and checked: see ffmpeg.yml.
+  ffmpeg:
+    uses: ./.github/workflows/ffmpeg.yml
+
   release:
+    needs: ffmpeg
     runs-on: windows-latest
     permissions:
       # `gh release create` writes to this repository.
@@ -70,11 +75,12 @@ jobs:
       - name: Install NSIS
         run: choco install nsis -y --no-progress
 
-      # The video player's ffmpeg: the pinned LGPL build, checked against its
-      # hash, installed beside the app. Its source goes up with the release.
-      - name: Fetch ffmpeg
-        shell: pwsh
-        run: ./tools/fetch-ffmpeg.ps1
+      # The video player's ffmpeg, installed beside the app. Its source goes
+      # up with the release.
+      - uses: actions/download-artifact@v4
+        with:
+          name: ffmpeg
+          path: third_party/ffmpeg
 
       - name: Fetch ffmpeg's source
         shell: pwsh
