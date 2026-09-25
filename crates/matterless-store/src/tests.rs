@@ -803,12 +803,16 @@ fn thread_unread_totals_count_only_followed_and_live_threads() {
     store
         .upsert_threads(&[user_thread("r1", 3, 1), user_thread("r2", 2, 0)])
         .unwrap();
-    assert_eq!(store.thread_unread_totals().unwrap(), (5, 1));
+    assert_eq!(
+        store.thread_unread_totals().unwrap(),
+        (2, 1),
+        "two threads waiting, however many replies are in them"
+    );
 
     store.set_thread_following("r2", false).unwrap();
     assert_eq!(
         store.thread_unread_totals().unwrap(),
-        (3, 1),
+        (1, 1),
         "an unfollowed thread stops demanding anything"
     );
 }
@@ -1953,4 +1957,17 @@ fn a_post_held_without_its_files_takes_them() {
     let outcomes = store.upsert_posts(std::slice::from_ref(&full)).unwrap();
     assert_eq!(outcomes[0].change, PostChange::Updated);
     assert_eq!(store.post("p1").unwrap().unwrap().metadata.files.len(), 1);
+}
+
+/// One thread's counts, and nothing for a thread never heard of; read here,
+/// they clear.
+#[test]
+fn a_threads_own_counts_are_read_and_cleared() {
+    let store = store();
+    store.upsert_threads(&[user_thread("r1", 3, 1)]).unwrap();
+    assert_eq!(store.thread_unread("r1").unwrap(), Some((3, 1)));
+    assert_eq!(store.thread_unread("nobody").unwrap(), None);
+    store.set_thread_read("r1", 5_000, 0, 0).unwrap();
+    assert_eq!(store.thread_unread("r1").unwrap(), Some((0, 0)));
+    assert_eq!(store.thread_unread_totals().unwrap(), (0, 0));
 }

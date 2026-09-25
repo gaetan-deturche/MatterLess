@@ -1980,10 +1980,16 @@ impl App {
                 // reading a channel here, or on a phone, changes them. Rebuilt
                 // whenever one does, or a badge stays on screen after the
                 // messages behind it have been read.
-                if deltas
-                    .iter()
-                    .any(|delta| matches!(delta, matterless_sync::Delta::UnreadChanged { .. }))
-                {
+                // A thread's count moves the Threads row the same way: read
+                // here, read on a phone, or a reply arriving. Without this the
+                // row kept its number until something else rebuilt the list.
+                if deltas.iter().any(|delta| {
+                    matches!(
+                        delta,
+                        matterless_sync::Delta::UnreadChanged { .. }
+                            | matterless_sync::Delta::ThreadChanged { .. }
+                    )
+                }) {
                     self.rebuild_sidebar();
                 }
                 // A reaction names its post and no channel, so whether it
@@ -4331,6 +4337,34 @@ impl App {
         if arrived {
             self.read_what_is_open();
         }
+        // A reply landing in the thread open beside it is read too.
+        if let Some(root) = self.open_root()
+            && matterless_view::live::touches_thread(deltas, &root)
+        {
+            self.read_thread(&root);
+        }
+    }
+
+    /// Says a thread has been read, if anything in it has not been: opened,
+    /// replied to while open, or come back to. Asked of the store first, so a
+    /// thread already read costs no request.
+    fn read_thread(&self, root_id: &str) {
+        if !self.focused {
+            return;
+        }
+        let (Some(store), Some(link)) = (self.store.as_ref(), self.link.as_ref()) else {
+            return;
+        };
+        let waiting = store
+            .thread_unread(root_id)
+            .ok()
+            .flatten()
+            .is_some_and(|(replies, mentions)| replies > 0 || mentions > 0);
+        if waiting {
+            link.send(matterless_view::live::Ask::ReadThread {
+                root_id: root_id.to_string(),
+            });
+        }
     }
 
     /// Says the conversation on screen has been read, if anything in it has
@@ -5039,6 +5073,8 @@ impl App {
             eprintln!("thread {root_id}: no root in the local store");
             return;
         };
+        // Opening a thread is reading it, as opening a channel is.
+        self.read_thread(root_id);
         // Taken from the root rather than from the column, which may be
         // showing the Threads list and not a conversation at all.
         self.thread_in = Some(root.channel_id.clone());
@@ -8473,6 +8509,9 @@ impl ApplicationHandler<Update> for App {
                     // and alt-tabbing away and back is the commonest way to
                     // be handed messages you then sit and read.
                     self.read_what_is_open();
+                    if let Some(root) = self.open_root() {
+                        self.read_thread(&root);
+                    }
                 }
                 // Which conversation counts as "being read" depends on this, so
                 // the socket thread has to hear about it.

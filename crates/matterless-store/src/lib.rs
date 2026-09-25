@@ -1459,6 +1459,18 @@ impl Store {
     }
 
     /// Which channel a thread lives in, for events that do not say.
+    /// One thread's unread replies and mentions; nothing when it is not held.
+    pub fn thread_unread(&self, root_id: &str) -> Result<Option<(i64, i64)>> {
+        let connection = self.lock();
+        Ok(connection
+            .query_row(
+                "SELECT unread_replies, unread_mentions FROM threads WHERE root_id = ?1",
+                params![root_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?)
+    }
+
     pub fn thread_channel(&self, root_id: &str) -> Result<Option<String>> {
         let connection = self.lock();
         Ok(connection
@@ -1540,10 +1552,17 @@ impl Store {
             .unwrap_or_default())
     }
 
+    /// How many followed threads have something unread, and how many
+    /// mentions are waiting in them.
+    ///
+    /// Threads, not replies: a thread is one row of the Threads list the way a
+    /// channel is one row of the sidebar, and the server's own summary counts
+    /// them the same way. Summing replies put "2" on the row for one thread
+    /// with two new answers in it.
     pub fn thread_unread_totals(&self) -> Result<(i64, i64)> {
         let connection = self.lock();
         Ok(connection.query_row(
-            "SELECT COALESCE(SUM(unread_replies), 0), COALESCE(SUM(unread_mentions), 0)
+            "SELECT COUNT(CASE WHEN unread_replies > 0 THEN 1 END), COALESCE(SUM(unread_mentions), 0)
              FROM threads WHERE following = 1 AND delete_at = 0",
             [],
             |row| Ok((row.get(0)?, row.get(1)?)),

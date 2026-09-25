@@ -354,6 +354,8 @@ pub enum Ask {
     /// Without it a channel stays unread however long it is looked at, and the
     /// sidebar is permanently wrong.
     MarkRead { channel_id: String },
+    /// Tell the server this thread has been read, and clear it here.
+    ReadThread { root_id: String },
     /// Fetch a page of older history and store it.
     LoadOlder { channel_id: String },
     /// Fetch a picture, decoded to fit the box the layout reserved for it.
@@ -1363,6 +1365,44 @@ async fn run(
                         // assumed focused: the alternative is interrupting
                         // somebody about the channel they are reading.
                         context.window_focused = true;
+                    }
+                    Ask::ReadThread { root_id } => {
+                        let store = engine.store();
+                        let channel_id = store.thread_channel(&root_id).ok().flatten().unwrap_or_default();
+                        // The route is scoped by team: the thread's channel's,
+                        // or for a direct or group conversation, which belongs
+                        // to none, any team this reader is on.
+                        let team = store
+                            .channel(&channel_id)
+                            .ok()
+                            .flatten()
+                            .map(|channel| channel.team_id)
+                            .filter(|team| !team.is_empty())
+                            .or_else(|| {
+                                store
+                                    .teams()
+                                    .ok()
+                                    .and_then(|teams| teams.first().map(|team| team.id.clone()))
+                            })
+                            .unwrap_or_default();
+                        // The server's clock, from the newest thing in the
+                        // thread: it is compared against post times.
+                        let read_to = store
+                            .thread_replies(&root_id)
+                            .unwrap_or_default()
+                            .iter()
+                            .map(|reply| reply.create_at)
+                            .chain(store.post(&root_id).ok().flatten().map(|root| root.create_at))
+                            .max()
+                            .unwrap_or(0);
+                        if let Err(error) = rest.mark_thread_read(&me_id, &team, &root_id, read_to).await {
+                            eprintln!("marking thread {root_id} read: {error}");
+                            continue;
+                        }
+                        if let Err(error) = store.set_thread_read(&root_id, read_to, 0, 0) {
+                            eprintln!("keeping thread {root_id} read: {error}");
+                        }
+                        wake.wake(Update::Changed(vec![Delta::ThreadChanged { root_id, channel_id }]));
                     }
                     Ask::MarkRead { channel_id } => {
                         if !known(engine.store(), &channel_id) {
