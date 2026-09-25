@@ -1,0 +1,15 @@
+# Regenerates crates/matterless-media/src/ffmpeg_types.rs from the headers of
+# the ffmpeg build in third_party/ffmpeg. Not part of the workspace: it needs
+# libclang, which nothing else does, and it is run once per ffmpeg upgrade.
+#
+#   LIBCLANG_PATH=<folder with libclang.dll> cargo run --manifest-path tools/ffmpeg-bindings/Cargo.toml
+[package]
+name = "ffmpeg-bindings"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+bindgen = "0.72"
+
+[workspace]

@@ -1,0 +1,19 @@
+MatterLess plays videos with FFmpeg, https://ffmpeg.org
+
+  Version:  n9.0.2-3-ga5923073bf
+  Build:    BtbN/FFmpeg-Builds, release autobuild-2026-09-24-14-14,
+            the LGPL shared Windows build (win64-lgpl-shared-9.0)
+  Files:    avcodec-63.dll, avformat-63.dll, avutil-61.dll, swresample-7.dll,
+            swscale-10.dll
+
+FFmpeg is free software licensed under the GNU Lesser General Public License,
+version 3 or later. Its text is in ffmpeg-LICENSE.txt, beside this file.
+
+The DLLs are unmodified and are loaded at run time: you may replace them with
+your own build of FFmpeg of the same major versions.
+
+The corresponding source code is attached to every MatterLess release as
+ffmpeg-source-a5923073bf.tar.gz, and is also available from
+  https://github.com/FFmpeg/FFmpeg/tree/a5923073bf
+with the scripts it was built with at
+  https://github.com/BtbN/FFmpeg-Builds

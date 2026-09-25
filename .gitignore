@@ -1,4 +1,8 @@
 /target
+# The ffmpeg build the video player loads: fetched by tools/fetch-ffmpeg.ps1,
+# never committed.
+/third_party/
+tools/ffmpeg-bindings/target/
 **/*.rs.bk
 
 # Claude working files that must never be committed

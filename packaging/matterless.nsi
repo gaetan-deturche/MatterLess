@@ -21,6 +21,9 @@
 ;
 ;   makensis /DVERSION=0.1.6 /DPAYLOAD=target\release\matterless-view.exe ^
 ;            /DOUTFILE=MatterLess-0.1.6-setup.exe packaging\matterless.nsi
+;
+; With /DFFMPEG=third_party\ffmpeg the video player's ffmpeg goes in beside the
+; app, with its licence and the notice saying where its source is.
 
 Unicode true
 
@@ -144,6 +147,17 @@ Section "${APP}"
   SetOutPath "$INSTDIR"
   Call WaitForTheOldBuild
   File "/oname=${EXE}" "${PAYLOAD}"
+!ifdef FFMPEG
+  ; Separate files the app loads at run time, which is what the LGPL asks:
+  ; anybody can put their own build of the same versions in their place.
+  File "${FFMPEG}\bin\avutil-61.dll"
+  File "${FFMPEG}\bin\swresample-7.dll"
+  File "${FFMPEG}\bin\swscale-10.dll"
+  File "${FFMPEG}\bin\avcodec-63.dll"
+  File "${FFMPEG}\bin\avformat-63.dll"
+  File "/oname=ffmpeg-LICENSE.txt" "${FFMPEG}\LICENSE.txt"
+  File "/oname=ffmpeg-NOTICE.txt" "${__FILEDIR__}\ffmpeg-NOTICE.txt"
+!endif
   WriteUninstaller "$INSTDIR\uninstall.exe"
 
   ; The shortcut is not decoration: a toast is refused outright without a
@@ -184,6 +198,13 @@ FunctionEnd
 
 Section "Uninstall"
   Delete "$INSTDIR\${EXE}"
+  Delete "$INSTDIR\avutil-61.dll"
+  Delete "$INSTDIR\swresample-7.dll"
+  Delete "$INSTDIR\swscale-10.dll"
+  Delete "$INSTDIR\avcodec-63.dll"
+  Delete "$INSTDIR\avformat-63.dll"
+  Delete "$INSTDIR\ffmpeg-LICENSE.txt"
+  Delete "$INSTDIR\ffmpeg-NOTICE.txt"
   Delete "$INSTDIR\uninstall.exe"
   ; Only if it is empty: whatever else somebody put there is theirs.
   RMDir "$INSTDIR"

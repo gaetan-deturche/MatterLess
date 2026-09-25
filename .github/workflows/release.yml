@@ -70,6 +70,19 @@ jobs:
       - name: Install NSIS
         run: choco install nsis -y --no-progress
 
+      # The video player's ffmpeg: the pinned LGPL build, checked against its
+      # hash, installed beside the app. Its source goes up with the release.
+      - name: Fetch ffmpeg
+        shell: pwsh
+        run: ./tools/fetch-ffmpeg.ps1
+
+      - name: Fetch ffmpeg's source
+        shell: pwsh
+        run: |
+          $out = "$env:GITHUB_WORKSPACE\ffmpeg-source-a5923073bf.tar.gz"
+          Invoke-WebRequest -Uri "https://github.com/FFmpeg/FFmpeg/archive/a5923073bf.tar.gz" -OutFile $out
+          "FFMPEG_SOURCE=$out" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
       # Backslashes, deliberately: NSIS reads a leading `/` in `File` as the
       # start of an option, so a forward-slash path is "no files found".
       - name: Build the installer
@@ -80,6 +93,7 @@ jobs:
           $out = "$env:GITHUB_WORKSPACE\MatterLess-$version-setup.exe"
           & "C:\Program Files (x86)\NSIS\makensis.exe" `
             "/DVERSION=$version" "/DPAYLOAD=$payload" "/DOUTFILE=$out" `
+            "/DFFMPEG=$env:GITHUB_WORKSPACE\third_party\ffmpeg" `
             "$env:GITHUB_WORKSPACE\packaging\matterless.nsi"
           if ($LASTEXITCODE -ne 0) { throw "makensis failed" }
           "SETUP=$out" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
@@ -171,6 +185,6 @@ jobs:
         run: |
           $version = $env:TAG -replace '^v', ''
           gh release create "$env:TAG" `
-            "$env:SETUP" "$env:GITHUB_WORKSPACE\latest.json" `
+            "$env:SETUP" "$env:GITHUB_WORKSPACE\latest.json" "$env:FFMPEG_SOURCE" `
             --title "MatterLess $version" `
             --notes-file "$env:NOTES"
