@@ -174,6 +174,8 @@ pub enum Update {
         width: u32,
         height: u32,
         rgba: Vec<u8>,
+        /// Every frame at that size, for a picture that moves.
+        frames: Option<Vec<(Vec<u8>, std::time::Duration)>>,
     },
     /// And the picture could not be had, so the viewer can say so rather than
     /// showing an empty window.
@@ -229,6 +231,8 @@ pub enum Ask {
         /// The original rather than the server's re-encoded preview, which is
         /// right for anything it does not re-encode -- a GIF, an SVG.
         original: bool,
+        /// A picture a message links to: `file_id` is its URL.
+        linked: bool,
         within: (u32, u32),
     },
     /// Put these pictures on the disk before anybody asks for them.
@@ -910,7 +914,13 @@ async fn run(
                         }
                     }
                     Ask::Download { file_id, name } => {
-                        match rest.fetch_bytes(&format!("/files/{file_id}")).await {
+                        // A linked picture comes from its own host, without
+                        // the session; everything else is this server's file.
+                        let route = match file_id.starts_with("https://") {
+                            true => file_id.clone(),
+                            false => format!("/files/{file_id}"),
+                        };
+                        match fetch_route(&rest, &route).await {
                             Ok(Some((bytes, _))) => match keep(&downloads(), &name, &bytes) {
                                 Ok(path) => println!("kept {}", path.display()),
                                 Err(error) => eprintln!("keeping {name}: {error}"),
@@ -1392,24 +1402,31 @@ async fn run(
                     Ask::Look {
                         file_id,
                         original,
+                        linked,
                         within,
                     } => {
-                        let route = if original {
+                        let route = if linked {
+                            file_id.clone()
+                        } else if original {
                             format!("/files/{file_id}")
                         } else {
                             format!("/files/{file_id}/preview")
                         };
-                        let key = looked_key(&file_id, original);
+                        let key = looked_key(&file_id, original, linked);
                         // A task of its own, like any picture: awaited here, a
                         // full-size original held every send and every
                         // refresh behind its download and then its decode.
                         let rest = rest.clone();
                         let wake = wake.clone();
                         tokio::spawn(async move {
-                            match rest.fetch_bytes(&route).await {
+                            match fetch_route(&rest, &route).await {
                                 Ok(Some((bytes, content_type))) => {
                                     let fitted = off_the_loop(move || {
-                                        let fitted = fit(&bytes, within.0.max(1), within.1.max(1));
+                                        let fitted = fit(&bytes, within.0.max(1), within.1.max(1))
+                                            .map(|(width, height, rgba)| {
+                                                let frames = reel_of(&bytes, width, height);
+                                                (width, height, rgba, frames)
+                                            });
                                         // Kept once it has decoded, so the next
                                         // time it is opened needs no network.
                                         if fitted.is_some()
@@ -1421,13 +1438,14 @@ async fn run(
                                     })
                                     .await;
                                     match fitted {
-                                        Some((Some((width, height, rgba)), _, _)) => {
+                                        Some((Some((width, height, rgba, frames)), _, _)) => {
                                             wake.wake(Update::Looked {
                                                 file_id,
                                                 within,
                                                 width,
                                                 height,
                                                 rgba,
+                                                frames,
                                             })
                                         }
                                         Some((None, length, kind)) => wake.wake(Update::LookFailed {
@@ -1838,6 +1856,30 @@ mod tests {
             }
         }
         bytes
+    }
+
+    /// A GIF opened in the viewer comes with every frame at the size it is
+    /// shown, so it plays there; a still picture comes with none.
+    #[test]
+    fn a_gif_in_the_viewer_brings_its_frames() {
+        let gif = a_gif(4, 120, 80);
+        let frames = super::reel_of(&gif, 60, 40).expect("it moves");
+        assert_eq!(frames.len(), 4);
+        assert!(frames.iter().all(|(rgba, _)| rgba.len() == 60 * 40 * 4));
+        assert!(
+            super::reel_of(&a_gif(1, 120, 80), 60, 40).is_none(),
+            "one frame is a still"
+        );
+    }
+
+    /// A linked picture is kept under its URL's hash, the same key the message
+    /// list fetches it under -- not under a route of this server's.
+    #[test]
+    fn a_linked_picture_is_kept_under_its_link() {
+        let url = "https://media1.giphy.com/media/JfHY/200.gif?cid=1";
+        assert_eq!(super::looked_key(url, false, true), super::linked_key(url));
+        assert_eq!(super::looked_key("f1", true, false), "file/f1");
+        assert_eq!(super::looked_key("f1", false, false), "preview/f1");
     }
 
     /// The frames of a GIF are scaled by the method now, for the same reason a
@@ -2375,7 +2417,7 @@ const READERS: usize = 6;
 /// miss is passed along to it, so the window has one call to make either way.
 pub struct Shelf {
     wants: std::sync::mpsc::Sender<(String, u32, u32)>,
-    looks: std::sync::mpsc::Sender<(String, bool, (u32, u32))>,
+    looks: std::sync::mpsc::Sender<(String, bool, bool, (u32, u32))>,
 }
 
 impl Shelf {
@@ -2386,18 +2428,53 @@ impl Shelf {
 
     /// Queues a picture opened in the viewer: off the disk when it is there,
     /// from the server when it is not.
-    pub fn look(&self, file_id: String, original: bool, within: (u32, u32)) -> bool {
-        self.looks.send((file_id, original, within)).is_ok()
+    pub fn look(&self, file_id: String, original: bool, linked: bool, within: (u32, u32)) -> bool {
+        self.looks.send((file_id, original, linked, within)).is_ok()
     }
 }
 
 /// What an opened picture is kept under on the disk: the rendition and the id,
-/// named as the routes name them.
-fn looked_key(file_id: &str, original: bool) -> String {
-    match original {
-        true => format!("file/{file_id}"),
-        false => format!("preview/{file_id}"),
+/// named as the routes name them -- and a linked one by its URL's hash.
+fn looked_key(file_id: &str, original: bool, linked: bool) -> String {
+    match (linked, original) {
+        (true, _) => linked_key(file_id),
+        (false, true) => format!("file/{file_id}"),
+        (false, false) => format!("preview/{file_id}"),
     }
+}
+
+/// The most the frames of one picture in the viewer may take. A GIF from the
+/// picker is a few megabytes of frames; a screen recording at window size is
+/// hundreds, and past this its loop is cut short rather than the memory spent.
+const REEL_BYTES: usize = 192 * 1024 * 1024;
+
+/// Every frame of a moving picture at exactly `width` by `height`, for the
+/// viewer. `None` for anything with one frame, which is nearly everything.
+fn reel_of(bytes: &[u8], width: u32, height: u32) -> Option<Vec<(Vec<u8>, std::time::Duration)>> {
+    use image::AnimationDecoder;
+    if kind_of(bytes) != "gif" {
+        return None;
+    }
+    let decoder = image::codecs::gif::GifDecoder::new(std::io::Cursor::new(bytes)).ok()?;
+    let mut frames = Vec::new();
+    let mut held = 0usize;
+    for frame in decoder.into_frames() {
+        let Ok(frame) = frame else { break };
+        let (numerator, denominator) = frame.delay().numer_denom_ms();
+        let delay = std::time::Duration::from_micros(
+            (u64::from(numerator) * 1000) / u64::from(denominator.max(1)).max(1),
+        );
+        let mut rgba = frame.into_buffer();
+        if (rgba.width(), rgba.height()) != (width, height) {
+            rgba = image::imageops::thumbnail(&rgba, width.max(1), height.max(1));
+        }
+        held += rgba.as_raw().len();
+        frames.push((rgba.into_raw(), delay));
+        if held > REEL_BYTES || frames.len() >= 240 {
+            break;
+        }
+    }
+    (frames.len() > 1).then_some(frames)
 }
 
 /// Asks the server who of these is around, and tells the window.
@@ -2509,26 +2586,31 @@ pub fn shelf(link: Link, wake: impl Wake) -> Shelf {
     }
     // The viewer's reader, one of its own: a two-thousand-pixel picture takes
     // tens of milliseconds to decode, and the faces behind it must not wait.
-    let (looks, looked) = std::sync::mpsc::channel::<(String, bool, (u32, u32))>();
+    let (looks, looked) = std::sync::mpsc::channel::<(String, bool, bool, (u32, u32))>();
     std::thread::spawn(move || {
         let held = crate::filecache::looked();
-        for (file_id, original, within) in looked {
+        for (file_id, original, linked, within) in looked {
             let fitted = held
                 .as_ref()
-                .and_then(|held| held.read(&looked_key(&file_id, original)))
-                .and_then(|(bytes, _)| fit(&bytes, within.0.max(1), within.1.max(1)));
+                .and_then(|held| held.read(&looked_key(&file_id, original, linked)))
+                .and_then(|(bytes, _)| {
+                    let (width, height, rgba) = fit(&bytes, within.0.max(1), within.1.max(1))?;
+                    Some((width, height, rgba, reel_of(&bytes, width, height)))
+                });
             match fitted {
-                Some((width, height, rgba)) => wake.wake(Update::Looked {
+                Some((width, height, rgba, frames)) => wake.wake(Update::Looked {
                     file_id,
                     within,
                     width,
                     height,
                     rgba,
+                    frames,
                 }),
                 None => {
                     link.send(Ask::Look {
                         file_id,
                         original,
+                        linked,
                         within,
                     });
                 }

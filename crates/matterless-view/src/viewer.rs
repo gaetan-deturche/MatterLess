@@ -47,6 +47,8 @@ pub struct Looking {
     /// Whether the original is the right rendition: the server re-encodes a
     /// photograph and does not re-encode a GIF or an SVG.
     pub original: bool,
+    /// A picture a message links to, from its own host: `file_id` is its URL.
+    pub linked: bool,
 }
 
 /// What a press on the viewer meant.
@@ -463,6 +465,7 @@ mod tests {
                 file_id: format!("f{at}"),
                 name: format!("shot{at}.png"),
                 original: false,
+                linked: false,
             })
             .collect()
     }

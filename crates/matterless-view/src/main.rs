@@ -561,6 +561,8 @@ struct App {
     shelf: Option<matterless_view::live::Shelf>,
     /// The pictures opened lately, decoded, so opening one again is instant.
     remembered: matterless_view::viewer::Remembered,
+    /// The frames of the picture in the viewer, when it moves, by its file id.
+    looked_moving: matterless_view::moving::Moving,
     /// Messages written but not yet confirmed, held in memory and nowhere else:
     /// a guess must never reach SQLite.
     outstanding: Arc<matterless_render::pending::PendingPosts>,
@@ -931,6 +933,7 @@ impl App {
             link: None,
             shelf: None,
             remembered: matterless_view::viewer::Remembered::default(),
+            looked_moving: matterless_view::moving::Moving::default(),
             outstanding: Arc::new(matterless_render::pending::PendingPosts::default()),
             asked: std::collections::HashSet::new(),
             arrived: Vec::new(),
@@ -1858,6 +1861,7 @@ impl App {
                 width,
                 height,
                 rgba,
+                frames,
             } => {
                 if self
                     .viewer
@@ -1868,7 +1872,23 @@ impl App {
                     view.show(width, height, &rgba);
                     self.viewer.arrived(&file_id, (width, height));
                 }
-                self.remembered.keep(&file_id, within, width, height, rgba);
+                match frames {
+                    // Played in the viewer. Not remembered as a still: opening
+                    // it again from memory would show a GIF that does not move.
+                    Some(frames) => {
+                        self.looked_moving = Default::default();
+                        self.looked_moving.keep(
+                            &file_id,
+                            matterless_view::moving::Reel::new(
+                                width,
+                                height,
+                                frames,
+                                std::time::Instant::now(),
+                            ),
+                        );
+                    }
+                    None => self.remembered.keep(&file_id, within, width, height, rgba),
+                }
             }
             Update::LookFailed { file_id, why } => {
                 eprintln!("looking at {file_id}: {why}");
@@ -3255,7 +3275,7 @@ impl App {
             return;
         }
         if let Some(shelf) = self.shelf.as_ref()
-            && shelf.look(one.file_id.clone(), one.original, self.size)
+            && shelf.look(one.file_id.clone(), one.original, one.linked, self.size)
         {
             return;
         }
@@ -3265,6 +3285,7 @@ impl App {
         link.send(matterless_view::live::Ask::Look {
             file_id: one.file_id.clone(),
             original: one.original,
+            linked: one.linked,
             within: self.size,
         });
     }
@@ -3740,12 +3761,22 @@ impl App {
     /// something to happen rather than for a clock, exactly as it did before
     /// any picture moved.
     fn playing(&self) -> Option<std::time::Instant> {
-        if !self.on_show() || self.moving.is_empty() {
+        if !self.on_show() {
             return None;
         }
+        let now = std::time::Instant::now();
+        // The picture in the viewer, which is in a texture of its own.
+        let viewed = self.viewer.current().map(|one| one.file_id.as_str());
+        let looked = self.looked_moving.wakes(now, |key| Some(key) == viewed);
+        if self.moving.is_empty() {
+            return looked;
+        }
         let view = self.view.as_ref()?;
-        self.moving
-            .wakes(std::time::Instant::now(), |key| view.atlas.drawn(key))
+        let atlas = self.moving.wakes(now, |key| view.atlas.drawn(key));
+        match (looked, atlas) {
+            (Some(looked), Some(atlas)) => Some(looked.min(atlas)),
+            (looked, atlas) => looked.or(atlas),
+        }
     }
 
     /// Puts a half-written message away a couple of seconds after the typing
@@ -3787,6 +3818,14 @@ impl App {
 
     /// Whether a picture on screen is showing a frame it has outlasted.
     fn overdue(&self) -> bool {
+        let viewed = self.viewer.current().map(|one| one.file_id.as_str());
+        if self.on_show()
+            && self
+                .looked_moving
+                .overdue(std::time::Instant::now(), |key| Some(key) == viewed)
+        {
+            return true;
+        }
         if !self.on_show() || self.moving.is_empty() {
             return false;
         }
@@ -3808,6 +3847,19 @@ impl App {
     /// behind an editor should cost nothing at all, and a loop nobody can see
     /// is a texture upload and a woken thread for each frame of it.
     fn played(&mut self) {
+        // The picture in the viewer: its next frame, as the texture it is drawn
+        // from.
+        if self.on_show() {
+            let viewed = self.viewer.current().map(|one| one.file_id.clone());
+            let due = self.looked_moving.due(std::time::Instant::now(), |key| {
+                viewed.as_deref() == Some(key)
+            });
+            if let Some(view) = self.view.as_mut() {
+                for (_, width, height, rgba) in due {
+                    view.show(width, height, &rgba);
+                }
+            }
+        }
         if !self.on_show() || self.moving.is_empty() {
             return;
         }
@@ -5889,6 +5941,7 @@ impl App {
             match did {
                 Some(matterless_view::viewer::Did::Close) => {
                     self.viewer.hide();
+                    self.looked_moving = Default::default();
                     if let Some(view) = self.view.as_mut() {
                         view.stop_showing();
                     }

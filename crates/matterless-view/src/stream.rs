@@ -2856,15 +2856,16 @@ pub fn avatar_key_sized(user_id: &str, version: i64, side: u32) -> String {
 pub fn looking_at(post: &matterless_render::PostRow) -> Vec<crate::viewer::Looking> {
     post.files
         .iter()
-        // Not a picture from the text: the viewer fetches from this server.
-        .filter(|file| {
-            (file.image || file.video)
-                && !file.archived
-                && file.variant != matterless_render::ImageVariant::Linked
-        })
+        .filter(|file| (file.image || file.video) && !file.archived)
         .map(|file| crate::viewer::Looking {
             file_id: file.id.clone(),
-            name: file.name.clone(),
+            // A linked picture's name is its alt text, which is not a file
+            // name until it says what kind of file.
+            name: match file.variant == matterless_render::ImageVariant::Linked {
+                true => format!("{}.{}", file.name, file.extension),
+                false => file.name.clone(),
+            },
+            linked: file.variant == matterless_render::ImageVariant::Linked,
             // The original for anything the server does not re-encode -- a
             // GIF, an SVG, a video -- and its preview for a photograph, which
             // it caps at 1920 wide and which is the right answer for one.
