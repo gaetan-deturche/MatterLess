@@ -403,6 +403,26 @@ impl Store {
 
     // ----------------------------------------------------------------- posts
 
+    /// Roots of followed threads, as the thread list sends them: with no
+    /// metadata at all -- no files, no reactions, no picture sizes -- and the
+    /// post's real `update_at`.
+    ///
+    /// Kept only where nothing is held, and as older than any real copy: taken
+    /// as they came, one overwrote the full post whenever a reply had moved
+    /// its `update_at`, and the full copy fetched later looked like the same
+    /// post and was dropped. An attached screenshot was gone for good.
+    pub fn keep_thread_roots(&self, roots: &[Post]) -> Result<()> {
+        let thin: Vec<Post> = roots
+            .iter()
+            .cloned()
+            .map(|mut root| {
+                root.update_at = 0;
+                root
+            })
+            .collect();
+        self.upsert_posts(&thin).map(|_| ())
+    }
+
     /// Write-through upsert. Returns per-post outcomes so the caller emits a
     /// delta only for what genuinely changed.
     pub fn upsert_posts(&self, posts: &[Post]) -> Result<Vec<PostOutcome>> {
@@ -435,15 +455,23 @@ impl Store {
                         // event. Never let it overwrite.
                         PostChange::Unchanged
                     } else if post.update_at == held_update_at {
-                        // The same post, but held from before the sizes of the
-                        // pictures its text links to were kept: without them a
-                        // GIF from the picker stays its alt text for good,
-                        // since nothing moves `update_at` to rewrite it.
-                        let sizes_missing = !post.metadata.images.is_empty()
+                        // The same post, but held thinner than this copy: its
+                        // files or its pictures' sizes missing. Nothing moves
+                        // `update_at` to rewrite it, so without this a picture
+                        // stays missing for good -- a root taken from the
+                        // thread list, which sends no metadata, or a GIF held
+                        // from before the sizes were kept.
+                        let offers =
+                            !post.metadata.files.is_empty() || !post.metadata.images.is_empty();
+                        let thinner = offers
                             && serde_json::from_str::<PostMetadata>(&held_metadata)
-                                .map(|held| held.images.is_empty())
+                                .map(|held| {
+                                    (held.files.is_empty() && !post.metadata.files.is_empty())
+                                        || (held.images.is_empty()
+                                            && !post.metadata.images.is_empty())
+                                })
                                 .unwrap_or(true);
-                        match sizes_missing {
+                        match thinner {
                             true => PostChange::Updated,
                             false => PostChange::Unchanged,
                         }

@@ -440,7 +440,7 @@ impl SyncEngine {
                         // not be opened.
                         if !thread.post.id.is_empty() {
                             self.store
-                                .upsert_posts(std::slice::from_ref(&thread.post))?;
+                                .keep_thread_roots(std::slice::from_ref(&thread.post))?;
                         }
                         self.store
                             .upsert_threads(std::slice::from_ref(thread.as_ref()))?;

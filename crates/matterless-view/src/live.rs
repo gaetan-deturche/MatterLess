@@ -3162,7 +3162,7 @@ async fn membership(
                 // joins the posts table for the message and comes back empty.
                 let roots: Vec<matterless_core::model::Post> =
                     page.threads.iter().map(|one| one.post.clone()).collect();
-                if let Err(error) = store.upsert_posts(&roots) {
+                if let Err(error) = store.keep_thread_roots(&roots) {
                     eprintln!("storing the thread roots for {}: {error}", team.id);
                 }
                 if let Err(error) = store.upsert_threads(&page.threads) {

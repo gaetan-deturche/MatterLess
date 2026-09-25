@@ -1891,3 +1891,66 @@ fn a_post_missing_its_picture_sizes_takes_them() {
         "the same copy again"
     );
 }
+
+fn with_a_file(mut post: Post) -> Post {
+    post.file_ids = vec!["f1".into()];
+    post.metadata.files = vec![matterless_core::model::FileInfo {
+        id: "f1".into(),
+        name: "Screenshot.png".into(),
+        mime_type: "image/png".into(),
+        width: 1115,
+        height: 824,
+        ..Default::default()
+    }];
+    post
+}
+
+/// A root from the thread list -- no metadata, the real `update_at` -- never
+/// takes the place of the full post, whichever arrives first.
+#[test]
+fn a_thread_root_never_thins_the_post() {
+    let store = store();
+    let full = with_a_file(post("p1", "c1", 100, 300));
+    let mut thin = full.clone();
+    thin.metadata = PostMetadata::default();
+
+    // Full first, then the thread list's copy.
+    store.upsert_posts(std::slice::from_ref(&full)).unwrap();
+    store
+        .keep_thread_roots(std::slice::from_ref(&thin))
+        .unwrap();
+    assert_eq!(
+        store.post("p1").unwrap().unwrap().metadata.files.len(),
+        1,
+        "thinned"
+    );
+
+    // The thread list's copy first, then the full one with the same stamp.
+    let other = store_with_thin_then_full(&full, &thin);
+    assert_eq!(
+        other.post("p1").unwrap().unwrap().metadata.files.len(),
+        1,
+        "never filled"
+    );
+}
+
+fn store_with_thin_then_full(full: &Post, thin: &Post) -> Store {
+    let store = store();
+    store.keep_thread_roots(std::slice::from_ref(thin)).unwrap();
+    store.upsert_posts(std::slice::from_ref(full)).unwrap();
+    store
+}
+
+/// A post already held thin, as older builds left one, is filled in by the
+/// first full copy even though its stamp has not moved.
+#[test]
+fn a_post_held_without_its_files_takes_them() {
+    let store = store();
+    let full = with_a_file(post("p1", "c1", 100, 300));
+    let mut thin = full.clone();
+    thin.metadata = PostMetadata::default();
+    store.upsert_posts(std::slice::from_ref(&thin)).unwrap();
+    let outcomes = store.upsert_posts(std::slice::from_ref(&full)).unwrap();
+    assert_eq!(outcomes[0].change, PostChange::Updated);
+    assert_eq!(store.post("p1").unwrap().unwrap().metadata.files.len(), 1);
+}
