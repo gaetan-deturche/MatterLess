@@ -1267,6 +1267,40 @@ impl Stream {
         runs
     }
 
+    /// Where each link card's picture is drawn, with its address: the text-less
+    /// preview lines paired, in order, with the previews that have a picture.
+    fn preview_pictures(&self, index: usize, top: f32, left: f32) -> Vec<(Rect, String)> {
+        let (Some(laid), Some(Row::Post { post } | Row::Continuation { post })) =
+            (self.laid.get(index), self.rows.get(index))
+        else {
+            return Vec::new();
+        };
+        let urls = post.previews.iter().filter_map(|preview| match preview {
+            matterless_render::Preview::Page {
+                image: Some(picture),
+                ..
+            } if picture.width > 0 => Some(picture.url.clone()),
+            _ => None,
+        });
+        laid.blocks
+            .iter()
+            .filter(|block| block.kind == matterless_layout::row::Kind::Preview && block.lines == 0)
+            .zip(urls)
+            .map(|(block, url)| {
+                let gap = self.theme.block_gap;
+                (
+                    Rect::new(
+                        left + self.theme.gutter + block.x,
+                        top + block.y + gap,
+                        block.wrap,
+                        (block.height - gap).max(1.0),
+                    ),
+                    url,
+                )
+            })
+            .collect()
+    }
+
     /// What one preview card leads to.
     ///
     /// A page card is its link and a quoted card is the message it quotes,
@@ -1876,6 +1910,14 @@ impl Stream {
                             ));
                         }
                     }
+                }
+                // And the pictures on its link cards, at the size they are drawn.
+                for (at, url) in self.preview_pictures(index, top, 0.0) {
+                    wanted.push((
+                        crate::live::linked_key(&url),
+                        (at.width as u32).max(1),
+                        (at.height as u32).max(1),
+                    ));
                 }
             }
             top = bottom;
@@ -2571,6 +2613,16 @@ impl Stream {
                     }
                 }
                 scene.extend(self.pictures(index, top, inner.x, palette.raised));
+                for (at, url) in self.preview_pictures(index, top, inner.x) {
+                    scene.extend([matterless_paint::Piece::Image {
+                        x: at.x,
+                        y: at.y,
+                        width: at.width,
+                        height: at.height,
+                        key: crate::live::linked_key(&url),
+                        radius: CARD,
+                    }]);
+                }
                 // The toolbar last of the row's own drawing, so it sits over
                 // the message rather than under the first word of it.
                 if hovered == Some(index) {

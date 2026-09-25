@@ -1215,6 +1215,17 @@ fn inline(
     }
 }
 
+/// How big a link card's picture is drawn in a card `wrap` wide: its fitted
+/// size, smaller again when the card is narrower, both sides together.
+pub fn preview_picture_size(picture: &matterless_render::PreviewImage, wrap: f32) -> (f32, f32) {
+    let width = picture.width.max(1) as f32;
+    let height = picture.height.max(1) as f32;
+    match width > wrap {
+        true => (wrap, (height * wrap / width).max(1.0)),
+        false => (width, height),
+    }
+}
+
 fn attrs_for(bold: bool, italic: bool, mono: bool) -> Attrs<'static> {
     let mut attrs = Attrs::new();
     if mono {
@@ -1746,11 +1757,29 @@ pub fn lay_out_opened(fonts: &mut Fonts, row: &Row, theme: &Theme, opened: bool)
                 title,
                 description,
                 site_name,
+                image,
                 ..
             } => {
                 push(site_name, false, true, 1, fonts);
                 push(title, true, false, 2, fonts);
                 push(description, false, true, theme.preview_lines, fonts);
+                // The page's picture, under its words and inside the same card:
+                // a line with no words, one gap above the picture tall, so the
+                // run the card's ground is drawn to carries on through it.
+                if let Some(picture) = image.as_ref().filter(|picture| picture.width > 0) {
+                    let (width, height) = preview_picture_size(picture, wrap);
+                    blocks.push(Block {
+                        y,
+                        x,
+                        height: theme.block_gap + height,
+                        lines: 0,
+                        kind: Kind::Preview,
+                        spans: Vec::new(),
+                        size: theme.body_size,
+                        wrap: width,
+                    });
+                    y += theme.block_gap + height;
+                }
             }
             matterless_render::Preview::Permalink {
                 channel_label,
@@ -2347,6 +2376,52 @@ mod tests {
                 "a gap opened between two lines of one card"
             );
         }
+    }
+
+    /// A card's picture is a line of the card with no words: as tall as the
+    /// picture plus a gap, carrying the run on so the card's ground covers it.
+    #[test]
+    fn a_link_card_keeps_room_for_its_picture() {
+        let mut fonts = Fonts::new();
+        let theme = Theme::default();
+        let mut carded = post(vec![text("look")]);
+        carded.previews = vec![matterless_render::Preview::Page {
+            url: "https://example.invalid/thing".into(),
+            title: "A page".into(),
+            description: "About it.".into(),
+            site_name: "example.invalid".into(),
+            image: Some(matterless_render::PreviewImage {
+                url: "https://example.invalid/og.png".into(),
+                width: 400,
+                height: 210,
+            }),
+        }];
+        let laid = lay_out(&mut fonts, &Row::Post { post: carded }, &theme);
+        let card: Vec<&Block> = laid
+            .blocks
+            .iter()
+            .filter(|block| block.kind == Kind::Preview)
+            .collect();
+        assert_eq!(card.len(), 4, "site, title, description and the picture");
+        let picture = card[3];
+        assert_eq!(picture.lines, 0);
+        assert!(picture.spans.is_empty());
+        let wide = (theme.text_width() - theme.quote_bar - theme.indent / 2.0)
+            .min(theme.preview_width - theme.card_padding * 2.0);
+        let expected = super::preview_picture_size(
+            &matterless_render::PreviewImage {
+                url: String::new(),
+                width: 400,
+                height: 210,
+            },
+            wide,
+        );
+        assert!((picture.wrap - expected.0).abs() < 0.5);
+        assert!((picture.height - (theme.block_gap + expected.1)).abs() < 0.5);
+        assert!(
+            (picture.y - (card[2].y + card[2].height)).abs() < 0.5,
+            "a gap opened between the words and the picture"
+        );
     }
 
     /// A description of a thousand words is not a summary. Past the cap the
