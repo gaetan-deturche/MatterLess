@@ -624,14 +624,17 @@ pub fn conversation_label(
     (matterless_sidebar::label(&channel, me_id, names), kind)
 }
 
-/// One line of the message, short enough for a toast.
+/// One line of the message, short enough for a toast, as it reads rather than
+/// as it was written.
+///
+/// Windows puts a notification's text on screen exactly as given, so the
+/// markdown went with it: `**`, backticks and `[text](url)` in the middle of
+/// the one line a reader gets. Flattened first and cut after, so the cut
+/// never leaves half a mark behind either.
 pub fn preview_of(message: &str) -> String {
-    let single_line: String = message
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .collect::<Vec<_>>()
-        .join(" ");
+    let read =
+        matterless_render::markdown::plain_text(&matterless_render::markdown::parse(message));
+    let single_line: String = read.split_whitespace().collect::<Vec<_>>().join(" ");
     let mut short: String = single_line.chars().take(140).collect();
     if single_line.chars().count() > 140 {
         short.push('…');
@@ -715,6 +718,37 @@ mod announcing {
     #[test]
     fn a_preview_is_a_single_line() {
         assert_eq!(preview_of("one\n\n  two  \nthree"), "one two three");
+    }
+
+    /// What a reader sees, not the marks that make it: emphasis, code,
+    /// strikethrough and a link's words rather than its address.
+    #[test]
+    fn a_preview_reads_without_its_markdown() {
+        assert_eq!(
+            preview_of(
+                "**Fixed** the `bake` in [CL 208350](https://swarm.example/208350), ~~not~~ yet :tada:"
+            ),
+            "Fixed the bake in CL 208350, not yet 🎉"
+        );
+        assert_eq!(
+            preview_of(
+                "# Heading
+
+> quoted
+
+```rust
+fn main() {}
+```"
+            ),
+            "Heading quoted fn main() {}"
+        );
+        assert_eq!(
+            preview_of(
+                "- one
+- two"
+            ),
+            "one two"
+        );
     }
 
     #[test]

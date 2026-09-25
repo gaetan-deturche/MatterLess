@@ -7,6 +7,9 @@ license.workspace = true
 
 [dependencies]
 matterless-core = { version = "0.1.0", path = "../matterless-core" }
+# Markdown flattened to what a reader sees, for a toast: Windows shows a
+# notification's text as it is given, marks and all.
+matterless-render = { version = "0.1.0", path = "../matterless-render" }
 matterless-store = { version = "0.1.0", path = "../matterless-store" }
 # For what to call a conversation. One answer to that question, not two: the
 # sidebar and a notification naming the same group differently is the sort of

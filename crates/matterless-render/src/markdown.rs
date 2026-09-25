@@ -420,7 +420,21 @@ fn flatten(nodes: &[Node], between: &str) -> String {
                     out.push_str(value);
                 }
                 Node::SoftBreak | Node::HardBreak => out.push_str(between),
-                _ => {}
+                // Each item, and each cell, its own piece: a message that was
+                // only a list flattened to nothing, and its toast said nothing.
+                Node::List { items, .. } => {
+                    for item in items {
+                        separate(out, between);
+                        walk(item, out, between);
+                    }
+                }
+                Node::Table { head, rows } => {
+                    for cell in head.iter().chain(rows.iter().flatten()) {
+                        separate(out, between);
+                        walk(cell, out, between);
+                    }
+                }
+                Node::Rule => {}
             }
         }
     }

@@ -1604,6 +1604,7 @@ name = "matterless-sync"
 version = "0.1.0"
 dependencies = [
  "matterless-core",
+ "matterless-render",
  "matterless-sidebar",
  "matterless-store",
  "serde",
