@@ -1128,9 +1128,16 @@ impl Stream {
         Some(Rect::new(
             left + self.theme.gutter,
             top + block.y,
-            (self.theme.text_width() * 0.6).min(320.0),
+            self.card_width(),
             block.height,
         ))
+    }
+
+    /// How wide a file card is: the column, up to a width that holds a name.
+    /// A share of the column left a narrow pane's card too small to say what
+    /// the file was.
+    fn card_width(&self) -> f32 {
+        self.theme.text_width().min(320.0)
     }
 
     /// How far from the newest message the reader is sitting.
@@ -2428,7 +2435,7 @@ impl Stream {
         for (ordinal, (block, file)) in self.filed(index).into_iter().enumerate() {
             let x = left + self.theme.gutter;
             let y = top + block.y;
-            let width = (self.theme.text_width() * 0.6).min(320.0);
+            let width = self.card_width();
             scene.rounded(x, y, width, block.height, palette.raised, CARD);
             // Somewhere to put it. Every other client offers this and a file
             // nobody can keep is a file nobody can open.
@@ -2455,9 +2462,23 @@ impl Stream {
                 Run::label(f32::MAX),
             );
             scene.glyphs(keep, palette.signal, palette.faint);
-            let name = painter.run(
+            // Cut short of the button rather than wrapped: a card is a fixed
+            // height and a wrapped name would run out of it.
+            let named = matterless_layout::elided(
                 fonts,
                 &file.name,
+                (save.x - 8.0 - (x + 12.0)).max(1.0),
+                matterless_layout::Style {
+                    size: 13.5,
+                    line_height: 18.0,
+                    bold: true,
+                    italic: false,
+                    mono: false,
+                },
+            );
+            let name = painter.run(
+                fonts,
+                &named,
                 x + 12.0,
                 y + 10.0,
                 Run {
@@ -2465,8 +2486,6 @@ impl Stream {
                     line_height: 18.0,
                     bold: true,
                     mono: false,
-                    // Cut by the panel's clip rather than wrapped: a card is a
-                    // fixed height and a wrapped name would run out of it.
                     wrap: f32::MAX,
                     icon: false,
                     smooth: false,
