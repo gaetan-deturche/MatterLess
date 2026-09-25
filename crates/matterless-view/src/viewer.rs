@@ -74,30 +74,37 @@ struct Text {
     /// Its lines cut to a width in characters, and that width: each row is a
     /// line's number and the byte range of the line it shows.
     rows: std::cell::RefCell<Rows>,
+    /// Each line's colours, once worked out; empty for plain text.
+    colours: crate::highlight::Colours,
+}
+
+/// A file's text as the lines the viewer draws: tabs as four spaces, no
+/// carriage returns, and no other control character left to draw as nothing.
+pub fn lines_of(text: &str) -> Vec<String> {
+    text.split('\n')
+        .map(|line| {
+            let mut kept = String::with_capacity(line.len());
+            for c in line.chars() {
+                match c {
+                    '\t' => kept.push_str("    "),
+                    '\r' => {}
+                    c if c.is_control() => kept.push('\u{fffd}'),
+                    c => kept.push(c),
+                }
+            }
+            kept
+        })
+        .collect()
 }
 
 impl Text {
-    fn new(file_id: &str, text: &str) -> Self {
-        let lines = text
-            .split('\n')
-            .map(|line| {
-                let mut kept = String::with_capacity(line.len());
-                for c in line.chars() {
-                    match c {
-                        '\t' => kept.push_str("    "),
-                        '\r' => {}
-                        c if c.is_control() => kept.push('\u{fffd}'),
-                        c => kept.push(c),
-                    }
-                }
-                kept
-            })
-            .collect();
+    fn new(file_id: &str, lines: Vec<String>) -> Self {
         Self {
             file_id: file_id.to_string(),
             lines,
             advance: std::cell::Cell::new(0.0),
             rows: Default::default(),
+            colours: Vec::new(),
         }
     }
 
@@ -276,13 +283,20 @@ impl Viewer {
         self.texts.iter().any(|text| text.file_id == file_id)
     }
 
-    /// A text file's contents arrived.
-    pub fn read(&mut self, file_id: &str, text: &str) {
+    /// A text file's contents arrived, as `lines_of` gives them.
+    pub fn read(&mut self, file_id: &str, lines: Vec<String>) {
         self.texts.retain(|held| held.file_id != file_id);
-        self.texts.push_front(Text::new(file_id, text));
+        self.texts.push_front(Text::new(file_id, lines));
         self.texts.truncate(TEXTS);
         if self.current().is_some_and(|one| one.file_id == file_id) {
             self.failed.clear();
+        }
+    }
+
+    /// And its colours, worked out after it.
+    pub fn colour(&mut self, file_id: &str, colours: crate::highlight::Colours) {
+        if let Some(text) = self.texts.iter_mut().find(|held| held.file_id == file_id) {
+            text.colours = colours;
         }
     }
 
@@ -607,10 +621,25 @@ impl Viewer {
                         );
                         scene.glyphs(glyphs, palette.faint, palette.faint);
                     }
-                    let line = &text.lines[number][from..to];
-                    if !line.is_empty() {
-                        let glyphs = painter.run(fonts, line, left, y, Run::label(f32::MAX).mono());
-                        scene.glyphs(glyphs, palette.ink, palette.faint);
+                    let whole = &text.lines[number];
+                    // Each coloured run the row holds, set as many characters
+                    // in as it starts: the face is monospaced.
+                    let runs: Vec<(usize, usize, [u8; 3])> = match text.colours.get(number) {
+                        Some(runs) if !runs.is_empty() => runs
+                            .iter()
+                            .filter(|run| run.0 < to && run.1 > from)
+                            .map(|run| (run.0.max(from), run.1.min(to), run.2))
+                            .collect(),
+                        _ => vec![(from, to, palette.ink)],
+                    };
+                    for (start, end, colour) in runs {
+                        let piece = &whole[start..end];
+                        if piece.trim().is_empty() {
+                            continue;
+                        }
+                        let x = left + whole[from..start].chars().count() as f32 * advance;
+                        let glyphs = painter.run(fonts, piece, x, y, Run::label(f32::MAX).mono());
+                        scene.glyphs(glyphs, colour, palette.faint);
                     }
                 }
                 // Where in it the reader is, down the right edge.
@@ -828,7 +857,7 @@ mod tests {
     /// line end leaves nothing behind.
     #[test]
     fn text_is_cut_into_rows_of_the_width() {
-        let text = Text::new("t", "abcdefghij\r\n\n\tx");
+        let text = Text::new("t", lines_of("abcdefghij\r\n\n\tx"));
         assert_eq!(text.lines, ["abcdefghij", "", "    x"]);
         let rows = text.rows(4);
         assert_eq!(
@@ -853,7 +882,7 @@ mod tests {
         let mut log = three().remove(0);
         log.text = true;
         viewer.show(vec![log], "f0");
-        viewer.read("f0", "one\ntwo\nthree");
+        viewer.read("f0", lines_of("one\ntwo\nthree"));
         viewer.reach.set(100.0);
         let placed = viewer.boxes(window());
         let mut input = Input::default();

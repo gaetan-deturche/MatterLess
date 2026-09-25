@@ -185,8 +185,13 @@ pub enum Update {
         file_id: String,
         path: std::path::PathBuf,
     },
-    /// A text file a reader opened, as text.
-    Text { file_id: String, text: String },
+    /// A text file a reader opened, as the lines the viewer draws.
+    Text { file_id: String, lines: Vec<String> },
+    /// And, for code, its colours, which take longer.
+    Colours {
+        file_id: String,
+        colours: crate::highlight::Colours,
+    },
 }
 
 /// What the window asks the socket thread to do.
@@ -230,8 +235,8 @@ pub enum Ask {
     Download { file_id: String, name: String },
     /// Fetch a video to the disk, to be played from there.
     Film { file_id: String },
-    /// Fetch a text file, to be read.
-    Read { file_id: String },
+    /// Fetch a text file, to be read. Its name says what grammar colours it.
+    Read { file_id: String, name: String },
     /// Fetch one attachment at full size, to be looked at.
     ///
     /// `within` is how big the window is: the picture is scaled down to fit it
@@ -1551,18 +1556,44 @@ async fn run(
                             }
                         });
                     }
-                    Ask::Read { file_id } => {
+                    Ask::Read { file_id, name } => {
                         let rest = rest.clone();
                         let wake = wake.clone();
                         tokio::spawn(async move {
                             let update = match rest.fetch_bytes(&format!("/files/{file_id}")).await {
-                                Ok(Some((bytes, _))) => match text_of(&bytes) {
-                                    Some(text) => Update::Text { file_id, text },
-                                    None => Update::LookFailed {
-                                        file_id,
-                                        why: "it is not text".to_string(),
-                                    },
-                                },
+                                Ok(Some((bytes, _))) => {
+                                    let lines = off_the_loop(move || {
+                                        text_of(&bytes).map(|text| crate::viewer::lines_of(&text))
+                                    })
+                                    .await
+                                    .flatten();
+                                    match lines {
+                                        // Shown plain at once, and coloured when
+                                        // the grammar has been through it.
+                                        Some(lines) => {
+                                            let coloured = crate::highlight::colours_for(&name)
+                                                .then(|| lines.clone());
+                                            wake.wake(Update::Text {
+                                                file_id: file_id.clone(),
+                                                lines,
+                                            });
+                                            let Some(lines) = coloured else { return };
+                                            match off_the_loop(move || {
+                                                crate::highlight::colours(&name, &lines)
+                                            })
+                                            .await
+                                            .flatten()
+                                            {
+                                                Some(colours) => Update::Colours { file_id, colours },
+                                                None => return,
+                                            }
+                                        }
+                                        None => Update::LookFailed {
+                                            file_id,
+                                            why: "it is not text".to_string(),
+                                        },
+                                    }
+                                }
                                 Ok(None) => Update::LookFailed {
                                     file_id,
                                     why: "the server has no such file".to_string(),

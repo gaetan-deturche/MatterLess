@@ -45,6 +45,14 @@ serde_json = "1"
 # on Windows. Pure Rust, with `hashbrown` as its only dependency, where the
 # Windows spell checker was judged not good enough and poor with two languages.
 spellbook = "0.4"
+# Colouring a code attachment in the viewer, with Sublime Text's grammars and
+# themes built in. The pure-Rust regex engine rather than Oniguruma, so no C
+# library comes with it.
+syntect = { version = "5.3", default-features = false, features = [
+    "default-syntaxes",
+    "default-themes",
+    "regex-fancy",
+] }
 # The session the app already established, read rather than collected: this
 # window has no business asking for a password to mint a second one.
 # `windows-native`, explicitly. Version 3 made every platform's credential

@@ -1894,7 +1894,8 @@ impl App {
                 }
             }
             Update::Film { file_id, path } => self.open_film(&file_id, &path),
-            Update::Text { file_id, text } => self.viewer.read(&file_id, &text),
+            Update::Text { file_id, lines } => self.viewer.read(&file_id, lines),
+            Update::Colours { file_id, colours } => self.viewer.colour(&file_id, colours),
             Update::LookFailed { file_id, why } => {
                 eprintln!("looking at {file_id}: {why}");
                 self.viewer.gave_up(&file_id, &why);
@@ -3288,6 +3289,7 @@ impl App {
             {
                 link.send(matterless_view::live::Ask::Read {
                     file_id: one.file_id.clone(),
+                    name: one.name.clone(),
                 });
             }
             return;

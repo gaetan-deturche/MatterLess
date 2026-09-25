@@ -25,6 +25,7 @@ pub mod feed;
 pub mod filecache;
 pub mod glide;
 pub mod header;
+pub mod highlight;
 pub mod identity;
 pub mod listing;
 pub mod live;
