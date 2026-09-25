@@ -755,6 +755,14 @@ fn a_remembered_length_is_known_before_the_rows_are_measured() {
     // Told what it measured to last time.
     opened.foresee(&measured);
     assert!(opened.knows_its_length());
+    // And the bar it draws can be grabbed, with the rows above still waiting.
+    assert!(
+        opened
+            .boxes(within, None)
+            .iter()
+            .any(|placed| placed.name == "stream/scrollbar"),
+        "the bar is drawn and nothing catches a press on it"
+    );
     assert!(
         (opened.total() - whole).abs() < 1.0,
         "remembered length {} against the real {whole}",

@@ -1034,10 +1034,13 @@ impl Stream {
             }
             top = bottom;
         }
-        // Only while it is drawn: a track that catches a press where there is
-        // no bar is a drag that moves a list by a fraction nobody could have
-        // aimed at, against a reach that is still being worked out.
-        if self.waiting() == 0 {
+        // Only while it is drawn, and whenever it is: a track that catches a
+        // press where there is no bar moves a list by a fraction nobody could
+        // have aimed at. It asked for every row to be measured while the bar
+        // was drawn from remembered heights, and the rows above the screen
+        // are measured as the reader nears them -- so on a long channel the
+        // bar was there and could never be grabbed.
+        if self.knows_its_length() {
             placed.extend(self.bar.boxes(&self.name, within, self.reach(within)));
         }
         if let Some(rect) = self.to_newest(within) {
