@@ -1897,7 +1897,9 @@ impl Stream {
                 if let Some(Row::Post { post } | Row::Continuation { post }) = self.rows.get(index)
                 {
                     for file in &post.files {
-                        if file.image || file.video {
+                        // Not a video: it is not a picture, and asking for one
+                        // downloaded the whole film to fail to decode it.
+                        if file.image {
                             // The box the layout reserved, worked out the
                             // same way, so the picture is scaled once on the
                             // way in rather than every frame on the way out --
@@ -1996,17 +1998,65 @@ impl Stream {
                         radius: CARD,
                     });
                 }
-                pieces.push(matterless_paint::Piece::Image {
-                    x: at.x,
-                    y: at.y,
-                    width: at.width,
-                    height: at.height,
-                    key: picture_key(file),
-                    radius: CARD,
-                });
+                if !file.video {
+                    pieces.push(matterless_paint::Piece::Image {
+                        x: at.x,
+                        y: at.y,
+                        width: at.width,
+                        height: at.height,
+                        key: picture_key(file),
+                        radius: CARD,
+                    });
+                }
                 pieces
             })
             .collect()
+    }
+
+    /// A play mark on each video: what says a dark box is a film waiting to
+    /// be opened. Its name is the caption under it, as for a picture.
+    fn play_marks(&self, into: &mut Canvas<'_>, index: usize, top: f32, left: f32) {
+        let (Some(Row::Post { post } | Row::Continuation { post }), Some(laid)) =
+            (self.rows.get(index), self.laid.get(index))
+        else {
+            return;
+        };
+        let Canvas {
+            scene,
+            painter,
+            fonts,
+            palette,
+        } = into;
+        for (block, _) in laid
+            .blocks
+            .iter()
+            .filter(|block| block.kind == matterless_layout::row::Kind::Attachment)
+            .zip(post.files.iter())
+            .filter(|(_, file)| file.video)
+        {
+            let at = Rect::new(
+                left + self.theme.gutter + block.x,
+                top + block.y,
+                block.wrap,
+                block.height,
+            );
+            let side = PLAY_DISC.min(at.height - 8.0).max(16.0);
+            let (x, y) = (
+                at.x + (at.width - side) / 2.0,
+                at.y + (at.height - side) / 2.0,
+            );
+            scene.rounded(x, y, side, side, [0, 0, 0, 150], side / 2.0);
+            let mark = side * 0.45;
+            // Nudged right: a triangle's weight sits left of its box.
+            let glyphs = painter.run(
+                fonts,
+                matterless_layout::marks::PLAY,
+                x + (side - mark) / 2.0 + mark * 0.08,
+                y + (side - mark * 1.4) / 2.0,
+                Run::mark(mark),
+            );
+            scene.glyphs(glyphs, [255, 255, 255], palette.faint);
+        }
     }
 
     /// The mini previews the rows on screen carry, by the name each is drawn
@@ -2641,6 +2691,7 @@ impl Stream {
                     palette,
                 };
                 self.cards(&mut canvas, index, top, inner.x);
+                self.play_marks(&mut canvas, index, top, inner.x);
                 self.footer(&mut canvas, index, top, inner.x, hovered == Some(index));
             }
             top = bottom;
@@ -2795,6 +2846,8 @@ const MENTION_PAD: f32 = 3.0;
 const JUMP: f32 = 150.0;
 /// How wide the button that keeps a file is.
 const SAVE: f32 = 46.0;
+/// The disc a play mark sits on.
+const PLAY_DISC: f32 = 52.0;
 
 /// A face on a thread footer, and how many of them are shown.
 const FACE: f32 = 18.0;

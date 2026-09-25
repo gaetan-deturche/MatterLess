@@ -56,6 +56,10 @@ pub const ATTACH: &str = "\u{e12d}";
 pub const REACT: &str = "\u{e164}";
 /// Reply in a thread.  `corner-up-left`
 pub const REPLY: &str = "\u{e0a7}";
+/// A video, waiting to be played.  `play`
+pub const PLAY: &str = "\u{e13c}";
+/// A video playing.  `pause`
+pub const PAUSE: &str = "\u{e12e}";
 /// Everything else that can be done to a message.  `ellipsis`
 pub const MORE: &str = "\u{e0b6}";
 /// Mark a conversation unread.  `mail`

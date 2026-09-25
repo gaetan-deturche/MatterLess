@@ -370,6 +370,15 @@ impl FileRef {
             // image -- and `fit_box` never upscales a small one.
             fit_box(file.width, file.height, IMAGE_BOX)
         };
+        // A video carries no size in its metadata, and a box of nothing drew
+        // nothing at all: it gets the shape most videos are.
+        let (box_width, box_height) = match video && box_width == 0 {
+            true => match layout.gallery {
+                true => fit_box(16, 9, (THUMB_BOX.0, THUMB_BOX.0 * 9 / 16)),
+                false => fit_box(1600, 900, IMAGE_BOX),
+            },
+            false => (box_width, box_height),
+        };
 
         Self {
             id: file.id.clone(),

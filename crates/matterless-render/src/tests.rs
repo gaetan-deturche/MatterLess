@@ -1822,3 +1822,26 @@ fn an_unmeasured_image_is_not_fetched() {
         .expect("a post row");
     assert!(row.files.is_empty());
 }
+
+/// A video's metadata has no size, and a box of nothing was a video that was
+/// not drawn at all. It gets a 16:9 box, as a picture's would be sized.
+#[test]
+fn a_video_without_a_size_gets_a_box() {
+    let mut film = image_info("v1", 0, 0);
+    film.mime_type = "video/mp4".into();
+    film.extension = "mp4".into();
+    film.has_preview_image = false;
+    film.mini_preview = None;
+    let alone = FileRef::from_info(&film, FileLayout::default());
+    assert!(alone.video);
+    assert_eq!((alone.box_width, alone.box_height), (420, 236));
+    let gallery = FileRef::from_info(
+        &film,
+        FileLayout {
+            gallery: true,
+            ..FileLayout::default()
+        },
+    );
+    assert!(gallery.box_width > 0 && gallery.box_height > 0);
+    assert!(gallery.box_width <= 120);
+}
