@@ -334,6 +334,9 @@ pub enum Ask {
     /// Fire and forget: nothing depends on it arriving, and a typing signal
     /// that misses is worth strictly less than the round trip to confirm it.
     Typing { channel_id: String, root_id: String },
+    /// The reader is using the window, which keeps them online to everybody
+    /// else. Fire and forget, like typing.
+    Active,
     /// Bring a channel's recent history back in line with the server.
     ///
     /// The window reads a local store, so anything that happened while it was
@@ -1247,6 +1250,7 @@ async fn run(
                         channel_id,
                         root_id,
                     } => handle.typing(&channel_id, &root_id),
+                    Ask::Active => handle.active(),
                     Ask::Person { user_id } => {
                         let (rest, store, wake) = (rest.clone(), Arc::clone(&kept), wake.clone());
                         tokio::spawn(async move {

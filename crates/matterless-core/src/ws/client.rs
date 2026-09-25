@@ -51,12 +51,16 @@ pub enum Command {
     /// clean-close test proved nothing; this is the retest.
     HardReset,
     Shutdown,
-    /// The one thing this client *sends* over the websocket. Everything else it
-    /// asks for goes over REST.
+    /// What this client *sends* over the websocket: typing, and that the reader
+    /// is at the keyboard. Everything else it asks for goes over REST.
     Typing {
         channel_id: String,
         root_id: String,
     },
+    /// The reader is using the client. Without it the server counts only the
+    /// connection, and marks them away a few minutes after it opened however
+    /// much they are writing.
+    Active,
 }
 
 pub struct WsHandle {
@@ -81,6 +85,13 @@ impl WsHandle {
             channel_id: channel_id.to_string(),
             root_id: root_id.to_string(),
         });
+    }
+
+    /// Tells the server this reader is active, as the official client does on
+    /// input. Not manual: a status the reader chose -- away, do not disturb --
+    /// is left as they set it. Dropped like typing when the socket is down.
+    pub fn active(&self) {
+        let _ = self.commands.try_send(Command::Active);
     }
 
     pub async fn shutdown(self) {
@@ -219,6 +230,22 @@ impl WsSession {
                                 socket.send(Message::Text(frame.to_string().into())).await
                             {
                                 tracing::debug!(%error, "typing not sent");
+                            }
+                        }
+                        Some(Command::Active) => {
+                            self.action_seq += 1;
+                            let frame = serde_json::json!({
+                                "seq": self.action_seq,
+                                "action": "user_update_active_status",
+                                "data": {
+                                    "user_is_active": true,
+                                    "manual": false,
+                                },
+                            });
+                            if let Err(error) =
+                                socket.send(Message::Text(frame.to_string().into())).await
+                            {
+                                tracing::debug!(%error, "activity not sent");
                             }
                         }
                     }

@@ -716,6 +716,8 @@ struct App {
     /// Whether this window has the keyboard, which decides both whether an
     /// arriving message interrupts and whether the button should be flashing.
     focused: bool,
+    /// When the server was last told the reader is using the client.
+    said_active: Option<std::time::Instant>,
     /// What the button under the pointer is for, once it has been rested on.
     tooltip: matterless_view::tooltip::Tooltip,
     /// The picture a reader has opened, over everything else.
@@ -998,6 +1000,7 @@ impl App {
             // first focus event: a window that starts out believing it is
             // ignored would flash at the first message.
             focused: true,
+            said_active: None,
         };
         app.sidebar.selected = Some(channel);
         // Focused before anything is clicked: a chat window that needs a click
@@ -2179,6 +2182,21 @@ impl App {
             channel_id: channel,
             root_id: root_id.to_string(),
         });
+    }
+
+    /// The reader touched the window: the server hears so, once a minute at
+    /// most. Its away timeout is minutes, so a minute keeps them online while
+    /// they are here, and leaves the timeout to mark them away once they go.
+    fn in_use(&mut self) {
+        const EVERY: std::time::Duration = std::time::Duration::from_secs(60);
+        if self.said_active.is_some_and(|said| said.elapsed() < EVERY) {
+            return;
+        }
+        if let Some(link) = self.link.as_ref()
+            && link.send(matterless_view::live::Ask::Active)
+        {
+            self.said_active = Some(std::time::Instant::now());
+        }
     }
 
     /// Follows something somebody wrote: a link, a person, a conversation.
@@ -8430,6 +8448,15 @@ impl ApplicationHandler<Update> for App {
     }
 
     fn window_event(&mut self, events: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+        if matches!(
+            event,
+            WindowEvent::KeyboardInput { .. }
+                | WindowEvent::MouseInput { .. }
+                | WindowEvent::MouseWheel { .. }
+                | WindowEvent::CursorMoved { .. }
+        ) {
+            self.in_use();
+        }
         match event {
             WindowEvent::CloseRequested => {
                 // Closing HIDES the window, and the tray is what says so.
