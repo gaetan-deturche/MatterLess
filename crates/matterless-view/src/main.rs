@@ -5014,7 +5014,10 @@ impl App {
                 depth: 6,
             });
         }
-        boxes.extend(self.profile.boxes(self.stream_rect()));
+        // Placed in the whole window: kept to the channel's column, a card
+        // opened from a name in the thread pane landed in the channel, far
+        // from the name, which read as nothing having happened.
+        boxes.extend(self.profile.boxes(self.window_rect()));
         if let Some(row) = self.edited_row() {
             boxes.extend(self.edit.boxes(row, self.stream_rect()));
         }
@@ -7612,6 +7615,7 @@ impl App {
         // question the reader just asked, so whatever it covers is not what
         // they are looking at.
         if self.profile.open() {
+            let window = self.window_rect();
             scene.clip_to(0.0, 0.0, self.size.0 as f32, self.size.1 as f32);
             let mut canvas = Canvas {
                 scene: &mut scene,
@@ -7619,7 +7623,7 @@ impl App {
                 fonts: &mut self.fonts,
                 palette: &self.palette,
             };
-            self.profile.draw(&mut canvas, stream);
+            self.profile.draw(&mut canvas, window);
         }
 
         // Over everything, including the toolbar it was opened from: it is a
