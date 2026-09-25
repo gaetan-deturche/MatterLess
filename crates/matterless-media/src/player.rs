@@ -677,6 +677,14 @@ fn decode(
             (api.av_find_best_stream)(owned.format, AVMEDIA_TYPE_VIDEO, -1, -1, &mut codec, 0),
             "finding the picture",
         )?;
+        // ffmpeg prefers dav1d for AV1, which decodes only on the CPU; its own
+        // decoder is the one with the GPU path.
+        if !codec.is_null() && (*codec).id == AV_CODEC_ID_AV1 {
+            let own = (api.avcodec_find_decoder_by_name)(c"av1".as_ptr());
+            if !own.is_null() {
+                codec = own;
+            }
+        }
         let video_stream = *(*owned.format).streams.add(video as usize);
         let video_base = (*video_stream).time_base;
         owned.video = (api.avcodec_alloc_context3)(codec);

@@ -45,6 +45,7 @@ pub struct Api {
         *mut *const AVCodec,
         c_int,
     ) -> c_int,
+    pub avcodec_find_decoder_by_name: unsafe extern "C" fn(*const c_char) -> *const AVCodec,
     pub avcodec_alloc_context3: unsafe extern "C" fn(*const AVCodec) -> *mut AVCodecContext,
     pub avcodec_parameters_to_context:
         unsafe extern "C" fn(*mut AVCodecContext, *const AVCodecParameters) -> c_int,
@@ -138,6 +139,7 @@ pub fn api() -> Result<&'static Api, String> {
                     av_read_frame: find(avformat, "av_read_frame\0")?,
                     av_seek_frame: find(avformat, "av_seek_frame\0")?,
                     av_find_best_stream: find(avformat, "av_find_best_stream\0")?,
+                    avcodec_find_decoder_by_name: find(avcodec, "avcodec_find_decoder_by_name\0")?,
                     avcodec_alloc_context3: find(avcodec, "avcodec_alloc_context3\0")?,
                     avcodec_parameters_to_context: find(
                         avcodec,
