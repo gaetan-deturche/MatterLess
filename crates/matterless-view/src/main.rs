@@ -563,6 +563,8 @@ struct App {
     remembered: matterless_view::viewer::Remembered,
     /// The frames of the picture in the viewer, when it moves, by its file id.
     looked_moving: matterless_view::moving::Moving,
+    /// The video in the viewer, and which attachment it is.
+    film: Option<(String, matterless_media::Player)>,
     /// Messages written but not yet confirmed, held in memory and nowhere else:
     /// a guess must never reach SQLite.
     outstanding: Arc<matterless_render::pending::PendingPosts>,
@@ -934,6 +936,7 @@ impl App {
             shelf: None,
             remembered: matterless_view::viewer::Remembered::default(),
             looked_moving: matterless_view::moving::Moving::default(),
+            film: None,
             outstanding: Arc::new(matterless_render::pending::PendingPosts::default()),
             asked: std::collections::HashSet::new(),
             arrived: Vec::new(),
@@ -1890,6 +1893,7 @@ impl App {
                     None => self.remembered.keep(&file_id, within, width, height, rgba),
                 }
             }
+            Update::Film { file_id, path } => self.open_film(&file_id, &path),
             Update::LookFailed { file_id, why } => {
                 eprintln!("looking at {file_id}: {why}");
                 self.viewer.gave_up(&file_id, &why);
@@ -3267,6 +3271,10 @@ impl App {
     /// took seconds each time, fetched afresh behind whatever the socket
     /// thread was busy with.
     fn fetch_looked(&mut self, one: &matterless_view::viewer::Looking) {
+        self.film = None;
+        if one.video {
+            return self.fetch_film(one);
+        }
         if let Some((width, height, rgba)) = self.remembered.get(&one.file_id, self.size)
             && let Some(view) = self.view.as_mut()
         {
@@ -3288,6 +3296,52 @@ impl App {
             linked: one.linked,
             within: self.size,
         });
+    }
+
+    /// A video for the viewer: from the disk when it was played before, and
+    /// fetched there first when it was not.
+    fn fetch_film(&mut self, one: &matterless_view::viewer::Looking) {
+        if let Err(why) = matterless_media::available() {
+            self.viewer.gave_up(&one.file_id, &why);
+            return;
+        }
+        if let Some(path) = matterless_view::live::film_path(&one.file_id)
+            && path.is_file()
+        {
+            // Played again, so it is the last to go when room is needed.
+            let _ = std::fs::File::options()
+                .write(true)
+                .open(&path)
+                .and_then(|file| file.set_modified(std::time::SystemTime::now()));
+            return self.open_film(&one.file_id, &path);
+        }
+        if let Some(link) = self.link.as_ref() {
+            link.send(matterless_view::live::Ask::Film {
+                file_id: one.file_id.clone(),
+            });
+        }
+    }
+
+    /// Starts a video that is on the disk, if it is still the one being looked
+    /// at: a reader who stepped on while it downloaded wants the next one.
+    fn open_film(&mut self, file_id: &str, path: &std::path::Path) {
+        if !self
+            .viewer
+            .current()
+            .is_some_and(|one| one.file_id == file_id)
+        {
+            return;
+        }
+        let Some(view) = self.view.as_ref() else {
+            return;
+        };
+        match matterless_media::Player::open(path, &view.gpu.device) {
+            Ok(player) => {
+                player.play();
+                self.film = Some((file_id.to_string(), player));
+            }
+            Err(why) => self.viewer.gave_up(file_id, &why),
+        }
     }
 
     /// What the box under the pointer is for.
@@ -3767,7 +3821,24 @@ impl App {
         let now = std::time::Instant::now();
         // The picture in the viewer, which is in a texture of its own.
         let viewed = self.viewer.current().map(|one| one.file_id.as_str());
-        let looked = self.looked_moving.wakes(now, |key| Some(key) == viewed);
+        let mut looked = self.looked_moving.wakes(now, |key| Some(key) == viewed);
+        // A video: its next frame, and a few times a second while it plays so
+        // the time under it keeps up.
+        if let Some((file_id, player)) = self.film.as_ref()
+            && viewed == Some(file_id.as_str())
+        {
+            let clock = player
+                .playing()
+                .then(|| now + std::time::Duration::from_millis(250));
+            let next = match (player.next_at(), clock) {
+                (Some(frame), Some(clock)) => Some(frame.min(clock)),
+                (frame, clock) => frame.or(clock),
+            };
+            looked = match (looked, next) {
+                (Some(looked), Some(next)) => Some(looked.min(next)),
+                (looked, next) => looked.or(next),
+            };
+        }
         if self.moving.is_empty() {
             return looked;
         }
@@ -3826,6 +3897,16 @@ impl App {
         {
             return true;
         }
+        if self.on_show()
+            && let Some((file_id, player)) = self.film.as_ref()
+            && viewed == Some(file_id.as_str())
+            && (player.playing()
+                || player
+                    .next_at()
+                    .is_some_and(|at| at <= std::time::Instant::now()))
+        {
+            return true;
+        }
         if !self.on_show() || self.moving.is_empty() {
             return false;
         }
@@ -3857,6 +3938,29 @@ impl App {
             if let Some(view) = self.view.as_mut() {
                 for (_, width, height, rgba) in due {
                     view.show(width, height, &rgba);
+                }
+            }
+            // The video's frame that has come due, painted into the viewer.
+            if let Some((file_id, player)) = self.film.as_ref()
+                && viewed.as_deref() == Some(file_id.as_str())
+            {
+                if let Some(why) = player.failed() {
+                    self.viewer.gave_up(file_id, &why);
+                } else {
+                    if let Some(frame) = player.due()
+                        && let Some(view) = self.view.as_mut()
+                    {
+                        match view.show_frame(frame.texture, frame.index, frame.width, frame.height)
+                        {
+                            Ok(()) => self.viewer.arrived(file_id, (frame.width, frame.height)),
+                            Err(why) => self.viewer.gave_up(file_id, &why),
+                        }
+                    }
+                    self.viewer.playback = Some(matterless_view::viewer::Playback {
+                        playing: player.playing(),
+                        position: player.position(),
+                        duration: player.duration(),
+                    });
                 }
             }
         }
@@ -5937,11 +6041,12 @@ impl App {
         // behind it may take the same press or the same key.
         if self.viewer.open() {
             let mut input = std::mem::take(&mut self.input);
-            let did = self.viewer.react(&input);
+            let did = self.viewer.react(&input, self.window_rect());
             match did {
                 Some(matterless_view::viewer::Did::Close) => {
                     self.viewer.hide();
                     self.looked_moving = Default::default();
+                    self.film = None;
                     if let Some(view) = self.view.as_mut() {
                         view.stop_showing();
                     }
@@ -5959,6 +6064,29 @@ impl App {
                 Some(matterless_view::viewer::Did::Save { file_id, name }) => {
                     if let Some(link) = self.link.as_ref() {
                         link.send(matterless_view::live::Ask::Download { file_id, name });
+                    }
+                }
+                Some(matterless_view::viewer::Did::Toggle) => {
+                    if let Some((_, player)) = self.film.as_ref() {
+                        player.toggle();
+                    }
+                }
+                Some(matterless_view::viewer::Did::Seek(fraction)) => {
+                    if let Some((_, player)) = self.film.as_ref() {
+                        player.seek(fraction * player.duration());
+                    }
+                }
+                Some(matterless_view::viewer::Did::Scrub(fraction)) => {
+                    // A picture decoded ahead, when there is one near: drawn
+                    // small and stretched, at the video's own size.
+                    if let Some((file_id, player)) = self.film.as_ref()
+                        && let Some(preview) = player.scrub(fraction * player.duration())
+                        && let Some(view) = self.view.as_mut()
+                    {
+                        view.show(preview.width, preview.height, &preview.rgba);
+                        if let Some(size) = player.size() {
+                            self.viewer.arrived(file_id, size);
+                        }
                     }
                 }
                 None => {}

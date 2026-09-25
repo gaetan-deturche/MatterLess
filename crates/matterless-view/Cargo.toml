@@ -89,6 +89,8 @@ name = "matterless-view"
 required-features = ["window"]
 
 [target.'cfg(windows)'.dependencies]
+# Playing attached videos: ffmpeg, decoding on this window's device.
+matterless-media = { path = "../matterless-media" }
 # Raised here rather than through a plugin, so a click reaches this window:
 # `on_activated` is an in-process event, which is the case that matters when the
 # window is already running.

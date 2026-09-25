@@ -1,0 +1,22 @@
+[package]
+name = "matterless-media"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# Plays the videos people attach. ffmpeg decodes them on the GPU, through
+# D3D11VA, and is loaded at run time from its own DLLs: the program builds and
+# runs without them, and the LGPL wants a reader able to swap them.
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.61.3", features = [
+    "Win32_Foundation",
+    # LoadLibraryExW and GetProcAddress, for finding ffmpeg.
+    "Win32_System_LibraryLoader",
+    # The window's device, which decodes, and its lock.
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi_Common",
+] }
+# The sound, to the reader's default output: WASAPI underneath.
+cpal = "0.18"

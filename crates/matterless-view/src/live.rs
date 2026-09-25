@@ -180,6 +180,11 @@ pub enum Update {
     /// And the picture could not be had, so the viewer can say so rather than
     /// showing an empty window.
     LookFailed { file_id: String, why: String },
+    /// A video is on the disk, ready to be opened.
+    Film {
+        file_id: String,
+        path: std::path::PathBuf,
+    },
 }
 
 /// What the window asks the socket thread to do.
@@ -221,6 +226,8 @@ pub enum Ask {
     },
     /// Keep a file somebody attached, next to the reader's other downloads.
     Download { file_id: String, name: String },
+    /// Fetch a video to the disk, to be played from there.
+    Film { file_id: String },
     /// Fetch one attachment at full size, to be looked at.
     ///
     /// `within` is how big the window is: the picture is scaled down to fit it
@@ -913,6 +920,40 @@ async fn run(
                             Err(error) => eprintln!("{} on {post_id}: {error}", action.slug()),
                         }
                     }
+                    Ask::Film { file_id } => {
+                        let rest = rest.clone();
+                        let wake = wake.clone();
+                        tokio::spawn(async move {
+                            let Some(path) = film_path(&file_id) else {
+                                return wake.wake(Update::LookFailed {
+                                    file_id,
+                                    why: "nowhere to keep it".to_string(),
+                                });
+                            };
+                            match rest.fetch_bytes(&format!("/files/{file_id}")).await {
+                                Ok(Some((bytes, _))) => {
+                                    let kept = path.clone();
+                                    let written = off_the_loop(move || keep_film(&kept, &bytes)).await;
+                                    match written {
+                                        Some(Ok(())) => wake.wake(Update::Film { file_id, path }),
+                                        Some(Err(why)) => wake.wake(Update::LookFailed {
+                                            file_id,
+                                            why: why.to_string(),
+                                        }),
+                                        None => {}
+                                    }
+                                }
+                                Ok(None) => wake.wake(Update::LookFailed {
+                                    file_id,
+                                    why: "the server has no such file".to_string(),
+                                }),
+                                Err(error) => wake.wake(Update::LookFailed {
+                                    file_id,
+                                    why: error.to_string(),
+                                }),
+                            }
+                        });
+                    }
                     Ask::Download { file_id, name } => {
                         // A linked picture comes from its own host, without
                         // the session; everything else is this server's file.
@@ -1513,6 +1554,28 @@ async fn run(
                         height,
                         shown,
                     } => {
+                        // A video's first picture: made here, from the ends of
+                        // the file, since the server keeps none.
+                        if let Some(file_id) = key.strip_prefix("poster/") {
+                            let file_id = file_id.to_string();
+                            let (rest, wake, pictures, fetching) =
+                                (rest.clone(), wake.clone(), pictures.clone(), fetching.clone());
+                            tokio::spawn(async move {
+                                let Ok(_room) = fetching.acquire().await else {
+                                    return;
+                                };
+                                match poster_of(&rest, &file_id, width, height).await {
+                                    Ok(png) => {
+                                        off_the_loop(move || {
+                                            take_in(&key, &png, "image/png", width, height, shown, pictures.as_deref(), &wake)
+                                        })
+                                        .await;
+                                    }
+                                    Err(why) => eprintln!("{key}: {why}"),
+                                }
+                            });
+                            continue;
+                        }
                         let Some(route) = route_for(&key) else {
                             continue;
                         };
@@ -3486,6 +3549,186 @@ async fn put(
 }
 
 /// Where this machine keeps what a person downloads.
+/// How much of each end of a video is fetched for its first picture: the start
+/// holds the picture, and the end holds the index when an MP4 put it there.
+const POSTER_ENDS: u64 = 2 * 1024 * 1024;
+
+/// A video's first picture, `width` by `height`, as PNG bytes for the cache.
+///
+/// From the video itself when it is on the disk; otherwise from its two ends,
+/// fetched into a file of its full length with nothing in between -- enough
+/// for ffmpeg to find the first picture, a few megabytes where the whole film
+/// is tens. The server does not always honour a range, though: the same file
+/// came back whole on one request and in part on the next. A whole answer is
+/// taken as the file, and kept, so playing it later is instant.
+async fn poster_of(
+    rest: &RestClient,
+    file_id: &str,
+    width: u32,
+    height: u32,
+) -> Result<Vec<u8>, String> {
+    let (width, height) = (width.max(1), height.max(1));
+    let kept = film_path(file_id);
+    if let Some(path) = kept.clone().filter(|path| path.is_file()) {
+        return off_the_loop(move || picture_of(&path, width, height))
+            .await
+            .unwrap_or_else(|| Err("the poster was not made".to_string()));
+    }
+    let route = format!("/files/{file_id}");
+    let fetch = |range: String| {
+        let route = route.clone();
+        async move {
+            rest.fetch_range(&route, &range)
+                .await
+                .map_err(|why| why.to_string())?
+                .ok_or_else(|| "the server has no such file".to_string())
+        }
+    };
+    let head = fetch(format!("bytes=0-{}", POSTER_ENDS - 1)).await?;
+    let total = head
+        .content_range
+        .as_deref()
+        .and_then(|said| said.rsplit('/').next())
+        .and_then(|total| total.parse::<u64>().ok());
+    let made = match total {
+        Some(total) if total > POSTER_ENDS => {
+            let from = total.saturating_sub(POSTER_ENDS).max(POSTER_ENDS);
+            let tail = fetch(format!("bytes={from}-{}", total - 1)).await?;
+            match tail.content_range.is_some() {
+                true => Made::Ends {
+                    head: head.bytes,
+                    from,
+                    tail: tail.bytes,
+                    total,
+                },
+                false => Made::Whole(tail.bytes),
+            }
+        }
+        // All of it, whether it was asked for in part or not.
+        _ => Made::Whole(head.bytes),
+    };
+    let file_id = file_id.to_string();
+    off_the_loop(move || match made {
+        Made::Whole(bytes) => match kept {
+            Some(path) => {
+                keep_film(&path, &bytes).map_err(|why| why.to_string())?;
+                picture_of(&path, width, height)
+            }
+            None => ends_to_picture(&file_id, &bytes, None, bytes.len() as u64, width, height),
+        },
+        Made::Ends {
+            head,
+            from,
+            tail,
+            total,
+        } => ends_to_picture(&file_id, &head, Some((from, &tail)), total, width, height),
+    })
+    .await
+    .unwrap_or_else(|| Err("the poster was not made".to_string()))
+}
+
+/// What a poster is made from: the whole file, or its two ends.
+enum Made {
+    Whole(Vec<u8>),
+    Ends {
+        head: Vec<u8>,
+        from: u64,
+        tail: Vec<u8>,
+        total: u64,
+    },
+}
+
+/// Lays the two ends of a video out in a file of its length, and makes the
+/// poster from that.
+fn ends_to_picture(
+    file_id: &str,
+    head: &[u8],
+    tail: Option<(u64, &[u8])>,
+    total: u64,
+    width: u32,
+    height: u32,
+) -> Result<Vec<u8>, String> {
+    use std::io::{Seek, SeekFrom, Write};
+    let path = std::env::temp_dir().join(format!("matterless-poster-{file_id}"));
+    let made = (|| {
+        let mut file = std::fs::File::create(&path).map_err(|why| why.to_string())?;
+        file.set_len(total).map_err(|why| why.to_string())?;
+        file.write_all(head).map_err(|why| why.to_string())?;
+        if let Some((from, bytes)) = tail {
+            file.seek(SeekFrom::Start(from))
+                .map_err(|why| why.to_string())?;
+            file.write_all(bytes).map_err(|why| why.to_string())?;
+        }
+        drop(file);
+        picture_of(&path, width, height)
+    })();
+    let _ = std::fs::remove_file(&path);
+    made
+}
+
+/// The first picture of the video at `path`, as PNG bytes.
+fn picture_of(path: &std::path::Path, width: u32, height: u32) -> Result<Vec<u8>, String> {
+    let rgba = matterless_media::poster(path, width, height)?;
+    let picture = image::RgbaImage::from_raw(width, height, rgba)
+        .ok_or_else(|| "a picture of the wrong size".to_string())?;
+    let mut png = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgba8(picture)
+        .write_to(&mut png, image::ImageFormat::Png)
+        .map_err(|why| why.to_string())?;
+    Ok(png.into_inner())
+}
+
+/// How much disk the videos a reader played may keep between them.
+const FILM_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
+/// Where a video is kept: by its id alone. ffmpeg tells what a file is from
+/// what is in it, and the poster, which has only the id, keeps a video it
+/// happened to be sent whole under the same name the player looks for.
+pub fn film_path(file_id: &str) -> Option<std::path::PathBuf> {
+    if file_id.is_empty() || !file_id.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return None;
+    }
+    let folder = crate::feed::pictures_dir()?.parent()?.join("films");
+    Some(folder.join(format!("{file_id}.video")))
+}
+
+/// Writes a video beside the others, then lets the ones played longest ago go
+/// until they fit.
+fn keep_film(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    let Some(folder) = path.parent() else {
+        return Ok(());
+    };
+    std::fs::create_dir_all(folder)?;
+    let partial = path.with_extension("partial");
+    std::fs::write(&partial, bytes)?;
+    std::fs::rename(&partial, path)?;
+    let mut held: Vec<(std::time::SystemTime, u64, std::path::PathBuf)> =
+        std::fs::read_dir(folder)?
+            .flatten()
+            .filter_map(|item| {
+                let metadata = item.metadata().ok()?;
+                metadata.is_file().then(|| {
+                    (
+                        metadata.modified().unwrap_or(std::time::UNIX_EPOCH),
+                        metadata.len(),
+                        item.path(),
+                    )
+                })
+            })
+            .collect();
+    held.sort();
+    let mut total: u64 = held.iter().map(|(_, bytes, _)| bytes).sum();
+    for (_, bytes, old) in held {
+        if total <= FILM_BYTES || old == path {
+            continue;
+        }
+        if std::fs::remove_file(&old).is_ok() {
+            total -= bytes;
+        }
+    }
+    Ok(())
+}
+
 fn downloads() -> std::path::PathBuf {
     let home = std::env::var_os("USERPROFILE")
         .or_else(|| std::env::var_os("HOME"))

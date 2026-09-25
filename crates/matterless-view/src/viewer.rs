@@ -49,10 +49,20 @@ pub struct Looking {
     pub original: bool,
     /// A picture a message links to, from its own host: `file_id` is its URL.
     pub linked: bool,
+    /// A video, played rather than looked at.
+    pub video: bool,
+}
+
+/// Where a video is, for the bar under it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Playback {
+    pub playing: bool,
+    pub position: f64,
+    pub duration: f64,
 }
 
 /// What a press on the viewer meant.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Did {
     /// Shut it.
     Close,
@@ -60,6 +70,12 @@ pub enum Did {
     Show(Looking),
     /// Keep this one, next to the reader's other downloads.
     Save { file_id: String, name: String },
+    /// Play the video, or pause it.
+    Toggle,
+    /// Go to this far through the video, from nothing to one.
+    Seek(f64),
+    /// Near there, while the track is being dragged: `Seek` follows on release.
+    Scrub(f64),
 }
 
 /// How much decoded picture is kept in memory. A window-sized picture is a few
@@ -146,6 +162,11 @@ pub struct Viewer {
     size: Option<(u32, u32)>,
     /// Why there is nothing to look at, when there is nothing.
     failed: String,
+    /// Where the video showing is, told each frame by whoever plays it.
+    pub playback: Option<Playback>,
+    /// The last place asked for while dragging along the track, so holding
+    /// still does not ask again every frame.
+    sought: Option<f64>,
 }
 
 impl Viewer {
@@ -168,6 +189,41 @@ impl Viewer {
         self.at = 0;
         self.size = None;
         self.failed.clear();
+        self.playback = None;
+    }
+
+    /// The play button, at the start of the bar, for a video.
+    fn play_rect(&self, window: Rect) -> Option<Rect> {
+        let bar = self.bar_rect(window);
+        self.current()?.video.then(|| {
+            Rect::new(
+                bar.x + PADDING,
+                bar.y + (bar.height - BUTTON) / 2.0,
+                BUTTON,
+                BUTTON,
+            )
+        })
+    }
+
+    /// The track a video's position runs along, from the play button to the
+    /// time, and tall enough to hit.
+    fn track_rect(&self, window: Rect) -> Option<Rect> {
+        let play = self.play_rect(window)?;
+        let bar = self.bar_rect(window);
+        let end = self
+            .button_rects(window)
+            .iter()
+            .map(|(_, rect)| rect.x)
+            .fold(bar.right() - PADDING, f32::min)
+            - TIME
+            - GAP;
+        let x = play.right() + GAP * 2.0;
+        Some(Rect::new(
+            x,
+            bar.y + (bar.height - 18.0) / 2.0,
+            (end - x).max(1.0),
+            18.0,
+        ))
     }
 
     /// What is on screen, if anything is.
@@ -277,6 +333,10 @@ impl Viewer {
         for (name, rect) in self.button_rects(window) {
             placed.push(named.at(name, rect, 31));
         }
+        if let (Some(play), Some(track)) = (self.play_rect(window), self.track_rect(window)) {
+            placed.push(named.at("play", play, 31));
+            placed.push(named.at("seek", track, 31));
+        }
         // The picture itself catches its own press, so clicking what you are
         // looking at does not shut it.
         if let Some(picture) = self.picture_rect(window) {
@@ -286,12 +346,33 @@ impl Viewer {
     }
 
     /// Applies a frame's input.
-    pub fn react(&mut self, input: &Input) -> Option<Did> {
+    pub fn react(&mut self, input: &Input, window: Rect) -> Option<Did> {
         if !self.open() {
             return None;
         }
         if input.struck(Key::Escape) {
             return Some(Did::Close);
+        }
+        let video = self.current().is_some_and(|one| one.video);
+        if video && input.struck(Key::Char(' ')) {
+            return Some(Did::Toggle);
+        }
+        // Held on the track: wherever the pointer is along it, as it moves.
+        let seeking = named().of("seek");
+        if video
+            && input.pressed() == Some(seeking.as_str())
+            && let (Some(track), Some((x, _))) = (self.track_rect(window), input.pointer_at())
+        {
+            let fraction = ((x - track.x) / track.width).clamp(0.0, 1.0) as f64;
+            if self.sought.is_none_or(|was| (was - fraction).abs() > 0.002) {
+                self.sought = Some(fraction);
+                return Some(Did::Scrub(fraction));
+            }
+            return None;
+        }
+        // Let go: exactly where it was let go.
+        if let Some(fraction) = self.sought.take() {
+            return Some(Did::Seek(fraction));
         }
         if input.struck(Key::Left) {
             return self.step(-1).map(Did::Show);
@@ -307,9 +388,11 @@ impl Viewer {
                 file_id: one.file_id.clone(),
                 name: one.name.clone(),
             }),
-            // The picture itself: pressed and nothing happens, which is what
-            // keeps a click on what you are reading from closing it.
-            Some("picture") => None,
+            Some("play") => Some(Did::Toggle),
+            // A video plays or pauses under a click, as every player does. A
+            // picture: nothing, which keeps a click on what you are reading
+            // from closing it.
+            Some("picture") => video.then_some(Did::Toggle),
             _ if clicked == NAME => Some(Did::Close),
             _ => None,
         }
@@ -364,8 +447,64 @@ impl Viewer {
             }
         }
 
-        // What it is called, and which of them this is.
-        if let Some(one) = self.current() {
+        // A video's bar: play, where it is along the track, and the time.
+        if let (Some(play), Some(track)) = (self.play_rect(window), self.track_rect(window)) {
+            let playback = self.playback.unwrap_or(Playback {
+                playing: false,
+                position: 0.0,
+                duration: 0.0,
+            });
+            scene.rounded(play.x, play.y, play.width, play.height, palette.raised, 6.0);
+            let glyphs = painter.run(
+                fonts,
+                match playback.playing {
+                    true => matterless_layout::marks::PAUSE,
+                    false => matterless_layout::marks::PLAY,
+                },
+                play.x + (play.width - 15.0) / 2.0,
+                play.y + (play.height - 18.0) / 2.0,
+                Run::mark(16.0),
+            );
+            scene.glyphs(glyphs, palette.ink, palette.faint);
+            let groove = track.y + track.height / 2.0 - 2.0;
+            scene.rounded(track.x, groove, track.width, 4.0, palette.raised, 2.0);
+            // Under the hand while dragged: where the picture landed is the
+            // keyframe before it, and a knob that jumped between keyframes
+            // would fight the pointer.
+            let through = match (self.sought, playback.duration > 0.0) {
+                (Some(held), _) => held as f32,
+                (None, true) => (playback.position / playback.duration).clamp(0.0, 1.0) as f32,
+                (None, false) => 0.0,
+            };
+            let reached = track.width * through;
+            let lit = [palette.signal[0], palette.signal[1], palette.signal[2], 255];
+            scene.rounded(track.x, groove, reached.max(4.0), 4.0, lit, 2.0);
+            scene.rounded(
+                track.x + reached - 6.0,
+                track.y + track.height / 2.0 - 6.0,
+                12.0,
+                12.0,
+                [palette.ink[0], palette.ink[1], palette.ink[2], 255],
+                6.0,
+            );
+            let time = format!(
+                "{} / {}",
+                clock(playback.position),
+                clock(playback.duration)
+            );
+            let glyphs = painter.run(
+                fonts,
+                &time,
+                track.right() + GAP,
+                bar.y + (bar.height - 18.0) / 2.0,
+                Run::label(f32::MAX),
+            );
+            scene.glyphs(glyphs, palette.soft, palette.faint);
+        }
+
+        // What it is called, and which of them this is. A video's bar is its
+        // controls instead.
+        if let Some(one) = self.current().filter(|one| !one.video) {
             let said = if self.shown.len() > 1 {
                 format!("{} ({} of {})", one.name, self.at + 1, self.shown.len())
             } else {
@@ -455,6 +594,19 @@ impl Viewer {
     }
 }
 
+/// How wide the time under a video is kept: "1:02:03 / 1:02:03".
+const TIME: f32 = 116.0;
+
+/// Seconds as a player writes them: `m:ss`, or `h:mm:ss` past an hour.
+fn clock(seconds: f64) -> String {
+    let whole = seconds.max(0.0) as u64;
+    let (hours, minutes, seconds) = (whole / 3600, whole / 60 % 60, whole % 60);
+    match hours {
+        0 => format!("{minutes}:{seconds:02}"),
+        _ => format!("{hours}:{minutes:02}:{seconds:02}"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -466,6 +618,7 @@ mod tests {
                 name: format!("shot{at}.png"),
                 original: false,
                 linked: false,
+                video: false,
             })
             .collect()
     }
@@ -565,7 +718,7 @@ mod tests {
         );
         input.apply(matterless_ui::input::Event::PointerPressed, &placed);
         input.apply(matterless_ui::input::Event::PointerReleased, &placed);
-        assert_eq!(viewer.react(&input), None);
+        assert_eq!(viewer.react(&input, window()), None);
 
         let mut beside = Input::default();
         beside.apply(
@@ -574,7 +727,7 @@ mod tests {
         );
         beside.apply(matterless_ui::input::Event::PointerPressed, &placed);
         beside.apply(matterless_ui::input::Event::PointerReleased, &placed);
-        assert_eq!(viewer.react(&beside), Some(Did::Close));
+        assert_eq!(viewer.react(&beside, window()), Some(Did::Close));
     }
 
     /// A shut viewer answers nothing and places nothing.
@@ -582,7 +735,7 @@ mod tests {
     fn a_shut_viewer_answers_nothing() {
         let mut viewer = Viewer::default();
         assert!(viewer.boxes(window()).is_empty());
-        assert_eq!(viewer.react(&Input::default()), None);
+        assert_eq!(viewer.react(&Input::default(), window()), None);
     }
 }
 

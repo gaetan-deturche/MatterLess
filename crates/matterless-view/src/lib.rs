@@ -412,6 +412,99 @@ const SUBPIXEL_LETTERS: u32 = 5;
 type Span = (std::ops::Range<u32>, Clip);
 
 /// The GPU side of the list: a device, a swapchain, a pipeline and an atlas.
+/// The GPU's video processor for one size of frame, and the texture it paints.
+struct Film {
+    size: (u32, u32),
+    enumerator: ID3D11VideoProcessorEnumerator,
+    processor: ID3D11VideoProcessor,
+    output: ID3D11VideoProcessorOutputView,
+    view: ID3D11ShaderResourceView,
+}
+
+impl Film {
+    fn new(
+        device: &ID3D11Device,
+        video: &ID3D11VideoDevice,
+        context: &ID3D11VideoContext,
+        width: u32,
+        height: u32,
+    ) -> Result<Self, String> {
+        let failed = |why: windows::core::Error| why.to_string();
+        let rate = windows::Win32::Graphics::Dxgi::Common::DXGI_RATIONAL {
+            Numerator: 60,
+            Denominator: 1,
+        };
+        let content = D3D11_VIDEO_PROCESSOR_CONTENT_DESC {
+            InputFrameFormat: D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE,
+            InputFrameRate: rate,
+            InputWidth: width,
+            InputHeight: height,
+            OutputFrameRate: rate,
+            OutputWidth: width,
+            OutputHeight: height,
+            Usage: D3D11_VIDEO_USAGE_PLAYBACK_NORMAL,
+        };
+        let enumerator =
+            unsafe { video.CreateVideoProcessorEnumerator(&content) }.map_err(failed)?;
+        let processor = unsafe { video.CreateVideoProcessor(&enumerator, 0) }.map_err(failed)?;
+        // Studio-range YCbCr in, full-range RGB out: BT.709 for anything HD,
+        // BT.601 below it, which is what the encoders that made them assumed.
+        let matrix = if height >= 720 { 1 << 2 } else { 0 };
+        let limited = 1 << 4;
+        unsafe {
+            context.VideoProcessorSetStreamColorSpace(
+                &processor,
+                0,
+                &D3D11_VIDEO_PROCESSOR_COLOR_SPACE {
+                    _bitfield: matrix | limited,
+                },
+            );
+            context.VideoProcessorSetOutputColorSpace(
+                &processor,
+                &D3D11_VIDEO_PROCESSOR_COLOR_SPACE { _bitfield: 0 },
+            );
+        }
+        let described = D3D11_TEXTURE2D_DESC {
+            Width: width,
+            Height: height,
+            MipLevels: 1,
+            ArraySize: 1,
+            Format: windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM,
+            SampleDesc: DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
+            Usage: D3D11_USAGE_DEFAULT,
+            BindFlags: (D3D11_BIND_RENDER_TARGET.0 | D3D11_BIND_SHADER_RESOURCE.0) as u32,
+            ..Default::default()
+        };
+        let mut texture: Option<ID3D11Texture2D> = None;
+        unsafe { device.CreateTexture2D(&described, None, Some(&mut texture)) }.map_err(failed)?;
+        let texture = texture.ok_or_else(|| "no texture".to_string())?;
+        let into = D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC {
+            ViewDimension: D3D11_VPOV_DIMENSION_TEXTURE2D,
+            Anonymous: D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC_0 {
+                Texture2D: D3D11_TEX2D_VPOV { MipSlice: 0 },
+            },
+        };
+        let mut output: Option<ID3D11VideoProcessorOutputView> = None;
+        unsafe {
+            video.CreateVideoProcessorOutputView(&texture, &enumerator, &into, Some(&mut output))
+        }
+        .map_err(failed)?;
+        let mut view: Option<ID3D11ShaderResourceView> = None;
+        unsafe { device.CreateShaderResourceView(&texture, None, Some(&mut view)) }
+            .map_err(failed)?;
+        Ok(Self {
+            size: (width, height),
+            enumerator,
+            processor,
+            output: output.ok_or_else(|| "no output view".to_string())?,
+            view: view.ok_or_else(|| "no view".to_string())?,
+        })
+    }
+}
+
 pub struct View {
     pub gpu: Gpu,
     bound: Bound,
@@ -425,6 +518,8 @@ pub struct View {
     /// viewer shuts. Not in a sheet: they are packed for things drawn at the
     /// size they were fetched, and a picture opened full size is neither.
     shown: Option<ID3D11ShaderResourceView>,
+    /// What turns a decoded video frame into the picture `shown` names.
+    film: Option<Film>,
     /// What stands in the fourth slot while nothing is open. A slot left empty
     /// is a shader reading from nothing, which draws a black rectangle.
     nothing: ID3D11ShaderResourceView,
@@ -445,6 +540,7 @@ impl View {
             vertices: None,
             capacity: 0,
             shown: None,
+            film: None,
             nothing,
         })
     }
@@ -521,10 +617,73 @@ impl View {
             return;
         }
         self.shown = view;
+        self.film = None;
     }
 
     pub fn stop_showing(&mut self) {
         self.shown = None;
+        self.film = None;
+    }
+
+    /// Paints a decoded video frame -- one slice of a texture array on this
+    /// device, in the decoder's own NV12 -- into the viewer's texture, with the
+    /// GPU's video processor doing the colour conversion.
+    pub fn show_frame(
+        &mut self,
+        texture: *mut std::ffi::c_void,
+        index: u32,
+        width: u32,
+        height: u32,
+    ) -> Result<(), String> {
+        use windows::core::Interface;
+        let failed = |why: windows::core::Error| why.to_string();
+        let video: ID3D11VideoDevice = self.gpu.device.cast().map_err(failed)?;
+        let context: ID3D11VideoContext = self.gpu.context.cast().map_err(failed)?;
+        if self
+            .film
+            .as_ref()
+            .is_none_or(|film| film.size != (width, height))
+        {
+            let film = Film::new(&self.gpu.device, &video, &context, width, height)?;
+            self.shown = Some(film.view.clone());
+            self.film = Some(film);
+        }
+        let Some(film) = self.film.as_ref() else {
+            return Err("no video processor".to_string());
+        };
+        let source = unsafe { ID3D11Texture2D::from_raw_borrowed(&texture) }
+            .ok_or_else(|| "no frame".to_string())?;
+        let described = D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC {
+            FourCC: 0,
+            ViewDimension: D3D11_VPIV_DIMENSION_TEXTURE2D,
+            Anonymous: D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC_0 {
+                Texture2D: D3D11_TEX2D_VPIV {
+                    MipSlice: 0,
+                    ArraySlice: index,
+                },
+            },
+        };
+        let mut input: Option<ID3D11VideoProcessorInputView> = None;
+        unsafe {
+            video.CreateVideoProcessorInputView(
+                source,
+                &film.enumerator,
+                &described,
+                Some(&mut input),
+            )
+        }
+        .map_err(failed)?;
+        let stream = D3D11_VIDEO_PROCESSOR_STREAM {
+            Enable: true.into(),
+            pInputSurface: std::mem::ManuallyDrop::new(input),
+            ..Default::default()
+        };
+        let streams = [stream];
+        let blit = unsafe { context.VideoProcessorBlt(&film.processor, &film.output, 0, &streams) };
+        // The input view was handed over wrapped, so it is released here.
+        let [mut stream] = streams;
+        unsafe { std::mem::ManuallyDrop::drop(&mut stream.pInputSurface) };
+        blit.map_err(failed)
     }
 
     /// Draws one frame and presents it.

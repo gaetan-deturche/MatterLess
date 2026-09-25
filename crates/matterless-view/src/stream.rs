@@ -1899,14 +1899,17 @@ impl Stream {
                     for file in &post.files {
                         // Not a video: it is not a picture, and asking for one
                         // downloaded the whole film to fail to decode it.
-                        if file.image {
+                        if file.image || file.video {
                             // The box the layout reserved, worked out the
                             // same way, so the picture is scaled once on the
                             // way in rather than every frame on the way out --
                             // and so the decoded size is the reserved one.
                             let (width, height) = file.drawn_in(self.theme.text_width());
                             wanted.push((
-                                picture_key(file),
+                                match file.video {
+                                    true => poster_key(&file.id),
+                                    false => picture_key(file),
+                                },
                                 (width as u32).max(1),
                                 (height as u32).max(1),
                             ));
@@ -1998,16 +2001,17 @@ impl Stream {
                         radius: CARD,
                     });
                 }
-                if !file.video {
-                    pieces.push(matterless_paint::Piece::Image {
-                        x: at.x,
-                        y: at.y,
-                        width: at.width,
-                        height: at.height,
-                        key: picture_key(file),
-                        radius: CARD,
-                    });
-                }
+                pieces.push(matterless_paint::Piece::Image {
+                    x: at.x,
+                    y: at.y,
+                    width: at.width,
+                    height: at.height,
+                    key: match file.video {
+                        true => poster_key(&file.id),
+                        false => picture_key(file),
+                    },
+                    radius: CARD,
+                });
                 pieces
             })
             .collect()
@@ -2919,6 +2923,7 @@ pub fn looking_at(post: &matterless_render::PostRow) -> Vec<crate::viewer::Looki
                 false => file.name.clone(),
             },
             linked: file.variant == matterless_render::ImageVariant::Linked,
+            video: file.video,
             // The original for anything the server does not re-encode -- a
             // GIF, an SVG, a video -- and its preview for a photograph, which
             // it caps at 1920 wide and which is the right answer for one.
@@ -2934,6 +2939,12 @@ pub fn looking_at(post: &matterless_render::PostRow) -> Vec<crate::viewer::Looki
 /// keeps anything from trying to fetch one -- the bytes are in the message.
 pub fn mini_key(file_id: &str) -> String {
     format!("mini/{file_id}")
+}
+
+/// What a video's first picture is called: made from the file rather than
+/// fetched, since the server keeps none for a video.
+pub fn poster_key(file_id: &str) -> String {
+    format!("poster/{file_id}")
 }
 
 /// What an attachment's picture is called.

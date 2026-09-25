@@ -22,8 +22,8 @@
 use windows::Win32::Foundation::HWND;
 use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_UNKNOWN, D3D_FEATURE_LEVEL_11_0};
 use windows::Win32::Graphics::Direct3D11::{
-    D3D11_CREATE_DEVICE_FLAG, D3D11_SDK_VERSION, D3D11_VIEWPORT, D3D11CreateDevice, ID3D11Device,
-    ID3D11DeviceContext, ID3D11RenderTargetView, ID3D11Texture2D,
+    D3D11_CREATE_DEVICE_FLAG, D3D11_CREATE_DEVICE_VIDEO_SUPPORT, D3D11_SDK_VERSION, D3D11_VIEWPORT,
+    D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11RenderTargetView, ID3D11Texture2D,
 };
 use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_ALPHA_MODE_IGNORE, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC,
@@ -64,25 +64,37 @@ impl Gpu {
 
         let mut device: Option<ID3D11Device> = None;
         let mut context: Option<ID3D11DeviceContext> = None;
-        unsafe {
-            D3D11CreateDevice(
-                adapter.as_ref(),
-                // Unknown when an adapter is named, which is what naming one
-                // means: asking for hardware as well is an error.
-                match adapter.is_some() {
-                    true => D3D_DRIVER_TYPE_UNKNOWN,
-                    false => windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE,
-                },
-                windows::Win32::Foundation::HMODULE::default(),
-                D3D11_CREATE_DEVICE_FLAG(0),
-                Some(&[D3D_FEATURE_LEVEL_11_0]),
-                D3D11_SDK_VERSION,
-                Some(&mut device),
-                None,
-                Some(&mut context),
-            )
+        // With video support, which is what lets a video decode on this same
+        // device; without it if the adapter will not have that, and a video
+        // then says it cannot be played rather than the window not opening.
+        for flags in [
+            D3D11_CREATE_DEVICE_VIDEO_SUPPORT,
+            D3D11_CREATE_DEVICE_FLAG(0),
+        ] {
+            let made = unsafe {
+                D3D11CreateDevice(
+                    adapter.as_ref(),
+                    // Unknown when an adapter is named, which is what naming
+                    // one means: asking for hardware as well is an error.
+                    match adapter.is_some() {
+                        true => D3D_DRIVER_TYPE_UNKNOWN,
+                        false => windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE,
+                    },
+                    windows::Win32::Foundation::HMODULE::default(),
+                    flags,
+                    Some(&[D3D_FEATURE_LEVEL_11_0]),
+                    D3D11_SDK_VERSION,
+                    Some(&mut device),
+                    None,
+                    Some(&mut context),
+                )
+            };
+            match made {
+                Ok(()) => break,
+                Err(why) if flags == D3D11_CREATE_DEVICE_FLAG(0) => return Err(why.to_string()),
+                Err(_) => {}
+            }
         }
-        .map_err(|why| why.to_string())?;
         let (Some(device), Some(context)) = (device, context) else {
             return Err("no Direct3D device".to_string());
         };
