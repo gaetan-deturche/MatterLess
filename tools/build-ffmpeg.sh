@@ -23,6 +23,9 @@ HOST=x86_64-w64-mingw32
 # What the player, the posters and the drag previews meet in practice: phone
 # and screen recordings, webm, and the odd old camera file.
 DEMUXERS=(mov matroska avi mpegts mpegps ogg mp3 wav flac aac)
+# Never opened on their own: a program stream leaves a video stream's codec
+# to be guessed, and the guess asks these. Without them it came out as mp3.
+DEMUXERS+=(mpegvideo h264 hevc m4v)
 DECODERS=(
     h264 hevc vp8 vp9 av1 libdav1d mpeg4 mpeg1video mpeg2video mjpeg
     aac aac_latm mp3 mp3float opus vorbis flac ac3 eac3 alac
