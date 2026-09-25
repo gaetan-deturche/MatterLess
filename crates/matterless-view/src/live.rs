@@ -185,6 +185,8 @@ pub enum Update {
         file_id: String,
         path: std::path::PathBuf,
     },
+    /// A text file a reader opened, as text.
+    Text { file_id: String, text: String },
 }
 
 /// What the window asks the socket thread to do.
@@ -228,6 +230,8 @@ pub enum Ask {
     Download { file_id: String, name: String },
     /// Fetch a video to the disk, to be played from there.
     Film { file_id: String },
+    /// Fetch a text file, to be read.
+    Read { file_id: String },
     /// Fetch one attachment at full size, to be looked at.
     ///
     /// `within` is how big the window is: the picture is scaled down to fit it
@@ -1547,6 +1551,30 @@ async fn run(
                             }
                         });
                     }
+                    Ask::Read { file_id } => {
+                        let rest = rest.clone();
+                        let wake = wake.clone();
+                        tokio::spawn(async move {
+                            let update = match rest.fetch_bytes(&format!("/files/{file_id}")).await {
+                                Ok(Some((bytes, _))) => match text_of(&bytes) {
+                                    Some(text) => Update::Text { file_id, text },
+                                    None => Update::LookFailed {
+                                        file_id,
+                                        why: "it is not text".to_string(),
+                                    },
+                                },
+                                Ok(None) => Update::LookFailed {
+                                    file_id,
+                                    why: "the server has no such file".to_string(),
+                                },
+                                Err(error) => Update::LookFailed {
+                                    file_id,
+                                    why: error.to_string(),
+                                },
+                            };
+                            wake.wake(update);
+                        });
+                    }
                     // Behind everything the reader is actually looking at.
                     // One task for the whole list rather than one each: this
                     // is work nobody is waiting for, and a hundred tasks
@@ -1814,6 +1842,31 @@ pub fn linked_key(url: &str) -> String {
 /// megabyte; this is for the one that is somebody's screen recording.
 const LINKED_BYTES: usize = 32 * 1024 * 1024;
 
+/// A file's bytes as text: UTF-8, or UTF-16 when it opens with that byte
+/// order mark, which is what PowerShell writes a redirected log in. Nothing
+/// when it holds a zero byte, which text never does.
+pub fn text_of(bytes: &[u8]) -> Option<String> {
+    let units = |little: bool| -> String {
+        let wide: Vec<u16> = bytes[2..]
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|&pair| match little {
+                true => u16::from_le_bytes(pair),
+                false => u16::from_be_bytes(pair),
+            })
+            .collect();
+        String::from_utf16_lossy(&wide)
+    };
+    match bytes {
+        [0xFF, 0xFE, ..] => Some(units(true)),
+        [0xFE, 0xFF, ..] => Some(units(false)),
+        _ if bytes.contains(&0) => None,
+        [0xEF, 0xBB, 0xBF, rest @ ..] => Some(String::from_utf8_lossy(rest).into_owned()),
+        _ => Some(String::from_utf8_lossy(bytes).into_owned()),
+    }
+}
+
 /// Fetches whatever a route names: this server's for a path, the picture's own
 /// host -- without the session -- for a linked one.
 async fn fetch_route(
@@ -1929,6 +1982,27 @@ pub fn renames_emoji(deltas: &[Delta]) -> bool {
 
 #[cfg(test)]
 mod tests {
+
+    /// UTF-8 with or without its mark, and UTF-16 either way round, which is
+    /// what a PowerShell redirect writes; and nothing for a file with a zero
+    /// byte in it, which is not text.
+    #[test]
+    fn a_text_file_is_read_in_the_encoding_it_says() {
+        assert_eq!(super::text_of(b"plain").as_deref(), Some("plain"));
+        assert_eq!(
+            super::text_of(&[0xEF, 0xBB, 0xBF, b'h', b'i']).as_deref(),
+            Some("hi")
+        );
+        assert_eq!(
+            super::text_of(&[0xFF, 0xFE, b'h', 0, b'i', 0]).as_deref(),
+            Some("hi")
+        );
+        assert_eq!(
+            super::text_of(&[0xFE, 0xFF, 0, b'h', 0, b'i']).as_deref(),
+            Some("hi")
+        );
+        assert_eq!(super::text_of(&[b'P', b'K', 3, 4, 0, 0]), None);
+    }
 
     /// A face drawn large is its own picture in the atlas and the same file on
     /// the disk and on the server: asked for at another size, it is neither

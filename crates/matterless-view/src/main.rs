@@ -1894,6 +1894,7 @@ impl App {
                 }
             }
             Update::Film { file_id, path } => self.open_film(&file_id, &path),
+            Update::Text { file_id, text } => self.viewer.read(&file_id, &text),
             Update::LookFailed { file_id, why } => {
                 eprintln!("looking at {file_id}: {why}");
                 self.viewer.gave_up(&file_id, &why);
@@ -3280,6 +3281,16 @@ impl App {
         self.film = None;
         if one.video {
             return self.fetch_film(one);
+        }
+        if one.text {
+            if !self.viewer.holds_text(&one.file_id)
+                && let Some(link) = self.link.as_ref()
+            {
+                link.send(matterless_view::live::Ask::Read {
+                    file_id: one.file_id.clone(),
+                });
+            }
+            return;
         }
         if let Some((width, height, rgba)) = self.remembered.get(&one.file_id, self.size)
             && let Some(view) = self.view.as_mut()
@@ -6929,8 +6940,10 @@ impl App {
         // conversation behind it stays where the reader left it. `wheel_over`
         // asks whether a matching box is under the pointer rather than whether
         // it is the topmost one, so the stream would otherwise scroll too --
-        // under a panel the reader is looking at.
-        if self.picker.open() {
+        // under a panel the reader is looking at. The viewer covers the whole
+        // window, so it takes the turn the same way: a text file scrolls and
+        // nothing behind it does.
+        if self.picker.open() || self.viewer.open() {
             self.react();
             self.redraw();
             return;
@@ -7809,6 +7822,13 @@ impl App {
         // Anything the window can say something about does something. The two
         // are written next to each other and gain their entries together.
         if self.explains(name).is_some() {
+            return true;
+        }
+        // The text in the viewer is read, not pressed.
+        if name == format!("{}/text", matterless_view::viewer::NAME) {
+            return false;
+        }
+        if name.contains("/read/") {
             return true;
         }
         // And the controls whose purpose is written on them, so they never

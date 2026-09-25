@@ -989,8 +989,18 @@ impl Stream {
                     }
                 }
                 for (ordinal, (_, file)) in self.filed(index).into_iter().enumerate() {
-                    let _ = file;
                     let card = self.card_rect(index, ordinal, top, inner.x);
+                    // Under the Save button: the rest of a text file's card
+                    // opens it to read.
+                    if let Some(card) = card
+                        && readable(file)
+                    {
+                        placed.push(Placed {
+                            name: format!("{}/row/{index}/read/{ordinal}", self.name),
+                            rect: card,
+                            depth: 2,
+                        });
+                    }
                     if let Some(card) = card {
                         placed.push(Placed {
                             name: format!("{}/row/{index}/save/{ordinal}", self.name),
@@ -1625,6 +1635,17 @@ impl Stream {
             && let Some((index, ordinal)) = rest.split_once("/look/")
             && let (Ok(index), Ok(ordinal)) = (index.parse::<usize>(), ordinal.parse::<usize>())
             && let Some((_, file)) = self.pictured(index).into_iter().nth(ordinal)
+            && let Some(Row::Post { post } | Row::Continuation { post }) = self.rows.get(index)
+        {
+            return Some(Chose::Look {
+                file_id: file.id.clone(),
+                post_id: post.post_id.clone(),
+            });
+        }
+        if let Some(rest) = clicked.strip_prefix(&format!("{}/row/", self.name))
+            && let Some((index, ordinal)) = rest.split_once("/read/")
+            && let (Ok(index), Ok(ordinal)) = (index.parse::<usize>(), ordinal.parse::<usize>())
+            && let Some((_, file)) = self.filed(index).into_iter().nth(ordinal)
             && let Some(Row::Post { post } | Row::Continuation { post }) = self.rows.get(index)
         {
             return Some(Chose::Look {
@@ -2925,14 +2946,98 @@ pub fn avatar_key_sized(user_id: &str, version: i64, side: u32) -> String {
     format!("{}@{side}", avatar_key(user_id, version))
 }
 
-/// Every picture on one message, in the order they were attached.
+/// The largest text file opened to read rather than only saved.
+const READABLE_BYTES: i64 = 8 * 1024 * 1024;
+
+/// Whether a file card is text the viewer can show: a log, some code, a
+/// config, a note.
+pub fn readable(file: &matterless_render::FileRef) -> bool {
+    const EXTENSIONS: &[&str] = &[
+        "txt",
+        "log",
+        "md",
+        "markdown",
+        "json",
+        "jsonl",
+        "yaml",
+        "yml",
+        "toml",
+        "ini",
+        "cfg",
+        "conf",
+        "xml",
+        "csv",
+        "tsv",
+        "rs",
+        "c",
+        "cc",
+        "cpp",
+        "cxx",
+        "h",
+        "hh",
+        "hpp",
+        "hxx",
+        "inl",
+        "cs",
+        "py",
+        "js",
+        "ts",
+        "tsx",
+        "jsx",
+        "java",
+        "kt",
+        "go",
+        "rb",
+        "php",
+        "lua",
+        "sh",
+        "bash",
+        "ps1",
+        "psm1",
+        "bat",
+        "cmd",
+        "sql",
+        "html",
+        "htm",
+        "css",
+        "scss",
+        "diff",
+        "patch",
+        "usf",
+        "ush",
+        "hlsl",
+        "glsl",
+        "vert",
+        "frag",
+        "comp",
+        "uproject",
+        "uplugin",
+        "properties",
+        "gradle",
+        "cmake",
+        "mk",
+    ];
+    let extension = file.extension.to_ascii_lowercase();
+    let mime = file.mime_type.to_ascii_lowercase();
+    !file.image
+        && !file.video
+        && !file.archived
+        && file.size <= READABLE_BYTES
+        && (EXTENSIONS.contains(&extension.as_str())
+            || mime.starts_with("text/")
+            || mime == "application/json"
+            || mime == "application/xml")
+}
+
+/// Every picture, video and text file on one message, in the order they were
+/// attached.
 ///
-/// A file card is not among them: there is nothing to magnify about one, so
+/// Any other file card is not among them: there is nothing to show of one, so
 /// stepping never lands on it. The same rule the app follows.
 pub fn looking_at(post: &matterless_render::PostRow) -> Vec<crate::viewer::Looking> {
     post.files
         .iter()
-        .filter(|file| (file.image || file.video) && !file.archived)
+        .filter(|file| ((file.image || file.video) && !file.archived) || readable(file))
         .map(|file| crate::viewer::Looking {
             file_id: file.id.clone(),
             // A linked picture's name is its alt text, which is not a file
@@ -2943,6 +3048,7 @@ pub fn looking_at(post: &matterless_render::PostRow) -> Vec<crate::viewer::Looki
             },
             linked: file.variant == matterless_render::ImageVariant::Linked,
             video: file.video,
+            text: readable(file),
             // The original for anything the server does not re-encode -- a
             // GIF, an SVG, a video -- and its preview for a photograph, which
             // it caps at 1920 wide and which is the right answer for one.
@@ -3189,6 +3295,50 @@ mod sizes {
         assert_eq!(size_of(474_000_000), "474.0 MB");
         // Never negative, whatever the server said.
         assert_eq!(size_of(-1), "-1 bytes");
+    }
+}
+
+#[cfg(test)]
+mod readable_files {
+    use super::readable;
+    use matterless_render::{FileRef, ImageVariant};
+
+    fn file(name: &str, extension: &str, mime_type: &str, size: i64) -> FileRef {
+        FileRef {
+            id: "f".to_string(),
+            name: name.to_string(),
+            extension: extension.to_string(),
+            size,
+            mime_type: mime_type.to_string(),
+            width: 0,
+            height: 0,
+            image: false,
+            video: false,
+            variant: ImageVariant::Original,
+            mini_preview: None,
+            box_width: 0,
+            box_height: 0,
+            archived: false,
+        }
+    }
+
+    /// A log, a source file or anything the server calls text opens to read;
+    /// an archive, a picture or a text file too big to read does not.
+    #[test]
+    fn text_opens_to_read_and_nothing_else_does() {
+        assert!(readable(&file("sync.txt", "txt", "text/plain", 1_600)));
+        assert!(readable(&file("Main.USF", "USF", "", 9_000)));
+        assert!(readable(&file("notes", "", "text/markdown", 90)));
+        assert!(!readable(&file(
+            "build.zip",
+            "zip",
+            "application/zip",
+            9_000
+        )));
+        assert!(!readable(&file("huge.log", "log", "text/plain", 64 << 20)));
+        let mut picture = file("shot.png", "png", "image/png", 9_000);
+        picture.image = true;
+        assert!(!readable(&picture));
     }
 }
 

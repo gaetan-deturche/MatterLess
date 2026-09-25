@@ -51,6 +51,77 @@ pub struct Looking {
     pub linked: bool,
     /// A video, played rather than looked at.
     pub video: bool,
+    /// A text file, read rather than looked at.
+    pub text: bool,
+}
+
+/// How many text files are kept once read, so going back to one is instant.
+const TEXTS: usize = 8;
+/// A line of text, in the monospaced face at the interface's size.
+const LINE: f32 = 18.0;
+
+/// A width in characters, and a text's lines cut to it: each row is a line's
+/// number and the byte range of the line it shows.
+type Rows = (usize, Vec<(usize, usize, usize)>);
+
+/// A text file as it arrived, ready to draw.
+#[derive(Debug)]
+struct Text {
+    file_id: String,
+    lines: Vec<String>,
+    /// The width of one character of the monospaced face, once measured.
+    advance: std::cell::Cell<f32>,
+    /// Its lines cut to a width in characters, and that width: each row is a
+    /// line's number and the byte range of the line it shows.
+    rows: std::cell::RefCell<Rows>,
+}
+
+impl Text {
+    fn new(file_id: &str, text: &str) -> Self {
+        let lines = text
+            .split('\n')
+            .map(|line| {
+                let mut kept = String::with_capacity(line.len());
+                for c in line.chars() {
+                    match c {
+                        '\t' => kept.push_str("    "),
+                        '\r' => {}
+                        c if c.is_control() => kept.push('\u{fffd}'),
+                        c => kept.push(c),
+                    }
+                }
+                kept
+            })
+            .collect();
+        Self {
+            file_id: file_id.to_string(),
+            lines,
+            advance: std::cell::Cell::new(0.0),
+            rows: Default::default(),
+        }
+    }
+
+    /// Its rows at `columns` characters a row, cut again when that changed.
+    fn rows(&self, columns: usize) -> std::cell::Ref<'_, Rows> {
+        if self.rows.borrow().0 != columns {
+            let mut rows = Vec::with_capacity(self.lines.len());
+            for (number, line) in self.lines.iter().enumerate() {
+                let mut from = 0;
+                let mut count = 0;
+                for (at, _) in line.char_indices() {
+                    if count == columns {
+                        rows.push((number, from, at));
+                        from = at;
+                        count = 0;
+                    }
+                    count += 1;
+                }
+                rows.push((number, from, line.len()));
+            }
+            *self.rows.borrow_mut() = (columns, rows);
+        }
+        self.rows.borrow()
+    }
 }
 
 /// Where a video is, for the bar under it.
@@ -167,6 +238,12 @@ pub struct Viewer {
     /// The last place asked for while dragging along the track, so holding
     /// still does not ask again every frame.
     sought: Option<f64>,
+    /// The text files read lately, newest first.
+    texts: std::collections::VecDeque<Text>,
+    /// How far down the text showing is, in pixels, and how far it can go as
+    /// the last frame drew it.
+    scroll: f32,
+    reach: std::cell::Cell<f32>,
 }
 
 impl Viewer {
@@ -181,6 +258,7 @@ impl Viewer {
         self.at = at;
         self.size = None;
         self.failed.clear();
+        self.scroll = 0.0;
         self.shown.get(at).cloned()
     }
 
@@ -190,6 +268,38 @@ impl Viewer {
         self.size = None;
         self.failed.clear();
         self.playback = None;
+    }
+
+    /// Whether this text file has been read already, so there is nothing to
+    /// fetch.
+    pub fn holds_text(&self, file_id: &str) -> bool {
+        self.texts.iter().any(|text| text.file_id == file_id)
+    }
+
+    /// A text file's contents arrived.
+    pub fn read(&mut self, file_id: &str, text: &str) {
+        self.texts.retain(|held| held.file_id != file_id);
+        self.texts.push_front(Text::new(file_id, text));
+        self.texts.truncate(TEXTS);
+        if self.current().is_some_and(|one| one.file_id == file_id) {
+            self.failed.clear();
+        }
+    }
+
+    /// The text showing, once it has arrived.
+    fn reading(&self) -> Option<&Text> {
+        let one = self.current().filter(|one| one.text)?;
+        self.texts.iter().find(|text| text.file_id == one.file_id)
+    }
+
+    /// Where a text file is drawn: all the room the window leaves.
+    fn text_rect(&self, window: Rect) -> Rect {
+        Rect::new(
+            window.x + MARGIN,
+            window.y + MARGIN,
+            (window.width - MARGIN * 2.0).max(1.0),
+            (window.height - MARGIN * 2.0 - BAR).max(1.0),
+        )
     }
 
     /// The play button, at the start of the bar, for a video.
@@ -257,6 +367,7 @@ impl Viewer {
         self.at = ((self.at as isize + by).rem_euclid(count)) as usize;
         self.size = None;
         self.failed.clear();
+        self.scroll = 0.0;
         self.current().cloned()
     }
 
@@ -342,6 +453,9 @@ impl Viewer {
         if let Some(picture) = self.picture_rect(window) {
             placed.push(named.at("picture", picture, 31));
         }
+        if self.reading().is_some() {
+            placed.push(named.at("text", self.text_rect(window), 31));
+        }
         placed
     }
 
@@ -373,6 +487,30 @@ impl Viewer {
         // Let go: exactly where it was let go.
         if let Some(fraction) = self.sought.take() {
             return Some(Did::Seek(fraction));
+        }
+        // A text file scrolls: the wheel anywhere over the viewer, and the
+        // keys an editor scrolls with.
+        if self.reading().is_some() {
+            let page = (self.text_rect(window).height - LINE).max(LINE);
+            let mut scroll = self.scroll;
+            if let Some((_, y)) =
+                input.wheel_over(&self.boxes(window), |name| name.starts_with(NAME))
+            {
+                scroll -= y;
+            }
+            for (key, by) in [
+                (Key::Up, -LINE),
+                (Key::Down, LINE),
+                (Key::PageUp, -page),
+                (Key::PageDown, page),
+                (Key::Home, f32::MIN),
+                (Key::End, f32::MAX),
+            ] {
+                if input.struck(key) {
+                    scroll += by;
+                }
+            }
+            self.scroll = scroll.clamp(0.0, self.reach.get());
         }
         if input.struck(Key::Left) {
             return self.step(-1).map(Did::Show);
@@ -421,18 +559,75 @@ impl Viewer {
             window.height,
             [0, 0, 0, 216],
         );
-        match picture {
-            Some(at) => scene.extend([matterless_paint::Piece::Shown {
+        match (picture, self.reading()) {
+            (Some(at), _) => scene.extend([matterless_paint::Piece::Shown {
                 x: at.x,
                 y: at.y,
                 width: at.width,
                 height: at.height,
             }]),
-            None => {
+            // A text file: numbered lines, cut to the width rather than run
+            // off it, in the face code is set in.
+            (None, Some(text)) => {
+                let room = self.text_rect(window);
+                scene.rounded(room.x, room.y, room.width, room.height, palette.ground, 8.0);
+                if text.advance.get() <= 0.0 {
+                    let style = matterless_layout::Style {
+                        size: 13.0,
+                        line_height: LINE,
+                        bold: false,
+                        italic: false,
+                        mono: true,
+                    };
+                    let ten = matterless_layout::extent_of(fonts, "0000000000", f32::MAX, style);
+                    text.advance.set((ten.width / 10.0).max(1.0));
+                }
+                let advance = text.advance.get();
+                let digits = text.lines.len().max(1).to_string().len();
+                let left = room.x + PADDING + digits as f32 * advance + PADDING * 1.5;
+                let columns = ((room.right() - PADDING - left) / advance).floor().max(8.0) as usize;
+                let rows = text.rows(columns);
+                let reach = (rows.1.len() as f32 * LINE + PADDING * 2.0 - room.height).max(0.0);
+                self.reach.set(reach);
+                let scroll = self.scroll.min(reach);
+                let first = ((scroll - PADDING) / LINE).floor().max(0.0) as usize;
+                let seen = (room.height / LINE).ceil() as usize + 2;
+                scene.clip_to(room.x, room.y, room.width, room.height);
+                for (at, &(number, from, to)) in rows.1.iter().enumerate().skip(first).take(seen) {
+                    let y = room.y + PADDING + at as f32 * LINE - scroll;
+                    // The number on a line's first row only: the rows after it
+                    // are the same line, cut.
+                    if from == 0 {
+                        let glyphs = painter.run(
+                            fonts,
+                            &format!("{:>digits$}", number + 1),
+                            room.x + PADDING,
+                            y,
+                            Run::label(f32::MAX).mono(),
+                        );
+                        scene.glyphs(glyphs, palette.faint, palette.faint);
+                    }
+                    let line = &text.lines[number][from..to];
+                    if !line.is_empty() {
+                        let glyphs = painter.run(fonts, line, left, y, Run::label(f32::MAX).mono());
+                        scene.glyphs(glyphs, palette.ink, palette.faint);
+                    }
+                }
+                // Where in it the reader is, down the right edge.
+                if reach > 0.0 {
+                    let tall = (room.height * room.height / (room.height + reach)).max(24.0);
+                    let y = room.y + (room.height - tall) * scroll / reach;
+                    scene.rounded(room.right() - 7.0, y, 4.0, tall, palette.raised, 2.0);
+                }
+                scene.clip_to(window.x, window.y, window.width, window.height);
+            }
+            (None, None) => {
                 // Something to look at while it arrives, and something to read
                 // if it never does.
                 let said = if self.failed.is_empty() {
                     "opening\u{2026}".to_string()
+                } else if self.current().is_some_and(|one| one.text) {
+                    format!("this file could not be opened: {}", self.failed)
                 } else {
                     format!("this picture could not be opened: {}", self.failed)
                 };
@@ -619,12 +814,65 @@ mod tests {
                 original: false,
                 linked: false,
                 video: false,
+                text: false,
             })
             .collect()
     }
 
     fn window() -> Rect {
         Rect::new(0.0, 0.0, 1000.0, 700.0)
+    }
+
+    /// A long line is cut into rows of the width, each knowing which line it
+    /// is; an empty line is still a row; tabs are four spaces and a Windows
+    /// line end leaves nothing behind.
+    #[test]
+    fn text_is_cut_into_rows_of_the_width() {
+        let text = Text::new("t", "abcdefghij\r\n\n\tx");
+        assert_eq!(text.lines, ["abcdefghij", "", "    x"]);
+        let rows = text.rows(4);
+        assert_eq!(
+            rows.1,
+            [
+                (0, 0, 4),
+                (0, 4, 8),
+                (0, 8, 10),
+                (1, 0, 0),
+                (2, 0, 4),
+                (2, 4, 5)
+            ]
+        );
+        drop(rows);
+        assert_eq!(text.rows(20).1.len(), 3, "cut again at a new width");
+    }
+
+    /// The wheel over a text file scrolls it, as far as there is to scroll.
+    #[test]
+    fn the_wheel_scrolls_a_text_file() {
+        let mut viewer = Viewer::default();
+        let mut log = three().remove(0);
+        log.text = true;
+        viewer.show(vec![log], "f0");
+        viewer.read("f0", "one\ntwo\nthree");
+        viewer.reach.set(100.0);
+        let placed = viewer.boxes(window());
+        let mut input = Input::default();
+        input.apply(
+            matterless_ui::input::Event::PointerMoved { x: 500.0, y: 300.0 },
+            &placed,
+        );
+        input.apply(
+            matterless_ui::input::Event::Wheel { x: 0.0, y: -40.0 },
+            &placed,
+        );
+        viewer.react(&input, window());
+        assert_eq!(viewer.scroll, 40.0);
+        input.apply(
+            matterless_ui::input::Event::Wheel { x: 0.0, y: -400.0 },
+            &placed,
+        );
+        viewer.react(&input, window());
+        assert_eq!(viewer.scroll, 100.0, "no further than the end");
     }
 
     /// Opening lands on the one that was pressed, not on the first.
