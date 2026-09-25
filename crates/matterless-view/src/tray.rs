@@ -91,8 +91,15 @@ pub mod startup {
 
     /// Turns it on or off. Answers what it ended up as, which is not
     /// necessarily what was asked for -- a locked-down machine may refuse.
+    ///
+    /// Only the installed program writes it: the value names the running
+    /// executable, and a build run out of `target\` would take the installed
+    /// one's place at the next sign-in.
     pub fn set(on: bool) -> bool {
-        super::platform::startup_set(on);
+        match crate::identity::installed() {
+            true => super::platform::startup_set(on),
+            false => println!("not installed, so starting with Windows is left alone"),
+        }
         enabled()
     }
 }

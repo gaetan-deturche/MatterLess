@@ -237,6 +237,9 @@ struct Card {
     /// The heading over how much opened pictures keep, and its buttons.
     kept: Rect,
     sizes: Laid,
+    /// The heading over starting with Windows, and its two buttons.
+    starting: Rect,
+    starts: Laid,
     /// The heading over the build this is, and the line under it naming it.
     about: Rect,
     build: Rect,
@@ -254,6 +257,9 @@ pub struct Settings {
     shown: bool,
     pub text: Text,
     pub kept: Kept,
+    /// Whether this client starts when the reader signs in to Windows. Kept in
+    /// the registry, not here: the window reads it in as the panel opens.
+    pub startup: bool,
     /// Whether a look for a newer build is out, so it is not asked for twice
     /// and the button can say what it is doing.
     looking: bool,
@@ -271,6 +277,8 @@ pub enum Did {
     Text(Text),
     /// Opened pictures may keep this much on disk from now on.
     Kept(Kept),
+    /// Start with Windows, or stop.
+    Startup(bool),
     /// Go and see whether there is a newer build.
     ///
     /// Asked for rather than done here: this widget knows where its buttons
@@ -351,6 +359,7 @@ impl Settings {
             + ROW_GAP * (sizes.len().saturating_sub(1) as f32);
 
         let kept = tall(fonts, KEPT_HEADING, inner, GROUP_SIZE);
+        let starting = tall(fonts, STARTUP_HEADING, inner, GROUP_SIZE);
 
         // The build this is, and what the last look for a newer one said. The
         // line is only measured into the card when there is something on it:
@@ -371,6 +380,10 @@ impl Settings {
             + rows
             + GAP
             + kept
+            + ROW_GAP
+            + BUTTON_HEIGHT
+            + GAP
+            + starting
             + ROW_GAP
             + BUTTON_HEIGHT
             + GAP
@@ -425,6 +438,32 @@ impl Settings {
             .measure(fonts);
         let y = kept.bottom() + ROW_GAP + BUTTON_HEIGHT + ROW_GAP;
 
+        let starting = Rect::new(rect.x + PAD, y - ROW_GAP + GAP, inner, starting);
+        let starts = [(true, "startup-on", "On"), (false, "startup-off", "Off")]
+            .into_iter()
+            .fold(
+                Row::new(
+                    NAME,
+                    Rect::new(
+                        rect.x,
+                        starting.bottom() + ROW_GAP,
+                        rect.width,
+                        BUTTON_HEIGHT,
+                    ),
+                )
+                .against(matterless_widgets::Against::Left)
+                .pad(PAD)
+                .depth(63),
+                |row, (on, slug, title)| {
+                    row.button(match on == self.startup {
+                        true => Button::primary(slug, title),
+                        false => Button::plain(slug, title),
+                    })
+                },
+            )
+            .measure(fonts);
+        let y = starting.bottom() + ROW_GAP + BUTTON_HEIGHT + ROW_GAP;
+
         let about = Rect::new(rect.x + PAD, y - ROW_GAP + GAP, inner, about);
         let band = Rect::new(rect.x, about.bottom() + ROW_GAP, rect.width, band);
         // The name of the build on the left, the button that goes looking on
@@ -471,6 +510,8 @@ impl Settings {
             choices,
             kept,
             sizes,
+            starting,
+            starts,
             about,
             build,
             said,
@@ -538,6 +579,7 @@ impl Settings {
             placed.push(named().at(choice.which.slug(), choice.rect, 62));
         }
         placed.extend(card.sizes.boxes());
+        placed.extend(card.starts.boxes());
         placed.extend(card.look.boxes());
         placed.extend(card.foot.boxes());
         placed
@@ -577,6 +619,13 @@ impl Settings {
             // Measured again, so the chosen button is drawn as chosen.
             self.placed = None;
             return Some(Did::Kept(one));
+        }
+        if let Some(slug) = self.laid().and_then(|card| card.starts.clicked(input)) {
+            let on = slug == "startup-on";
+            // The window says what it ended up as; this is what was asked.
+            self.startup = on;
+            self.placed = None;
+            return Some(Did::Startup(on));
         }
         let clicked = input.clicked()?.to_string();
         if let Some(slug) = named().slug(&clicked) {
@@ -722,6 +771,15 @@ impl Settings {
 
             let glyphs = painter.run(
                 fonts,
+                STARTUP_HEADING,
+                card.starting.x,
+                card.starting.y,
+                Run::label(card.starting.width).sized(GROUP_SIZE),
+            );
+            scene.glyphs(glyphs, palette.faint, palette.faint);
+
+            let glyphs = painter.run(
+                fonts,
                 "About",
                 card.about.x,
                 card.about.y,
@@ -750,6 +808,7 @@ impl Settings {
             }
         }
         card.sizes.draw(into, input);
+        card.starts.draw(into, input);
         card.look.draw(into, input);
         card.foot.draw(into, input);
     }
@@ -757,6 +816,9 @@ impl Settings {
 
 /// The heading over how much disk opened pictures may keep.
 const KEPT_HEADING: &str = "Opened pictures kept on disk";
+
+/// The heading over starting when the reader signs in to Windows.
+const STARTUP_HEADING: &str = "Start with Windows";
 
 /// The mark saying which choice is in use.
 ///
@@ -858,12 +920,12 @@ mod tests {
                 "a size button runs into About"
             );
         }
-        // A box for each, plus the card, the window behind it, the sizes, and
-        // the two buttons -- the one that looks for a build and the one that
-        // shuts it.
+        // A box for each, plus the card, the window behind it, the sizes, On
+        // and Off for starting with Windows, and the two buttons -- the one
+        // that looks for a build and the one that shuts it.
         assert_eq!(
             settings.boxes(window()).len(),
-            4 + card.choices.len() + sizes.len()
+            6 + card.choices.len() + sizes.len()
         );
     }
 
@@ -1039,5 +1101,37 @@ mod tests {
             "the button reaches past the foot of the card"
         );
         assert!(card.rect.right() <= window().right() && card.rect.bottom() <= window().bottom());
+    }
+
+    /// Starting with Windows sits between the disk budget and About, and a
+    /// press on either button asks for exactly that.
+    #[test]
+    fn starting_with_windows_is_asked_for_by_its_buttons() {
+        let (mut settings, _fonts) = shown();
+        let card = settings.laid().expect("measured");
+        let on = card.starts.rect("startup-on").expect("placed");
+        assert!(
+            card.kept.bottom() <= card.starting.y,
+            "under the disk budget"
+        );
+        assert!(on.bottom() <= card.about.y, "above About");
+
+        let boxes = settings.boxes(window());
+        let mut input = Input::default();
+        press(&mut input, &boxes, on);
+        assert_eq!(settings.react(&mut input), Some(Did::Startup(true)));
+        assert!(settings.startup);
+
+        let (mut settings, _fonts) = shown();
+        let off = settings
+            .laid()
+            .expect("measured")
+            .starts
+            .rect("startup-off")
+            .expect("placed");
+        let boxes = settings.boxes(window());
+        let mut input = Input::default();
+        press(&mut input, &boxes, off);
+        assert_eq!(settings.react(&mut input), Some(Did::Startup(false)));
     }
 }

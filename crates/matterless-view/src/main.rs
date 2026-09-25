@@ -6076,6 +6076,12 @@ impl App {
                             eprintln!("keeping the picture budget: {error}");
                         }
                     }
+                    matterless_view::settings::Did::Startup(on) => {
+                        // What it ended up as, which a locked-down machine or a
+                        // build that is not the installed one may refuse.
+                        self.settings.startup = matterless_view::tray::startup::set(on);
+                        println!("start with windows: {}", self.settings.startup);
+                    }
                     matterless_view::settings::Did::Look => self.look_for_a_build(),
                     matterless_view::settings::Did::Close => {}
                 }
@@ -8760,6 +8766,8 @@ impl ApplicationHandler<Update> for App {
                             println!("nothing unread to scroll to");
                         }
                     } else if pressed == matterless_view::rail::SETTINGS {
+                        // Asked each time: the tray's menu switches it too.
+                        self.settings.startup = matterless_view::tray::startup::enabled();
                         self.settings.show();
                         let window = self.window_rect();
                         self.settings.measure(&mut self.fonts, window);
