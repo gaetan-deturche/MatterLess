@@ -19,6 +19,13 @@ pub struct Watching {
     /// Kept for as long as the view: WebView2 keeps its profile here.
     _context: wry::WebContext,
     pub id: String,
+    /// Whether its page has loaded, and whether it has been shown since.
+    ///
+    /// Hidden until then: this window draws through Direct3D with no surface
+    /// behind it, so a child window that has painted nothing yet is a hole
+    /// showing whatever is behind the app.
+    loaded: std::rc::Rc<std::cell::Cell<bool>>,
+    shown: bool,
 }
 
 impl Watching {
@@ -31,6 +38,8 @@ impl Watching {
     ) -> Result<Self, String> {
         let mut context = wry::WebContext::new(profile);
         let page = page_of(video);
+        let loaded = std::rc::Rc::new(std::cell::Cell::new(false));
+        let heard = loaded.clone();
         let url = format!("{PAGE}?v={}", video.id);
         let view = {
             use wry::WebViewBuilderExtWindows;
@@ -44,6 +53,12 @@ impl Watching {
                 })
                 .with_url(url)
                 .with_bounds(bounds(at))
+                .with_visible(false)
+                .with_on_page_load_handler(move |event, _| {
+                    if matches!(event, wry::PageLoadEvent::Finished) {
+                        heard.set(true);
+                    }
+                })
                 .with_autoplay(true)
                 .with_background_color((0, 0, 0, 255))
                 .with_devtools(false)
@@ -69,15 +84,32 @@ impl Watching {
             at,
             _context: context,
             id: video.id.clone(),
+            loaded,
+            shown: false,
         })
     }
 
-    /// Follows the viewer when it moves, which is a window being resized.
+    /// Follows the viewer when it moves, which is a window being resized, and
+    /// shows the player once its page has painted.
     pub fn place(&mut self, at: Rect) {
         if at != self.at {
             self.at = at;
             let _ = self.view.set_bounds(bounds(at));
         }
+        self.reveal();
+    }
+
+    /// Shows the player once its page has loaded, and not before.
+    pub fn reveal(&mut self) {
+        if !self.shown && self.loaded.get() {
+            self.shown = self.view.set_visible(true).is_ok();
+        }
+    }
+
+    /// When the window should draw again to show it: soon, until it is shown,
+    /// since its page loading is nothing the window would otherwise wake for.
+    pub fn wakes(&self) -> Option<std::time::Instant> {
+        (!self.shown).then(|| std::time::Instant::now() + std::time::Duration::from_millis(50))
     }
 }
 

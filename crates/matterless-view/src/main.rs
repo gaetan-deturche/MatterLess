@@ -8492,7 +8492,17 @@ impl ApplicationHandler<Update> for App {
         if spinning.is_some() {
             self.redraw();
         }
+        // YouTube's player, shown the moment its page has painted: until then
+        // it is a hole in the window. Nothing else wakes the loop for that.
+        #[cfg(windows)]
+        let revealing = self.youtube_player.as_mut().and_then(|player| {
+            player.reveal();
+            player.wakes()
+        });
+        #[cfg(not(windows))]
+        let revealing = None;
         let next = [
+            revealing,
             next,
             written,
             playing,
