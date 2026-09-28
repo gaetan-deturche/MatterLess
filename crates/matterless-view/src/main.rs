@@ -2076,6 +2076,10 @@ impl App {
                     Ok(Some(offer)) => {
                         self.settings
                             .looked(format!("MatterLess {} is ready to install.", offer.version));
+                        self.settings.ready(Some(&offer.version));
+                        // Asked for by hand, so offered again even if the strip
+                        // was told "Not now" before.
+                        self.put_off = None;
                         Some(offer)
                     }
                     Ok(None) => {
@@ -2102,6 +2106,9 @@ impl App {
                 self.offered.failed(&why);
                 let window = self.notice_rect();
                 self.offered.measure(&mut self.fonts, window);
+                self.settings.install_failed(&why);
+                let window = self.window_rect();
+                self.settings.measure(&mut self.fonts, window);
             }
             // Answered before this, in `user_event`, because it is the one
             // update that can end the loop and this has no way to say so.
@@ -4040,6 +4047,27 @@ impl App {
     /// and a dev build never starts it at all. This one needs neither: it is
     /// somebody pressing a button, and the answer is the same whether or not
     /// the window ever reached a server.
+    /// Installs the build on offer, from the strip or from Settings, and says
+    /// so on both.
+    ///
+    /// The waker rather than the socket. Installing never needed a Mattermost
+    /// session -- it is a fetch from a release host and a check against a key
+    /// -- and asking for one meant the offer could be shown to a window that
+    /// could not take it.
+    fn install_offered(&mut self) {
+        match (self.offer.clone(), self.waker.clone()) {
+            (Some(offer), Some(waker)) => {
+                println!("installing {}", offer.version);
+                self.offered.installing();
+                matterless_view::live::install_update(offer, Proxy(waker));
+            }
+            _ => {
+                self.offered.failed("there is nothing to install");
+                self.settings.install_failed("there is nothing to install");
+            }
+        }
+    }
+
     fn look_for_a_build(&mut self) {
         let Some(waker) = self.waker.clone() else {
             // No event loop to answer on, which is the window not being up
@@ -5592,17 +5620,7 @@ impl App {
         self.offered.measure(&mut self.fonts, notice);
         match self.offered.react(&self.input) {
             Some(matterless_view::updater_bar::Chose::Install) => {
-                // The waker rather than the socket. Installing never needed a
-                // Mattermost session -- it is a fetch from a release host and
-                // a check against a key -- and asking for one meant the offer
-                // could be shown to a window that could not take it.
-                match (self.offer.clone(), self.waker.clone()) {
-                    (Some(offer), Some(waker)) => {
-                        println!("installing {}", offer.version);
-                        matterless_view::live::install_update(offer, Proxy(waker));
-                    }
-                    _ => self.offered.failed("there is nothing to install"),
-                }
+                self.install_offered();
                 // Measured again: the button says something else now.
                 self.offered.measure(&mut self.fonts, notice);
             }
@@ -6131,6 +6149,11 @@ impl App {
                         println!("start with windows: {}", self.settings.startup);
                     }
                     matterless_view::settings::Did::Look => self.look_for_a_build(),
+                    matterless_view::settings::Did::Install => {
+                        self.install_offered();
+                        let notice = self.notice_rect();
+                        self.offered.measure(&mut self.fonts, notice);
+                    }
                     matterless_view::settings::Did::Close => {}
                 }
                 self.input = Input::default();
@@ -8856,6 +8879,9 @@ impl ApplicationHandler<Update> for App {
                     } else if pressed == matterless_view::rail::SETTINGS {
                         // Asked each time: the tray's menu switches it too.
                         self.settings.startup = matterless_view::tray::startup::enabled();
+                        // A build already on offer is installed from here too.
+                        let ready = self.offer.as_ref().map(|offer| offer.version.clone());
+                        self.settings.ready(ready.as_deref());
                         self.settings.show();
                         let window = self.window_rect();
                         self.settings.measure(&mut self.fonts, window);

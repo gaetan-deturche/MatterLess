@@ -103,6 +103,14 @@ impl Bar {
         self.placed = None;
     }
 
+    /// The install is under way, however it was asked for: here, or from the
+    /// Settings panel's own button.
+    pub fn installing(&mut self) {
+        self.working = true;
+        self.failed.clear();
+        self.placed = None;
+    }
+
     /// Says why the install did not work, and lets it be tried again.
     pub fn failed(&mut self, why: &str) {
         self.failed = why.to_string();
@@ -191,9 +199,7 @@ impl Bar {
         }
         match self.laid()?.clicked(input)? {
             "install" => {
-                self.working = true;
-                self.failed.clear();
-                self.placed = None;
+                self.installing();
                 Some(Chose::Install)
             }
             "later" => {

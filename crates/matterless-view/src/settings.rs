@@ -266,6 +266,11 @@ pub struct Settings {
     /// What that look came back with, in the reader's words rather than the
     /// program's.
     said: String,
+    /// A newer build there is to install, found by that look or already on
+    /// offer, and whether it is being installed. The button installs it then,
+    /// rather than sending the reader to the strip along the top.
+    ready: Option<String>,
+    installing: bool,
     placed: Option<Card>,
 }
 
@@ -284,6 +289,8 @@ pub enum Did {
     /// Asked for rather than done here: this widget knows where its buttons
     /// are and nothing about the network, which is the window's business.
     Look,
+    /// Install the newer build that was found, and restart into it.
+    Install,
     Close,
 }
 
@@ -472,8 +479,11 @@ impl Settings {
         let look = Row::new(NAME, band)
             .pad(PAD)
             .depth(63)
-            .enabled(!self.looking)
-            .button(Button::plain("look", self.looking_label()))
+            .enabled(!self.looking && !self.installing)
+            .button(match self.ready.is_some() {
+                true => Button::primary("install", self.installing_label()),
+                false => Button::plain("look", self.looking_label()),
+            })
             .measure(fonts);
         let build = Rect::new(
             band.x + PAD,
@@ -531,6 +541,27 @@ impl Settings {
             true => "Looking...",
             false => "Check for updates",
         }
+    }
+
+    fn installing_label(&self) -> &'static str {
+        match self.installing {
+            true => "Installing\u{2026}",
+            false => "Install and restart",
+        }
+    }
+
+    /// There is a newer build to install, or no longer one. Set by the window
+    /// from what a look found and from the offer on the strip.
+    pub fn ready(&mut self, version: Option<&str>) {
+        self.ready = version.map(str::to_string);
+        self.installing = false;
+    }
+
+    /// The install did not work: said here, where it was asked for, and the
+    /// button can be pressed again.
+    pub fn install_failed(&mut self, why: &str) {
+        self.installing = false;
+        self.said = format!("It could not be installed: {why}");
     }
 
     /// A look has gone out: the button is spent until it comes back.
@@ -601,16 +632,25 @@ impl Settings {
             self.hide();
             return Some(Did::Close);
         }
-        if self
+        let pressed = self
             .laid()
             .and_then(|card| card.look.clicked(input))
-            .is_some()
-        {
+            .map(str::to_string);
+        match pressed.as_deref() {
             // The panel says it is looking before anything has been asked:
             // the answer is a round trip away, and a button that sits there
             // unchanged reads as a button that missed.
-            self.looking();
-            return Some(Did::Look);
+            Some("look") => {
+                self.looking();
+                return Some(Did::Look);
+            }
+            // The same for installing, which then restarts the window.
+            Some("install") => {
+                self.installing = true;
+                self.said = "Downloading the new build...".to_string();
+                return Some(Did::Install);
+            }
+            _ => {}
         }
         if let Some(slug) = self.laid().and_then(|card| card.sizes.clicked(input))
             && let Some(one) = Kept::all().into_iter().find(|one| one.slug() == slug)
@@ -1074,6 +1114,37 @@ mod tests {
         let card = settings.laid().expect("measured");
         assert!(!card.look.boxes().is_empty(), "the button never came back");
         assert!(card.said.is_some());
+    }
+
+    /// A newer build that is ready is installed from the panel itself, and a
+    /// failed install can be tried again from the same button.
+    #[test]
+    fn a_ready_build_is_installed_from_here() {
+        let (mut settings, mut fonts) = shown();
+        settings.ready(Some("9.9.9"));
+        settings.measure(&mut fonts, window());
+        let card = settings.laid().expect("measured");
+        assert!(
+            card.look.rect("look").is_none(),
+            "no second check once one is found"
+        );
+        let install = card.look.rect("install").expect("the install button");
+
+        let boxes = settings.boxes(window());
+        let mut input = Input::default();
+        press(&mut input, &boxes, install);
+        assert_eq!(settings.react(&mut input), Some(Did::Install));
+        settings.measure(&mut fonts, window());
+        assert!(
+            settings.laid().expect("measured").look.boxes().is_empty(),
+            "it can be installed twice"
+        );
+
+        settings.install_failed("the download broke");
+        settings.measure(&mut fonts, window());
+        let card = settings.laid().expect("measured");
+        assert!(card.look.rect("install").is_some(), "it can be tried again");
+        assert!(card.said.is_some(), "and it says why");
     }
 
     /// And the card holds everything measured into it.
