@@ -152,7 +152,11 @@ pub fn rows_of(
     let mut posts = store
         .channel_page(channel_id, None, depth)
         .map_err(|error| format!("read {channel_id}: {error}"))?;
-    let mut authors: Vec<String> = posts.iter().map(|post| post.user_id.clone()).collect();
+    let mut authors: Vec<String> = posts
+        .iter()
+        .map(|post| post.user_id.clone())
+        .chain(matterless_render::reactors(&posts))
+        .collect();
     authors.sort();
     authors.dedup();
     let people = store.users_by_ids(&authors).unwrap_or_default();
@@ -266,7 +270,11 @@ pub fn rows_from(
     // The names come from the store rather than the post: which name to show is
     // a server-side preference, and the plan wants it already resolved.
     let authors: Vec<String> = {
-        let mut ids: Vec<String> = posts.iter().map(|post| post.user_id.clone()).collect();
+        let mut ids: Vec<String> = posts
+            .iter()
+            .map(|post| post.user_id.clone())
+            .chain(matterless_render::reactors(&posts))
+            .collect();
         ids.sort();
         ids.dedup();
         ids
@@ -451,6 +459,7 @@ mod tests {
                         // table has never heard of -- the two this asks about.
                         unicode: None,
                         names: Vec::new(),
+                        user_ids: Vec::new(),
                     })
                     .collect(),
                 files: Vec::new(),

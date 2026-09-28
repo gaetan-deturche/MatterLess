@@ -2071,11 +2071,18 @@ impl Stream {
         let mut top = self.first_row_at(within);
         for (index, laid) in self.laid.iter().enumerate() {
             let bottom = top + laid.height;
-            if bottom >= within.y
-                && top <= within.bottom()
-                && let Some(Row::Post { post }) = self.rows.get(index)
-            {
-                here.push(post.author_id.clone());
+            if bottom >= within.y && top <= within.bottom() {
+                if let Some(Row::Post { post }) = self.rows.get(index) {
+                    here.push(post.author_id.clone());
+                }
+                // And whoever reacted to it, so a reaction's tooltip can
+                // name them rather than say their ids.
+                if let Some(Row::Post { post } | Row::Continuation { post }) = self.rows.get(index)
+                {
+                    for reaction in &post.reactions {
+                        here.extend(reaction.user_ids.iter().cloned());
+                    }
+                }
             }
             top = bottom;
         }
@@ -3502,6 +3509,7 @@ mod pills {
                 mine: false,
                 unicode: Some("\u{1F389}".into()),
                 names: Vec::new(),
+                user_ids: Vec::new(),
             }],
             files: Vec::new(),
             attachments: Vec::new(),

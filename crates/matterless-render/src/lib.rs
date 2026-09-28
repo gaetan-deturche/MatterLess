@@ -60,6 +60,18 @@ pub struct ReactionSummary {
     /// already hydrates every reactor's name so the pill can be labelled at
     /// all.
     pub names: Vec<String>,
+    /// Who those are, in the same order: a name the store did not have is the
+    /// id itself, and the window asks who that is.
+    pub user_ids: Vec<String>,
+}
+
+/// Everybody who reacted to these posts: named with the authors, or a
+/// reaction's tooltip reads as a list of ids.
+pub fn reactors(posts: &[Post]) -> impl Iterator<Item = String> + '_ {
+    posts
+        .iter()
+        .flat_map(|post| post.metadata.reactions.iter())
+        .map(|reaction| reaction.user_id.clone())
 }
 
 /// A preview drawn under a message.
@@ -901,7 +913,11 @@ fn summarise_reactions(post: &Post, options: &PlanOptions) -> Vec<ReactionSummar
     let mut order: Vec<String> = Vec::new();
     let mut counts: HashMap<&str, (usize, bool)> = HashMap::new();
     let mut reactors: HashMap<&str, Vec<String>> = HashMap::new();
+    let mut ids: HashMap<&str, Vec<String>> = HashMap::new();
     for reaction in &post.metadata.reactions {
+        ids.entry(reaction.emoji_name.as_str())
+            .or_default()
+            .push(reaction.user_id.clone());
         let entry = counts
             .entry(reaction.emoji_name.as_str())
             .or_insert_with(|| {
@@ -933,12 +949,14 @@ fn summarise_reactions(post: &Post, options: &PlanOptions) -> Vec<ReactionSummar
             let (count, mine) = counts.get(emoji.as_str()).copied().unwrap_or((0, false));
             let unicode = emoji::character_for(&emoji);
             let names = reactors.remove(emoji.as_str()).unwrap_or_default();
+            let user_ids = ids.remove(emoji.as_str()).unwrap_or_default();
             ReactionSummary {
                 emoji,
                 count,
                 mine,
                 unicode,
                 names,
+                user_ids,
             }
         })
         .collect()

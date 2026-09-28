@@ -5142,6 +5142,8 @@ impl App {
         let replies = store.thread_replies(root_id).unwrap_or_default();
         let mut people: Vec<String> = std::iter::once(root.user_id.clone())
             .chain(replies.iter().map(|reply| reply.user_id.clone()))
+            .chain(matterless_render::reactors(std::slice::from_ref(&root)))
+            .chain(matterless_render::reactors(&replies))
             .collect();
         people.sort();
         people.dedup();

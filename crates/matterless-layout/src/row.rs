@@ -2722,6 +2722,7 @@ mod tests {
             mine: false,
             unicode: Some("\u{1F389}".into()),
             names: Vec::new(),
+            user_ids: Vec::new(),
         }];
         let laid = lay_out(&mut fonts, &Row::Post { post }, &theme);
         let pill = laid

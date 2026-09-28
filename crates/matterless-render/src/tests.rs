@@ -274,6 +274,7 @@ fn reactions_are_grouped_with_the_viewers_own_marked() {
                 // In the order they reacted, and the viewer is "You" rather
                 // than their own name -- which is what the tooltip shows.
                 names: vec!["bob.smith".into(), "You".into()],
+                user_ids: vec!["bob".into(), "me".into()],
             },
             ReactionSummary {
                 emoji: "eyes".into(),
@@ -281,6 +282,7 @@ fn reactions_are_grouped_with_the_viewers_own_marked() {
                 mine: false,
                 unicode: Some("\u{1F440}".into()),
                 names: vec!["bob.smith".into()],
+                user_ids: vec!["bob".into()],
             },
         ],
         "grouped in first-seen order, with the viewer's own flagged"
