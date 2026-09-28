@@ -143,6 +143,13 @@ pub struct Stream {
     pub me: String,
     /// Where each pressable run of words was drawn, from the frame just gone.
     presses: Vec<(matterless_layout::row::Press, Rect)>,
+    /// Where each block's letters were drawn, from the frame just gone: what
+    /// a press or a drag on the words is answered against.
+    seen: Vec<crate::selecting::Seen>,
+    /// The words chosen: where the press began, and where the pointer is.
+    selection: Option<(crate::selecting::Spot, crate::selecting::Spot)>,
+    /// Whether that press is still being dragged.
+    selecting: bool,
     /// This panel's own bar. Each list has one, because a drag in the thread
     /// pane must not scroll the channel behind it.
     pub bar: crate::scrollbar::Scrollbar,
@@ -382,6 +389,9 @@ impl Stream {
             custom: std::collections::HashMap::new(),
             me: String::new(),
             presses: Vec::new(),
+            seen: Vec::new(),
+            selection: None,
+            selecting: false,
             bar: crate::scrollbar::Scrollbar::default(),
             kept: Vec::new(),
             visits: 0,
@@ -926,6 +936,120 @@ impl Stream {
 
     fn row_name(&self, index: usize) -> String {
         format!("{}/row/{index}", self.name)
+    }
+
+    /// Whether a press on this box is a press on the words: the panel, a row,
+    /// or a link in one -- not a button, a pill or a picture on it.
+    pub fn on_words(&self, name: &str) -> bool {
+        let Some(rest) = name.strip_prefix(&self.name) else {
+            return false;
+        };
+        rest.is_empty()
+            || rest.starts_with("/press/")
+            || rest
+                .strip_prefix("/row/")
+                .is_some_and(|index| index.parse::<usize>().is_ok())
+    }
+
+    /// A press on the words and the drag that follows it: which words are
+    /// chosen. Two presses take a word, three its whole block.
+    pub fn select(&mut self, input: &Input) {
+        use crate::selecting::{Spot, spot_at, text_of, word_at};
+        let under = input
+            .pointer_at()
+            .and_then(|(x, y)| spot_at(&self.seen, x, y));
+        // Not again once the drag is under way: a move can arrive before the
+        // frame that ends the press, and it would put the anchor where the
+        // pointer has got to.
+        if let Some(pressed) = input.pressed_now()
+            && !self.selecting
+        {
+            if !self.on_words(pressed) {
+                // Somewhere else altogether lets go of it, as a page does; a
+                // button on this panel leaves it be.
+                if !pressed.starts_with(&self.name) {
+                    self.selection = None;
+                }
+                self.selecting = false;
+                return;
+            }
+            let Some(spot) = under else {
+                self.selection = None;
+                return;
+            };
+            let text = self
+                .row_of(&spot.post)
+                .and_then(|row| self.laid.get(row))
+                .and_then(|laid| laid.blocks.get(spot.block))
+                .map(text_of)
+                .unwrap_or_default();
+            let (from, to) = match input.clicks() {
+                1 => (spot.at, spot.at),
+                2 => word_at(&text, spot.at),
+                _ => (0, text.len()),
+            };
+            let at = |at| Spot { at, ..spot.clone() };
+            self.selection = Some((at(from), at(to)));
+            self.selecting = input.clicks() == 1;
+            return;
+        }
+        if input.pressed().is_none() {
+            self.selecting = false;
+            return;
+        }
+        if self.selecting
+            && let Some(under) = under
+            && let Some((_, end)) = self.selection.as_mut()
+        {
+            *end = under;
+        }
+    }
+
+    /// Which row holds this message.
+    fn row_of(&self, post_id: &str) -> Option<usize> {
+        self.rows.iter().position(|row| {
+            matches!(row, Row::Post { post } | Row::Continuation { post } if post.post_id == post_id)
+        })
+    }
+
+    /// The chosen words in reading order, as row, block and byte, when any
+    /// are chosen at all.
+    fn chosen(&self) -> Option<(Place, Place)> {
+        let (anchor, end) = self.selection.as_ref()?;
+        let place =
+            |spot: &crate::selecting::Spot| Some((self.row_of(&spot.post)?, spot.block, spot.at));
+        let (anchor, end) = (place(anchor)?, place(end)?);
+        (anchor != end).then(|| (anchor.min(end), anchor.max(end)))
+    }
+
+    /// The chosen words as they are copied: a block to a line, and messages
+    /// one after another.
+    pub fn selected_text(&self) -> Option<String> {
+        use crate::selecting::{copied, selectable};
+        let (from, to) = self.chosen()?;
+        let mut said: Vec<String> = Vec::new();
+        for row in from.0..=to.0 {
+            let Some(laid) = self.laid.get(row) else {
+                continue;
+            };
+            for (index, block) in laid.blocks.iter().enumerate() {
+                let here = (row, index);
+                if !selectable(block) || here < (from.0, from.1) || here > (to.0, to.1) {
+                    continue;
+                }
+                let lo = if here == (from.0, from.1) { from.2 } else { 0 };
+                let hi = if here == (to.0, to.1) {
+                    to.2
+                } else {
+                    usize::MAX
+                };
+                let piece = copied(block, lo, hi);
+                if !piece.is_empty() {
+                    said.push(piece);
+                }
+            }
+        }
+        (!said.is_empty()).then(|| said.join("\n"))
     }
 
     /// The panel, and every row currently on screen.
@@ -1584,6 +1708,11 @@ impl Stream {
             self.scroll = (self.scroll - y).clamp(0.0, self.reach(within));
         }
         let clicked = input.clicked()?;
+        // Letting go of words just chosen is not pressing what they say: a
+        // drag that began on a link would otherwise follow it.
+        if self.chosen().is_some() && self.on_words(clicked) {
+            return None;
+        }
         // One of the reader's most-used, straight off the strip: the whole
         // point of them being there is that this takes one press.
         if let Some((index, at)) = self.favourite_at(clicked)
@@ -2549,6 +2678,8 @@ impl Stream {
         } = into;
         let hovered = self.hovered(input);
         let inner = self.inner(within);
+        let chosen = self.chosen();
+        let mut seen = Vec::new();
         // The light goes down before any row is drawn rather than when its own
         // row comes up. The unread line has no height and its block is lifted
         // half its depth into the join it shares with the row below, so a fill
@@ -2582,10 +2713,47 @@ impl Stream {
                 let pieces = painter.pieces_of(fonts, row, top, &self.theme, palette, &self.custom);
                 // Shifted into this panel's column: a row plan is laid out from
                 // zero and knows nothing of where it lands.
-                let pieces: Vec<matterless_paint::Piece> = pieces
+                let (letters, pieces): (Vec<_>, Vec<_>) = pieces
                     .into_iter()
                     .map(|piece| shift(piece, inner.x))
-                    .collect();
+                    .partition(|piece| matches!(piece, matterless_paint::Piece::Letters { .. }));
+                // Where the words landed, kept for the next press on them; and
+                // the chosen ones lit before they are drawn over.
+                let post_id = match self.rows.get(index) {
+                    Some(Row::Post { post } | Row::Continuation { post }) => Some(&post.post_id),
+                    _ => None,
+                };
+                for piece in letters {
+                    let (matterless_paint::Piece::Letters { block, letters }, Some(post_id)) =
+                        (piece, post_id)
+                    else {
+                        continue;
+                    };
+                    if let Some((from, to)) = chosen
+                        && (from.0, from.1) <= (index, block)
+                        && (index, block) <= (to.0, to.1)
+                    {
+                        let lo = if (index, block) == (from.0, from.1) {
+                            from.2
+                        } else {
+                            0
+                        };
+                        let hi = if (index, block) == (to.0, to.1) {
+                            to.2
+                        } else {
+                            usize::MAX
+                        };
+                        let light = [palette.signal[0], palette.signal[1], palette.signal[2], 90];
+                        for lit in crate::selecting::lit(&letters, lo, hi) {
+                            scene.fill(lit.x, lit.y, lit.width, lit.height, light);
+                        }
+                    }
+                    seen.push(crate::selecting::Seen {
+                        post: post_id.clone(),
+                        block,
+                        letters,
+                    });
+                }
                 for piece in &pieces {
                     if let matterless_paint::Piece::Press {
                         x,
@@ -2741,6 +2909,7 @@ impl Stream {
             top = bottom;
         }
         self.presses = presses;
+        self.seen = seen;
         // The ends of the conversation, once the rows are down and before
         // anything that floats over them: a list cut off square at the top of
         // its panel says nothing about whether there is more above it, and
@@ -3143,6 +3312,16 @@ fn shift(piece: matterless_paint::Piece, by: f32) -> matterless_paint::Piece {
             press,
             quiet,
         },
+        Piece::Letters { block, letters } => Piece::Letters {
+            block,
+            letters: letters
+                .into_iter()
+                .map(|letter| matterless_paint::Letter {
+                    x: letter.x + by,
+                    ..letter
+                })
+                .collect(),
+        },
         Piece::Text {
             glyphs,
             ink,
@@ -3194,6 +3373,9 @@ fn size_of(bytes: i64) -> String {
 pub fn emoji_key(emoji_id: &str) -> String {
     format!("emoji/{emoji_id}")
 }
+
+/// A place in a conversation's words in reading order: row, block, byte.
+type Place = (usize, usize, usize);
 
 #[cfg(test)]
 mod pills {

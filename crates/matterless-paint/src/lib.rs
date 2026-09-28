@@ -357,6 +357,22 @@ pub enum Piece {
         /// by mentioning its own writer.
         quiet: bool,
     },
+    /// Where one block's glyphs landed and which of its text each one is, for
+    /// selecting it and for knowing what is under the pointer. Nothing is
+    /// drawn for it, like a press. `block` is its index in the row's blocks.
+    Letters { block: usize, letters: Vec<Letter> },
+}
+
+/// One glyph's box on its line, and the bytes of its block's text it shows:
+/// the block's spans joined, which is what `start` and `end` count into.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Letter {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+    pub start: usize,
+    pub end: usize,
 }
 
 /// A frame's worth of drawing, built up piece by piece.
@@ -716,7 +732,7 @@ impl Painter {
         custom: &HashMap<String, String>,
     ) -> Vec<Piece> {
         let mut pieces = Vec::new();
-        for block in &row.blocks {
+        for (index, block) in row.blocks.iter().enumerate() {
             let x = theme.gutter + block.x;
             let y = top + block.y;
             match block.kind {
@@ -724,7 +740,7 @@ impl Painter {
                     // The words first, so their width decides where the two
                     // rules stop: a rule drawn under the label would strike
                     // through it.
-                    let (glyphs, _, _, _) = self.glyphs_of(fonts, block, 0.0, y, theme);
+                    let Shaped { glyphs, .. } = self.glyphs_of(fonts, block, 0.0, y, theme);
                     let middle = y + block.height / 2.0;
                     let said = glyphs
                         .iter()
@@ -781,7 +797,7 @@ impl Painter {
                                 softness: 1.0,
                             });
                         }
-                        let (glyphs, _, _, _) = self.glyphs_of(
+                        let Shaped { glyphs, .. } = self.glyphs_of(
                             fonts,
                             block,
                             left,
@@ -817,7 +833,9 @@ impl Painter {
                     // dropped on the floor. This took `.0` and threw the rest
                     // away, so the author's name could carry a press all it
                     // liked and nothing downstream ever heard about it.
-                    let (glyphs, _, presses, _) = self.glyphs_of(fonts, block, x, y, theme);
+                    let Shaped {
+                        glyphs, presses, ..
+                    } = self.glyphs_of(fonts, block, x, y, theme);
                     // A span that can be pressed is shaded as a link, which is
                     // right in a sentence and wrong here: the author's name is
                     // the heading of the message rather than a reference to
@@ -864,19 +882,24 @@ impl Painter {
                         radius: CODE,
                         softness: 1.0,
                     });
+                    let Shaped {
+                        glyphs, letters, ..
+                    } = self.glyphs_of(
+                        fonts,
+                        block,
+                        x + theme.code_padding,
+                        y + theme.code_padding_y,
+                        theme,
+                    );
                     pieces.push(Piece::Text {
-                        glyphs: self
-                            .glyphs_of(
-                                fonts,
-                                block,
-                                x + theme.code_padding,
-                                y + theme.code_padding_y,
-                                theme,
-                            )
-                            .0,
+                        glyphs,
                         ink: palette.ink,
                         faint: palette.faint,
                         signal: palette.signal,
+                    });
+                    pieces.push(Piece::Letters {
+                        block: index,
+                        letters,
                     });
                 }
                 // The ground under the offer to see the rest of a cut listing.
@@ -936,16 +959,24 @@ impl Painter {
                 // block is one elided line the layout already measured, so
                 // there is no wrapping to do and no ground to draw.
                 Kind::Caption => {
-                    let (glyphs, _, _, _) = self.glyphs_of(fonts, block, x, y, theme);
+                    let Shaped {
+                        glyphs, letters, ..
+                    } = self.glyphs_of(fonts, block, x, y, theme);
                     pieces.push(Piece::Text {
                         glyphs,
                         ink: palette.soft,
                         faint: palette.faint,
                         signal: palette.signal,
                     });
+                    pieces.push(Piece::Letters {
+                        block: index,
+                        letters,
+                    });
                 }
                 Kind::Quote => {
-                    let (glyphs, _, _, _) = self.glyphs_of(fonts, block, x, y, theme);
+                    let Shaped {
+                        glyphs, letters, ..
+                    } = self.glyphs_of(fonts, block, x, y, theme);
                     pieces.push(Piece::Fill {
                         x: x - theme.indent + theme.quote_bar,
                         y,
@@ -961,9 +992,19 @@ impl Painter {
                         faint: palette.faint,
                         signal: palette.signal,
                     });
+                    pieces.push(Piece::Letters {
+                        block: index,
+                        letters,
+                    });
                 }
                 Kind::Text => {
-                    let (glyphs, rooms, presses, code) = self.glyphs_of(fonts, block, x, y, theme);
+                    let Shaped {
+                        glyphs,
+                        rooms,
+                        presses,
+                        code,
+                        letters,
+                    } = self.glyphs_of(fonts, block, x, y, theme);
                     // The ground behind inline code, before the words: a
                     // background pushed after them covers what it is for.
                     pieces.extend(code.into_iter().map(|(cx, cy, width, height)| Piece::Fill {
@@ -989,6 +1030,10 @@ impl Painter {
                         press: one.press,
                         quiet: false,
                     }));
+                    pieces.push(Piece::Letters {
+                        block: index,
+                        letters,
+                    });
                     // A custom emoji's placeholder, turned into the picture it
                     // was standing in for. Drawn to the room the spaces
                     // actually measured, so the line and the image agree
@@ -1016,12 +1061,18 @@ impl Painter {
                 // attachment. The words in it are ordinary text blocks.
                 Kind::Card => {}
                 Kind::Preview => {
-                    let (glyphs, _, _, _) = self.glyphs_of(fonts, block, x, y, theme);
+                    let Shaped {
+                        glyphs, letters, ..
+                    } = self.glyphs_of(fonts, block, x, y, theme);
                     pieces.push(Piece::Text {
                         glyphs,
                         ink: palette.ink,
                         faint: palette.faint,
                         signal: palette.signal,
+                    });
+                    pieces.push(Piece::Letters {
+                        block: index,
+                        letters,
                     });
                 }
                 // Drawn by whoever owns the row rather than here. A pill is a
@@ -1099,7 +1150,7 @@ impl Painter {
                 ),
                 // Nothing is drawn for a press: it is a box a pointer can
                 // land on, and the words in it are already drawn as text.
-                Piece::Press { .. } => {}
+                Piece::Press { .. } | Piece::Letters { .. } => {}
                 // The snapshot path has no network, so a picture is drawn as
                 // the space it occupies. That is the honest answer: this path
                 // exists to check heights and glyph positions, and a filled box
@@ -1291,9 +1342,9 @@ impl Painter {
         x: f32,
         y: f32,
         theme: &Theme,
-    ) -> (Vec<PlacedGlyph>, Rooms, Presses, Vec<CodeBox>) {
+    ) -> Shaped {
         if block.spans.is_empty() {
-            return (Vec::new(), HashMap::new(), Vec::new(), Vec::new());
+            return Shaped::default();
         }
         let line_height = if block.kind == Kind::Code {
             theme.code_line_height
@@ -1321,12 +1372,29 @@ impl Painter {
         // the same way an emoji's room is.
         let mut presses: Presses = Vec::new();
         let mut code: Vec<CodeBox> = Vec::new();
+        let mut letters: Vec<Letter> = Vec::new();
+        // Where each of the buffer's lines starts in the block's text: a glyph
+        // counts from the start of its own line, and a `\n` in the spans is
+        // where the shaper began a new one.
+        let joined: String = block.spans.iter().map(|span| span.text.as_str()).collect();
+        let starts: Vec<usize> = std::iter::once(0)
+            .chain(joined.match_indices('\n').map(|(at, _)| at + 1))
+            .collect();
         // Never more lines than the layout reserved. The buffer wraps to the
         // width it was given and will happily produce a fourth line for a
         // three-line block -- which draws over the message underneath. The
         // layout decides how tall a block is; this draws that and no more.
         for run in shaped.layout_runs().take(block.lines.max(1)) {
+            let from = starts.get(run.line_i).copied().unwrap_or(0);
             for glyph in run.glyphs {
+                letters.push(Letter {
+                    x: glyph.x + x,
+                    y: y + run.line_top,
+                    width: glyph.w,
+                    height: line_height,
+                    start: from + glyph.start,
+                    end: from + glyph.end,
+                });
                 let at = span_of(glyph.metadata);
                 if marks(glyph.metadata, PRESS)
                     && let Some(press) = block.spans.get(at).and_then(|span| span.press.as_ref())
@@ -1392,8 +1460,25 @@ impl Painter {
                 });
             }
         }
-        (placed, rooms, presses, code)
+        Shaped {
+            glyphs: placed,
+            rooms,
+            presses,
+            code,
+            letters,
+        }
     }
+}
+
+/// What shaping one block reports: its glyphs, and where the things in it
+/// that are not only words landed.
+#[derive(Default)]
+struct Shaped {
+    glyphs: Vec<PlacedGlyph>,
+    rooms: Rooms,
+    presses: Presses,
+    code: Vec<CodeBox>,
+    letters: Vec<Letter>,
 }
 
 /// Where a custom emoji's placeholder ended up: its left edge, its top, and

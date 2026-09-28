@@ -5507,6 +5507,28 @@ impl App {
         }
     }
 
+    /// A press on a conversation's words, or a drag from one: both panes are
+    /// told, so choosing words in one lets go of any chosen in the other.
+    fn select_words(&mut self) {
+        self.stream.select(&self.input);
+        if let Some(thread) = self.thread.as_mut() {
+            thread.select(&self.input);
+        }
+    }
+
+    /// The words chosen in whichever conversation has the keyboard.
+    fn words_to_copy(&self) -> Option<String> {
+        let focus = self.input.focus()?;
+        match focus.starts_with(&self.stream.name) {
+            true => self.stream.selected_text(),
+            false => self
+                .thread
+                .as_ref()
+                .filter(|thread| focus.starts_with(&thread.name))
+                .and_then(|thread| thread.selected_text()),
+        }
+    }
+
     /// Copies text, into this window and into every other one.
     fn copy(&mut self, text: String) {
         matterless_view::clip::write(&text);
@@ -5540,6 +5562,11 @@ impl App {
             }
         }
         let before = self.clipboard.clone();
+        if self.input.chord(Key::Char('c'))
+            && let Some(words) = self.words_to_copy()
+        {
+            self.clipboard = words;
+        }
         self.reacted();
         if self.clipboard != before {
             matterless_view::clip::write(&self.clipboard);
@@ -6915,8 +6942,10 @@ impl App {
         self.placed = self.targets();
         let boxes = self.placed.clone();
         self.input.apply(UiEvent::PointerMoved { x, y }, &boxes);
-        // A held press is a drag, which selects text in the composer.
+        // A held press is a drag, which selects text in the composer, and in
+        // a conversation's words.
         if self.input.pressed().is_some() {
+            self.select_words();
             self.react();
         }
         self.watch_pointer();
@@ -8854,6 +8883,7 @@ impl ApplicationHandler<Update> for App {
                         self.act_on_header(act);
                     }
                 }
+                self.select_words();
                 // A message opens its thread. Taken before the composer reacts,
                 // because opening one narrows the column the composer sits in.
                 let stream = self.stream_rect();

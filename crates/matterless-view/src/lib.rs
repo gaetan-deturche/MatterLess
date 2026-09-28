@@ -41,6 +41,7 @@ pub mod rail;
 pub mod rest;
 pub mod scrollbar;
 pub mod search;
+pub mod selecting;
 pub mod settings;
 pub mod sidebar;
 pub mod sidebar_feed;
@@ -147,7 +148,7 @@ pub fn vertices_of(
         match piece {
             // Nothing to draw: a press box is where a pointer may land, and
             // its words are already in the text piece beside it.
-            Piece::Press { .. } => {}
+            Piece::Press { .. } | Piece::Letters { .. } => {}
             // Drawn, but not from here: it samples a texture of its own rather
             // than the atlas, so it needs its own bind group and therefore its
             // own draw. `draw_scene` picks these out.
