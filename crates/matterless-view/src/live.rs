@@ -838,6 +838,12 @@ async fn run(
     loop {
         tokio::select! {
             _ = again.tick() => {
+                // Somebody at this computer, in whatever window: the official
+                // desktop client reports the system's idle time, not its own
+                // window's, so a reader working elsewhere stays online.
+                if system_idle().is_some_and(|idle| idle < STILL_HERE) {
+                    handle.active();
+                }
                 let everybody: Vec<String> = watched.iter().cloned().collect();
                 for slice in everybody.chunks(STATUSES_AT_ONCE) {
                     let (rest, wake, slice) = (rest.clone(), wake.clone(), slice.to_vec());
@@ -2018,6 +2024,15 @@ pub fn renames_emoji(deltas: &[Delta]) -> bool {
 #[cfg(test)]
 mod tests {
 
+    /// Windows answers how long the session has been idle, which is what keeps
+    /// the reader online while they work in another window.
+    #[cfg(windows)]
+    #[test]
+    fn the_computer_says_how_long_it_has_been_idle() {
+        let idle = super::system_idle().expect("GetLastInputInfo answers");
+        assert!(idle < std::time::Duration::from_secs(60 * 60 * 24 * 50), "{idle:?}");
+    }
+
     /// UTF-8 with or without its mark, and UTF-16 either way round, which is
     /// what a PowerShell redirect writes; and nothing for a file with a zero
     /// byte in it, which is not text.
@@ -2716,6 +2731,32 @@ async fn who_is_around(rest: &RestClient, user_ids: &[String], wake: &impl Wake)
 /// then again on this beat. The official web client polls statuses every
 /// minute too.
 const STATUSES_AGAIN: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// How recent the last input anywhere on the computer must be for the reader
+/// to count as here: a beat, and some slack for the beat being late.
+const STILL_HERE: std::time::Duration = std::time::Duration::from_secs(75);
+
+/// How long since the last keyboard or mouse input anywhere in this session.
+#[cfg(windows)]
+fn system_idle() -> Option<std::time::Duration> {
+    use windows::Win32::System::SystemInformation::GetTickCount;
+    use windows::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
+    let mut last = LASTINPUTINFO {
+        cbSize: std::mem::size_of::<LASTINPUTINFO>() as u32,
+        dwTime: 0,
+    };
+    if !unsafe { GetLastInputInfo(&mut last) }.as_bool() {
+        return None;
+    }
+    // Both in milliseconds since boot, wrapping every 49 days together.
+    let since = unsafe { GetTickCount() }.wrapping_sub(last.dwTime);
+    Some(std::time::Duration::from_millis(u64::from(since)))
+}
+
+#[cfg(not(windows))]
+fn system_idle() -> Option<std::time::Duration> {
+    None
+}
 
 /// How many people one status request names.
 ///
