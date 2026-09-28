@@ -122,6 +122,22 @@ pub enum Chose {
     One(Match),
     /// Everybody picked, for a conversation that has not been started yet.
     These(Vec<Match>),
+    /// A press beside the panel, which puts it away as Escape does.
+    Dismissed,
+}
+
+/// The dimmed window behind the panel, and the panel: boxes of their own so
+/// nothing behind the switcher takes a press or a hover meant for it.
+const BACKDROP: &str = "switcher/backdrop";
+const PANEL_BOX: &str = "switcher/panel";
+
+/// What a result row's box is called, and back.
+fn row_name(at: usize) -> String {
+    format!("switcher/row/{at}")
+}
+
+fn row_of(name: &str) -> Option<usize> {
+    name.strip_prefix("switcher/row/")?.parse().ok()
 }
 
 /// The person a row is about, for the face and the dot beside their name.
@@ -409,6 +425,21 @@ impl Switcher {
         if input.struck(Key::Up) {
             self.chosen = self.chosen.saturating_sub(1);
         }
+        // The pointer lights a row as the arrows do, and a click takes it as
+        // return does; a click beside the panel puts it away.
+        if let Some(at) = input.hovered().and_then(row_of)
+            && at < self.found.len()
+        {
+            self.chosen = at;
+        }
+        let clicked = input.clicked();
+        if clicked == Some(BACKDROP) {
+            return Some(Chose::Dismissed);
+        }
+        let clicked_row = clicked.and_then(row_of).filter(|at| *at < self.found.len());
+        if let Some(at) = clicked_row {
+            self.chosen = at;
+        }
         let panel = self.rect(within);
         let field = Rect::new(panel.x, panel.y, panel.width, self.query.height());
         // What the cursor is on, read before the field is given the frame:
@@ -420,7 +451,8 @@ impl Switcher {
         let entered = self
             .query
             .react(fonts, input, field, clipboard)
-            .is_some_and(|text| !text.is_empty());
+            .is_some_and(|text| !text.is_empty())
+            || clicked_row.is_some();
         self.query.lay_out(fonts, panel.width);
         self.narrow(entries);
         if !self.asking.wants_several() {
@@ -429,8 +461,8 @@ impl Switcher {
         // The key itself rather than the field's report of it. A field with
         // nothing typed in it reports nothing -- there is no message to send --
         // and on this question an empty field is exactly where return means
-        // something: "these are all of them".
-        if !input.struck(Key::Enter) {
+        // something: "these are all of them". A click on a row adds it.
+        if !input.struck(Key::Enter) && clicked_row.is_none() {
             return None;
         }
         // Return on an empty field is "these are all of them". On a name it is
@@ -530,8 +562,7 @@ impl Switcher {
             scene.glyphs(glyphs, palette.signal, palette.faint);
         }
         for (at, one) in self.found.iter().enumerate() {
-            let y =
-                panel.y + PADDING + self.query.height() + self.picked_height() + at as f32 * ROW;
+            let y = self.row_rect(panel, at).y;
             if at == self.chosen {
                 scene.fill(panel.x, y, panel.width, ROW, palette.ground);
             }
@@ -593,6 +624,52 @@ impl Switcher {
             );
             scene.glyphs(glyphs, palette.ink, palette.faint);
         }
+    }
+
+    /// Everything a press can land on, over the whole window: the backdrop
+    /// that keeps presses from what is behind it, the panel, the field and
+    /// each result.
+    pub fn boxes(&self, within: Rect) -> Vec<matterless_ui::Placed> {
+        use matterless_ui::Placed;
+        if !self.open {
+            return Vec::new();
+        }
+        let panel = self.rect(within);
+        let mut placed = vec![
+            Placed {
+                name: BACKDROP.to_string(),
+                rect: within,
+                depth: 50,
+            },
+            Placed {
+                name: PANEL_BOX.to_string(),
+                rect: panel,
+                depth: 51,
+            },
+        ];
+        for at in 0..self.found.len() {
+            placed.push(Placed {
+                name: row_name(at),
+                rect: self.row_rect(panel, at),
+                depth: 52,
+            });
+        }
+        placed.extend(
+            self.query
+                .boxes(self.field(within))
+                .into_iter()
+                .map(|mut one| {
+                    one.depth = 53;
+                    one
+                }),
+        );
+        placed
+    }
+
+    /// Where one result is drawn, inside the panel.
+    fn row_rect(&self, panel: Rect, at: usize) -> Rect {
+        let y = panel.y + PADDING + self.query.height() + self.picked_height() + at as f32 * ROW;
+        Rect::new(panel.x, y, panel.width, ROW)
     }
 
     /// The field the query is typed into, for the caller to draw.
@@ -980,6 +1057,85 @@ mod tests {
     fn a_query_matching_nothing_offers_nothing() {
         let switcher = typed("zzzz");
         assert!(switcher.found.is_empty());
+    }
+
+    /// Over the whole window: its backdrop takes every press behind it, a
+    /// click on a result picks it, a click beside the panel puts it away --
+    /// and Ctrl+K, which opens it, types nothing into it.
+    #[test]
+    fn it_covers_the_window_and_answers_the_pointer() {
+        use matterless_ui::input::{Event, Mods};
+        let mut fonts = Fonts::new();
+        let window = Rect::new(0.0, 0.0, 1000.0, 700.0);
+        let mut switcher = Switcher::new();
+        let mut input = Input::default();
+        switcher.show(&mut fonts, &mut input);
+        switcher.narrow(&channels());
+        let placed = switcher.boxes(window);
+        assert!(
+            placed
+                .iter()
+                .any(|one| one.name == BACKDROP && one.rect == window),
+            "nothing covers the window behind it"
+        );
+        let second = placed
+            .iter()
+            .find(|one| one.name == row_name(1))
+            .expect("a box per result")
+            .rect;
+
+        let click = |at: Rect| {
+            let mut input = Input::default();
+            input.focus_on(NAME);
+            input.apply(
+                Event::PointerMoved {
+                    x: at.x + 4.0,
+                    y: at.y + 4.0,
+                },
+                &placed,
+            );
+            input.apply(Event::PointerPressed, &placed);
+            input.apply(Event::PointerReleased, &placed);
+            input
+        };
+        let expected = switcher.found[1].clone();
+        let picked = switcher.react(
+            &mut fonts,
+            &click(second),
+            window,
+            &mut String::new(),
+            &channels(),
+        );
+        assert_eq!(picked, Some(Chose::One(expected)));
+
+        let beside = Rect::new(2.0, 690.0, 4.0, 4.0);
+        let picked = switcher.react(
+            &mut fonts,
+            &click(beside),
+            window,
+            &mut String::new(),
+            &channels(),
+        );
+        assert_eq!(picked, Some(Chose::Dismissed));
+
+        let mut chord = Input::default();
+        chord.focus_on(NAME);
+        chord.apply(
+            Event::Modifiers(Mods {
+                command: true,
+                ..Default::default()
+            }),
+            &[],
+        );
+        chord.apply(
+            Event::Key {
+                key: Key::Char('k'),
+                down: true,
+            },
+            &[],
+        );
+        switcher.react(&mut fonts, &chord, window, &mut String::new(), &channels());
+        assert_eq!(switcher.query.text(), "", "the chord typed into the query");
     }
 
     /// The highlight must never point past the end of a list that just shrank

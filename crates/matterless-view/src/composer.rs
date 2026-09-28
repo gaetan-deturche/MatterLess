@@ -1536,13 +1536,15 @@ impl Composer {
         }
         // The chords everybody arrives with. Taken before the paste, and
         // before typed text is folded in, so a platform reporting the chord
-        // *and* the letter does not also type a b.
+        // *and* the letter does not also type a b. Not in a field: a query is
+        // not markdown, and Ctrl+K, which opens the switcher, put a backquote
+        // into the switcher's own box.
         for (key, how) in [
             (Key::Char('b'), Format::Bold),
             (Key::Char('i'), Format::Italic),
             (Key::Char('k'), Format::Code),
         ] {
-            if input.chord(key) {
+            if !self.plain && input.chord(key) {
                 self.mark_up(how, fonts);
             }
         }

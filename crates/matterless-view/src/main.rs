@@ -5094,6 +5094,9 @@ impl App {
         }
         // Over everything, including a menu: it is the whole window.
         boxes.extend(self.viewer.boxes(self.window_rect()));
+        // The switcher too: its backdrop covers the window, so nothing behind
+        // it is hovered or pressed while it is up.
+        boxes.extend(self.switcher.boxes(self.window_rect()));
         // Last and deepest: a menu is over everything, and its catcher covers
         // the window so a click beside it shuts it rather than reaching what
         // it is covering.
@@ -6555,7 +6558,7 @@ impl App {
                 self.input = input;
                 return;
             }
-            let within = self.stream_rect();
+            let within = self.window_rect();
             let entries = self.sidebar.entries.clone();
             let picked = self.switcher.react(
                 &mut self.fonts,
@@ -6564,6 +6567,11 @@ impl App {
                 &mut self.clipboard,
                 &entries,
             );
+            if picked == Some(matterless_view::switcher::Chose::Dismissed) {
+                self.switcher.hide(&mut input);
+                self.input = input;
+                return;
+            }
             // Everybody picked, for the one question that takes more than one
             // name. Nothing else can answer with several, so nothing else has
             // to be consulted about which question this was.
@@ -7053,7 +7061,7 @@ impl App {
         // under a panel the reader is looking at. The viewer covers the whole
         // window, so it takes the turn the same way: a text file scrolls and
         // nothing behind it does.
-        if self.picker.open() || self.viewer.open() {
+        if self.picker.open() || self.viewer.open() || self.switcher.open {
             self.react();
             self.redraw();
             return;
@@ -7700,21 +7708,6 @@ impl App {
             self.search.draw_droplist(&mut canvas, &self.input, field);
         }
 
-        // Last, and over the whole window: the switcher covers what it stands
-        // in front of rather than sitting beside it.
-        if self.switcher.open {
-            let stream = self.stream_rect();
-            let field = self.switcher.field(stream);
-            scene.clip_to(0.0, 0.0, self.size.0 as f32, self.size.1 as f32);
-            let mut canvas = Canvas {
-                scene: &mut scene,
-                painter: &mut self.painter,
-                fonts: &mut self.fonts,
-                palette: &self.palette,
-            };
-            self.switcher.draw(&mut canvas, stream, &self.presence);
-            self.switcher.query.draw(&mut canvas, field, true);
-        }
         if let Some(pane) = self.aside_rect() {
             scene.clip_to(0.0, 0.0, self.size.0 as f32, self.size.1 as f32);
             let mut canvas = Canvas {
@@ -7786,6 +7779,23 @@ impl App {
                 palette: &self.palette,
             };
             self.offered.draw(&mut canvas, &self.input, notice);
+        }
+        // Over the whole window, the side pane and the strip included: the
+        // switcher is a thing the reader is doing instead of reading, and the
+        // dimming stopped at the channel's edges while the pane was drawn over
+        // it.
+        if self.switcher.open {
+            let window = self.window_rect();
+            let field = self.switcher.field(window);
+            scene.clip_to(0.0, 0.0, self.size.0 as f32, self.size.1 as f32);
+            let mut canvas = Canvas {
+                scene: &mut scene,
+                painter: &mut self.painter,
+                fonts: &mut self.fonts,
+                palette: &self.palette,
+            };
+            self.switcher.draw(&mut canvas, window, &self.presence);
+            self.switcher.query.draw(&mut canvas, field, true);
         }
         if self.settings.open() {
             scene.clip_to(0.0, 0.0, self.size.0 as f32, self.size.1 as f32);
@@ -7963,8 +7973,12 @@ impl App {
         if self.explains(name).is_some() {
             return true;
         }
-        // The text in the viewer is read, not pressed.
-        if name == format!("{}/text", matterless_view::viewer::NAME) {
+        // The text in the viewer is read, not pressed; nor are the switcher's
+        // panel and the dimmed window around it.
+        if name == format!("{}/text", matterless_view::viewer::NAME)
+            || name == "switcher/backdrop"
+            || name == "switcher/panel"
+        {
             return false;
         }
         if name.contains("/read/") {
@@ -8757,6 +8771,8 @@ impl ApplicationHandler<Update> for App {
                 }
                 if down && self.input.chord(Key::Char('k')) {
                     let mut input = std::mem::take(&mut self.input);
+                    // Taken, so the box it opens does not read the same key.
+                    input.took(Key::Char('k'));
                     self.switcher.show(&mut self.fonts, &mut input);
                     self.input = input;
                 }
