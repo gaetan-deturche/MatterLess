@@ -35,6 +35,30 @@ const CORNER: f32 = 4.0;
 const WIDEST: f32 = 320.0;
 const FROM_POINTER: (f32, f32) = (12.0, 20.0);
 
+/// How large a picture sits over the words, and the room around it.
+const SHOWN: f32 = crate::stream::EMOJI_SHOWN as f32;
+const PICTURE_PAD: f32 = 8.0;
+
+/// What a popup shows over its words: an emoji, large.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Picture {
+    /// A standard emoji, drawn from the emoji font.
+    Character(String),
+    /// A custom one, by its key in the atlas.
+    Image(String),
+}
+
+/// An emoji in a message the pointer is on: the official client names it
+/// with the emoji drawn large over its `:name:`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Emoji {
+    /// Which emoji it is, so resting on the same one does not start again.
+    pub key: String,
+    pub rect: Rect,
+    pub name: String,
+    pub picture: Option<Picture>,
+}
+
 /// What the pointer is resting on, and what it would say.
 #[derive(Debug, Default)]
 pub struct Tooltip {
@@ -49,6 +73,8 @@ pub struct Tooltip {
     /// drag it a long way.
     at: (f32, f32),
     says: String,
+    /// Shown over the words, for an emoji.
+    picture: Option<Picture>,
     /// Whether the window has already been told this one is due.
     ///
     /// The wait ends with nothing happening -- no click, no key, no message --
@@ -73,6 +99,7 @@ impl Tooltip {
             (Some(name), Some(_)) if self.over.as_ref().is_some_and(|(on, _)| on == name) => {}
             (Some(name), Some(at)) => {
                 self.says = explains(name).unwrap_or_default();
+                self.picture = None;
                 self.over = Some((name.to_string(), Instant::now()));
                 self.at = at;
                 self.told = false;
@@ -80,8 +107,46 @@ impl Tooltip {
             _ => {
                 self.over = None;
                 self.says.clear();
+                self.picture = None;
                 self.told = false;
             }
+        }
+    }
+
+    /// Follows the pointer onto an emoji in a message: the same wait, then
+    /// the emoji large over its name. Anchored under the emoji rather than
+    /// the pointer, so it names the one it is under.
+    pub fn follows_emoji(&mut self, emoji: &Emoji) {
+        if self.over.as_ref().is_some_and(|(on, _)| *on == emoji.key) {
+            return;
+        }
+        self.says = format!(":{}:", emoji.name);
+        self.picture = emoji.picture.clone();
+        self.over = Some((emoji.key.clone(), Instant::now()));
+        self.at = (
+            emoji.rect.x - FROM_POINTER.0,
+            emoji.rect.bottom() - FROM_POINTER.1 + 4.0,
+        );
+        self.told = false;
+    }
+
+    /// Puts a picture over what the box the pointer is on says: a reaction's
+    /// emoji, over who left it.
+    pub fn with_picture(&mut self, name: &str, picture: Option<Picture>) {
+        if self.over.as_ref().is_some_and(|(on, _)| on == name) {
+            self.picture = picture;
+        }
+    }
+
+    /// The picture it needs from the atlas, for a custom emoji.
+    pub fn wants(&self) -> Vec<(String, u32, u32)> {
+        match &self.picture {
+            Some(Picture::Image(key)) => vec![(
+                key.clone(),
+                crate::stream::EMOJI_SHOWN,
+                crate::stream::EMOJI_SHOWN,
+            )],
+            _ => Vec::new(),
         }
     }
 
@@ -136,8 +201,16 @@ impl Tooltip {
                 mono: false,
             },
         );
-        let width = extent.width + PAD_X * 2.0;
-        let height = extent.lines as f32 * LINE + PAD_Y * 2.0;
+        let (width, height) = match self.picture {
+            Some(_) => (
+                (extent.width + PAD_X * 2.0).max(SHOWN) + PICTURE_PAD * 2.0,
+                SHOWN + PICTURE_PAD * 2.0 + extent.lines as f32 * LINE + PAD_Y,
+            ),
+            None => (
+                extent.width + PAD_X * 2.0,
+                extent.lines as f32 * LINE + PAD_Y * 2.0,
+            ),
+        };
         // Pushed back onto the window rather than flipped, and flipped above
         // the pointer only when there is no room below it at all -- which is
         // the one case where pushing would put it under the cursor.
@@ -168,11 +241,65 @@ impl Tooltip {
             .edge(into.palette.rule)
             .fill(into.palette.raised)
             .draw(into.scene);
+        // The emoji over its name, both centred.
+        let words = match &self.picture {
+            Some(picture) => {
+                let (left, top) = (rect.x + (rect.width - SHOWN) / 2.0, rect.y + PICTURE_PAD);
+                match picture {
+                    Picture::Image(key) => into.scene.extend([matterless_paint::Piece::Image {
+                        x: left,
+                        y: top,
+                        width: SHOWN,
+                        height: SHOWN,
+                        key: key.clone(),
+                        radius: 0.0,
+                    }]),
+                    Picture::Character(character) => {
+                        let size = SHOWN * 0.8;
+                        let style = Style {
+                            size,
+                            line_height: SHOWN,
+                            bold: false,
+                            italic: false,
+                            mono: false,
+                        };
+                        let wide = extent_of(into.fonts, character, f32::MAX, style).width;
+                        let glyphs = into.painter.run(
+                            into.fonts,
+                            character,
+                            rect.x + (rect.width - wide) / 2.0,
+                            top,
+                            Run::label(f32::MAX).sized(size),
+                        );
+                        into.scene
+                            .glyphs(glyphs, into.palette.ink, into.palette.faint);
+                    }
+                }
+                let said = extent_of(
+                    into.fonts,
+                    &self.says,
+                    WIDEST,
+                    Style {
+                        size: SIZE,
+                        line_height: LINE,
+                        bold: false,
+                        italic: false,
+                        mono: false,
+                    },
+                )
+                .width;
+                (
+                    rect.x + (rect.width - said) / 2.0,
+                    top + SHOWN + PICTURE_PAD,
+                )
+            }
+            None => (rect.x + PAD_X, rect.y + PAD_Y),
+        };
         let glyphs = into.painter.run(
             into.fonts,
             &self.says,
-            rect.x + PAD_X,
-            rect.y + PAD_Y,
+            words.0,
+            words.1,
             Run::label(WIDEST).sized(SIZE),
         );
         into.scene
@@ -290,6 +417,43 @@ mod tests {
         tooltip.follows(Some("stream"), Some((10.0, 10.0)), |_| None);
         assert_eq!(tooltip.wakes(), None);
         assert_eq!(tooltip.shown(), None);
+    }
+
+    /// An emoji is named after the same wait, with its picture over the words,
+    /// the picture asked for at the size it is shown -- and resting on the
+    /// same emoji again does not start the wait over.
+    #[test]
+    fn an_emoji_is_shown_large_over_its_name() {
+        let mut fonts = matterless_layout::Fonts::new();
+        let emoji = Emoji {
+            key: "stream/emoji/p/0/0".into(),
+            rect: Rect::new(100.0, 100.0, 20.0, 18.0),
+            name: "party".into(),
+            picture: Some(Picture::Image("emoji/e1@56".into())),
+        };
+        let mut tooltip = Tooltip::default();
+        tooltip.follows_emoji(&emoji);
+        assert_eq!(tooltip.shown(), None, "not before the wait");
+        tooltip.over = Some((emoji.key.clone(), Instant::now() - DWELL));
+        tooltip.follows_emoji(&emoji);
+        assert_eq!(
+            tooltip.shown(),
+            Some(":party:"),
+            "the same one keeps its wait"
+        );
+        assert_eq!(tooltip.wants(), vec![("emoji/e1@56".to_string(), 56, 56)]);
+        let rect = tooltip.rect(&mut fonts, Rect::new(0.0, 0.0, 900.0, 600.0));
+        assert!(
+            rect.width >= SHOWN + PICTURE_PAD * 2.0 && rect.height > SHOWN,
+            "{rect:?}"
+        );
+        assert!(rect.y > emoji.rect.y, "under the emoji");
+
+        // Anything else after it takes the picture away with it.
+        tooltip.follows(Some("header/saved"), Some((10.0, 10.0)), |_| {
+            Some("Saved messages".into())
+        });
+        assert!(tooltip.wants().is_empty());
     }
 
     /// It stays on the window wherever the pointer is.

@@ -4565,6 +4565,7 @@ impl App {
         // other and go through the same asked set.
         wanted.extend(self.picker.wants());
         wanted.extend(self.profile.wants());
+        wanted.extend(self.tooltip.wants());
         wanted.extend(self.rail.wants());
         wanted.extend(self.sidebar.wants());
         wanted.extend(self.switcher.wants());
@@ -7855,9 +7856,38 @@ impl App {
             });
         }
         let at = self.input.pointer_at();
-        self.tooltip.follows(hovered.as_deref(), at, |_| {
-            (!explained.is_empty()).then_some(explained)
-        });
+        // An emoji in a message's words, which has no box of its own: asked of
+        // whichever conversation the pointer is over, from where it drew them.
+        let emoji = match (hovered.as_deref(), at) {
+            (Some(name), Some((x, y))) if self.stream.on_words(name) => {
+                self.stream.emoji_under(x, y)
+            }
+            (Some(name), Some((x, y))) => self
+                .thread
+                .as_ref()
+                .filter(|thread| thread.on_words(name))
+                .and_then(|thread| thread.emoji_under(x, y)),
+            _ => None,
+        };
+        match emoji {
+            Some(emoji) => self.tooltip.follows_emoji(&emoji),
+            None => {
+                self.tooltip.follows(hovered.as_deref(), at, |_| {
+                    (!explained.is_empty()).then_some(explained)
+                });
+                // A reaction pill: its emoji large, over who left it.
+                if let Some(name) = hovered.as_deref() {
+                    let picture = self.stream.reaction_picture(name).or_else(|| {
+                        self.thread
+                            .as_ref()
+                            .and_then(|thread| thread.reaction_picture(name))
+                    });
+                    if picture.is_some() {
+                        self.tooltip.with_picture(name, picture);
+                    }
+                }
+            }
+        }
     }
 
     /// Whether pressing what the pointer is over would do anything.

@@ -75,6 +75,30 @@ pub fn codepoints_for(name: &str) -> Option<&'static str> {
         .map(|index| SYSTEM_EMOJI[index].1)
 }
 
+/// The name of a standard emoji from its character, for saying what one is.
+///
+/// The name a picker shows where there are several (`+1`, not `thumbsup`), and
+/// the variation selector ignored: a character typed or pasted carries one or
+/// not, whatever the table's spelling of it.
+pub fn name_for(character: &str) -> Option<&'static str> {
+    static NAMES: std::sync::OnceLock<std::collections::HashMap<String, &'static str>> =
+        std::sync::OnceLock::new();
+    let plain = |text: &str| text.replace('\u{fe0f}', "");
+    let names = NAMES.get_or_init(|| {
+        let mut names = std::collections::HashMap::new();
+        let base = categories()
+            .iter()
+            .flat_map(|(_, names)| names.iter().copied());
+        for name in base.chain(SYSTEM_EMOJI.iter().map(|(name, _)| *name)) {
+            if let Some(character) = character_for(name) {
+                names.entry(plain(&character)).or_insert(name);
+            }
+        }
+        names
+    });
+    names.get(&plain(character)).copied()
+}
+
 /// `1f937-200d-2642-fe0f` to the characters it names.
 fn decode(codepoints: &str) -> Option<String> {
     let mut text = String::with_capacity(codepoints.len() / 2);
@@ -169,6 +193,18 @@ pub fn custom_candidates(message: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A character reads back as the name a picker shows it under, with or
+    /// without the variation selector it was typed with.
+    #[test]
+    fn a_character_is_named_as_the_picker_names_it() {
+        // `+1`, not its alias `thumbsup`: the server's own name for it.
+        let thumbs = character_for("thumbsup").expect("a standard emoji");
+        assert_eq!(name_for(&thumbs), Some("+1"));
+        assert_eq!(name_for("\u{2764}\u{fe0f}"), Some("heart"));
+        assert_eq!(name_for("\u{2764}"), Some("heart"));
+        assert_eq!(name_for("a"), None);
+    }
 
     /// The table has to stay sorted: the lookup is a binary search, and an
     /// unsorted table fails *silently* for the names either side of the break.

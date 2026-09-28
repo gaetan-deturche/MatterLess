@@ -1005,6 +1005,84 @@ impl Stream {
         }
     }
 
+    /// The emoji the pointer is on, in a message's words: where it was drawn,
+    /// and what to show of it. A standard one is its character, named from
+    /// the server's table; a custom one is its picture, by the name written.
+    pub fn emoji_under(&self, x: f32, y: f32) -> Option<crate::tooltip::Emoji> {
+        let inside = |letter: &&matterless_paint::Letter| {
+            x >= letter.x
+                && x < letter.x + letter.width
+                && y >= letter.y
+                && y < letter.y + letter.height
+        };
+        let (one, letter) = self
+            .seen
+            .iter()
+            .find_map(|one| one.letters.iter().find(inside).map(|letter| (one, letter)))?;
+        let block = self
+            .laid
+            .get(self.row_of(&one.post)?)?
+            .blocks
+            .get(one.block)?;
+        // The span the letter belongs to, by where each one's text starts.
+        let mut offset = 0usize;
+        let span = block.spans.iter().find(|span| {
+            offset += span.text.len();
+            letter.start < offset
+        })?;
+        let key = format!(
+            "{}/emoji/{}/{}/{}",
+            self.name, one.post, one.block, letter.start
+        );
+        if let Some(name) = &span.emoji {
+            // Every space of the placeholder, on this line.
+            let (start, end) = (offset - span.text.len(), offset);
+            let room = crate::selecting::lit(&one.letters, start, end);
+            let rect = room
+                .into_iter()
+                .find(|room| (room.y - letter.y).abs() < 0.5)?;
+            return Some(crate::tooltip::Emoji {
+                key,
+                rect,
+                name: name.clone(),
+                picture: self
+                    .custom
+                    .get(name)
+                    .map(|id| crate::tooltip::Picture::Image(emoji_key_sized(id, EMOJI_SHOWN))),
+            });
+        }
+        let text = crate::selecting::text_of(block);
+        let character = text.get(letter.start..letter.end)?;
+        let name = matterless_render::emoji::name_for(character)?;
+        Some(crate::tooltip::Emoji {
+            key,
+            rect: Rect::new(letter.x, letter.y, letter.width, letter.height),
+            name: name.to_string(),
+            picture: Some(crate::tooltip::Picture::Character(character.to_string())),
+        })
+    }
+
+    /// The emoji a reaction pill stands for, shown large over who left it.
+    pub fn reaction_picture(&self, name: &str) -> Option<crate::tooltip::Picture> {
+        let (index, what) = name
+            .strip_prefix(&format!("{}/row/", self.name))?
+            .split_once('/')?;
+        let ordinal = what.strip_prefix("reaction/")?.parse::<usize>().ok()?;
+        let (Row::Post { post } | Row::Continuation { post }) =
+            self.rows.get(index.parse::<usize>().ok()?)?
+        else {
+            return None;
+        };
+        let reaction = post.reactions.get(ordinal)?;
+        match &reaction.unicode {
+            Some(character) => Some(crate::tooltip::Picture::Character(character.clone())),
+            None => self
+                .custom
+                .get(&reaction.emoji)
+                .map(|id| crate::tooltip::Picture::Image(emoji_key_sized(id, EMOJI_SHOWN))),
+        }
+    }
+
     /// Which row holds this message.
     fn row_of(&self, post_id: &str) -> Option<usize> {
         self.rows.iter().position(|row| {
@@ -3376,6 +3454,15 @@ pub fn emoji_key(emoji_id: &str) -> String {
 
 /// A place in a conversation's words in reading order: row, block, byte.
 type Place = (usize, usize, usize);
+
+/// How large an emoji is shown in the popup that names it.
+pub const EMOJI_SHOWN: u32 = 56;
+
+/// A custom emoji's picture at another size: another name to the atlas, the
+/// same file on the disk, as `avatar_key_sized` is.
+pub fn emoji_key_sized(emoji_id: &str, side: u32) -> String {
+    format!("{}@{side}", emoji_key(emoji_id))
+}
 
 #[cfg(test)]
 mod pills {
