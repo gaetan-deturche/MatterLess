@@ -5754,6 +5754,39 @@ impl App {
         self.redraw();
     }
 
+    /// Saves what the editor holds and shuts it.
+    ///
+    /// Nothing left in the box is a delete, which the server makes of an edit
+    /// to nothing -- and a delete is asked, as it is from the message's menu,
+    /// rather than done on a keypress.
+    fn save_the_edit(
+        &mut self,
+        message: String,
+        row: matterless_ui::Rect,
+        within: matterless_ui::Rect,
+        input: &mut Input,
+    ) {
+        use matterless_view::menu::{Anchor, Item, Style, Tint};
+        let post_id = self.edit.for_post.clone().unwrap_or_default();
+        let save = self.edit.box_of.send(self.edit.field(row, within));
+        self.shut_the_editor(input);
+        if message.trim().is_empty() {
+            self.menu.show(
+                &post_id,
+                Anchor::Under(save),
+                Style::message(),
+                vec![
+                    Item::new("delete.now", "Delete message").tinted(Tint::Danger),
+                    Item::new("delete.keep", "Keep"),
+                ],
+            );
+            return;
+        }
+        if let Some(link) = self.link.as_ref() {
+            link.send(matterless_view::live::Ask::Edit { post_id, message });
+        }
+    }
+
     /// Shuts it, and gives the row its words back.
     fn shut_the_editor(&mut self, input: &mut Input) {
         self.edit.hide(input);
@@ -6261,12 +6294,8 @@ impl App {
                 // rather than a button that does nearly what the key does.
                 Some(composer::Button::Save) => {
                     let message = self.edit.box_of.text();
-                    let post_id = self.edit.for_post.clone().unwrap_or_default();
-                    self.shut_the_editor(&mut input);
+                    self.save_the_edit(message, row, within, &mut input);
                     self.input = input;
-                    if let Some(link) = self.link.as_ref() {
-                        link.send(matterless_view::live::Ask::Edit { post_id, message });
-                    }
                     return;
                 }
                 _ => {}
@@ -6275,6 +6304,15 @@ impl App {
             let saved = self
                 .edit
                 .react(&mut self.fonts, &input, row, within, &mut self.clipboard);
+            // Before the height is looked at: saving empties the box, which
+            // changes its height, and answering that first dropped the save --
+            // the box stayed open and empty, and the next Enter saved nothing
+            // over the message.
+            if let Some(message) = saved {
+                self.save_the_edit(message, row, within, &mut input);
+                self.input = input;
+                return;
+            }
             // A message that wraps to another line is a row that has to make
             // more room for it. Nothing else here re-shapes, so a box left to
             // grow on its own grows over its neighbours.
@@ -6282,15 +6320,6 @@ impl App {
                 self.input = std::mem::take(&mut input);
                 self.relayout();
                 self.redraw();
-                return;
-            }
-            if let Some(message) = saved {
-                let post_id = self.edit.for_post.clone().unwrap_or_default();
-                self.shut_the_editor(&mut input);
-                self.input = input;
-                if let Some(link) = self.link.as_ref() {
-                    link.send(matterless_view::live::Ask::Edit { post_id, message });
-                }
                 return;
             }
             self.input = input;
