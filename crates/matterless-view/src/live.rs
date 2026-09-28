@@ -2030,7 +2030,10 @@ mod tests {
     #[test]
     fn the_computer_says_how_long_it_has_been_idle() {
         let idle = super::system_idle().expect("GetLastInputInfo answers");
-        assert!(idle < std::time::Duration::from_secs(60 * 60 * 24 * 50), "{idle:?}");
+        assert!(
+            idle < std::time::Duration::from_secs(60 * 60 * 24 * 50),
+            "{idle:?}"
+        );
     }
 
     /// UTF-8 with or without its mark, and UTF-16 either way round, which is
