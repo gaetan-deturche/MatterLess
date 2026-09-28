@@ -52,6 +52,12 @@ pub enum Chose {
     },
     /// Keep a file somebody attached.
     Save { file_id: String, name: String },
+    /// Play a YouTube video a message links to, in the viewer. `title` is the
+    /// preview card's, for the viewer's bar.
+    Watch {
+        video: crate::youtube::Video,
+        title: String,
+    },
     /// Look at one of a message's pictures properly.
     ///
     /// The whole message, not just the one pressed, so the viewer can step
@@ -1520,6 +1526,27 @@ impl Stream {
             .collect()
     }
 
+    /// Which of those pictures are a YouTube video's, which carry a play mark:
+    /// pressing the card plays it rather than opening the page.
+    fn youtube_pictures(&self, index: usize, top: f32, left: f32) -> Vec<Rect> {
+        let Some(Row::Post { post } | Row::Continuation { post }) = self.rows.get(index) else {
+            return Vec::new();
+        };
+        let youtube = post.previews.iter().filter_map(|preview| match preview {
+            matterless_render::Preview::Page {
+                image: Some(picture),
+                url,
+                ..
+            } if picture.width > 0 => Some(crate::youtube::video_of(url).is_some()),
+            _ => None,
+        });
+        self.preview_pictures(index, top, left)
+            .into_iter()
+            .zip(youtube)
+            .filter_map(|((at, _), youtube)| youtube.then_some(at))
+            .collect()
+    }
+
     /// What one preview card leads to.
     ///
     /// A page card is its link and a quoted card is the message it quotes,
@@ -1540,6 +1567,19 @@ impl Stream {
                 channel_id: channel_id.clone(),
                 post_id: post_id.clone(),
             }),
+        }
+    }
+
+    /// The YouTube video one row's preview card is for, and its title.
+    fn youtube_of(&self, index: usize, ordinal: usize) -> Option<(crate::youtube::Video, String)> {
+        let (Row::Post { post } | Row::Continuation { post }) = self.rows.get(index)? else {
+            return None;
+        };
+        match post.previews.get(ordinal)? {
+            matterless_render::Preview::Page { url, title, .. } => {
+                Some((crate::youtube::video_of(url)?, title.clone()))
+            }
+            _ => None,
         }
     }
 
@@ -1895,6 +1935,11 @@ impl Stream {
             && let (Ok(index), Ok(ordinal)) = (index.parse::<usize>(), ordinal.parse::<usize>())
             && let Some(press) = self.preview_press(index, ordinal)
         {
+            // A YouTube card plays here, as the official client plays it in
+            // the message; everything else opens where it leads.
+            if let Some((video, title)) = self.youtube_of(index, ordinal) {
+                return Some(Chose::Watch { video, title });
+            }
             return Some(Chose::Press { press, at: None });
         }
         // A pill next, because it sits inside a row and its name says so.
@@ -2267,12 +2312,6 @@ impl Stream {
         else {
             return;
         };
-        let Canvas {
-            scene,
-            painter,
-            fonts,
-            palette,
-        } = into;
         for (block, _) in laid
             .blocks
             .iter()
@@ -2286,22 +2325,11 @@ impl Stream {
                 block.wrap,
                 block.height,
             );
-            let side = PLAY_DISC.min(at.height - 8.0).max(16.0);
-            let (x, y) = (
-                at.x + (at.width - side) / 2.0,
-                at.y + (at.height - side) / 2.0,
-            );
-            scene.rounded(x, y, side, side, [0, 0, 0, 150], side / 2.0);
-            let mark = side * 0.45;
-            // Nudged right: a triangle's weight sits left of its box.
-            let glyphs = painter.run(
-                fonts,
-                matterless_layout::marks::PLAY,
-                x + (side - mark) / 2.0 + mark * 0.08,
-                y + (side - mark * 1.4) / 2.0,
-                Run::mark(mark),
-            );
-            scene.glyphs(glyphs, [255, 255, 255], palette.faint);
+            play_disc(into, at);
+        }
+        // And a YouTube card's picture, which plays too.
+        for at in self.youtube_pictures(index, top, left) {
+            play_disc(into, at);
         }
     }
 
@@ -3303,6 +3331,7 @@ pub fn looking_at(post: &matterless_render::PostRow) -> Vec<crate::viewer::Looki
             linked: file.variant == matterless_render::ImageVariant::Linked,
             video: file.video,
             text: readable(file),
+            youtube: None,
             // The original for anything the server does not re-encode -- a
             // GIF, an SVG, a video -- and its preview for a photograph, which
             // it caps at 1920 wide and which is the right answer for one.
@@ -3457,6 +3486,33 @@ fn size_of(bytes: i64) -> String {
 /// What a custom emoji's picture is called.
 pub fn emoji_key(emoji_id: &str) -> String {
     format!("emoji/{emoji_id}")
+}
+
+/// The play mark over something that plays: a dark disc, centred, with the
+/// triangle in it.
+fn play_disc(into: &mut Canvas<'_>, at: Rect) {
+    let Canvas {
+        scene,
+        painter,
+        fonts,
+        palette,
+    } = into;
+    let side = PLAY_DISC.min(at.height - 8.0).max(16.0);
+    let (x, y) = (
+        at.x + (at.width - side) / 2.0,
+        at.y + (at.height - side) / 2.0,
+    );
+    scene.rounded(x, y, side, side, [0, 0, 0, 150], side / 2.0);
+    let mark = side * 0.45;
+    // Nudged right: a triangle's weight sits left of its box.
+    let glyphs = painter.run(
+        fonts,
+        matterless_layout::marks::PLAY,
+        x + (side - mark) / 2.0 + mark * 0.08,
+        y + (side - mark * 1.4) / 2.0,
+        Run::mark(mark),
+    );
+    scene.glyphs(glyphs, [255, 255, 255], palette.faint);
 }
 
 /// A place in a conversation's words in reading order: row, block, byte.

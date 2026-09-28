@@ -53,7 +53,13 @@ pub struct Looking {
     pub video: bool,
     /// A text file, read rather than looked at.
     pub text: bool,
+    /// A YouTube video a message links to, played by YouTube's own player
+    /// over where a picture would be.
+    pub youtube: Option<crate::youtube::Video>,
 }
+
+/// How a YouTube video is framed: its usual shape, fitted to the window.
+pub const YOUTUBE_SIZE: (u32, u32) = (1280, 720);
 
 /// How many text files are kept once read, so going back to one is instant.
 const TEXTS: usize = 8;
@@ -152,6 +158,8 @@ pub enum Did {
     Toggle,
     /// Go to this far through the video, from nothing to one.
     Seek(f64),
+    /// Open this link in the browser: a YouTube video, on YouTube.
+    Browse(String),
     /// Near there, while the track is being dragged: `Seek` follows on release.
     Scrub(f64),
 }
@@ -425,13 +433,22 @@ impl Viewer {
         let bar = self.bar_rect(window);
         let mut at = bar.right() - PADDING;
         let mut found = Vec::new();
-        for name in ["save", "next", "back"] {
+        // A YouTube video has nothing to save: what it offers is YouTube.
+        let keep = match self.current().is_some_and(|one| one.youtube.is_some()) {
+            true => "browse",
+            false => "save",
+        };
+        for name in [keep, "next", "back"] {
             // Only one picture, so there is nowhere to step: a button that
             // does nothing is a button that has to be pressed to find out.
             if (name == "next" || name == "back") && self.shown.len() < 2 {
                 continue;
             }
-            let width = if name == "save" { 62.0 } else { BUTTON };
+            let width = match name {
+                "save" => 62.0,
+                "browse" => 132.0,
+                _ => BUTTON,
+            };
             at -= width;
             found.push((
                 name,
@@ -540,6 +557,10 @@ impl Viewer {
                 file_id: one.file_id.clone(),
                 name: one.name.clone(),
             }),
+            Some("browse") => self
+                .current()
+                .and_then(|one| one.youtube.as_ref())
+                .map(|video| Did::Browse(video.url.clone())),
             Some("play") => Some(Did::Toggle),
             // A video plays or pauses under a click, as every player does. A
             // picture: nothing, which keeps a click on what you are reading
@@ -573,7 +594,13 @@ impl Viewer {
             window.height,
             [0, 0, 0, 216],
         );
+        let youtube = self.current().is_some_and(|one| one.youtube.is_some());
         match (picture, self.reading()) {
+            // Black where YouTube's player sits: it is a window of its own over
+            // this rect, and black is what shows while it loads.
+            (Some(at), _) if youtube => {
+                scene.fill(at.x, at.y, at.width, at.height, [0, 0, 0, 255]);
+            }
             (Some(at), _) => scene.extend([matterless_paint::Piece::Shown {
                 x: at.x,
                 y: at.y,
@@ -778,13 +805,14 @@ impl Viewer {
             );
             let said = match name {
                 "save" => "Save",
+                "browse" => "Open in YouTube",
                 "back" => matterless_layout::marks::BACK,
                 _ => matterless_layout::marks::NEXT,
             };
             // The arrows are marks and "Save" is a word, so they are neither
             // the same size nor from the same family, and only the word can be
             // measured with the text metrics.
-            let mark = name != "save";
+            let mark = name != "save" && name != "browse";
             let wide = if mark {
                 15.0
             } else {
@@ -844,6 +872,7 @@ mod tests {
                 linked: false,
                 video: false,
                 text: false,
+                youtube: None,
             })
             .collect()
     }

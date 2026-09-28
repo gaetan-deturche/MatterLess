@@ -718,6 +718,11 @@ struct App {
     focused: bool,
     /// When the server was last told the reader is using the client.
     said_active: Option<std::time::Instant>,
+    /// YouTube's player, while the viewer is showing a YouTube video, and the
+    /// video that would not open, so it is not tried again every frame.
+    #[cfg(windows)]
+    youtube_player: Option<matterless_view::watch::Watching>,
+    watch_failed: Option<String>,
     /// What the button under the pointer is for, once it has been rested on.
     tooltip: matterless_view::tooltip::Tooltip,
     /// The picture a reader has opened, over everything else.
@@ -1001,6 +1006,9 @@ impl App {
             // ignored would flash at the first message.
             focused: true,
             said_active: None,
+            #[cfg(windows)]
+            youtube_player: None,
+            watch_failed: None,
         };
         app.sidebar.selected = Some(channel);
         // Focused before anything is clicked: a chat window that needs a click
@@ -3246,6 +3254,7 @@ impl App {
             }
             Some(Chose::More { post_id, under }) => self.offer_message_menu(&post_id, under),
             Some(Chose::Look { file_id, post_id }) => self.look_at(&post_id, &file_id),
+            Some(Chose::Watch { video, title }) => self.watch(video, title),
             None => {}
         }
     }
@@ -3271,6 +3280,67 @@ impl App {
         };
         if !sent {
             eprintln!("the socket is not up, so there is nobody to ask");
+        }
+    }
+
+    /// Plays a YouTube video in the viewer, by YouTube's own player.
+    ///
+    /// The viewer frames it at the video's usual shape and draws the dim and
+    /// the bar; `follow_the_video` puts the player over the frame each frame.
+    fn watch(&mut self, video: matterless_view::youtube::Video, title: String) {
+        let one = matterless_view::viewer::Looking {
+            file_id: format!("youtube/{}", video.id),
+            name: if title.is_empty() {
+                video.url.clone()
+            } else {
+                title
+            },
+            original: false,
+            linked: false,
+            video: false,
+            text: false,
+            youtube: Some(video),
+        };
+        if self.viewer.show(vec![one.clone()], &one.file_id).is_some() {
+            self.viewer
+                .arrived(&one.file_id, matterless_view::viewer::YOUTUBE_SIZE);
+        }
+        self.watch_failed = None;
+        self.redraw();
+    }
+
+    /// Keeps YouTube's player where the viewer frames it: opened when a video
+    /// is shown, moved when the window is, gone when the viewer is.
+    #[cfg(windows)]
+    fn follow_the_video(&mut self) {
+        let wanted = self
+            .viewer
+            .current()
+            .filter(|_| self.viewer.open())
+            .and_then(|one| one.youtube.clone());
+        let at = self.viewer.picture_rect(self.window_rect());
+        match (wanted, at) {
+            (Some(video), Some(at)) => match self.youtube_player.as_mut() {
+                Some(watching) if watching.id == video.id => watching.place(at),
+                _ if self.watch_failed.as_deref() == Some(video.id.as_str()) => {}
+                _ => {
+                    self.youtube_player = None;
+                    let Some(window) = self.window.as_ref() else {
+                        return;
+                    };
+                    let profile = matterless_view::feed::pictures_dir()
+                        .and_then(|pictures| pictures.parent().map(|dir| dir.join("webview")));
+                    match matterless_view::watch::Watching::open(window, &video, at, profile) {
+                        Ok(watching) => self.youtube_player = Some(watching),
+                        Err(why) => {
+                            eprintln!("playing {}: {why}", video.url);
+                            self.viewer.gave_up(&format!("youtube/{}", video.id), &why);
+                            self.watch_failed = Some(video.id);
+                        }
+                    }
+                }
+            },
+            _ => self.youtube_player = None,
         }
     }
 
@@ -3972,6 +4042,8 @@ impl App {
     /// behind an editor should cost nothing at all, and a loop nobody can see
     /// is a texture upload and a woken thread for each frame of it.
     fn played(&mut self) {
+        #[cfg(windows)]
+        self.follow_the_video();
         // The picture in the viewer: its next frame, as the texture it is drawn
         // from.
         if self.on_show() {
@@ -6241,6 +6313,9 @@ impl App {
                     if let Some(link) = self.link.as_ref() {
                         link.send(matterless_view::live::Ask::Download { file_id, name });
                     }
+                }
+                Some(matterless_view::viewer::Did::Browse(url)) => {
+                    matterless_view::open::link(&url);
                 }
                 Some(matterless_view::viewer::Did::Toggle) => {
                     if let Some((_, player)) = self.film.as_ref() {

@@ -99,6 +99,10 @@ required-features = ["window"]
 [target.'cfg(windows)'.dependencies]
 # Playing attached videos: ffmpeg, decoding on this window's device.
 matterless-media = { path = "../matterless-media" }
+# Playing a YouTube link in the viewer: YouTube's own embedded player, in a
+# WebView2 child of this window. The runtime ships with Windows 11. The
+# default features are Linux's (webkit2gtk, x11).
+wry = { version = "0.57", default-features = false }
 # Raised here rather than through a plugin, so a click reaches this window:
 # `on_activated` is an in-process event, which is the case that matters when the
 # window is already running.

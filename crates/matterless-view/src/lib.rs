@@ -60,7 +60,10 @@ pub mod typing;
 pub mod update;
 pub mod updater_bar;
 pub mod viewer;
+#[cfg(windows)]
+pub mod watch;
 pub mod whats_new;
+pub mod youtube;
 
 use crate::d3d::Gpu;
 use crate::d3d_draw::{Bound, Viewport};
