@@ -374,6 +374,17 @@ impl Store {
         Ok(names)
     }
 
+    /// The names asked about that the server has no custom emoji for.
+    pub fn not_custom_emoji(&self) -> Result<std::collections::HashSet<String>> {
+        let connection = self.lock();
+        let mut statement =
+            connection.prepare("SELECT name FROM custom_emoji WHERE emoji_id = ''")?;
+        let names = statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(names)
+    }
+
     /// One channel by its slug or display name, for a `~channel` link.
     pub fn channel_by_name(&self, name: &str) -> Result<Option<Channel>> {
         let connection = self.lock();

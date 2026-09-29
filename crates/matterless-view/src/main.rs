@@ -1918,6 +1918,14 @@ impl App {
             Update::Film { file_id, path } => self.open_film(&file_id, &path),
             Update::Text { file_id, lines } => self.viewer.read(&file_id, lines),
             Update::Colours { file_id, colours } => self.viewer.colour(&file_id, colours),
+            Update::NotEmoji => {
+                if let Some(open) = self.sidebar.selected.clone() {
+                    self.reread_channel(&open);
+                }
+                if let Some(root) = self.open_root() {
+                    self.reread_thread(&root);
+                }
+            }
             Update::LookFailed { file_id, why } => {
                 eprintln!("looking at {file_id}: {why}");
                 self.viewer.gave_up(&file_id, &why);
@@ -5295,6 +5303,7 @@ impl App {
             matterless_render::PlanOptions::new(matterless_core::model::ThreadMode::Flat, &self.me);
         options.utc_offset_minutes = matterless_view::clock::utc_offset_minutes();
         options.channel_names = store.channel_names().unwrap_or_default();
+        options.not_emoji = store.not_custom_emoji().unwrap_or_default();
         options.author_names = known
             .iter()
             .map(|(id, user)| (id.clone(), user.username.clone()))

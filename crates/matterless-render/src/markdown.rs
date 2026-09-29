@@ -219,14 +219,24 @@ fn scan_token(text: &str, from: usize, sigil: char) -> Option<(usize, usize, Str
     None
 }
 
+/// Mattermost's `(?<!\w)(:([\w+-]+):)(?!\w)`: the name stands apart from the
+/// words around it, so "arn:aws:s3" is no emoji.
 fn scan_emoji(text: &str, from: usize) -> Option<Found> {
+    let is_word = |character: u8| character.is_ascii_alphanumeric() || character == b'_';
+    let bytes = text.as_bytes();
     let mut cursor = from;
     while let Some(offset) = text[cursor..].find(':') {
         let start = cursor + offset;
         let body_start = start + 1;
         let close = text[body_start..].find(':')?;
         let name = &text[body_start..body_start + close];
-        let plausible = !name.is_empty()
+        let apart = !(start > 0 && is_word(bytes[start - 1]))
+            && !bytes
+                .get(body_start + close + 1)
+                .copied()
+                .is_some_and(is_word);
+        let plausible = apart
+            && !name.is_empty()
             && name.len() <= 64
             && name.chars().all(|character| {
                 character.is_ascii_alphanumeric()
@@ -246,18 +256,34 @@ fn scan_emoji(text: &str, from: usize) -> Option<Found> {
     None
 }
 
+/// Mattermost's marked: math opens at a `$` no word character precedes and
+/// closes at the next `$` on the line, unless a word character follows it --
+/// so a price like "10$ ... 150$" stays text.
 fn scan_math(text: &str, from: usize) -> Option<Found> {
-    let start = from + text[from..].find('$')?;
-    let body_start = start + 1;
-    let close = text[body_start..].find('$')?;
-    if close == 0 {
-        return None;
+    let is_word = |character: u8| character.is_ascii_alphanumeric() || character == b'_';
+    let bytes = text.as_bytes();
+    let mut cursor = from;
+    while let Some(offset) = text[cursor..].find('$') {
+        let start = cursor + offset;
+        let body_start = start + 1;
+        cursor = body_start;
+        if start > 0 && is_word(bytes[start - 1]) {
+            continue;
+        }
+        let close = body_start + text[body_start..].find(['$', '\n'])?;
+        if close == body_start
+            || bytes[close] == b'\n'
+            || bytes.get(close + 1).copied().is_some_and(is_word)
+        {
+            continue;
+        }
+        return Some(Found::Math {
+            start,
+            end: close + 1,
+            value: text[body_start..close].trim().to_string(),
+        });
     }
-    Some(Found::Math {
-        start,
-        end: body_start + close + 1,
-        value: text[body_start..body_start + close].to_string(),
-    })
+    None
 }
 
 /// Splits one text run into text and extension nodes.
@@ -1002,6 +1028,48 @@ mod tests {
                     value: "O(n^2)".into()
                 },
                 text(" here"),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_emoji_name_stands_apart_from_the_words() {
+        let nodes = inline("bucket arn:aws:s3:::slcp-symserv");
+        assert!(
+            !nodes.iter().any(|node| matches!(node, Node::Emoji { .. })),
+            "{nodes:?}"
+        );
+        assert!(
+            inline("yes :+1::tada:!")
+                .iter()
+                .filter(|node| matches!(node, Node::Emoji { .. }))
+                .count()
+                == 2
+        );
+    }
+
+    #[test]
+    fn a_price_in_dollars_is_not_maths() {
+        for line in [
+            "de 10$ par jour a 150$ par jour",
+            "$5 and $6",
+            "a $b$c",
+            "$open\nclose$",
+        ] {
+            let nodes = inline(line);
+            assert!(
+                !nodes
+                    .iter()
+                    .any(|node| matches!(node, Node::InlineMath { .. })),
+                "{line:?} -> {nodes:?}"
+            );
+        }
+        assert_eq!(
+            inline("(so $x$.)"),
+            vec![
+                text("(so "),
+                Node::InlineMath { value: "x".into() },
+                text(".)"),
             ]
         );
     }

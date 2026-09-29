@@ -467,6 +467,37 @@ fn only_a_channel_that_exists_is_a_link() {
     assert!(text.contains("~10") && text.contains("~nowhere"), "{text}");
 }
 
+/// A `:name:` the server has no emoji for is what was typed, not a blank.
+#[test]
+fn a_name_that_is_no_emoji_is_text() {
+    let mut carrier = post("p1", "amy", 1_000);
+    carrier.message = "see :nosuch: and :bongo:".into();
+    let mut plan = options(ThreadMode::Flat);
+    plan.not_emoji.insert("nosuch".into());
+    let rows = plan_channel(&[carrier], &HashMap::new(), &plan);
+    let Some(Row::Post { post, .. }) = rows.iter().find(|row| matches!(row, Row::Post { .. }))
+    else {
+        panic!("expected a post row");
+    };
+    let Some(markdown::Node::Paragraph { children }) = post.nodes.first() else {
+        panic!("expected a paragraph, got {:?}", post.nodes);
+    };
+    let emoji: Vec<&str> = children
+        .iter()
+        .filter_map(|node| match node {
+            markdown::Node::Emoji { name, .. } => Some(name.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(emoji, ["bongo"]);
+    assert!(
+        children
+            .iter()
+            .any(|node| matches!(node, markdown::Node::Text { value } if value == ":nosuch:")),
+        "{children:?}"
+    );
+}
+
 #[test]
 fn an_author_resolves_to_a_name_and_falls_back_to_the_id() {
     let mut plan = options(ThreadMode::Flat);

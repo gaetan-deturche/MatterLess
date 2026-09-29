@@ -192,6 +192,8 @@ pub enum Update {
         file_id: String,
         colours: crate::highlight::Colours,
     },
+    /// Some `:name:`s turned out to be no emoji, and are text again.
+    NotEmoji,
 }
 
 /// What the window asks the socket thread to do.
@@ -1376,6 +1378,9 @@ async fn run(
                             // adds one, so the window has one way to hear that
                             // the table changed rather than two.
                             wake.wake(Update::Changed(vec![Delta::CustomEmojiChanged]));
+                        }
+                        if learned < names.len() {
+                            wake.wake(Update::NotEmoji);
                         }
                     }
                     Ask::Looking { channel_id } => {

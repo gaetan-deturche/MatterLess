@@ -610,11 +610,15 @@ fn known_channels(post: &Post, options: &PlanOptions) -> Option<HashSet<String>>
     Some(known)
 }
 
-/// Whether the text links to a channel that is not known.
-fn names_unknown(nodes: &[markdown::Node], known: &HashSet<String>) -> bool {
+/// What a node that only looks like markup was typed as: a `~name` no channel
+/// answers to, or a `:name:` that is no emoji.
+type Typed<'a> = dyn Fn(&markdown::Node) -> Option<String> + 'a;
+
+/// Whether the text holds any such node.
+fn names_unknown(nodes: &[markdown::Node], known: &Typed) -> bool {
     use markdown::Node;
     nodes.iter().any(|node| match node {
-        Node::ChannelLink { name } => !known.contains(&name.to_lowercase()),
+        _ if known(node).is_some() => true,
         Node::Emphasis { children }
         | Node::Strong { children }
         | Node::Strike { children }
@@ -631,16 +635,14 @@ fn names_unknown(nodes: &[markdown::Node], known: &HashSet<String>) -> bool {
     })
 }
 
-/// The text with every link to an unknown channel put back as what was typed.
-fn only_known(nodes: &[markdown::Node], known: &HashSet<String>) -> Vec<markdown::Node> {
+/// The text with every such node put back as what was typed.
+fn only_known(nodes: &[markdown::Node], known: &Typed) -> Vec<markdown::Node> {
     use markdown::Node;
     let within = |children: &[Node]| only_known(children, known);
     nodes
         .iter()
         .map(|node| match node {
-            Node::ChannelLink { name } if !known.contains(&name.to_lowercase()) => Node::Text {
-                value: format!("~{name}"),
-            },
+            _ if let Some(value) = known(node) => Node::Text { value },
             Node::Emphasis { children } => Node::Emphasis {
                 children: within(children),
             },
@@ -954,6 +956,9 @@ pub struct PlanOptions {
     /// `~name` must be to be a link. Empty when the caller cannot say, and
     /// then every `~name` is taken as written.
     pub channel_names: HashSet<String>,
+    /// The `:name:`s the server says are no emoji of its own, and which have no
+    /// character either: written out as typed rather than left a blank.
+    pub not_emoji: HashSet<String>,
 }
 
 impl PlanOptions {
@@ -976,6 +981,7 @@ impl PlanOptions {
             allow_svg: false,
             pixel_ratio: 1.0,
             channel_names: HashSet::new(),
+            not_emoji: HashSet::new(),
         }
     }
 }
@@ -1356,10 +1362,23 @@ fn build_post_row(post: &Post, options: &PlanOptions) -> PostRow {
         }
     };
     // A `~name` is a channel only when there is one by that name: the tilde
-    // before a number or a word is otherwise just a tilde.
-    let nodes = match known_channels(post, options) {
-        Some(known) if names_unknown(&nodes, &known) => Arc::new(only_known(&nodes, &known)),
-        _ => nodes,
+    // before a number or a word is otherwise just a tilde. Likewise a `:name:`
+    // the server has no emoji for.
+    let channels = known_channels(post, options);
+    let typed = |node: &markdown::Node| match node {
+        markdown::Node::ChannelLink { name } => channels
+            .as_ref()
+            .filter(|known| !known.contains(&name.to_lowercase()))
+            .map(|_| format!("~{name}")),
+        markdown::Node::Emoji {
+            name,
+            unicode: None,
+        } if options.not_emoji.contains(name) => Some(format!(":{name}:")),
+        _ => None,
+    };
+    let nodes = match names_unknown(&nodes, &typed) {
+        true => Arc::new(only_known(&nodes, &typed)),
+        false => nodes,
     };
     let (author_name, bot) = author_of(post, options);
     PostRow {
@@ -1611,6 +1630,7 @@ pub fn plan_channel(
 pub fn plan_thread(root: &Post, replies: &[Post], options: &PlanOptions) -> Vec<Row> {
     let mut flat = PlanOptions {
         channel_names: options.channel_names.clone(),
+        not_emoji: options.not_emoji.clone(),
         utc_offset_minutes: options.utc_offset_minutes,
         collapse_window_ms: options.collapse_window_ms,
         thread_mode: ThreadMode::Flat,
