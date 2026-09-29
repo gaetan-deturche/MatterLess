@@ -436,12 +436,28 @@ impl Listing {
     }
 
     /// Applies a frame's input to a list drawn as an aside.
-    pub fn react(&mut self, input: &Input, placed: &[Placed], pane: Rect) -> Option<Did> {
-        self.react_in(input, placed, aside::body(pane))
+    pub fn react(
+        &mut self,
+        input: &Input,
+        placed: &[Placed],
+        pane: Rect,
+        keys: bool,
+    ) -> Option<Did> {
+        self.react_in(input, placed, aside::body(pane), keys)
     }
 
     /// The same, for a list that fills a column of its own.
-    pub fn react_in(&mut self, input: &Input, placed: &[Placed], body: Rect) -> Option<Did> {
+    ///
+    /// `keys` is whether the arrows and Enter are the list's: not while the
+    /// reader is typing in a box beside it, where Enter sends -- the list took
+    /// it and opened the highlighted row instead.
+    pub fn react_in(
+        &mut self,
+        input: &Input,
+        placed: &[Placed],
+        body: Rect,
+        keys: bool,
+    ) -> Option<Did> {
         if !self.open() {
             return None;
         }
@@ -457,10 +473,10 @@ impl Listing {
         // A list that shrank under a reader who had scrolled down would
         // otherwise leave them below the end of it, looking at nothing.
         self.scroll = self.scroll.clamp(0.0, reach);
-        if input.struck(Key::Down) && !self.found.is_empty() {
+        if keys && input.struck(Key::Down) && !self.found.is_empty() {
             self.chosen = (self.chosen + 1).min(self.found.len() - 1);
         }
-        if input.struck(Key::Up) {
+        if keys && input.struck(Key::Up) {
             self.chosen = self.chosen.saturating_sub(1);
         }
         if let Some(clicked) = input.clicked() {
@@ -481,7 +497,7 @@ impl Listing {
                 return self.found.get(at).cloned().map(Box::new).map(Did::Open);
             }
         }
-        if input.struck(Key::Enter) {
+        if keys && input.struck(Key::Enter) {
             return self
                 .found
                 .get(self.chosen)
@@ -740,7 +756,7 @@ mod tests {
             cross.x + cross.width / 2.0,
             cross.y + cross.height / 2.0,
         );
-        match listing.react(&input, &placed, pane()) {
+        match listing.react(&input, &placed, pane(), true) {
             Some(Did::Clear(row)) => assert_eq!(row.post_id, "p1", "the wrong row"),
             other => panic!("pressing the cross did {other:?}"),
         }
@@ -771,11 +787,38 @@ mod tests {
         );
     }
 
+    /// Enter opens the highlighted row only when the keys are the list's: with
+    /// the reader typing in a box beside it, Enter sends -- and the list took
+    /// it and opened the thread again, so a reply was never sent.
+    #[test]
+    fn enter_is_not_the_lists_while_the_reader_types() {
+        let mut listing = Listing::default();
+        listing.expect("Threads");
+        listing.fill(found(2));
+        let mut input = Input::default();
+        input.apply(
+            matterless_ui::input::Event::Key {
+                key: Key::Enter,
+                down: true,
+            },
+            &[],
+        );
+        assert!(listing.react(&input, &[], pane(), false).is_none());
+        assert!(matches!(
+            listing.react(&input, &[], pane(), true),
+            Some(Did::Open(_))
+        ));
+    }
+
     /// A shut panel answers nothing and places nothing, whatever is pressed.
     #[test]
     fn a_shut_listing_answers_nothing() {
         let mut listing = Listing::default();
-        assert!(listing.react(&Input::default(), &[], pane()).is_none());
+        assert!(
+            listing
+                .react(&Input::default(), &[], pane(), true)
+                .is_none()
+        );
         assert!(listing.boxes(pane()).is_empty());
     }
 

@@ -1179,6 +1179,17 @@ impl App {
         self.followed.open()
     }
 
+    /// Whether the reader is typing in a box on screen, where Enter sends and
+    /// the arrows move the caret -- so a list beside it must leave them be.
+    /// The message box is not on screen over the Threads list.
+    fn typing_in_a_box(&self) -> bool {
+        match self.input.focus() {
+            Some(THREAD_COMPOSER) | Some(matterless_view::edit::NAME) => true,
+            Some(composer::NAME) => !self.on_threads(),
+            _ => false,
+        }
+    }
+
     /// The threads list's own column: everything under the header.
     ///
     /// No room kept for a composer, because there is nothing here to write to
@@ -2406,7 +2417,13 @@ impl App {
                     return;
                 }
                 box_of.clear(&mut self.fonts);
-                if let Some(channel) = self.sidebar.selected.clone() {
+                // A reply goes to the thread's own channel, as Enter sends it:
+                // from the Threads list the sidebar's selection is the list.
+                let channel = match root_id.is_empty() {
+                    true => self.sidebar.selected.clone(),
+                    false => self.thread_in.clone(),
+                };
+                if let Some(channel) = channel {
                     self.post_message(&channel, root_id, text);
                 }
             }
@@ -2718,6 +2735,28 @@ impl App {
                 );
             }
             header::Act::Close => self.close_thread(),
+            // Where the thread began, in its own channel: the root message,
+            // scrolled to, as following a link to it does.
+            header::Act::Jump => {
+                if let (Some(post_id), Some(channel_id)) =
+                    (self.open_root(), self.thread_in.clone())
+                {
+                    self.press(
+                        matterless_layout::row::Press::Post {
+                            channel_id,
+                            post_id: post_id.clone(),
+                        },
+                        None,
+                    );
+                    // The thread stays open beside its channel, as the
+                    // official client keeps it: opening the channel shut it.
+                    if self.open_root().is_none() {
+                        self.open_thread(&post_id);
+                        let within = self.stream_rect();
+                        self.stream.to_post(&mut self.fonts, &post_id, within);
+                    }
+                }
+            }
             header::Act::Follow => {
                 let Some(root) = self.open_root() else {
                     return;
@@ -6435,10 +6474,12 @@ impl App {
         // the list exists: under collapsed threads a reply is a row nowhere
         // else, so this is the only way to reach one.
         if self.on_threads() {
+            // Asked before the input is taken: after, it has no focus to ask.
+            let keys = !self.typing_in_a_box();
             let input = std::mem::take(&mut self.input);
             let boxes = self.placed.clone();
             let within = self.followed_rect();
-            let did = self.followed.react_in(&input, &boxes, within);
+            let did = self.followed.react_in(&input, &boxes, within, keys);
             self.input = input;
             if let Some(matterless_view::listing::Did::Open(found)) = did {
                 // Beside the list, not instead of it. Choosing a thread used
@@ -6460,6 +6501,7 @@ impl App {
         // still work while it is open. Its own rows are its own because a click
         // resolves to one box, which is what the depths are for.
         if self.listing.open() {
+            let keys = !self.typing_in_a_box();
             let mut input = std::mem::take(&mut self.input);
             if input.struck(Key::Escape) {
                 input.focus_on(composer::NAME);
@@ -6469,7 +6511,7 @@ impl App {
             }
             let pane = matterless_view::aside::rect(self.column_rect(), self.pane_width);
             let boxes = self.placed.clone();
-            let did = self.listing.react(&input, &boxes, pane);
+            let did = self.listing.react(&input, &boxes, pane, keys);
             if let Some(matterless_view::listing::Did::Clear(found)) = did {
                 self.input = input;
                 self.clear_draft(&found);

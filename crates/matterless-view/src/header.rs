@@ -89,6 +89,8 @@ pub enum Act {
     Follow,
     /// Shut the thread pane.
     Close,
+    /// Show the thread's first message in its channel.
+    Jump,
     /// Search this conversation.
     ///
     /// Offered like the rest, and drawn unlike them: `fit` gives it a field
@@ -137,6 +139,7 @@ impl Act {
             (Act::Follow, false) => "follow",
             (Act::Follow, true) => "following",
             (Act::Close, _) => marks::CLOSE,
+            (Act::Jump, _) => marks::FORWARD,
             (Act::Search, _) => marks::SEARCH,
             (Act::More, _) => marks::MORE,
         }
@@ -160,6 +163,7 @@ impl Act {
             (Act::Follow, false) => "Follow thread",
             (Act::Follow, true) => "Unfollow thread",
             (Act::Close, _) => "Close thread",
+            (Act::Jump, _) => "Show in channel",
             (Act::Search, _) => "Search messages",
             (Act::More, _) => "More",
         }
@@ -177,6 +181,7 @@ impl Act {
             Act::Leave => "leave",
             Act::Follow => "follow",
             Act::Close => "close",
+            Act::Jump => "jump",
             Act::Search => "search",
             Act::More => "more",
         }
@@ -192,6 +197,7 @@ impl Act {
             "leave" => Act::Leave,
             "follow" => Act::Follow,
             "close" => Act::Close,
+            "jump" => Act::Jump,
             "search" => Act::Search,
             "more" => Act::More,
             _ => return None,
@@ -199,10 +205,11 @@ impl Act {
     }
 }
 
-/// What a thread pane's strip offers: whether to keep hearing about it, and a
-/// way out. Nothing on the channel's strip applies to one thread.
+/// What a thread pane's strip offers: where it was said, whether to keep
+/// hearing about it, and a way out. Nothing on the channel's strip applies to
+/// one thread.
 pub fn for_thread() -> Vec<Act> {
-    vec![Act::Follow, Act::Close]
+    vec![Act::Jump, Act::Follow, Act::Close]
 }
 
 /// What the strip offers for this conversation.
@@ -410,20 +417,27 @@ impl Header {
         // Past the mark, whichever it is. A hash is narrower than the column
         // kept for it; three lines are wider, and at a fixed offset the name
         // lands on top of them.
-        let past = matterless_layout::extent_of(
-            fonts,
-            if self.sigil_is_mark { "#" } else { self.sigil },
-            f32::MAX,
-            matterless_layout::Style {
-                size: 15.0,
-                line_height: 20.0,
-                bold: false,
-                italic: false,
-                mono: false,
-            },
-        )
-        .width
-            + 4.0;
+        // A mark is set at fifteen pixels square and measured as that: read
+        // as a hash it came out narrower, and the name sat against it.
+        let past = match self.sigil_is_mark {
+            true => 15.0 + 7.0,
+            false => {
+                matterless_layout::extent_of(
+                    fonts,
+                    self.sigil,
+                    f32::MAX,
+                    matterless_layout::Style {
+                        size: 15.0,
+                        line_height: 20.0,
+                        bold: false,
+                        italic: false,
+                        mono: false,
+                    },
+                )
+                .width
+                    + 4.0
+            }
+        };
         let from = within.x + LEFT + SIGIL.max(past);
         let laid = fit(within, &self.offered);
         // Whichever is leftmost: the field when there is one, otherwise the
@@ -548,13 +562,34 @@ impl Header {
             // sampler is not what makes it one -- a glyph is rasterised at the
             // size it is drawn and sampled one texel to one pixel, so there is
             // nothing to filter. There are simply not enough pixels.
-            let glyphs = painter.run(
-                fonts,
-                act.label(self.muted),
-                rect.x + 6.0,
-                rect.y - 1.0,
-                Run::mark(MARK),
-            );
+            let said = act.label(self.muted);
+            // Following is a state, and a word: set in the text face, centred
+            // in its wider button. Through the icon face it drew nothing.
+            let glyphs = match act == Act::Follow {
+                true => {
+                    let wide = matterless_layout::extent_of(
+                        fonts,
+                        said,
+                        f32::MAX,
+                        matterless_layout::Style {
+                            size: 13.0,
+                            line_height: 18.0,
+                            bold: false,
+                            italic: false,
+                            mono: false,
+                        },
+                    )
+                    .width;
+                    painter.run(
+                        fonts,
+                        said,
+                        rect.x + (rect.width - wide) / 2.0,
+                        rect.y + (rect.height - 18.0) / 2.0,
+                        Run::label(f32::MAX),
+                    )
+                }
+                false => painter.run(fonts, said, rect.x + 6.0, rect.y - 1.0, Run::mark(MARK)),
+            };
             scene.glyphs(
                 glyphs,
                 if lit { palette.ink } else { palette.soft },
