@@ -444,6 +444,9 @@ struct App {
     /// The same surface read without its sRGB encoding, which is what the
     /// pipeline writes through.
     size: (u32, u32),
+    /// The window's placement as last kept, so a move that ends where it
+    /// began writes nothing.
+    kept_placement: Option<String>,
     fonts: Fonts,
     painter: Painter,
     /// The open channel.
@@ -894,6 +897,7 @@ impl App {
             window: None,
             view: None,
             size: (1000, 760),
+            kept_placement: None,
             fonts: {
                 // Building this scans the system's font directories.
                 let _loading = matterless_view::timing::watch("loading the fonts", 0, "");
@@ -3762,6 +3766,26 @@ impl App {
         window.set_minimized(false);
         window.focus_window();
         self.taskbar.calm(raw_window(self.window.as_ref()));
+    }
+
+    /// Remembers where the window is, for the next run. On every move and
+    /// resize rather than on the way out: a computer shut down with the
+    /// window open never says goodbye.
+    fn keep_placement(&mut self) {
+        let Some(placed) = matterless_view::placement::of(raw_window(self.window.as_ref())) else {
+            return;
+        };
+        let written = placed.write();
+        if self.kept_placement.as_deref() == Some(written.as_str()) {
+            return;
+        }
+        if let Some(store) = self.store.as_ref()
+            && let Err(error) =
+                store.remember_setting(matterless_view::placement::SETTING, &written)
+        {
+            eprintln!("keeping the window's place: {error}");
+        }
+        self.kept_placement = Some(written);
     }
 
     /// Runs whatever the tray was asked for.
@@ -8688,6 +8712,20 @@ impl ApplicationHandler<Update> for App {
                 .expect("a window"),
         );
         self.window = Some(Arc::clone(&window));
+        // Where it was last run, while it is still hidden, and at the size
+        // that makes: the surface below is built for it.
+        use matterless_view::placement::{self, Placement};
+        let kept = self
+            .store
+            .as_ref()
+            .and_then(|store| store.setting(placement::SETTING).ok().flatten());
+        let restored = kept.as_deref().and_then(Placement::read);
+        if let Some(restored) = restored {
+            placement::restore(raw_window(self.window.as_ref()), restored);
+            let inner = window.inner_size();
+            self.size = (inner.width.max(1), inner.height.max(1));
+        }
+        self.kept_placement = kept;
         // Before anything else can want it: the close button means one thing
         // with a tray and another without, and the answer must not depend on
         // how far through starting up the reader got.
@@ -8771,6 +8809,10 @@ impl ApplicationHandler<Update> for App {
             behind(&window);
         } else {
             window.set_visible(true);
+            // Shown first: maximising shows it anyway, behind winit's back.
+            if restored.is_some_and(|restored| restored.maximized) {
+                window.set_maximized(true);
+            }
         }
     }
 
@@ -8816,7 +8858,9 @@ impl ApplicationHandler<Update> for App {
                     events.exit();
                 }
             }
+            WindowEvent::Moved(_) => self.keep_placement(),
             WindowEvent::Resized(size) => {
+                self.keep_placement();
                 // Minimising is reported as a resize to nothing -- measured:
                 // 0x0 on the way down, then the real size on the way back --
                 // and a conversation re-wrapped to a column one pixel wide is

@@ -35,6 +35,7 @@ pub mod offer;
 pub mod open;
 pub mod pack;
 pub mod picker;
+pub mod placement;
 pub mod places;
 pub mod profile;
 pub mod rail;
