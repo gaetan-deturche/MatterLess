@@ -166,6 +166,7 @@ pub fn rows_of(
     // belongs to is decided in UTC too, and a conversation that ran across
     // midnight local time is separated in the wrong place.
     options.utc_offset_minutes = crate::clock::utc_offset_minutes();
+    options.channel_names = store.channel_names().unwrap_or_default();
     options.author_names = people
         .iter()
         .map(|(id, user)| (id.clone(), user.username.clone()))
@@ -286,6 +287,7 @@ pub fn rows_from(
     // belongs to is decided in UTC too, and a conversation that ran across
     // midnight local time is separated in the wrong place.
     options.utc_offset_minutes = crate::clock::utc_offset_minutes();
+    options.channel_names = store.channel_names().unwrap_or_default();
     options.author_names = people
         .iter()
         .map(|(id, user)| (id.clone(), user.username.clone()))

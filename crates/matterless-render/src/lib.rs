@@ -589,6 +589,97 @@ fn without_pictures(
     out
 }
 
+/// The channels a post may link to: those the server found for it (public
+/// ones) and the reader's own. `None` when there is nothing to judge by, and
+/// then every `~name` stays as it was written.
+fn known_channels(post: &Post, options: &PlanOptions) -> Option<HashSet<String>> {
+    let mentioned = post
+        .props
+        .get("channel_mentions")
+        .and_then(serde_json::Value::as_object);
+    if mentioned.is_none() && options.channel_names.is_empty() {
+        return None;
+    }
+    let mut known = options.channel_names.clone();
+    known.extend(
+        mentioned
+            .into_iter()
+            .flatten()
+            .map(|(name, _)| name.to_lowercase()),
+    );
+    Some(known)
+}
+
+/// Whether the text links to a channel that is not known.
+fn names_unknown(nodes: &[markdown::Node], known: &HashSet<String>) -> bool {
+    use markdown::Node;
+    nodes.iter().any(|node| match node {
+        Node::ChannelLink { name } => !known.contains(&name.to_lowercase()),
+        Node::Emphasis { children }
+        | Node::Strong { children }
+        | Node::Strike { children }
+        | Node::Link { children, .. }
+        | Node::Paragraph { children }
+        | Node::Heading { children, .. }
+        | Node::Blockquote { children } => names_unknown(children, known),
+        Node::List { items, .. } => items.iter().any(|item| names_unknown(item, known)),
+        Node::Table { head, rows } => head
+            .iter()
+            .chain(rows.iter().flatten())
+            .any(|cell| names_unknown(cell, known)),
+        _ => false,
+    })
+}
+
+/// The text with every link to an unknown channel put back as what was typed.
+fn only_known(nodes: &[markdown::Node], known: &HashSet<String>) -> Vec<markdown::Node> {
+    use markdown::Node;
+    let within = |children: &[Node]| only_known(children, known);
+    nodes
+        .iter()
+        .map(|node| match node {
+            Node::ChannelLink { name } if !known.contains(&name.to_lowercase()) => Node::Text {
+                value: format!("~{name}"),
+            },
+            Node::Emphasis { children } => Node::Emphasis {
+                children: within(children),
+            },
+            Node::Strong { children } => Node::Strong {
+                children: within(children),
+            },
+            Node::Strike { children } => Node::Strike {
+                children: within(children),
+            },
+            Node::Link { href, children } => Node::Link {
+                href: href.clone(),
+                children: within(children),
+            },
+            Node::Paragraph { children } => Node::Paragraph {
+                children: within(children),
+            },
+            Node::Heading { level, children } => Node::Heading {
+                level: *level,
+                children: within(children),
+            },
+            Node::Blockquote { children } => Node::Blockquote {
+                children: within(children),
+            },
+            Node::List { ordered, items } => Node::List {
+                ordered: *ordered,
+                items: items.iter().map(|item| within(item)).collect(),
+            },
+            Node::Table { head, rows } => Node::Table {
+                head: head.iter().map(|cell| within(cell)).collect(),
+                rows: rows
+                    .iter()
+                    .map(|row| row.iter().map(|cell| within(cell)).collect())
+                    .collect(),
+            },
+            other => other.clone(),
+        })
+        .collect()
+}
+
 /// Whether a file can be drawn as a picture at all.
 ///
 /// An image either has server-side renditions or simply says so in its mime
@@ -858,6 +949,11 @@ pub struct PlanOptions {
     /// The viewer's `devicePixelRatio`, so a thumbnail is not asked to cover
     /// more device pixels than it has.
     pub pixel_ratio: f32,
+    /// The channels the reader has, by lowercased slug: with the ones the
+    /// server names in a post's `channel_mentions` (public ones only), what a
+    /// `~name` must be to be a link. Empty when the caller cannot say, and
+    /// then every `~name` is taken as written.
+    pub channel_names: HashSet<String>,
 }
 
 impl PlanOptions {
@@ -879,6 +975,7 @@ impl PlanOptions {
             full_res: false,
             allow_svg: false,
             pixel_ratio: 1.0,
+            channel_names: HashSet::new(),
         }
     }
 }
@@ -1258,6 +1355,12 @@ fn build_post_row(post: &Post, options: &PlanOptions) -> PostRow {
             Arc::new(without_pictures(&nodes, &urls))
         }
     };
+    // A `~name` is a channel only when there is one by that name: the tilde
+    // before a number or a word is otherwise just a tilde.
+    let nodes = match known_channels(post, options) {
+        Some(known) if names_unknown(&nodes, &known) => Arc::new(only_known(&nodes, &known)),
+        _ => nodes,
+    };
     let (author_name, bot) = author_of(post, options);
     PostRow {
         post_id: post.id.clone(),
@@ -1507,6 +1610,7 @@ pub fn plan_channel(
 /// The thread pane: one root and its replies, always flat and always ordered.
 pub fn plan_thread(root: &Post, replies: &[Post], options: &PlanOptions) -> Vec<Row> {
     let mut flat = PlanOptions {
+        channel_names: options.channel_names.clone(),
         utc_offset_minutes: options.utc_offset_minutes,
         collapse_window_ms: options.collapse_window_ms,
         thread_mode: ThreadMode::Flat,

@@ -429,6 +429,44 @@ fn a_channel_link_and_a_strikethrough_coexist() {
     );
 }
 
+/// A `~name` is a channel only when one exists: named by the server in the
+/// post's `channel_mentions` (public ones) or held by the reader (private
+/// ones). A tilde before a number is a tilde.
+#[test]
+fn only_a_channel_that_exists_is_a_link() {
+    let mut carrier = post("p1", "amy", 1_000);
+    carrier.message = "~10 people in ~town-square and ~secret-room, not ~nowhere".into();
+    carrier.props = serde_json::json!({
+        "channel_mentions": { "town-square": { "display_name": "Town Square" } }
+    });
+    let mut plan = options(ThreadMode::Flat);
+    plan.channel_names.insert("secret-room".into());
+    let rows = plan_channel(&[carrier], &HashMap::new(), &plan);
+    let Some(Row::Post { post, .. }) = rows.iter().find(|row| matches!(row, Row::Post { .. }))
+    else {
+        panic!("expected a post row");
+    };
+    let Some(markdown::Node::Paragraph { children }) = post.nodes.first() else {
+        panic!("expected a paragraph, got {:?}", post.nodes);
+    };
+    let links: Vec<&str> = children
+        .iter()
+        .filter_map(|node| match node {
+            markdown::Node::ChannelLink { name } => Some(name.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(links, ["town-square", "secret-room"]);
+    let text: String = children
+        .iter()
+        .filter_map(|node| match node {
+            markdown::Node::Text { value } => Some(value.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(text.contains("~10") && text.contains("~nowhere"), "{text}");
+}
+
 #[test]
 fn an_author_resolves_to_a_name_and_falls_back_to_the_id() {
     let mut plan = options(ThreadMode::Flat);

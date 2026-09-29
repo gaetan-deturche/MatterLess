@@ -362,6 +362,18 @@ impl Store {
             .optional()?)
     }
 
+    /// The slug of every channel held, lowercased: what a `~channel` in a
+    /// message has to name to be a link rather than a tilde and a word.
+    pub fn channel_names(&self) -> Result<std::collections::HashSet<String>> {
+        let connection = self.lock();
+        let mut statement =
+            connection.prepare("SELECT lower(name) FROM channels WHERE delete_at = 0")?;
+        let names = statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(names)
+    }
+
     /// One channel by its slug or display name, for a `~channel` link.
     pub fn channel_by_name(&self, name: &str) -> Result<Option<Channel>> {
         let connection = self.lock();
