@@ -2994,6 +2994,56 @@ impl App {
         );
     }
 
+    /// The menu a right-click on the direct messages heading offers: their
+    /// order, which the official client keeps on the same category.
+    fn offer_directs_menu(&mut self) {
+        use matterless_view::menu::{Item, Style};
+        let on_directs = self
+            .input
+            .contexted()
+            .and_then(|name| name.strip_prefix("sidebar/heading/"))
+            .and_then(|index| index.parse::<usize>().ok())
+            .and_then(|index| self.sidebar.entries.get(index))
+            .is_some_and(|entry| matches!(entry, Entry::Heading { directs: true, .. }));
+        let Some((x, y)) = self.input.pointer_at() else {
+            return;
+        };
+        let Some(store) = self.store.as_deref() else {
+            return;
+        };
+        if !on_directs {
+            return;
+        }
+        let alpha = store
+            .sidebar()
+            .unwrap_or_default()
+            .iter()
+            .any(|(category, _)| {
+                category.category_type == "direct_messages" && category.sorting == "alpha"
+            });
+        let choice = |id: &str, label: &str, chosen: bool| {
+            Item::new(id, label).marked(if chosen {
+                matterless_layout::marks::CHECK
+            } else {
+                ""
+            })
+        };
+        let items = vec![
+            Item::new("directs.sort", "Sort")
+                .marked(matterless_layout::marks::SORT)
+                .nests(vec![
+                    choice("directs.alpha", "Alphabetically", alpha),
+                    choice("directs.recent", "Recent activity", !alpha),
+                ]),
+        ];
+        self.menu.show(
+            "direct_messages",
+            matterless_view::menu::Anchor::At(x, y),
+            Style::channel(),
+            items,
+        );
+    }
+
     /// Suggestions for the misspelled word under a right-click in a message
     /// box, and a way to say it is right.
     fn offer_spelling_menu(&mut self) {
@@ -3105,6 +3155,25 @@ impl App {
         }
         if let Some(rest) = chosen.strip_prefix("channel.") {
             self.act_on_channel_menu(about, rest);
+            return;
+        }
+        if let Some(sorting) = chosen.strip_prefix("directs.") {
+            if !matches!(sorting, "alpha" | "recent") {
+                return;
+            }
+            // Here first: the server's answer, and the membership re-read
+            // after it, take a second. A refusal restores the old order then.
+            if let Some(store) = self.store.as_ref()
+                && let Err(error) = store.sort_directs(sorting)
+            {
+                eprintln!("sorting direct messages: {error}");
+            }
+            self.rebuild_sidebar();
+            if let Some(link) = self.link.as_ref() {
+                link.send(matterless_view::live::Ask::SortDirects {
+                    sorting: sorting.to_string(),
+                });
+            }
             return;
         }
         // The strip's own overflow, which does exactly what the button it
@@ -7132,6 +7201,11 @@ impl App {
         self.placed = self.targets();
         let boxes = self.placed.clone();
         self.input.apply(UiEvent::PointerMoved { x, y }, &boxes);
+        // Before the boxes are asked for again: the list it opens has boxes
+        // of its own, which the next move has to find.
+        if self.menu.hover(&self.input) {
+            self.placed = self.targets();
+        }
         // A held press is a drag, which selects text in the composer, and in
         // a conversation's words.
         if self.input.pressed().is_some() {
@@ -8992,6 +9066,7 @@ impl ApplicationHandler<Update> for App {
                     let boxes = self.targets();
                     self.input.apply(UiEvent::Contexted, &boxes);
                     self.offer_channel_menu();
+                    self.offer_directs_menu();
                     self.offer_spelling_menu();
                     self.react();
                     self.redraw();

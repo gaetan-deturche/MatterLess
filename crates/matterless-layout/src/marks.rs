@@ -101,6 +101,10 @@ pub const REMIND: &str = "\u{e087}";
 pub const FORWARD: &str = "\u{e229}";
 /// Find a message already said.  `search`
 pub const SEARCH: &str = "\u{e151}";
+/// The order a list is in.  `arrow-up-down`
+pub const SORT: &str = "\u{e37d}";
+/// The choice already made.  `check`
+pub const CHECK: &str = "\u{e06c}";
 
 /// What the message box offers for marking a message up.
 ///

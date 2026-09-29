@@ -291,6 +291,9 @@ pub enum Ask {
         team_id: String,
         category_id: String,
     },
+    /// Order the direct messages `alpha` or `recent`, in every team's
+    /// category, so the official client agrees.
+    SortDirects { sorting: String },
     /// Be told about one message again later.
     Remind { post_id: String, when: i64 },
     /// Everything said in one thread.
@@ -1135,6 +1138,24 @@ async fn run(
                                 }
                             }
                             Err(error) => eprintln!("moving {channel_id}: {error}"),
+                        }
+                    }
+                    Ask::SortDirects { sorting } => {
+                        let teams = engine.store().teams().unwrap_or_default();
+                        let mut sorted = true;
+                        for team in &teams {
+                            if let Err(error) =
+                                sort_directs(&rest, &me_id, &team.id, &sorting).await
+                            {
+                                eprintln!("sorting direct messages in {}: {error}", team.id);
+                                sorted = false;
+                            }
+                        }
+                        if sorted {
+                            println!("direct messages sorted {sorting}");
+                        }
+                        if let Ok((_, mode)) = membership(&rest, engine.store(), &me_id).await {
+                            wake.wake(Update::Membership(mode));
                         }
                     }
                     Ask::Remind { post_id, when } => {
@@ -3365,6 +3386,31 @@ async fn moved(
         }
         changed.push(copy);
     }
+    if changed.is_empty() {
+        return Ok(());
+    }
+    rest.update_sidebar_categories(me_id, team_id, &changed)
+        .await
+}
+
+/// Sets one team's direct-messages category to `sorting`.
+async fn sort_directs(
+    rest: &matterless_core::rest::RestClient,
+    me_id: &str,
+    team_id: &str,
+    sorting: &str,
+) -> matterless_core::Result<()> {
+    let held = rest.sidebar_categories(me_id, team_id).await?;
+    let changed: Vec<matterless_core::model::SidebarCategory> = held
+        .categories
+        .iter()
+        .filter(|category| category.category_type == "direct_messages")
+        .filter(|category| category.sorting != sorting)
+        .map(|category| matterless_core::model::SidebarCategory {
+            sorting: sorting.to_string(),
+            ..category.clone()
+        })
+        .collect();
     if changed.is_empty() {
         return Ok(());
     }

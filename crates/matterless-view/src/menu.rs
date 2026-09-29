@@ -416,12 +416,15 @@ impl Menu {
         if rest.ends_with("/nest") {
             return None;
         }
-        // A row that asks a question arms instead of firing.
+        // A row that asks a question arms instead of firing, and a row with a
+        // list behind it opens the list.
         if let Some(item) = self.items.iter().find(|item| item.id == rest)
-            && item.inline
             && !item.children.is_empty()
         {
-            self.armed = Some(item.id.clone());
+            match item.inline {
+                true => self.armed = Some(item.id.clone()),
+                false => self.nested = Some(item.id.clone()),
+            }
             return None;
         }
         let known = self
@@ -435,6 +438,18 @@ impl Menu {
         let chosen = (self.about.clone(), rest.to_string());
         self.hide();
         Some(chosen)
+    }
+
+    /// Follows the pointer, which is what opens and shuts a nested list.
+    /// Answers whether that changed.
+    pub fn hover(&mut self, input: &Input) -> bool {
+        if !self.open() {
+            return false;
+        }
+        let nested = self.hovered_nest(input);
+        let changed = nested != self.nested;
+        self.nested = nested;
+        changed
     }
 
     /// Which nested list the pointer is keeping open: the parent row, the list
@@ -800,7 +815,8 @@ mod tests {
             .find(|placed| placed.name == "menu/move")
             .expect("the row");
         hover(&mut input, &boxes, row.rect);
-        menu.react(&input);
+        // A move, with no click: `react` only runs on a press.
+        assert!(menu.hover(&input));
         let open = menu.boxes(window());
         assert!(open.iter().any(|placed| placed.name == "menu/move.a"));
 
@@ -811,12 +827,49 @@ mod tests {
             .find(|placed| placed.name == "menu/mute")
             .expect("the other row");
         hover(&mut input, &open, other.rect);
-        menu.react(&input);
+        assert!(menu.hover(&input));
         assert!(
             !menu
                 .boxes(window())
                 .iter()
                 .any(|placed| placed.name == "menu/move.a")
+        );
+    }
+
+    /// A press on the row a list hangs off opens the list; it is not a choice,
+    /// and shutting the menu on it left the list out of reach.
+    #[test]
+    fn pressing_a_nesting_row_opens_its_list() {
+        let mut menu = Menu::default();
+        menu.show(
+            "direct_messages",
+            Anchor::At(100.0, 100.0),
+            Style::channel(),
+            vec![Item::new("sort", "Sort").nests(vec![
+                Item::new("sort.alpha", "Alphabetically"),
+                Item::new("sort.recent", "Recent activity"),
+            ])],
+        );
+        let boxes = menu.boxes(window());
+        let row = boxes
+            .iter()
+            .find(|placed| placed.name == "menu/sort")
+            .expect("the row");
+        let mut input = Input::default();
+        press(&mut input, &boxes, row.rect);
+        assert_eq!(menu.react(&input), None);
+        assert!(menu.open(), "still open");
+
+        let boxes = menu.boxes(window());
+        let choice = boxes
+            .iter()
+            .find(|placed| placed.name == "menu/sort.alpha")
+            .expect("the list is open");
+        let mut input = Input::default();
+        press(&mut input, &boxes, choice.rect);
+        assert_eq!(
+            menu.react(&input),
+            Some(("direct_messages".to_string(), "sort.alpha".to_string()))
         );
     }
 

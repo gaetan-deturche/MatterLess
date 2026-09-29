@@ -184,6 +184,31 @@ fn direct_messages_from_every_team_are_listed_once() {
     assert_eq!(groups[0].channels.len(), 1);
 }
 
+/// Direct messages follow their category's sorting: recent activity unless
+/// the reader chose alphabetical.
+#[test]
+fn direct_messages_are_sorted_as_their_category_says() {
+    let order = |sorting: &str| {
+        let summaries = vec![
+            summary("b", "bob", 300),
+            summary("a", "Alice", 100),
+            summary("c", "carol", 200),
+        ];
+        let categories = vec![(
+            category("Directs", "direct_messages", sorting, 0),
+            vec!["b".into(), "a".into(), "c".into()],
+        )];
+        arrange(summaries, categories, &HashMap::new(), &HashMap::new())[0]
+            .channels
+            .iter()
+            .map(|channel| channel.id.clone())
+            .collect::<Vec<String>>()
+    };
+    assert_eq!(order("recent"), ["b", "c", "a"]);
+    assert_eq!(order(""), ["b", "c", "a"]);
+    assert_eq!(order("alpha"), ["a", "b", "c"]);
+}
+
 /// A channel joined seconds ago is in no category until the server says so, and
 /// must still be reachable.
 #[test]

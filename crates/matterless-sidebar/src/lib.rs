@@ -171,6 +171,7 @@ pub fn arrange(
 
     let mut groups: Vec<Group> = Vec::new();
     let mut directs: Option<Group> = None;
+    let mut directs_sorting = String::new();
     let mut placed: HashSet<String> = HashSet::new();
 
     for (category, channel_ids) in categories {
@@ -181,6 +182,9 @@ pub fn arrange(
         sort_group(&mut channels, &category.sorting);
 
         if category.category_type == "direct_messages" {
+            if directs.is_none() {
+                directs_sorting = category.sorting.clone();
+            }
             // Merged across teams: the same conversations, listed once.
             let group = directs.get_or_insert_with(|| Group {
                 id: "direct_messages".to_string(),
@@ -243,9 +247,14 @@ pub fn arrange(
         )
     });
 
-    // DMs last, as they are in each team's own order.
+    // DMs last, as they are in each team's own order. Alphabetical only when
+    // the reader chose it: recent activity is the server's default for them.
     if let Some(mut group) = directs {
-        sort_group(&mut group.channels, "recent");
+        let sorting = match directs_sorting.as_str() {
+            "alpha" => "alpha",
+            _ => "recent",
+        };
+        sort_group(&mut group.channels, sorting);
         groups.push(group);
     }
 

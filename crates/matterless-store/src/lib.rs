@@ -945,14 +945,18 @@ impl Store {
         is_root: bool,
         mine: bool,
         mentions_me: bool,
+        at: i64,
     ) -> Result<()> {
         let connection = self.lock();
+        // `last_post_at` too, or a conversation sorted by recent activity only
+        // rises to the top on the next full channel refresh.
         connection.execute(
             "UPDATE channels SET
                 total_msg_count = total_msg_count + 1,
-                total_msg_count_root = total_msg_count_root + ?2
+                total_msg_count_root = total_msg_count_root + ?2,
+                last_post_at = MAX(last_post_at, ?3)
              WHERE id = ?1",
-            params![channel_id, i64::from(is_root)],
+            params![channel_id, i64::from(is_root), at],
         )?;
         if mine {
             connection.execute(
@@ -1244,6 +1248,18 @@ impl Store {
             }
         }
         transaction.commit()?;
+        Ok(())
+    }
+
+    /// Sorts every team's direct messages `alpha` or `recent` ahead of the
+    /// server agreeing, so the list reorders on the click.
+    pub fn sort_directs(&self, sorting: &str) -> Result<()> {
+        let connection = self.lock();
+        connection.execute(
+            "UPDATE sidebar_categories SET sorting = ?1
+             WHERE category_type = 'direct_messages'",
+            params![sorting],
+        )?;
         Ok(())
     }
 

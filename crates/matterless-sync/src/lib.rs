@@ -278,6 +278,7 @@ impl SyncEngine {
                         !post.is_reply(),
                         post.user_id == context.me.id,
                         mentions_me,
+                        post.create_at,
                     )?;
                 }
                 let mut deltas = vec![delta];
