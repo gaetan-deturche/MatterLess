@@ -2244,8 +2244,26 @@ impl App {
             // Answered by the panel it was pressed in, which is the only thing
             // that knows how tall the row becomes. It never reaches here.
             Press::Whole(_) => {}
+            // A link to a message on this server is followed here, as its
+            // quoted card is, when the message is in the store.
             Press::Link(href) => {
-                matterless_view::open::link(&href);
+                let held = matterless_view::feed::permalinked(&self.server, &href).and_then(|id| {
+                    self.store
+                        .as_ref()
+                        .and_then(|store| store.post(&id).ok().flatten())
+                });
+                match held {
+                    Some(post) => self.press(
+                        Press::Post {
+                            channel_id: post.channel_id,
+                            post_id: post.id,
+                        },
+                        at,
+                    ),
+                    None => {
+                        matterless_view::open::link(&href);
+                    }
+                }
             }
             // By name, because that is all a `~channel` in a message carries.
             // A name this store has never met is not an error worth a dialog:
@@ -2271,15 +2289,39 @@ impl App {
                 channel_id,
                 post_id,
             } => {
+                // A reply under collapsed threads is no row of its channel: its
+                // root is, and the reply is in the thread beside it.
+                let root = self
+                    .store
+                    .as_ref()
+                    .and_then(|store| store.post(&post_id).ok().flatten())
+                    .map(|post| post.root_id)
+                    .filter(|root| {
+                        !root.is_empty()
+                            && self.threads == matterless_core::model::ThreadMode::Collapsed
+                    });
+                let target = root.clone().unwrap_or_else(|| post_id.clone());
                 if self.sidebar.selected.as_deref() != Some(channel_id.as_str()) {
                     self.sidebar.selected = Some(channel_id.clone());
                     self.open_channel(&channel_id);
                 }
+                if let Some(root) = &root
+                    && self.open_root().as_deref() != Some(root.as_str())
+                {
+                    self.open_thread(root);
+                }
+                // After the thread opens, which narrows the channel beside it.
                 let within = self.stream_rect();
-                if !self.stream.to_post(&mut self.fonts, &post_id, within) {
+                if !self.stream.to_post(&mut self.fonts, &target, within) {
                     // Older than the pages loaded so far. Saying so beats
                     // leaving the reader somewhere arbitrary and silent.
-                    println!("{post_id} is further back than this channel is loaded");
+                    println!("{target} is further back than this channel is loaded");
+                }
+                if root.is_some()
+                    && let Some(within) = self.thread_stream_rect()
+                    && let Some(thread) = self.thread.as_mut()
+                {
+                    thread.to_post(&mut self.fonts, &post_id, within);
                 }
             }
         }
@@ -5387,6 +5429,10 @@ impl App {
             .chain(replies.iter().map(|reply| reply.user_id.clone()))
             .chain(matterless_render::reactors(std::slice::from_ref(&root)))
             .chain(matterless_render::reactors(&replies))
+            .chain(matterless_render::quoted_authors(std::slice::from_ref(
+                &root,
+            )))
+            .chain(matterless_render::quoted_authors(&replies))
             .collect();
         people.sort();
         people.dedup();

@@ -1790,6 +1790,11 @@ fn a_permalink_preview_quotes_the_message() {
             "post": serde_json::to_value(&quoted).expect("post as json"),
         }),
     }];
+    // Looked up with the page's own authors, or the card is headed by an id.
+    assert_eq!(
+        crate::quoted_authors(std::slice::from_ref(&carrier)).collect::<Vec<_>>(),
+        ["bob"]
+    );
     let mut named = options(ThreadMode::Flat);
     named.author_names.insert("bob".into(), "bob.jones".into());
 

@@ -1859,6 +1859,35 @@ fn a_message_still_waiting_to_be_shaped_can_still_be_jumped_to() {
     assert!(!stream.to_post(&mut fonts, "never-loaded", within));
 }
 
+/// Following a link in a channel just opened, whose older rows are waiting
+/// with their remembered heights: the message lands on screen, not the height
+/// of those rows further up.
+#[test]
+fn a_jump_counts_the_rows_still_waiting_above() {
+    let mut fonts = Fonts::new();
+    let within = panel();
+    let mut stream = Stream::new("stream");
+    stream.plan(many(200), false);
+    stream.lay_out(&mut fonts, within.width);
+    let measured: std::collections::HashMap<String, f32> = stream.measured().into_iter().collect();
+
+    let mut opened = Stream::new("stream");
+    opened.plan(many(200), true);
+    opened.lay_out(&mut fonts, within.width);
+    opened.cover(&mut fonts, within.width, within);
+    opened.foresee(&measured);
+    assert!(opened.knows_its_length() && opened.waiting() > 0);
+
+    assert!(opened.to_post(&mut fonts, "p150", within), "not found");
+    let rect = opened
+        .row_rect("p150", within)
+        .expect("found but not brought into view");
+    assert!(
+        rect.y >= within.y && rect.bottom() <= within.bottom(),
+        "{rect:?}"
+    );
+}
+
 /// A reaction on a message the reader has not scrolled back to yet still
 /// belongs on the page. Asked over the shaped rows alone, the window would
 /// have skipped the re-read and kept a stale pill there.

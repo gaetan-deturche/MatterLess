@@ -156,6 +156,7 @@ pub fn rows_of(
         .iter()
         .map(|post| post.user_id.clone())
         .chain(matterless_render::reactors(&posts))
+        .chain(matterless_render::quoted_authors(&posts))
         .collect();
     authors.sort();
     authors.dedup();
@@ -276,6 +277,7 @@ pub fn rows_from(
             .iter()
             .map(|post| post.user_id.clone())
             .chain(matterless_render::reactors(&posts))
+            .chain(matterless_render::quoted_authors(&posts))
             .collect();
         ids.sort();
         ids.dedup();
@@ -367,6 +369,25 @@ pub fn permalink(store: &Store, server: &str, post_id: &str) -> Option<String> {
     ))
 }
 
+/// The message a link names, when it is a permalink on this server:
+/// `<server>/<team>/pl/<post id>`, which is what `permalink` writes.
+pub fn permalinked(server: &str, href: &str) -> Option<String> {
+    let server = server.trim_end_matches('/');
+    if server.is_empty() {
+        return None;
+    }
+    let path = href.strip_prefix(server)?.strip_prefix('/')?;
+    let path = path.split(['?', '#']).next().unwrap_or_default();
+    let mut parts = path.split('/');
+    let (Some(team), Some("pl"), Some(post_id), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return None;
+    };
+    let id_like = post_id.len() == 26 && post_id.chars().all(|c| c.is_ascii_alphanumeric());
+    (!team.is_empty() && id_like).then(|| post_id.to_string())
+}
+
 /// The custom emoji a page of rows uses, by name to the id behind their image.
 ///
 /// A standard emoji is a character the parser already resolved. A custom one is
@@ -441,6 +462,35 @@ mod tests {
     use super::*;
     use matterless_render::{PostRow, ReactionSummary};
     use std::sync::Arc;
+
+    #[test]
+    fn a_link_to_a_message_on_this_server_names_it() {
+        let server = "https://mattermost.sloclap.net/";
+        let id = "xa71fj6dr3ro78b518ji61kuua";
+        assert_eq!(
+            permalinked(
+                server,
+                &format!("https://mattermost.sloclap.net/p4/pl/{id}")
+            ),
+            Some(id.to_string())
+        );
+        assert_eq!(
+            permalinked(
+                server,
+                &format!("https://mattermost.sloclap.net/p4/pl/{id}?x=1")
+            ),
+            Some(id.to_string())
+        );
+        for other in [
+            format!("https://elsewhere.net/p4/pl/{id}"),
+            "https://mattermost.sloclap.net/p4/pl/short".to_string(),
+            format!("https://mattermost.sloclap.net/p4/channels/{id}"),
+            format!("https://mattermost.sloclap.net/p4/pl/{id}/more"),
+        ] {
+            assert_eq!(permalinked(server, &other), None, "{other}");
+        }
+        assert_eq!(permalinked("", &format!("/p4/pl/{id}")), None);
+    }
 
     fn reacted_with(names: &[&str]) -> Vec<Row> {
         vec![Row::Post {

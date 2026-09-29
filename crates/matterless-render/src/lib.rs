@@ -74,6 +74,22 @@ pub fn reactors(posts: &[Post]) -> impl Iterator<Item = String> + '_ {
         .map(|reaction| reaction.user_id.clone())
 }
 
+/// Whoever wrote the messages these posts quote: named with the authors, or
+/// a quoted card is headed by an id.
+pub fn quoted_authors(posts: &[Post]) -> impl Iterator<Item = String> + '_ {
+    posts
+        .iter()
+        .flat_map(|post| post.metadata.embeds.iter())
+        .filter(|embed| embed.embed_type == "permalink")
+        .filter_map(|embed| {
+            embed
+                .data
+                .pointer("/post/user_id")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        })
+}
+
 /// A preview drawn under a message.
 ///
 /// Two shapes, so an enum rather than one struct with half its fields empty:

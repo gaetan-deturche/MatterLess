@@ -879,7 +879,10 @@ impl Stream {
         while self.above.iter().any(|row| names(row, post_id)) {
             self.fill(fonts, within.width, 24);
         }
-        let mut top = 0.0;
+        // From where the rows are drawn, which is below the ones still waiting:
+        // a channel just opened counts their remembered height, and a jump
+        // that left it out landed that far up the conversation.
+        let mut top = self.theme.pad_top + self.foreseen;
         for (index, laid) in self.laid.iter().enumerate() {
             if self.rows.get(index).is_some_and(|row| names(row, post_id)) {
                 self.scroll = (top - within.height / 3.0).clamp(0.0, self.reach(within));
