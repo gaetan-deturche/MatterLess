@@ -1,9 +1,8 @@
 //! Where the reader has been, for the two buttons under the thumb.
 //!
-//! A history of *places*, which in this window means conversations: a thread
-//! is a pane beside the one you are in rather than somewhere else to be, and
-//! a permalink lands in a channel, so it is recorded as an arrival in that
-//! channel like any other.
+//! A history of *places*: a conversation, and the thread open beside it if
+//! any, so opening or closing a thread is a step. A permalink lands in a
+//! channel, so it is recorded as an arrival in that channel like any other.
 //!
 //! Walked rather than popped, exactly as a browser does. Going back and then
 //! on again has to return where you were, so nothing is thrown away until a

@@ -5477,6 +5477,10 @@ impl App {
         self.replying_to = Some(thread_name(root_id));
         self.resume(Which::Thread, &thread_name(root_id));
         self.thread = Some(stream);
+        // A thread open beside a conversation is a place of its own.
+        if let Some(column) = self.sidebar.selected.clone() {
+            self.remember_the_place(&format!("{column}#{root_id}"));
+        }
         // Writing is what the pane is for, so it opens focused.
         self.input.focus_on(THREAD_COMPOSER);
         // The pane takes width from the channel, so both have to be laid out
@@ -5510,6 +5514,9 @@ impl App {
             return;
         };
         let _ = thread;
+        if let Some(column) = self.sidebar.selected.clone() {
+            self.remember_the_place(&column);
+        }
         // With no thread open there is no thread's channel, and a stale one
         // would send the next reply somewhere nobody is looking.
         self.thread_in = None;
@@ -6057,7 +6064,8 @@ impl App {
         self.redraw();
     }
 
-    /// Notes that the reader has arrived somewhere, for the back button.
+    /// Notes that the reader has arrived somewhere, for the back button: a
+    /// conversation, or `conversation#root` with a thread open beside it.
     ///
     /// Nothing is recorded while stepping. A step is a move *through* the
     /// history, and a history that recorded its own steps could never be
@@ -6079,18 +6087,29 @@ impl App {
             true => self.visited.on(),
             false => self.visited.back(),
         };
-        let Some(channel) = wanted.map(str::to_string) else {
+        let Some(place) = wanted.map(str::to_string) else {
             return;
+        };
+        let (channel, root) = match place.split_once('#') {
+            Some((channel, root)) => (channel, Some(root)),
+            None => (place.as_str(), None),
         };
         // Through the same `open_channel` a click takes, with a flag rather
         // than an opener of its own: the two would otherwise drift about what
         // opening a conversation involves, and it involves a dozen things.
         self.stepping = true;
-        self.sidebar.selected = Some(channel.clone());
-        self.open_channel(&channel);
+        if self.sidebar.selected.as_deref() != Some(channel) {
+            self.sidebar.selected = Some(channel.to_string());
+            self.open_channel(channel);
+        }
+        match root {
+            Some(root) if self.open_root().as_deref() != Some(root) => self.open_thread(root),
+            None if self.thread.is_some() => self.close_thread(),
+            _ => {}
+        }
         self.stepping = false;
         println!(
-            "stepped {} to {channel}",
+            "stepped {} to {place}",
             match on {
                 true => "on",
                 false => "back",
