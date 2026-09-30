@@ -190,6 +190,13 @@ pub struct Remembered {
 }
 
 impl Remembered {
+    /// Whether a picture is held at this size, without touching its place.
+    pub fn holds(&self, file_id: &str, within: (u32, u32)) -> bool {
+        self.kept
+            .iter()
+            .any(|one| one.file_id == file_id && one.within == within)
+    }
+
     /// A picture as fitted to this window's size, if it is held.
     pub fn get(&mut self, file_id: &str, within: (u32, u32)) -> Option<(u32, u32, &[u8])> {
         let at = self
@@ -361,6 +368,21 @@ impl Viewer {
     /// What is on screen, if anything is.
     pub fn current(&self) -> Option<&Looking> {
         self.shown.get(self.at)
+    }
+
+    /// Whether what is on screen has arrived.
+    pub fn arrived_yet(&self) -> bool {
+        self.size.is_some()
+    }
+
+    /// The others, nearest first -- next, previous, the one after, the one
+    /// before -- which is the order a reader steps to them in.
+    pub fn neighbours(&self) -> Vec<Looking> {
+        let count = self.shown.len();
+        (1..count)
+            .flat_map(|step| [self.at + step, self.at.wrapping_sub(step)])
+            .filter_map(|at| self.shown.get(at).cloned())
+            .collect()
     }
 
     /// The bytes arrived, and this is how big they turned out to be.
@@ -875,6 +897,24 @@ mod tests {
                 youtube: None,
             })
             .collect()
+    }
+
+    #[test]
+    fn neighbours_come_nearest_first() {
+        let five: Vec<Looking> = (0..5)
+            .map(|at| Looking {
+                file_id: format!("f{at}"),
+                ..three()[0].clone()
+            })
+            .collect();
+        let mut viewer = Viewer::default();
+        viewer.show(five, "f1");
+        let order: Vec<String> = viewer
+            .neighbours()
+            .into_iter()
+            .map(|one| one.file_id)
+            .collect();
+        assert_eq!(order, ["f2", "f0", "f3", "f4"]);
     }
 
     fn window() -> Rect {

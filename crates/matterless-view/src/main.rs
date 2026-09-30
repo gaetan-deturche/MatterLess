@@ -566,6 +566,10 @@ struct App {
     remembered: matterless_view::viewer::Remembered,
     /// The frames of the picture in the viewer, when it moves, by its file id.
     looked_moving: matterless_view::moving::Moving,
+    /// The viewer's other picture being fetched ahead of the reader, and
+    /// those already asked for since the viewer opened.
+    preloading: Option<String>,
+    preload_tried: std::collections::HashSet<String>,
     /// The video in the viewer, and which attachment it is.
     film: Option<(String, matterless_media::Player)>,
     /// Messages written but not yet confirmed, held in memory and nowhere else:
@@ -947,6 +951,8 @@ impl App {
             shelf: None,
             remembered: matterless_view::viewer::Remembered::default(),
             looked_moving: matterless_view::moving::Moving::default(),
+            preloading: None,
+            preload_tried: std::collections::HashSet::new(),
             film: None,
             outstanding: Arc::new(matterless_render::pending::PendingPosts::default()),
             asked: std::collections::HashSet::new(),
@@ -1892,18 +1898,23 @@ impl App {
                 rgba,
                 frames,
             } => {
-                if self
+                let current = self
                     .viewer
                     .current()
-                    .is_some_and(|one| one.file_id == file_id)
-                    && let Some(view) = self.view.as_mut()
-                {
+                    .is_some_and(|one| one.file_id == file_id);
+                if current && let Some(view) = self.view.as_mut() {
                     view.show(width, height, &rgba);
                     self.viewer.arrived(&file_id, (width, height));
+                }
+                if self.preloading.as_deref() == Some(file_id.as_str()) {
+                    self.preloading = None;
                 }
                 match frames {
                     // Played in the viewer. Not remembered as a still: opening
                     // it again from memory would show a GIF that does not move.
+                    // One fetched ahead is dropped rather than put in place of
+                    // the one playing.
+                    Some(_) if !current => {}
                     Some(frames) => {
                         self.looked_moving = Default::default();
                         self.looked_moving.keep(
@@ -1918,6 +1929,7 @@ impl App {
                     }
                     None => self.remembered.keep(&file_id, within, width, height, rgba),
                 }
+                self.preload_gallery();
             }
             Update::Film { file_id, path } => self.open_film(&file_id, &path),
             Update::Text { file_id, lines } => self.viewer.read(&file_id, lines),
@@ -1933,6 +1945,10 @@ impl App {
             Update::LookFailed { file_id, why } => {
                 eprintln!("looking at {file_id}: {why}");
                 self.viewer.gave_up(&file_id, &why);
+                if self.preloading.as_deref() == Some(file_id.as_str()) {
+                    self.preloading = None;
+                    self.preload_gallery();
+                }
             }
             Update::SendSettled {
                 pending_post_id,
@@ -3573,8 +3589,46 @@ impl App {
                 _ => None,
             })
             .unwrap_or_default();
+        // A fetch still out for the last gallery lands in memory all the same.
+        self.preloading = None;
+        self.preload_tried.clear();
         if let Some(one) = self.viewer.show(all, file_id) {
             self.fetch_looked(&one);
+        }
+    }
+
+    /// Fetches the viewer's other pictures ahead of the reader, one at a time
+    /// and nearest first, once the one showing has arrived: stepping to one
+    /// is then a texture upload. One at a time so the picture asked for is
+    /// never queued behind the ones it was not.
+    fn preload_gallery(&mut self) {
+        if self.preloading.is_some() || !self.viewer.open() || !self.viewer.arrived_yet() {
+            return;
+        }
+        let size = self.size;
+        let Some(next) = self.viewer.neighbours().into_iter().find(|one| {
+            !one.video
+                && !one.text
+                && one.youtube.is_none()
+                && !self.remembered.holds(&one.file_id, size)
+                && !self.preload_tried.contains(&one.file_id)
+        }) else {
+            return;
+        };
+        self.preload_tried.insert(next.file_id.clone());
+        let asked = self.shelf.as_ref().is_some_and(|shelf| {
+            shelf.look(next.file_id.clone(), next.original, next.linked, size)
+        }) || self.link.as_ref().is_some_and(|link| {
+            link.send(matterless_view::live::Ask::Look {
+                file_id: next.file_id.clone(),
+                original: next.original,
+                linked: next.linked,
+                within: size,
+            })
+        });
+        if asked {
+            println!("fetching ahead: {}", next.file_id);
+            self.preloading = Some(next.file_id);
         }
     }
 
@@ -3605,6 +3659,11 @@ impl App {
         {
             view.show(width, height, rgba);
             self.viewer.arrived(&one.file_id, (width, height));
+            self.preload_gallery();
+            return;
+        }
+        // Already on its way, fetched ahead: it is shown when it lands.
+        if self.preloading.as_deref() == Some(one.file_id.as_str()) {
             return;
         }
         if let Some(shelf) = self.shelf.as_ref()
