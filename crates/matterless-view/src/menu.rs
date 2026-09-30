@@ -48,8 +48,12 @@ pub struct Item {
     /// The 16px column before the label. Empty in the message menu, which has
     /// no such column.
     pub glyph: String,
+    /// The glyph's own colour, where the colour is the meaning: a status.
+    pub glyph_ink: Option<[u8; 3]>,
     pub label: String,
     pub tint: Tint,
+    /// The choice already made, ticked at the row's far end.
+    pub chosen: bool,
     /// A separator rather than a button.
     pub rule: bool,
     /// What this row leads to: the choices of a "Delete..." or a "Remind
@@ -82,6 +86,16 @@ impl Item {
 
     pub fn marked(mut self, glyph: &str) -> Self {
         self.glyph = glyph.to_string();
+        self
+    }
+
+    pub fn inked(mut self, ink: [u8; 3]) -> Self {
+        self.glyph_ink = Some(ink);
+        self
+    }
+
+    pub fn chosen(mut self, chosen: bool) -> Self {
+        self.chosen = chosen;
         self
     }
 
@@ -564,6 +578,17 @@ impl Menu {
                 // its size: a mark is a picture with detail inside it, and at
                 // the size of a word the font hints that detail into stems
                 // too hard to read.
+                Run::mark(14.0),
+            );
+            let ink = item.glyph_ink.unwrap_or(into.palette.soft);
+            into.scene.glyphs(glyphs, ink, into.palette.faint);
+        }
+        if item.chosen {
+            let glyphs = into.painter.run(
+                into.fonts,
+                matterless_layout::marks::CHECK,
+                rect.right() - style.pad_x - 14.0,
+                middle - 3.0,
                 Run::mark(14.0),
             );
             into.scene

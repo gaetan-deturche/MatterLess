@@ -105,6 +105,14 @@ pub const SEARCH: &str = "\u{e151}";
 pub const SORT: &str = "\u{e37d}";
 /// The choice already made.  `check`
 pub const CHECK: &str = "\u{e06c}";
+/// Statuses, as the official client draws them: here  `check-circle`,
+pub const ONLINE: &str = "\u{e07c}";
+/// away  `clock`,
+pub const AWAY: &str = "\u{e087}";
+/// do not disturb  `circle-minus`,
+pub const BUSY: &str = "\u{e07e}";
+/// and offline  `circle`.
+pub const OFFLINE: &str = "\u{e076}";
 
 /// What the message box offers for marking a message up.
 ///

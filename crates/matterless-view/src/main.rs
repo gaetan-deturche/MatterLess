@@ -3100,20 +3100,21 @@ impl App {
         let Some((x, y)) = self.input.pointer_at() else {
             return;
         };
+        use matterless_layout::marks;
         let now = self.presence.get(&self.me).cloned().unwrap_or_default();
+        let palette = &self.palette;
         let items = [
-            ("online", "Online"),
-            ("away", "Away"),
-            ("dnd", "Do not disturb"),
-            ("offline", "Offline"),
+            ("online", "Online", marks::ONLINE, palette.ok),
+            ("away", "Away", marks::AWAY, palette.flag),
+            ("dnd", "Do not disturb", marks::BUSY, palette.danger),
+            ("offline", "Offline", marks::OFFLINE, palette.faint),
         ]
         .into_iter()
-        .map(|(status, label)| {
-            Item::new(&format!("status.{status}"), label).marked(if now == status {
-                matterless_layout::marks::CHECK
-            } else {
-                ""
-            })
+        .map(|(status, label, mark, ink)| {
+            Item::new(&format!("status.{status}"), label)
+                .marked(mark)
+                .inked(ink)
+                .chosen(now == status)
         })
         .collect();
         self.menu.show(
