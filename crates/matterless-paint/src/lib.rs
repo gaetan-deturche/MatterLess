@@ -1086,7 +1086,12 @@ impl Painter {
                         pieces.push(Piece::Fill {
                             x,
                             y,
-                            width: 120.0,
+                            // The picture's own width: a fixed one showed
+                            // past a narrow picture and into the gap beside it.
+                            width: match block.wrap > 0.0 {
+                                true => block.wrap,
+                                false => 120.0,
+                            },
                             height: (block.height - 4.0).max(1.0),
                             colour: palette.surface,
                             radius: 0.0,
