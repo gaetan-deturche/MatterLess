@@ -291,6 +291,8 @@ pub enum Ask {
         team_id: String,
         category_id: String,
     },
+    /// Set the reader's own status: `online`, `away`, `dnd` or `offline`.
+    SetStatus { status: String },
     /// Order the direct messages `alpha` or `recent`, in every team's
     /// category, so the official client agrees.
     SortDirects { sorting: String },
@@ -1140,6 +1142,22 @@ async fn run(
                             Err(error) => eprintln!("moving {channel_id}: {error}"),
                         }
                     }
+                    Ask::SetStatus { status } => match rest.set_my_status(&me_id, &status).await {
+                        Ok(now) => {
+                            println!("status set to {}", now.status);
+                            wake.wake(Update::Statuses(vec![(
+                                now.user_id,
+                                now.status,
+                                now.last_activity_at,
+                            )]));
+                        }
+                        Err(error) => {
+                            eprintln!("setting the status: {error}");
+                            // What it really is, over what the window assumed.
+                            let (rest, wake, me) = (rest.clone(), wake.clone(), vec![me_id.clone()]);
+                            tokio::spawn(async move { who_is_around(&rest, &me, &wake).await });
+                        }
+                    },
                     Ask::SortDirects { sorting } => {
                         let teams = engine.store().teams().unwrap_or_default();
                         let mut sorted = true;

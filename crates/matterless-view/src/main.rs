@@ -2035,6 +2035,10 @@ impl App {
                 for delta in &deltas {
                     if let matterless_sync::Delta::StatusChanged { user_id, status } = delta {
                         self.presence.insert(user_id.clone(), status.clone());
+                        // The reader's own is on the strip, which holds a copy.
+                        if user_id == &self.me {
+                            self.rebuild_sidebar();
+                        }
                     }
                     if let matterless_sync::Delta::Typing {
                         channel_id,
@@ -3090,6 +3094,36 @@ impl App {
         );
     }
 
+    /// The statuses a reader can set themselves, offered from their name.
+    fn offer_status_menu(&mut self) {
+        use matterless_view::menu::{Item, Style};
+        let Some((x, y)) = self.input.pointer_at() else {
+            return;
+        };
+        let now = self.presence.get(&self.me).cloned().unwrap_or_default();
+        let items = [
+            ("online", "Online"),
+            ("away", "Away"),
+            ("dnd", "Do not disturb"),
+            ("offline", "Offline"),
+        ]
+        .into_iter()
+        .map(|(status, label)| {
+            Item::new(&format!("status.{status}"), label).marked(if now == status {
+                matterless_layout::marks::CHECK
+            } else {
+                ""
+            })
+        })
+        .collect();
+        self.menu.show(
+            "status",
+            matterless_view::menu::Anchor::At(x, y),
+            Style::channel(),
+            items,
+        );
+    }
+
     /// Suggestions for the misspelled word under a right-click in a message
     /// box, and a way to say it is right.
     fn offer_spelling_menu(&mut self) {
@@ -3201,6 +3235,20 @@ impl App {
         }
         if let Some(rest) = chosen.strip_prefix("channel.") {
             self.act_on_channel_menu(about, rest);
+            return;
+        }
+        if let Some(status) = chosen.strip_prefix("status.") {
+            if !matches!(status, "online" | "away" | "dnd" | "offline") {
+                return;
+            }
+            // Shown at once; the server's answer, or a failure, corrects it.
+            self.presence.insert(self.me.clone(), status.to_string());
+            self.rebuild_sidebar();
+            if let Some(link) = self.link.as_ref() {
+                link.send(matterless_view::live::Ask::SetStatus {
+                    status: status.to_string(),
+                });
+            }
             return;
         }
         if let Some(sorting) = chosen.strip_prefix("directs.") {
@@ -8288,6 +8336,7 @@ impl App {
         const BUTTONS: [&str; 4] = ["/send", "/attach", "/close", "/newest"];
         name.starts_with("sidebar/channel/")
             || name.starts_with("sidebar/team/")
+            || name == "sidebar/me"
             || name == matterless_view::sidebar::NEW
             || PANELS
                 .iter()
@@ -9264,6 +9313,12 @@ impl ApplicationHandler<Update> for App {
                     self.switcher
                         .instead(matterless_view::switcher::Asking::Start);
                     self.input = input;
+                    self.redraw();
+                    return;
+                }
+                // The reader's own name, which is where their status is set.
+                if self.input.clicked_on("sidebar/me") {
+                    self.offer_status_menu();
                     self.redraw();
                     return;
                 }
