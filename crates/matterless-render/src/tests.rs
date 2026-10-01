@@ -1918,6 +1918,6 @@ fn a_video_without_a_size_gets_a_box() {
             ..FileLayout::default()
         },
     );
-    assert!(gallery.box_width > 0 && gallery.box_height > 0);
-    assert!(gallery.box_width <= 120);
+    // As wide as a thumbnail beside it, not the 16 by 9 pixels it once was.
+    assert_eq!((gallery.box_width, gallery.box_height), (120, 68));
 }
