@@ -7409,8 +7409,32 @@ impl App {
             self.select_words();
             self.react();
         }
+        // A held scrollbar follows the hand. These panels are otherwise only
+        // answered on a press, a release or a wheel, so the list stood still
+        // until the button came up.
+        if self
+            .input
+            .pressed()
+            .is_some_and(|name| name.ends_with("/scrollbar"))
+        {
+            self.follow_the_bar(&boxes);
+        }
         self.watch_pointer();
         self.redraw();
+    }
+
+    /// Moves the lists whose scrollbar is held to where the pointer has it.
+    fn follow_the_bar(&mut self, boxes: &[Placed]) {
+        let sidebar = self.sidebar_rect();
+        self.sidebar.react(&self.input, boxes, sidebar);
+        let stream = self.stream_rect();
+        self.stream.react(&self.input, boxes, stream);
+        self.want_older();
+        if let Some(within) = self.thread_stream_rect()
+            && let Some(thread) = self.thread.as_mut()
+        {
+            thread.react(&self.input, boxes, within);
+        }
     }
 
     /// Takes a turn of the wheel, to be given over the next few frames.
