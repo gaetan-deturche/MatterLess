@@ -337,13 +337,6 @@ const MARGIN: f32 = 12.0;
 const MAX_LINES: usize = 8;
 /// What the stylesheet cuts the box's corners by.
 const BOX: f32 = 8.0;
-/// How far the box is lifted off the conversation behind it.
-///
-/// Small: this is furniture that stays put, not a card that has just appeared
-/// over the window, and the shadow is there to separate it from the last
-/// message rather than to announce it. It has to stay inside `MARGIN`, which
-/// is the only room there is between the box and the edge of its own clip.
-const DROP: f32 = 6.0;
 /// The buttons inside the box: one to attach, one to send.
 const BUTTON: f32 = 26.0;
 const SEND: f32 = 52.0;
@@ -2016,16 +2009,12 @@ impl Composer {
         } else {
             palette.rule
         };
-        // And a shadow under it, which the border is not a substitute for:
-        // one says which box has the keyboard, the other says the box is in
-        // front of the conversation rather than part of it. A field inside a
-        // panel gets none -- the panel it sits in is already the thing that
-        // floats, and a shadow inside a shadow is just dirt.
-        let panel = match self.plain {
-            true => Panel::flat(outer, BOX),
-            false => Panel::floating(outer, BOX, DROP),
-        };
-        panel.edge(edge).fill(palette.surface).draw(scene);
+        // Flat, like any field: the border says where it is and which box has
+        // the keyboard, and it stays put rather than floating over anything.
+        Panel::flat(outer, BOX)
+            .edge(edge)
+            .fill(palette.surface)
+            .draw(scene);
 
         if self.is_empty() {
             let said = self.hint(fonts, inner.width);

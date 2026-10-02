@@ -126,6 +126,41 @@ impl Palette {
 }
 
 impl Palette {
+    /// The same roles on a light ground: dark ink on a soft off-white, panels
+    /// a step greyer, links in the app's own blue. Dark on light reads more
+    /// easily than light on dark (Buchner & Baumgartner 2007; Piepenbrock et
+    /// al. 2013) -- but not on pure white, which glares across a whole window.
+    pub fn light() -> Self {
+        Self {
+            ground: [238, 240, 243, 255],
+            surface: [228, 231, 235, 255],
+            hover: [233, 236, 239, 255],
+            raised: [219, 223, 229, 255],
+            ink: [30, 35, 43],
+            soft: [78, 87, 100],
+            faint: [104, 113, 125],
+            rule: [205, 210, 217, 255],
+            rule_soft: [219, 223, 228, 255],
+            signal: [28, 88, 217],
+            signal_soft: [214, 226, 248, 255],
+            flag: [184, 110, 0],
+            ok: [8, 140, 86],
+            danger: [204, 58, 47],
+        }
+    }
+
+    /// What dims the window behind a dialog, at `alpha` on the dark theme. A
+    /// light one is dimmed far less, in a blue-grey: black at that strength
+    /// turns a light window to mud rather than setting the dialog off it.
+    pub fn backdrop(&self, alpha: u8) -> [u8; 4] {
+        let light =
+            u16::from(self.ground[0]) + u16::from(self.ground[1]) + u16::from(self.ground[2]) > 384;
+        match light {
+            true => [16, 24, 40, (f32::from(alpha) * 0.45).round() as u8],
+            false => [0, 0, 0, alpha],
+        }
+    }
+
     /// The quieter ink as something to fill with.
     ///
     /// A bar beside a quote is the same colour as the text it belongs to, and
@@ -450,6 +485,7 @@ impl Scene {
         width: f32,
         height: f32,
         colour: [u8; 4],
+        under: [u8; 4],
         radius: f32,
         drop: f32,
     ) {
@@ -473,17 +509,32 @@ impl Scene {
         // around it, not the darkness underneath: the shadow only has to fall
         // away from that edge. Panels drawn without one had nothing for it to
         // fall away from, and no amount of darkening fixed that.
-        let spread = drop * 0.15;
+        let spread = drop * 0.1;
         let blur = drop;
-        // A radius wider than the box is not a rounder box, it is a shape the
-        // distance function has no answer for.
-        let corner = (radius + spread).min((width + height) / 4.0);
+        // Rounder than the panel by half the blur: the fade is centred on the
+        // shape's edge, and the inner half of it has corners tighter than the
+        // shape's own -- square ones, past the radius -- which is what showed
+        // below a panel's rounded corners. A radius wider than the box is not
+        // a rounder box, it is a shape the distance function has no answer for.
+        let corner = (radius + spread + blur * 0.5).min((width + height) / 4.0);
+        // On a light panel the dark-theme shadow is a bruise: there the eye
+        // has every level down to black to read it against, so a faint
+        // blue-grey does what the near-black does on the dark theme. Judged by
+        // the panel's fill, `under`, not its edge: a focused box's edge is the
+        // accent, which is dark enough to pass for a dark theme.
+        let light = u16::from(under[0]) + u16::from(under[1]) + u16::from(under[2]) > 384;
+        // Lighter than either theme first had: a shadow says the panel is in
+        // front, and past that it is only weight under it.
+        let shade = match light {
+            true => [16, 24, 40, 32],
+            false => [0, 0, 0, 140],
+        };
         self.soft(
             x - spread,
-            y - spread + drop * 0.35,
+            y - spread + drop * 0.25,
             width + spread * 2.0,
             height + spread * 2.0,
-            [0, 0, 0, 200],
+            shade,
             corner,
             blur,
         );

@@ -3977,6 +3977,26 @@ impl App {
         self.taskbar.calm(raw_window(self.window.as_ref()));
     }
 
+    /// Draws everything in a theme from now on: its palette, and the panel
+    /// letters are blended against.
+    fn wear(&mut self, theme: matterless_view::settings::Theme) {
+        self.palette = theme.palette();
+        let [red, green, blue, _] = self.palette.ground;
+        if let Some(view) = self.view.as_mut() {
+            view.ground = [red, green, blue];
+        }
+        self.redraw();
+    }
+
+    /// Writes one setting down for the next run.
+    fn keep_setting(&self, name: &str, value: &str) {
+        if let Some(store) = self.store.as_ref()
+            && let Err(error) = store.remember_setting(name, value)
+        {
+            eprintln!("keeping {name}: {error}");
+        }
+    }
+
     /// Remembers where the window is, for the next run. On every move and
     /// resize rather than on the way out: a computer shut down with the
     /// window open never says goodbye.
@@ -6752,8 +6772,26 @@ impl App {
             // to agree with -- and a click is a press and a release agreeing.
             // Every press in here died on the frame it was made.
             if let Some(did) = did {
+                // A slider being dragged keeps its press: it answers every move.
+                let dragging = matches!(did, matterless_view::settings::Did::Contrast(_));
                 match did {
                     matterless_view::settings::Did::Text(mode) => self.draw_text_as(mode),
+                    matterless_view::settings::Did::Contrast(contrast) => {
+                        if let Some(view) = self.view.as_mut() {
+                            view.contrast = contrast.amount();
+                        }
+                        self.keep_setting(
+                            matterless_view::settings::Contrast::SETTING,
+                            &contrast.stored(),
+                        );
+                    }
+                    matterless_view::settings::Did::Theme(theme) => {
+                        self.wear(theme);
+                        self.keep_setting(
+                            matterless_view::settings::Theme::SETTING,
+                            theme.stored(),
+                        );
+                    }
                     matterless_view::settings::Did::Kept(kept) => {
                         if let Some(held) = matterless_view::filecache::looked() {
                             held.set_budget(kept.bytes());
@@ -6781,7 +6819,9 @@ impl App {
                     }
                     matterless_view::settings::Did::Close => {}
                 }
-                self.input = Input::default();
+                if !dragging {
+                    self.input = Input::default();
+                }
                 // Answering changes what the card says and therefore how tall
                 // it is, and the panel drops its placement when that happens.
                 // Nothing else measures it -- a draw draws what was measured
@@ -9340,6 +9380,24 @@ impl ApplicationHandler<Update> for App {
         if let Some(view) = self.view.as_mut() {
             view.atlas
                 .rasterise_subpixel(asked == matterless_view::settings::Text::Subpixel);
+        }
+        // How firmly letters are drawn, and the theme, before the first frame.
+        let read = |name: &str| {
+            self.store
+                .as_ref()
+                .and_then(|store| store.setting(name).ok().flatten())
+        };
+        let contrast = matterless_view::settings::Contrast::read(
+            read(matterless_view::settings::Contrast::SETTING).as_deref(),
+        );
+        let theme = matterless_view::settings::Theme::read(
+            read(matterless_view::settings::Theme::SETTING).as_deref(),
+        );
+        self.settings.contrast = contrast;
+        self.settings.theme = theme;
+        self.wear(theme);
+        if let Some(view) = self.view.as_mut() {
+            view.contrast = contrast.amount();
         }
         // Already held, from before the tray was told about it.
         debug_assert!(self.window.is_some());

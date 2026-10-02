@@ -121,14 +121,15 @@ pub struct Theme {
 }
 
 impl Default for Theme {
-    /// The stylesheet's own numbers: 14px body at 1.5, a 28px avatar with an
-    /// 8px gap.
+    /// 15px body at 23px (about 1.5), a 28px avatar with an 8px gap. A pixel
+    /// over the stylesheet's 14: a lowercase two millimetres tall at 96 DPI,
+    /// comfortably over the 1.5 mm legibility studies put the floor at.
     fn default() -> Self {
         Self {
             width: 900.0,
             gutter: 36.0,
-            body_size: 14.0,
-            line_height: 21.0,
+            body_size: 15.0,
+            line_height: 23.0,
             header_height: 20.0,
             header_size: 13.5,
             row_padding: 3.0,

@@ -215,7 +215,7 @@ impl WhatsNew {
             window.y,
             window.width,
             window.height,
-            [0, 0, 0, 160],
+            palette.backdrop(160),
         );
         Panel::floating(panel, CORNER, DROP)
             .edge(palette.rule)

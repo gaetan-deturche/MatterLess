@@ -534,6 +534,10 @@ pub struct View {
     /// What stands in the fourth slot while nothing is open. A slot left empty
     /// is a shader reading from nothing, which draws a black rectangle.
     nothing: ID3D11ShaderResourceView,
+    /// How much letters' edges are firmed up, and the panel they are blended
+    /// against: set by the window from the settings and the theme.
+    pub contrast: f32,
+    pub ground: [u8; 3],
 }
 
 impl View {
@@ -554,6 +558,8 @@ impl View {
             film: None,
             still: None,
             nothing,
+            contrast: 0.5,
+            ground: [12, 18, 24],
         })
     }
 
@@ -817,7 +823,13 @@ impl View {
                 // Scrolling is baked into the positions by whoever built the
                 // scene; a panel that scrolls is not the renderer's business.
                 scroll: 0.0,
-                padding: 0.0,
+                contrast: self.contrast,
+                ground: [
+                    f32::from(self.ground[0]) / 255.0,
+                    f32::from(self.ground[1]) / 255.0,
+                    f32::from(self.ground[2]) / 255.0,
+                    1.0,
+                ],
             };
             self.write_uniform(&viewport);
 

@@ -129,6 +129,7 @@ impl Panel {
                 self.rect.width,
                 self.rect.height,
                 self.edge,
+                self.fill,
                 self.corner,
                 drop,
             ),

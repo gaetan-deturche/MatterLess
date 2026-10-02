@@ -93,33 +93,6 @@ impl Sheet {
     }
 }
 
-/// How much a glyph's coverage is opened up before it is stored.
-///
-/// The window blends in gamma space -- the swapchain is `B8G8R8A8_UNORM`, not
-/// `_SRGB` -- which is the usual choice for interface text and the reason it
-/// has to be paid for here. Half coverage written as 128 is not half the light
-/// of full coverage; on a dark panel it lands nearer a quarter, so the edges of
-/// every stem come out thinner than the shape they were rasterised from and
-/// light text on dark reads as spindly.
-///
-/// The curve gives that back. It is applied here rather than in the fragment
-/// shader because this is the one place a glyph's pixels are decided: a
-/// rectangle samples the sheet's opaque texel and a colour emoji carries its
-/// own alpha, and neither wants this done to it.
-const COVERAGE_GAMMA: f32 = 1.4;
-
-fn weighted(coverage: u8) -> u8 {
-    // The ends are exact: nothing is not a little something, and a filled
-    // texel stays filled.
-    if coverage == 0 || coverage == 255 {
-        return coverage;
-    }
-    let part = f32::from(coverage) / 255.0;
-    (part.powf(1.0 / COVERAGE_GAMMA) * 255.0)
-        .round()
-        .clamp(0.0, 255.0) as u8
-}
-
 /// Smears each subpixel's coverage across its neighbours, and answers RGB
 /// triples.
 ///
@@ -214,8 +187,11 @@ fn subpixel_image(
         Source::ColorBitmap(StrikeWith::BestFit),
         Source::Outline,
     ])
-    // The one line this function exists for.
-    .format(Format::Subpixel)
+    // The one line this function exists for. Red sampled a third of a pixel
+    // to the left and blue to the right, which is where they sit on an RGB
+    // panel: zeno's own `Subpixel` has them the other way round, and the
+    // colour that should read as sharpness lands on the wrong side of a stem.
+    .format(Format::CustomSubpixel([1.0 / 3.0, 0.0, -1.0 / 3.0]))
     .offset(offset)
     .transform(
         match key.flags.contains(cosmic_text::CacheKeyFlags::FAKE_ITALIC) {
@@ -857,7 +833,7 @@ impl Atlas {
                 .0
                 .iter()
                 .flat_map(|texel| {
-                    let (r, g, b) = (weighted(texel[0]), weighted(texel[1]), weighted(texel[2]));
+                    let (r, g, b) = (texel[0], texel[1], texel[2]);
                     [r, g, b, r.max(g).max(b)]
                 })
                 .collect()
@@ -865,7 +841,7 @@ impl Atlas {
             image
                 .data
                 .iter()
-                .flat_map(|coverage| [255, 255, 255, weighted(*coverage)])
+                .flat_map(|coverage| [255, 255, 255, *coverage])
                 .collect()
         };
 

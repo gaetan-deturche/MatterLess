@@ -144,6 +144,107 @@ impl Default for Text {
     }
 }
 
+/// How firmly letters' edges are drawn: the `k` of DirectWrite's enhanced
+/// contrast, `c(k+1)/(ck+1)`, from none to its strongest. Text is blended as
+/// if in linear light, which is right but softens edges; this gives them back,
+/// to taste.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Contrast(u8);
+
+impl Default for Contrast {
+    fn default() -> Self {
+        Contrast(10)
+    }
+}
+
+impl Contrast {
+    /// What this is called in the settings table.
+    pub const SETTING: &'static str = "text-contrast";
+
+    /// Between nought and one, in twentieths: finer than anybody can tell.
+    pub fn new(amount: f32) -> Self {
+        Contrast((amount.clamp(0.0, 1.0) * 20.0).round() as u8)
+    }
+
+    pub fn amount(&self) -> f32 {
+        f32::from(self.0) / 20.0
+    }
+
+    pub fn stored(&self) -> String {
+        format!("{:.2}", self.amount())
+    }
+
+    /// Reads one back; anything that is not a number is the default.
+    pub fn read(said: Option<&str>) -> Self {
+        said.and_then(|said| said.trim().parse::<f32>().ok())
+            .filter(|amount| amount.is_finite())
+            .map(Contrast::new)
+            .unwrap_or_default()
+    }
+
+    /// The amount in words, beside the heading.
+    fn said(&self) -> &'static str {
+        match self.0 {
+            0 => "None",
+            1..=7 => "Low",
+            8..=12 => "Medium",
+            13..=19 => "High",
+            _ => "Max",
+        }
+    }
+}
+
+/// Light text on a dark ground, or dark on light.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Theme {
+    #[default]
+    Dark,
+    Light,
+}
+
+impl Theme {
+    /// What this is called in the settings table.
+    pub const SETTING: &'static str = "theme";
+
+    pub fn stored(&self) -> &'static str {
+        self.slug()
+    }
+
+    /// Reads one back; anything else is the default.
+    pub fn read(said: Option<&str>) -> Self {
+        Self::all()
+            .into_iter()
+            .find(|one| Some(one.slug()) == said)
+            .unwrap_or_default()
+    }
+
+    /// The colours this theme draws in.
+    pub fn palette(&self) -> matterless_paint::Palette {
+        match self {
+            Theme::Dark => matterless_paint::Palette::default(),
+            Theme::Light => matterless_paint::Palette::light(),
+        }
+    }
+
+    fn title(&self) -> &'static str {
+        match self {
+            Theme::Dark => "Dark",
+            Theme::Light => "Light",
+        }
+    }
+
+    fn slug(&self) -> &'static str {
+        match self {
+            Theme::Dark => "theme-dark",
+            Theme::Light => "theme-light",
+        }
+    }
+
+    fn all() -> [Theme; 2] {
+        [Theme::Dark, Theme::Light]
+    }
+}
+
 /// How much disk the pictures opened in the viewer may keep.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Kept {
@@ -234,6 +335,13 @@ struct Card {
     /// The heading over the group of choices.
     group: Rect,
     choices: Vec<Choice>,
+    /// The heading over the text contrast, and its steps.
+    contrast: Rect,
+    /// The slider's track: the whole row it can be grabbed on.
+    slider: Rect,
+    /// The heading over the theme, and its two buttons.
+    theme: Rect,
+    themes: Laid,
     /// The heading over how much opened pictures keep, and its buttons.
     kept: Rect,
     sizes: Laid,
@@ -251,11 +359,27 @@ struct Card {
     foot: Laid,
 }
 
+impl Card {
+    /// Every row of buttons, in one place: what is drawn and what answers a
+    /// press come from the same list, so a row cannot be one without the other.
+    fn rows(&self) -> [&Laid; 5] {
+        [
+            &self.themes,
+            &self.sizes,
+            &self.starts,
+            &self.look,
+            &self.foot,
+        ]
+    }
+}
+
 /// The panel, when it is up.
 #[derive(Debug, Default)]
 pub struct Settings {
     shown: bool,
     pub text: Text,
+    pub contrast: Contrast,
+    pub theme: Theme,
     pub kept: Kept,
     /// Whether this client starts when the reader signs in to Windows. Kept in
     /// the registry, not here: the window reads it in as the panel opens.
@@ -280,6 +404,10 @@ pub enum Did {
     /// Text is to be drawn the other way, and the caller has to say so to
     /// whatever holds the glyphs.
     Text(Text),
+    /// Letters' edges are to be firmed up this much.
+    Contrast(Contrast),
+    /// Everything is to be drawn in this theme.
+    Theme(Theme),
     /// Opened pictures may keep this much on disk from now on.
     Kept(Kept),
     /// Start with Windows, or stop.
@@ -365,6 +493,8 @@ impl Settings {
             .sum::<f32>()
             + ROW_GAP * (sizes.len().saturating_sub(1) as f32);
 
+        let contrast = tall(fonts, CONTRAST_HEADING, inner, GROUP_SIZE);
+        let theme = tall(fonts, THEME_HEADING, inner, GROUP_SIZE);
         let kept = tall(fonts, KEPT_HEADING, inner, GROUP_SIZE);
         let starting = tall(fonts, STARTUP_HEADING, inner, GROUP_SIZE);
 
@@ -385,6 +515,14 @@ impl Settings {
             + heading
             + ROW_GAP
             + rows
+            + GAP
+            + contrast
+            + ROW_GAP
+            + BUTTON_HEIGHT
+            + GAP
+            + theme
+            + ROW_GAP
+            + BUTTON_HEIGHT
             + GAP
             + kept
             + ROW_GAP
@@ -422,6 +560,37 @@ impl Settings {
             });
             y = row.bottom() + ROW_GAP;
         }
+
+        let contrast = Rect::new(rect.x + PAD, y - ROW_GAP + GAP, inner, contrast);
+        let slider = Rect::new(
+            rect.x + PAD,
+            contrast.bottom() + ROW_GAP,
+            inner,
+            BUTTON_HEIGHT,
+        );
+        let y = contrast.bottom() + ROW_GAP + BUTTON_HEIGHT + ROW_GAP;
+
+        let theme = Rect::new(rect.x + PAD, y - ROW_GAP + GAP, inner, theme);
+        let worn = self.theme;
+        let themes = Theme::all()
+            .into_iter()
+            .fold(
+                Row::new(
+                    NAME,
+                    Rect::new(rect.x, theme.bottom() + ROW_GAP, rect.width, BUTTON_HEIGHT),
+                )
+                .against(matterless_widgets::Against::Left)
+                .pad(PAD)
+                .depth(63),
+                |row, one| {
+                    row.button(match one == worn {
+                        true => Button::primary(one.slug(), one.title()),
+                        false => Button::plain(one.slug(), one.title()),
+                    })
+                },
+            )
+            .measure(fonts);
+        let y = theme.bottom() + ROW_GAP + BUTTON_HEIGHT + ROW_GAP;
 
         let kept = Rect::new(rect.x + PAD, y - ROW_GAP + GAP, inner, kept);
         let chosen = self.kept;
@@ -518,6 +687,10 @@ impl Settings {
             rect,
             group,
             choices,
+            contrast,
+            slider,
+            theme,
+            themes,
             kept,
             sizes,
             starting,
@@ -609,10 +782,10 @@ impl Settings {
         for choice in &card.choices {
             placed.push(named().at(choice.which.slug(), choice.rect, 62));
         }
-        placed.extend(card.sizes.boxes());
-        placed.extend(card.starts.boxes());
-        placed.extend(card.look.boxes());
-        placed.extend(card.foot.boxes());
+        placed.push(named().at("contrast", card.slider, 63));
+        for row in card.rows() {
+            placed.extend(row.boxes());
+        }
         placed
     }
 
@@ -623,6 +796,19 @@ impl Settings {
         if input.took(Key::Escape) {
             self.hide();
             return Some(Did::Close);
+        }
+        // The slider follows the pointer for as long as it is held, from the
+        // press on: a click anywhere on the track goes there.
+        if input.pressed().and_then(|name| named().slug(name)) == Some("contrast")
+            && let (Some(card), Some((x, _))) = (self.laid(), input.pointer_at())
+        {
+            let (from, to) = slider_ends(card.slider);
+            let asked = Contrast::new((x - from) / (to - from));
+            if asked != self.contrast {
+                self.contrast = asked;
+                return Some(Did::Contrast(asked));
+            }
+            return None;
         }
         if self
             .laid()
@@ -651,6 +837,14 @@ impl Settings {
                 return Some(Did::Install);
             }
             _ => {}
+        }
+
+        if let Some(slug) = self.laid().and_then(|card| card.themes.clicked(input))
+            && let Some(one) = Theme::all().into_iter().find(|one| one.slug() == slug)
+        {
+            self.theme = one;
+            self.placed = None;
+            return Some(Did::Theme(one));
         }
         if let Some(slug) = self.laid().and_then(|card| card.sizes.clicked(input))
             && let Some(one) = Kept::all().into_iter().find(|one| one.slug() == slug)
@@ -716,7 +910,7 @@ impl Settings {
                 window.y,
                 window.width,
                 window.height,
-                [0, 0, 0, 160],
+                palette.backdrop(160),
             );
             Panel::floating(card.rect, CORNER, DROP)
                 .edge(palette.rule)
@@ -800,6 +994,61 @@ impl Settings {
                 scene.glyphs(glyphs, palette.faint, palette.faint);
             }
 
+            let heading = format!("{CONTRAST_HEADING} \u{b7} {}", self.contrast.said());
+            for (heading, at) in [
+                (heading.as_str(), card.contrast),
+                (THEME_HEADING, card.theme),
+            ] {
+                let glyphs = painter.run(
+                    fonts,
+                    heading,
+                    at.x,
+                    at.y,
+                    Run::label(at.width).sized(GROUP_SIZE),
+                );
+                scene.glyphs(glyphs, palette.faint, palette.faint);
+            }
+
+            // The slider: a groove, the part of it below the amount lit, a
+            // tick at each quarter, and a knob where it stands.
+            let (from, to) = slider_ends(card.slider);
+            let middle = card.slider.y + card.slider.height / 2.0;
+            let at = from + (to - from) * self.contrast.amount();
+            let held = input.pressed() == Some(named().of("contrast").as_str());
+            let lit = held || input.hovered() == Some(named().of("contrast").as_str());
+            let groove = palette.raised;
+            let [red, green, blue] = palette.signal;
+            scene.rounded(from, middle - 2.0, to - from, 4.0, groove, 2.0);
+            scene.rounded(
+                from,
+                middle - 2.0,
+                at - from,
+                4.0,
+                [red, green, blue, 255],
+                2.0,
+            );
+            for quarter in 0..5 {
+                let x = from + (to - from) * quarter as f32 / 4.0;
+                scene.rounded(x - 1.0, middle + 6.0, 2.0, 4.0, palette.rule, 1.0);
+            }
+            let knob = if lit { SLIDER_KNOB + 2.0 } else { SLIDER_KNOB };
+            scene.rounded(
+                at - knob / 2.0 - 2.0,
+                middle - knob / 2.0 - 2.0,
+                knob + 4.0,
+                knob + 4.0,
+                palette.surface,
+                (knob + 4.0) / 2.0,
+            );
+            scene.rounded(
+                at - knob / 2.0,
+                middle - knob / 2.0,
+                knob,
+                knob,
+                [red, green, blue, 255],
+                knob / 2.0,
+            );
+
             let glyphs = painter.run(
                 fonts,
                 KEPT_HEADING,
@@ -847,12 +1096,30 @@ impl Settings {
                 scene.glyphs(glyphs, palette.faint, palette.faint);
             }
         }
-        card.sizes.draw(into, input);
-        card.starts.draw(into, input);
-        card.look.draw(into, input);
-        card.foot.draw(into, input);
+        for row in card.rows() {
+            row.draw(into, input);
+        }
     }
 }
+
+/// The heading over how firmly letters are drawn.
+const CONTRAST_HEADING: &str = "Text contrast";
+
+/// The slider's knob, and how far its ends sit in from the track's.
+const SLIDER_KNOB: f32 = 14.0;
+
+/// Where the slider's knob can go: the track less half a knob each end, so it
+/// never hangs off either.
+fn slider_ends(track: Rect) -> (f32, f32) {
+    let inset = SLIDER_KNOB / 2.0 + 2.0;
+    (
+        track.x + inset,
+        (track.right() - inset).max(track.x + inset + 1.0),
+    )
+}
+
+/// The heading over the theme.
+const THEME_HEADING: &str = "Theme";
 
 /// The heading over how much disk opened pictures may keep.
 const KEPT_HEADING: &str = "Opened pictures kept on disk";
@@ -917,6 +1184,22 @@ mod tests {
     }
 
     #[test]
+    fn contrast_and_theme_read_back_as_stored() {
+        for step in 0..=20u8 {
+            let one = Contrast::new(f32::from(step) / 20.0);
+            assert_eq!(Contrast::read(Some(&one.stored())), one);
+        }
+        assert_eq!(Contrast::read(Some("0.33")).amount(), 0.35, "in twentieths");
+        assert_eq!(Contrast::read(Some("7")).amount(), 1.0, "clamped");
+        assert_eq!(Contrast::read(Some("nope")), Contrast::default());
+        assert_eq!(Contrast::default().amount(), 0.5);
+        for one in Theme::all() {
+            assert_eq!(Theme::read(Some(one.stored())), one);
+        }
+        assert_eq!(Theme::read(None), Theme::Dark);
+    }
+
+    #[test]
     fn a_setting_survives_being_written_and_read() {
         for one in Text::both() {
             assert_eq!(Text::read(Some(one.stored())), one);
@@ -961,12 +1244,18 @@ mod tests {
             );
         }
         // A box for each, plus the card, the window behind it, the sizes, On
-        // and Off for starting with Windows, and the two buttons -- the one
-        // that looks for a build and the one that shuts it.
-        assert_eq!(
-            settings.boxes(window()).len(),
-            6 + card.choices.len() + sizes.len()
-        );
+        // and Off for starting with Windows, the two buttons -- the one that
+        // looks for a build and the one that shuts it -- the contrast slider
+        // and the two themes.
+        let boxes = settings.boxes(window());
+        assert_eq!(boxes.len(), 6 + card.choices.len() + sizes.len() + 3);
+        // Every button drawn is a button that can be pressed.
+        for slug in ["theme-dark", "theme-light"] {
+            assert!(
+                boxes.iter().any(|placed| placed.name == named().of(slug)),
+                "{slug} is drawn but cannot be pressed"
+            );
+        }
     }
 
     /// What a choice says stays inside the choice.

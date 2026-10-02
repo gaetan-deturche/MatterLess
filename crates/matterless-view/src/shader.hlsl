@@ -21,8 +21,43 @@ cbuffer Viewport : register(b0) {
     // Pixels to clip space, and how far the list is scrolled.
     float2 viewport_size;
     float viewport_scroll;
-    float viewport_pad;
+    // How much a letter's edges are firmed up: DirectWrite's enhanced contrast.
+    float viewport_contrast;
+    // The panel behind text, which letters are blended against as if in
+    // linear light.
+    float4 viewport_ground;
 };
+
+float decoded(float value) {
+    return value <= 0.04045 ? value / 12.92 : pow((value + 0.055) / 1.055, 2.4);
+}
+
+float encoded(float value) {
+    return value <= 0.0031308 ? value * 12.92 : 1.055 * pow(value, 1.0 / 2.4) - 0.055;
+}
+
+// A letter's coverage, made right for this window's blend. The window mixes
+// in encoded values, which thins light letters on a dark panel and thickens
+// dark ones on a light panel. This answers the coverage that, mixed that way,
+// lands where a mix in linear light would -- for this ink over the panel --
+// after the contrast curve DirectWrite applies to firm up the edges.
+float lit(float cover, float ink, float ground) {
+    float k = viewport_contrast;
+    float firm = cover * (k + 1.0) / (cover * k + 1.0);
+    float span = ink - ground;
+    if (abs(span) < 0.02) {
+        return firm;
+    }
+    float target = encoded(firm * decoded(ink) + (1.0 - firm) * decoded(ground));
+    return saturate((target - ground) / span);
+}
+
+float3 lit3(float3 cover, float3 ink) {
+    return float3(
+        lit(cover.r, ink.r, viewport_ground.r),
+        lit(cover.g, ink.g, viewport_ground.g),
+        lit(cover.b, ink.b, viewport_ground.b));
+}
 
 // The sheets, in the order `Sheet` lists them, and then the one picture a
 // reader has opened -- which has a texture to itself because it is far too
@@ -170,7 +205,14 @@ Shaded fragment(Out input) {
         // the colour, so the colour goes out untouched and each channel is
         // weighed by its own third of the pixel. The alpha is the most any
         // channel is covered, which is what the window's own opacity wants.
-        float3 cover = texel.rgb * input.colour.a * coverage;
+        float3 cover = lit3(texel.rgb, input.colour.rgb) * input.colour.a * coverage;
+        float most = max(max(cover.r, cover.g), cover.b);
+        shaded.colour = float4(input.colour.rgb, most);
+        shaded.cover = float4(cover, most);
+    } else if ((input.sheet == 0u || input.sheet == 4u) && all(texel.rgb > 0.999)) {
+        // A letter's coverage, or the opaque texel a fill samples -- which
+        // comes through whole, because full coverage stays full.
+        float3 cover = lit3(texel.aaa, input.colour.rgb) * input.colour.a * coverage;
         float most = max(max(cover.r, cover.g), cover.b);
         shaded.colour = float4(input.colour.rgb, most);
         shaded.cover = float4(cover, most);

@@ -22,14 +22,15 @@ const SHADER: &str = include_str!("shader.hlsl");
 /// What the shader is given once a frame.
 ///
 /// Matches the `Viewport` block in the shader: two floats of size, the scroll,
-/// and a float of padding, because a constant buffer is measured in
-/// sixteen-byte lots.
+/// the text contrast, then the panel colour behind text -- in sixteen-byte
+/// lots, which is how a constant buffer is measured.
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct Viewport {
     pub size: [f32; 2],
     pub scroll: f32,
-    pub padding: f32,
+    pub contrast: f32,
+    pub ground: [f32; 4],
 }
 
 /// Everything bound to draw with, built once.

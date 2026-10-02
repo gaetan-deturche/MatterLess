@@ -533,7 +533,7 @@ impl Switcher {
             within.y,
             within.width,
             within.height,
-            [0, 0, 0, 102],
+            palette.backdrop(102),
         );
         // Through the widget rather than by hand, which is what gives it the
         // hairline. Drawn as a shadow and a fill alone, a panel has no edge at

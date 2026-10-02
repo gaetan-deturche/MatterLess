@@ -200,11 +200,11 @@ pub struct Style {
 }
 
 impl Style {
-    /// The body of a message, matching the stylesheet's 14px/1.5.
+    /// The body of a message: 15px at 23.
     pub fn body() -> Self {
         Self {
-            size: 14.0,
-            line_height: 21.0,
+            size: 15.0,
+            line_height: 23.0,
             bold: false,
             italic: false,
             mono: false,
@@ -405,8 +405,8 @@ mod tests {
             narrow.lines > wide.lines,
             "narrower has to wrap more: {narrow:?} vs {wide:?}"
         );
-        assert_eq!(wide.height, wide.lines as f32 * 21.0);
-        assert_eq!(narrow.height, narrow.lines as f32 * 21.0);
+        assert_eq!(wide.height, wide.lines as f32 * 23.0);
+        assert_eq!(narrow.height, narrow.lines as f32 * 23.0);
     }
 
     #[test]
@@ -414,7 +414,7 @@ mod tests {
         let mut fonts = Fonts::new();
         let extent = extent_of(&mut fonts, "Yo!", 600.0, Style::body());
         assert_eq!(extent.lines, 1);
-        assert_eq!(extent.height, 21.0);
+        assert_eq!(extent.height, 23.0);
         assert!(extent.width > 0.0 && extent.width < 600.0);
     }
 
@@ -423,11 +423,11 @@ mod tests {
     fn weight_changes_the_width() {
         let mut fonts = Fonts::new();
         let text = "measured against the real font rather than an average glyph";
-        let plain = extent_of(&mut fonts, text, 400.0, Style::body());
+        let plain = extent_of(&mut fonts, text, 1000.0, Style::body());
         let bold = extent_of(
             &mut fonts,
             text,
-            400.0,
+            1000.0,
             Style {
                 bold: true,
                 ..Style::body()
