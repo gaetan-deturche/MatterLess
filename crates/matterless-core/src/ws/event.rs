@@ -1,5 +1,7 @@
 use crate::error::Result;
-use crate::model::{ChannelMember, Post, Preference, Reaction, Timestamp, UserThread};
+use crate::model::{
+    Channel, ChannelAbout, ChannelMember, Post, Preference, Reaction, Timestamp, UserThread,
+};
 use serde::Deserialize;
 
 /// The raw frame as it arrives. `data` is deliberately untyped: each event puts
@@ -132,6 +134,11 @@ pub enum Event {
         channel_id: String,
         user_id: String,
     },
+    /// A channel was edited: its name, purpose or header.
+    ChannelUpdated {
+        channel: Box<Channel>,
+        about: ChannelAbout,
+    },
     /// Custom emoji added: invalidate the emoji cache.
     EmojiAdded {
         emoji_id: String,
@@ -168,6 +175,7 @@ impl Event {
             Event::PreferencesChanged { .. } => "preferences_changed",
             Event::SidebarCategoriesUpdated { .. } => "sidebar_category_updated",
             Event::MembershipChanged { .. } => "membership_changed",
+            Event::ChannelUpdated { .. } => "channel_updated",
             Event::EmojiAdded { .. } => "emoji_added",
             Event::UserUpdated { .. } => "user_updated",
             Event::Other { name } => name,
@@ -395,6 +403,20 @@ pub fn parse(envelope: &Envelope) -> Result<Option<Event>> {
         "direct_added" | "group_added" => Event::MembershipChanged {
             channel_id: broadcast_channel,
             user_id: String::new(),
+        },
+        "channel_updated" => match (
+            decode_nested::<Channel>(data, "channel").ok().flatten(),
+            decode_nested::<ChannelAbout>(data, "channel")
+                .ok()
+                .flatten(),
+        ) {
+            (Some(channel), Some(about)) => Event::ChannelUpdated {
+                channel: Box::new(channel),
+                about,
+            },
+            _ => Event::Other {
+                name: "channel_updated".into(),
+            },
         },
         "emoji_added" => Event::EmojiAdded {
             emoji_id: nested_id(data, "emoji"),

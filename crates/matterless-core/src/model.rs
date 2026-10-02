@@ -62,6 +62,18 @@ pub struct Channel {
     pub delete_at: Timestamp,
 }
 
+/// What a channel says about itself: its purpose, and the header shown beside
+/// its name. Read from the same object as `Channel` and kept beside it rather
+/// than in it, so the fixtures that build a channel need not spell it out.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
+pub struct ChannelAbout {
+    pub id: String,
+    #[serde(default)]
+    pub purpose: String,
+    #[serde(default)]
+    pub header: String,
+}
+
 /// Unread and mention counts are *derived* from this, never read from a flag.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ChannelMember {

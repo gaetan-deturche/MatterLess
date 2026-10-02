@@ -663,6 +663,20 @@ struct App {
     /// Saved or pinned messages, whichever was last asked for. An aside,
     /// read against whatever conversation is open.
     listing: matterless_view::listing::Listing,
+    /// Who is in the open channel: an aside like the lists, of people.
+    members: matterless_view::members::Members,
+    /// What the open channel says about itself, and its header as one line
+    /// of text for the strip.
+    channel_about: Option<matterless_core::model::ChannelAbout>,
+    topic: Vec<matterless_view::flow::Segment>,
+    topic_links: Vec<String>,
+    /// Where the header's links landed on the strip last frame.
+    topic_boxes: Vec<(Rect, String)>,
+    /// The header's line on the strip, when it was cut short; and the box
+    /// that shows the whole of it while the pointer is there, with its links.
+    topic_line: Option<Rect>,
+    topic_pop: Option<Rect>,
+    topic_pop_boxes: Vec<(Rect, String)>,
     /// The threads this reader follows, which is a place to go rather than an
     /// aside: it fills the conversation's own column, chosen from the sidebar
     /// like a channel.
@@ -987,6 +1001,14 @@ impl App {
             active_at: std::collections::HashMap::new(),
             asked_about: Vec::new(),
             listing: matterless_view::listing::Listing::default(),
+            members: matterless_view::members::Members::default(),
+            channel_about: None,
+            topic: Vec::new(),
+            topic_links: Vec::new(),
+            topic_boxes: Vec::new(),
+            topic_line: None,
+            topic_pop: None,
+            topic_pop_boxes: Vec::new(),
             viewer: matterless_view::viewer::Viewer::default(),
             followed: matterless_view::listing::Listing::new("followed"),
             profile: matterless_view::profile::Profile::default(),
@@ -1137,7 +1159,7 @@ impl App {
     /// because they are all answers to "show me messages from somewhere else"
     /// and two of them side by side would be two answers to one question.
     fn aside_rect(&self) -> Option<Rect> {
-        (self.search.open() || self.listing.open())
+        (self.search.open() || self.listing.open() || self.members.open())
             .then(|| matterless_view::aside::rect(self.column_rect(), self.pane_width))
     }
 
@@ -1777,6 +1799,7 @@ impl App {
                 let moved = self.threads != mode;
                 self.threads = mode;
                 self.rebuild_sidebar();
+                self.load_about();
                 // A window that has just signed in for the first time is still
                 // showing the invented sample, and `sample` is not a channel
                 // any server has: it went out as a channel id in everything
@@ -1830,6 +1853,30 @@ impl App {
                     card.position = user.position;
                     card.avatar_at = user.last_picture_update;
                 }
+            }
+            Update::Members {
+                channel_id,
+                user_ids,
+            } => {
+                let people = self
+                    .store
+                    .as_ref()
+                    .and_then(|store| store.users_by_ids(&user_ids).ok())
+                    .unwrap_or_default();
+                let members = user_ids
+                    .iter()
+                    .filter_map(|id| people.get(id))
+                    .map(|user| matterless_view::members::Member {
+                        user_id: user.id.clone(),
+                        username: user.username.clone(),
+                        full_name: format!("{} {}", user.first_name, user.last_name)
+                            .trim()
+                            .to_string(),
+                        avatar_at: user.last_picture_update,
+                    })
+                    .collect();
+                self.members.fill(&channel_id, members);
+                self.want_faces();
             }
             Update::Statuses(found) => {
                 let mine = found.iter().any(|(user_id, _, _)| user_id == &self.me);
@@ -2049,6 +2096,13 @@ impl App {
                 // this a pill the reader just added stayed invisible until
                 // they left the channel and came back.
                 for delta in &deltas {
+                    // An edit to the open channel's name or words.
+                    if let matterless_sync::Delta::ChannelChanged { channel_id } = delta {
+                        self.rebuild_sidebar();
+                        if self.sidebar.selected.as_deref() == Some(channel_id.as_str()) {
+                            self.load_about();
+                        }
+                    }
                     if let matterless_sync::Delta::StatusChanged { user_id, status } = delta {
                         self.presence.insert(user_id.clone(), status.clone());
                         // The reader's own is on the strip, which holds a copy.
@@ -2196,6 +2250,7 @@ impl App {
         // And whoever the switcher is offering, who may be somebody this
         // reader has never written to and so is in no conversation at all.
         wanted.extend(self.switcher.who_is_here());
+        wanted.extend(self.members.who_is_here());
         if let (Some(within), Some(thread)) = (self.thread_stream_rect(), self.thread.as_ref()) {
             wanted.extend(thread.who_is_here(within));
         }
@@ -2751,6 +2806,10 @@ impl App {
                 self.sidebar.selected = Some(matterless_view::sidebar::THREADS.to_string());
                 self.open_channel(matterless_view::sidebar::THREADS);
             }
+            header::Act::Info => match self.members.open() {
+                true => self.hide_members(),
+                false => self.show_members(),
+            },
             header::Act::Saved => {
                 self.show_the_list("Saved");
                 if let Some(link) = self.link.as_ref() {
@@ -4959,6 +5018,7 @@ impl App {
         wanted.extend(self.rail.wants());
         wanted.extend(self.sidebar.wants());
         wanted.extend(self.switcher.wants());
+        wanted.extend(self.members.wants());
         // The tray shows a picture rather than naming it, so it needs the same
         // thumbnail the conversation would.
         wanted.extend(self.composer.wants());
@@ -5403,6 +5463,43 @@ impl App {
             boxes.extend(thread.boxes(rect, thread.hovered(&self.input)));
         }
         boxes.extend(header::boxes(self.channel_rect(), &self.header_offers()));
+        // The header's line when it was cut, which opens the whole of it; and
+        // that box, over everything, while it is open.
+        if let Some(line) = self.topic_line {
+            boxes.push(Placed {
+                name: "header/topic".to_string(),
+                rect: line,
+                depth: 2,
+            });
+        }
+        if let Some(pop) = self.topic_pop.filter(|_| self.topic_popped()) {
+            boxes.push(Placed {
+                name: "topicpop".to_string(),
+                rect: pop,
+                depth: 30,
+            });
+            boxes.extend(
+                self.topic_pop_boxes
+                    .iter()
+                    .enumerate()
+                    .map(|(at, (rect, _))| Placed {
+                        name: format!("topicpop/link/{at}"),
+                        rect: *rect,
+                        depth: 31,
+                    }),
+            );
+        }
+        // The header's links, where the strip drew them last.
+        boxes.extend(
+            self.topic_boxes
+                .iter()
+                .enumerate()
+                .map(|(at, (rect, _))| Placed {
+                    name: format!("header/link/{at}"),
+                    rect: *rect,
+                    depth: 3,
+                }),
+        );
         if let Some(pane) = self.thread_rect() {
             boxes.extend(header::boxes(pane, &header::for_thread()));
         }
@@ -5431,6 +5528,9 @@ impl App {
             }));
         }
         if let Some(pane) = self.aside_rect() {
+            if self.members_showing() {
+                boxes.extend(self.members.boxes(pane));
+            }
             boxes.extend(self.listing.boxes(pane));
             boxes.extend(self.search.boxes(matterless_view::search::Shown {
                 pane,
@@ -5662,6 +5762,8 @@ impl App {
     /// opening over a thread takes the pane the thread already had -- because
     /// the parked place belongs to whoever moved the column first.
     fn show_the_list(&mut self, title: &str) {
+        // One pane at a time, and this is the one just asked for.
+        self.members.hide();
         let before = self.channel_rect().width;
         let was = self.anchors().0;
         self.listing.expect(title);
@@ -5673,6 +5775,106 @@ impl App {
             was,
             left_at: self.stream.scroll,
         });
+    }
+
+    /// Whether the box showing the whole header is open: while the pointer is
+    /// on the cut line, its links, or the box itself.
+    fn topic_popped(&self) -> bool {
+        self.topic_line.is_some()
+            && self.input.hovered().is_some_and(|name| {
+                name == "header/topic"
+                    || name == "topicpop"
+                    || name.starts_with("header/link/")
+                    || name.starts_with("topicpop/link/")
+            })
+    }
+
+    /// Whether the members pane is the one showing: it gives way to a search
+    /// or a list opened over it.
+    fn members_showing(&self) -> bool {
+        self.members.open() && !self.listing.open() && !self.search.open()
+    }
+
+    /// Opens the members pane on the open channel, and asks who is in it.
+    fn show_members(&mut self) {
+        let Some(channel) = self.sidebar.selected.clone() else {
+            return;
+        };
+        if channel == matterless_view::sidebar::THREADS {
+            return;
+        }
+        self.hide_the_list();
+        let before = self.channel_rect().width;
+        let was = self.anchors().0;
+        let about = self.channel_about.clone().unwrap_or_default();
+        let title = self.title();
+        let handle = self
+            .store
+            .as_ref()
+            .and_then(|store| store.channel(&channel).ok().flatten())
+            .map(|found| format!("~{}", found.name))
+            .unwrap_or_default();
+        self.members
+            .show(&channel, &title, &handle, &about.purpose, &about.header);
+        if (self.channel_rect().width - before).abs() >= 0.5 {
+            self.relayout();
+            self.parked = Some(Parked {
+                was,
+                left_at: self.stream.scroll,
+            });
+        }
+        if let Some(link) = self.link.as_ref() {
+            link.send(matterless_view::live::Ask::Members {
+                channel_id: channel,
+            });
+        }
+    }
+
+    /// Shuts the members pane and gives the conversation its column back.
+    fn hide_members(&mut self) {
+        if !self.members.open() {
+            return;
+        }
+        let before = self.channel_rect().width;
+        self.members.hide();
+        if (self.channel_rect().width - before).abs() >= 0.5 {
+            let parked = self
+                .parked
+                .take()
+                .filter(|parked| (parked.left_at - self.stream.scroll).abs() < 1.0);
+            self.relayout();
+            if let Some(parked) = parked {
+                let within = self.stream_rect();
+                self.stream.anchored(parked.was, within);
+            }
+        }
+    }
+
+    /// What the open channel says about itself, read again from the store.
+    fn load_about(&mut self) {
+        if let Some(channel) = self.sidebar.selected.clone() {
+            self.load_about_for(&channel);
+        }
+    }
+
+    /// The same, for the channel being opened, which may not be selected yet.
+    fn load_about_for(&mut self, channel: &str) {
+        let about = self
+            .store
+            .as_ref()
+            .and_then(|store| store.channel_about(channel).ok().flatten());
+        // As words and links, not the markdown they were written in: a header
+        // is mostly links, and their addresses are not what anybody wants to see.
+        (self.topic, self.topic_links) = about
+            .as_ref()
+            .map(|about| matterless_view::flow::segments(&about.header))
+            .unwrap_or_default();
+        if let Some(about) = &about
+            && self.members.channel() == about.id
+        {
+            self.members.say(&about.purpose, &about.header);
+        }
+        self.channel_about = about;
     }
 
     /// Shuts the side list and gives the conversation its column back.
@@ -6776,6 +6978,32 @@ impl App {
         // sidebar, a turn of the wheel over the channel, and typing a reply all
         // still work while it is open. Its own rows are its own because a click
         // resolves to one box, which is what the depths are for.
+        if self.members_showing() {
+            if self.input.struck(Key::Escape) {
+                self.hide_members();
+                return;
+            }
+            let pane = matterless_view::aside::rect(self.column_rect(), self.pane_width);
+            let boxes = self.placed.clone();
+            match self
+                .members
+                .react(&self.input, &boxes, pane, &self.presence)
+            {
+                Some(matterless_view::members::Did::Close) => {
+                    self.hide_members();
+                    return;
+                }
+                Some(matterless_view::members::Did::Person { username, at }) => {
+                    self.show_profile(&username, Some(at));
+                    return;
+                }
+                Some(matterless_view::members::Did::Link(href)) => {
+                    self.press(matterless_layout::row::Press::Link(href), None);
+                    return;
+                }
+                None => {}
+            }
+        }
         if self.listing.open() {
             let keys = !self.typing_in_a_box();
             let mut input = std::mem::take(&mut self.input);
@@ -7275,6 +7503,14 @@ impl App {
         if channel == matterless_view::sidebar::DRAFTS {
             self.open_drafts();
             return;
+        }
+        self.load_about_for(channel);
+        // The members pane follows the reader to the channel they open.
+        if self.members.open() && self.members.channel() != channel {
+            match channel == matterless_view::sidebar::THREADS {
+                true => self.hide_members(),
+                false => self.show_members(),
+            }
         }
         // Written on the way in rather than on the way out, so a window that
         // is killed still knows where somebody was. Nothing depends on it this
@@ -7891,6 +8127,15 @@ impl App {
         let strip_field = self.strip_field();
         let typed_in = self.search.asking() && strip_field.is_some();
         let mut header = Header::new(self.title());
+        header.topic = self.topic.clone();
+        header.topic_links = self.topic_links.clone();
+        header.hovered_link = self
+            .input
+            .hovered()
+            .and_then(|name| name.strip_prefix("header/link/"))
+            .and_then(|at| at.parse::<usize>().ok())
+            .and_then(|at| self.topic_boxes.get(at))
+            .map(|(_, href)| href.clone());
         header.offered = self.header_offers();
         header.muted = self.muted();
         if self.on_threads() {
@@ -7912,7 +8157,9 @@ impl App {
             fonts: &mut self.fonts,
             palette: &self.palette,
         };
-        header.draw(&mut canvas, strip, on_strip, typed_in);
+        let drawn = header.draw(&mut canvas, strip, on_strip, typed_in);
+        self.topic_boxes = drawn.links;
+        self.topic_line = drawn.topic.filter(|_| drawn.cut);
         // Over the strip rather than in it. The strip draws a placeholder while
         // the search is shut and leaves the room empty once it is open, so this
         // is the box itself -- the one the reader clicked, with the caret in
@@ -8131,6 +8378,7 @@ impl App {
         }
 
         if let Some(pane) = self.aside_rect() {
+            let members = self.members_showing();
             scene.clip_to(0.0, 0.0, self.size.0 as f32, self.size.1 as f32);
             let mut canvas = Canvas {
                 scene: &mut scene,
@@ -8138,6 +8386,10 @@ impl App {
                 fonts: &mut self.fonts,
                 palette: &self.palette,
             };
+            if members {
+                self.members
+                    .draw(&mut canvas, &self.input, pane, &self.presence);
+            }
             self.listing.draw(&mut canvas, &self.input, pane);
             self.search.draw(&mut canvas, &self.input, pane);
             if self.search.open() {
@@ -8268,6 +8520,31 @@ impl App {
                 palette: &self.palette,
             };
             self.menu.draw(&mut canvas, window, &self.input);
+        }
+        // The whole header, over its cut line, while the pointer is on it.
+        self.topic_pop = None;
+        if self.topic_popped()
+            && let Some(line) = self.topic_line
+        {
+            let column = self.column_rect();
+            scene.clip_to(0.0, 0.0, self.size.0 as f32, self.size.1 as f32);
+            let mut canvas = Canvas {
+                scene: &mut scene,
+                painter: &mut self.painter,
+                fonts: &mut self.fonts,
+                palette: &self.palette,
+            };
+            let (pop, links) = draw_topic_pop(
+                &mut canvas,
+                line,
+                column,
+                &self.topic,
+                &self.topic_links,
+                self.input.hovered(),
+                &self.topic_pop_boxes,
+            );
+            self.topic_pop = Some(pop);
+            self.topic_pop_boxes = links;
         }
         // Last of everything, because it explains whatever is on top: a label
         // about a menu item drawn under the menu is a label about nothing.
@@ -8421,6 +8698,8 @@ impl App {
         name.starts_with("sidebar/channel/")
             || name.starts_with("sidebar/team/")
             || name == "sidebar/me"
+            || name.starts_with("header/link/")
+            || name.starts_with("topicpop/link/")
             || name == matterless_view::sidebar::NEW
             || PANELS
                 .iter()
@@ -8732,6 +9011,81 @@ fn raw_window(window: Option<&Arc<Window>>) -> matterless_view::taskbar::RawWind
 /// the reader is looking at. This is what the app does in `reveal_quietly`,
 /// and for the same reason.
 #[cfg(windows)]
+/// The whole of a channel's header, in a box over the line it was cut from.
+/// Answers the box, and where its links landed.
+fn draw_topic_pop(
+    into: &mut Canvas<'_>,
+    line: Rect,
+    column: Rect,
+    runs: &[matterless_view::flow::Segment],
+    links: &[String],
+    hovered: Option<&str>,
+    last: &[(Rect, String)],
+) -> (Rect, Vec<(Rect, String)>) {
+    // The words stay where the line had them and simply carry on, so the box
+    // starts just above the line and clear of the name over it.
+    const PAD: f32 = 8.0;
+    const TOP: f32 = 3.0;
+    let words = header::TOPIC;
+    let width = 520.0_f32.min(column.right() - line.x - 16.0).max(160.0);
+    let (laid, tall, _) =
+        matterless_view::flow::lay(into.fonts, runs, links, width - PAD * 2.0, words, false);
+    let pop = Rect::new(line.x - PAD, line.y - TOP, width, tall + TOP + PAD);
+    // A hairline round it, or a dark box on a dark window has no edge.
+    into.scene.rounded(
+        pop.x - 1.0,
+        pop.y - 1.0,
+        pop.width + 2.0,
+        pop.height + 2.0,
+        into.palette.rule,
+        7.0,
+    );
+    into.scene.rounded(
+        pop.x,
+        pop.y,
+        pop.width,
+        pop.height,
+        into.palette.raised,
+        6.0,
+    );
+    let under = hovered
+        .and_then(|name| name.strip_prefix("topicpop/link/"))
+        .and_then(|at| at.parse::<usize>().ok())
+        .and_then(|at| last.get(at))
+        .map(|(_, href)| href.clone());
+    let mut placed = Vec::new();
+    for word in &laid {
+        let (x, y) = (line.x + word.x, line.y + word.y);
+        let href = word.link.and_then(|at| links.get(at));
+        let ink = match href {
+            Some(_) => into.palette.signal,
+            None => into.palette.soft,
+        };
+        let glyphs = into.painter.run(
+            into.fonts,
+            &word.text,
+            x,
+            y,
+            matterless_paint::Run::label(f32::MAX).sized(words.size),
+        );
+        into.scene.glyphs(glyphs, ink, into.palette.faint);
+        if let Some(href) = href {
+            if under.as_ref() == Some(href) {
+                let [red, green, blue] = into.palette.signal;
+                into.scene.fill(
+                    x,
+                    y + words.line_height - 2.0,
+                    word.width,
+                    1.0,
+                    [red, green, blue, 255],
+                );
+            }
+            placed.push((Rect::new(x, y, word.width, words.line_height), href.clone()));
+        }
+    }
+    (pop, placed)
+}
+
 fn behind(window: &winit::window::Window) {
     use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
     let Ok(handle) = window.window_handle() else {
@@ -9422,6 +9776,24 @@ impl ApplicationHandler<Update> for App {
                 // The strip's own buttons, which are the only visible way to
                 // reach the lists: a keystroke nobody has been told about is
                 // not a feature anybody has.
+                // A link in the channel's header, followed like one in a message:
+                // on the strip, or in the box that shows the whole of it.
+                let clicked = self.input.clicked().map(str::to_string);
+                let on_strip = clicked
+                    .as_deref()
+                    .and_then(|name| name.strip_prefix("header/link/"))
+                    .and_then(|at| at.parse::<usize>().ok())
+                    .and_then(|at| self.topic_boxes.get(at));
+                let in_box = clicked
+                    .as_deref()
+                    .and_then(|name| name.strip_prefix("topicpop/link/"))
+                    .and_then(|at| at.parse::<usize>().ok())
+                    .and_then(|at| self.topic_pop_boxes.get(at));
+                if let Some(href) = on_strip.or(in_box).map(|(_, href)| href.clone()) {
+                    self.press(matterless_layout::row::Press::Link(href), None);
+                    self.redraw();
+                    return;
+                }
                 if let Some(pressed) = self
                     .input
                     .clicked()

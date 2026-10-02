@@ -113,6 +113,8 @@ pub const AWAY: &str = "\u{e087}";
 pub const BUSY: &str = "\u{e07e}";
 /// and offline  `circle`.
 pub const OFFLINE: &str = "\u{e076}";
+/// What a conversation says about itself, and who is in it.  `info`
+pub const INFO: &str = "\u{e0f9}";
 
 /// What the message box offers for marking a message up.
 ///

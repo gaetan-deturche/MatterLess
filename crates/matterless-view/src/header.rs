@@ -31,10 +31,34 @@ pub struct Header {
     /// followed threads, which are every conversation at once and read as a
     /// channel called "Threads" with one on them.
     pub sigil: &'static str,
+    /// The channel's header, faint after its name in whatever room is left:
+    /// its words, and the addresses its links lead to.
+    pub topic: Vec<crate::flow::Segment>,
+    pub topic_links: Vec<String>,
+    /// The address of the header link under the pointer, underlined.
+    pub hovered_link: Option<String>,
+}
+
+/// What drawing the strip left for whoever hit-tests it next frame.
+#[derive(Debug, Default)]
+pub struct Drawn {
+    /// Where the header's links landed, and where each leads.
+    pub links: Vec<(Rect, String)>,
+    /// The header's line, and whether it had to be cut short to fit.
+    pub topic: Option<Rect>,
+    pub cut: bool,
 }
 
 /// The strip's height. Fixed: it is one line of text and a rule.
 pub const HEIGHT: f32 = 44.0;
+/// The channel's header, under its name.
+pub const TOPIC: matterless_layout::Style = matterless_layout::Style {
+    size: 11.5,
+    line_height: 11.5 * 1.4,
+    bold: false,
+    italic: false,
+    mono: false,
+};
 /// What a button's mark is set at.
 ///
 /// An icon family fills the size it is asked for, near enough: a mark at 18
@@ -78,6 +102,8 @@ pub enum Act {
     Saved,
     /// The threads they follow.
     Threads,
+    /// What this channel says about itself, and who is in it.
+    Info,
     /// Put somebody else in this channel.
     Add,
     /// Stop this conversation counting unread, or start again.
@@ -132,6 +158,7 @@ impl Act {
             (Act::Pinned, _) => marks::PINNED,
             (Act::Saved, _) => marks::SAVED,
             (Act::Threads, _) => marks::THREADS,
+            (Act::Info, _) => marks::INFO,
             (Act::Add, _) => marks::ADD_PEOPLE,
             (Act::Mute, false) => marks::BELL,
             (Act::Mute, true) => marks::BELL_OFF,
@@ -156,6 +183,7 @@ impl Act {
             (Act::Pinned, _) => "Pinned messages",
             (Act::Saved, _) => "Saved messages",
             (Act::Threads, _) => "Threads",
+            (Act::Info, _) => "Channel info",
             (Act::Add, _) => "Add Members",
             (Act::Mute, false) => "Mute Channel",
             (Act::Mute, true) => "Unmute Channel",
@@ -176,6 +204,7 @@ impl Act {
             Act::Pinned => "pinned",
             Act::Saved => "saved",
             Act::Threads => "threads",
+            Act::Info => "info",
             Act::Add => "add",
             Act::Mute => "mute",
             Act::Leave => "leave",
@@ -192,6 +221,7 @@ impl Act {
             "pinned" => Act::Pinned,
             "saved" => Act::Saved,
             "threads" => Act::Threads,
+            "info" => Act::Info,
             "add" => Act::Add,
             "mute" => Act::Mute,
             "leave" => Act::Leave,
@@ -234,6 +264,7 @@ pub fn offered(direct: bool) -> Vec<Act> {
     // Adding and leaving both belong to a channel. A direct message's
     // membership is the two people in it, and the server decides that.
     if !direct {
+        offered.push(Act::Info);
         offered.push(Act::Add);
         offered.push(Act::Leave);
     }
@@ -384,6 +415,9 @@ impl Header {
             muted: false,
             sigil: "#",
             sigil_is_mark: false,
+            topic: Vec::new(),
+            topic_links: Vec::new(),
+            hovered_link: None,
         }
     }
 
@@ -450,7 +484,15 @@ impl Header {
         (from, (until - from - GAP).max(0.0))
     }
 
-    pub fn draw(&self, into: &mut Canvas<'_>, within: Rect, hovered: Option<Act>, typed_in: bool) {
+    /// Answers where the header's links landed, and where each leads.
+    pub fn draw(
+        &self,
+        into: &mut Canvas<'_>,
+        within: Rect,
+        hovered: Option<Act>,
+        typed_in: bool,
+    ) -> Drawn {
+        let mut drawn = Drawn::default();
         let Canvas {
             scene,
             painter,
@@ -474,6 +516,8 @@ impl Header {
             palette.ground,
         );
 
+        // With a header under the name, both lines are centred together.
+        let lift = if self.topic.is_empty() { 0.0 } else { 7.0 };
         // The sigil is faint and the name is not, so the eye lands on the name.
         let set_in = if self.sigil_is_mark {
             Run::mark(15.0)
@@ -492,7 +536,7 @@ impl Header {
             fonts,
             self.sigil,
             within.x + LEFT,
-            within.y + if self.sigil_is_mark { 14.0 } else { 13.0 },
+            within.y + if self.sigil_is_mark { 14.0 } else { 13.0 } - lift,
             set_in,
         );
         scene.glyphs(sigil, palette.faint, palette.faint);
@@ -506,7 +550,7 @@ impl Header {
             fonts,
             &shown,
             from,
-            within.y + 13.0,
+            within.y + 13.0 - lift,
             Run {
                 size: 15.0,
                 line_height: 20.0,
@@ -518,6 +562,45 @@ impl Header {
             },
         );
         scene.glyphs(name, palette.ink, palette.faint);
+        // The channel's header under its name, smaller, cut to the same room.
+        if !self.topic.is_empty() && room > 40.0 {
+            let (words, _, cut) =
+                crate::flow::lay(fonts, &self.topic, &self.topic_links, room, TOPIC, true);
+            let (x, y) = (from, within.y + 26.0);
+            drawn.topic = Some(Rect::new(x, y, room, TOPIC.line_height));
+            drawn.cut = cut;
+            for word in &words {
+                let href = word.link.and_then(|at| self.topic_links.get(at));
+                let ink = match href {
+                    Some(_) => palette.signal,
+                    None => palette.faint,
+                };
+                let glyphs = painter.run(
+                    fonts,
+                    &word.text,
+                    x + word.x,
+                    y,
+                    Run::label(f32::MAX).sized(TOPIC.size),
+                );
+                scene.glyphs(glyphs, ink, palette.faint);
+                if let Some(href) = href {
+                    if self.hovered_link.as_ref() == Some(href) {
+                        let [red, green, blue] = palette.signal;
+                        scene.fill(
+                            x + word.x,
+                            y + TOPIC.line_height - 2.0,
+                            word.width,
+                            1.0,
+                            [red, green, blue, 255],
+                        );
+                    }
+                    drawn.links.push((
+                        Rect::new(x + word.x, y, word.width, TOPIC.line_height),
+                        href.clone(),
+                    ));
+                }
+            }
+        }
 
         // A field rather than a button: it is the only thing on the strip that
         // takes words, and drawing it as anything else would hide that. It is
@@ -596,6 +679,7 @@ impl Header {
                 palette.soft,
             );
         }
+        drawn
     }
 }
 
@@ -678,7 +762,7 @@ mod tests {
     fn the_buttons_sit_inside_the_strip() {
         let panel = Rect::new(260.0, 0.0, 700.0, 600.0);
         let placed = place(panel, &offered(false));
-        assert_eq!(placed.len(), 6);
+        assert_eq!(placed.len(), 7);
         for pair in placed.windows(2) {
             assert!(pair[0].1.right() <= pair[1].1.x);
         }

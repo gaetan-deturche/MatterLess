@@ -86,7 +86,16 @@ const MIGRATION_7: &str = "
 ALTER TABLE posts ADD COLUMN is_pinned INTEGER NOT NULL DEFAULT 0;
 ";
 
-pub const TARGET_VERSION: i64 = 13;
+/// What each channel says about itself: its purpose and its header.
+const MIGRATION_14: &str = "
+CREATE TABLE IF NOT EXISTS channel_about (
+    channel_id TEXT PRIMARY KEY,
+    purpose    TEXT NOT NULL DEFAULT '',
+    header     TEXT NOT NULL DEFAULT ''
+);
+";
+
+pub const TARGET_VERSION: i64 = 14;
 
 // Migration 1 is frozen: the shell now keeps a real database with real history,
 // so every change gets its own step from here.
@@ -275,7 +284,7 @@ fn missing_columns(connection: &Connection) -> rusqlite::Result<Vec<String>> {
 }
 
 fn missing_tables(connection: &Connection) -> rusqlite::Result<Vec<String>> {
-    const REQUIRED: [&str; 15] = [
+    const REQUIRED: [&str; 16] = [
         "row_heights",
         "settings",
         "drafts",
@@ -291,6 +300,7 @@ fn missing_tables(connection: &Connection) -> rusqlite::Result<Vec<String>> {
         "sidebar_categories",
         "sidebar_category_channels",
         "custom_emoji",
+        "channel_about",
     ];
     let mut absent = Vec::new();
     for name in REQUIRED {
@@ -514,6 +524,9 @@ fn migrate(connection: &Connection) -> rusqlite::Result<()> {
     }
     if version < 12 || missing.iter().any(|name| name == "row_heights") {
         connection.execute_batch(MIGRATION_12)?;
+    }
+    if version < 14 || missing.iter().any(|name| name == "channel_about") {
+        connection.execute_batch(MIGRATION_14)?;
     }
     connection.pragma_update(None, "user_version", TARGET_VERSION)?;
     tracing::info!(from = version, to = TARGET_VERSION, "store migrated");

@@ -120,6 +120,10 @@ pub enum Delta {
     MembershipChanged {
         channel_id: String,
     },
+    /// A channel's name, purpose or header changed, and the store has it.
+    ChannelChanged {
+        channel_id: String,
+    },
 }
 
 /// Runtime state the decision functions need. Kept small and cheap to clone.
@@ -533,6 +537,14 @@ impl SyncEngine {
                 }])
             }
             Event::Hello(_) => Ok(Vec::new()),
+            Event::ChannelUpdated { channel, about } => {
+                self.store
+                    .upsert_channels(std::slice::from_ref(channel.as_ref()))?;
+                self.store.upsert_about(std::slice::from_ref(about))?;
+                Ok(vec![Delta::ChannelChanged {
+                    channel_id: channel.id.clone(),
+                }])
+            }
             Event::Other { .. } => Ok(Vec::new()),
         }
     }

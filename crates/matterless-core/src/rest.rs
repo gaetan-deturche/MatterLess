@@ -391,6 +391,36 @@ impl RestClient {
             .await
     }
 
+    /// The same channels, with what each says about itself.
+    pub async fn my_channels_with_about(
+        &self,
+        team_id: &str,
+    ) -> Result<(Vec<Channel>, Vec<crate::model::ChannelAbout>)> {
+        let raw: Vec<serde_json::Value> = self
+            .get(&format!("/users/me/teams/{team_id}/channels"))
+            .await?;
+        let mut channels = Vec::with_capacity(raw.len());
+        let mut about = Vec::with_capacity(raw.len());
+        for one in raw {
+            about.push(serde_json::from_value(one.clone())?);
+            channels.push(serde_json::from_value(one)?);
+        }
+        Ok((channels, about))
+    }
+
+    /// Everybody in a channel, a page at a time.
+    pub async fn users_in_channel(
+        &self,
+        channel_id: &str,
+        page: u32,
+        per_page: u32,
+    ) -> Result<Vec<User>> {
+        self.get(&format!(
+            "/users?in_channel={channel_id}&page={page}&per_page={per_page}"
+        ))
+        .await
+    }
+
     pub async fn my_channel_members(&self, team_id: &str) -> Result<Vec<ChannelMember>> {
         self.get(&format!("/users/me/teams/{team_id}/channels/members"))
             .await

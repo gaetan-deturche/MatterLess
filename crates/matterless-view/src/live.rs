@@ -122,6 +122,11 @@ pub enum Update {
     /// Who is around: each person, their status, and when they were last
     /// active -- which is what "last online 7 min. ago" is worked out from.
     Statuses(Vec<(String, String, i64)>),
+    /// Everybody in a channel, by id, their records now in the store.
+    Members {
+        channel_id: String,
+        user_ids: Vec<String>,
+    },
     /// What else a name could mean, for the query that was asked.
     Discovered {
         query: String,
@@ -329,6 +334,8 @@ pub enum Ask {
     /// Batched rather than one call per person: the sidebar asks about every
     /// direct conversation at once, and that is one request rather than forty.
     Statuses { user_ids: Vec<String> },
+    /// Everybody in a channel, and whether they are around.
+    Members { channel_id: String },
     /// Fetch one person's record again, whether or not the store has met them.
     ///
     /// For the card a name opens: a record is otherwise fetched only the
@@ -1267,6 +1274,12 @@ async fn run(
                         Ok(list) => wake.wake(listed("Pinned", engine.store(), list, &me_id)),
                         Err(error) => eprintln!("listing pinned messages: {error}"),
                     },
+                    Ask::Members { channel_id } => {
+                        let (rest, store, wake) = (rest.clone(), Arc::clone(&kept), wake.clone());
+                        tokio::spawn(async move {
+                            members_of(&rest, &store, &channel_id, &wake).await;
+                        });
+                    }
                     Ask::Statuses { user_ids } => {
                         // Who they are, before whether they are here. Nothing
                         // in this window has ever written a user record except
@@ -2751,6 +2764,42 @@ fn reel_of(bytes: &[u8], width: u32, height: u32) -> Option<Vec<(Vec<u8>, std::t
     (frames.len() > 1).then_some(frames)
 }
 
+/// Everybody in a channel: their records kept, the window told who they are,
+/// then whether they are around.
+async fn members_of(rest: &RestClient, store: &Store, channel_id: &str, wake: &impl Wake) {
+    const PAGE: u32 = 200;
+    // Enough for any channel a reader scrolls through by eye.
+    const PAGES: u32 = 25;
+    let mut everybody = Vec::new();
+    for page in 0..PAGES {
+        match rest.users_in_channel(channel_id, page, PAGE).await {
+            Ok(found) => {
+                let last = found.len() < PAGE as usize;
+                everybody.extend(found);
+                if last {
+                    break;
+                }
+            }
+            Err(error) => {
+                eprintln!("the members of {channel_id}: {error}");
+                break;
+            }
+        }
+    }
+    if let Err(error) = store.upsert_users(&everybody) {
+        eprintln!("keeping the members of {channel_id}: {error}");
+    }
+    let user_ids: Vec<String> = everybody.into_iter().map(|user| user.id).collect();
+    println!("{} members in {channel_id}", user_ids.len());
+    wake.wake(Update::Members {
+        channel_id: channel_id.to_string(),
+        user_ids: user_ids.clone(),
+    });
+    for slice in user_ids.chunks(STATUSES_AT_ONCE) {
+        who_is_around(rest, slice, wake).await;
+    }
+}
+
 /// Asks the server who of these is around, and tells the window.
 async fn who_is_around(rest: &RestClient, user_ids: &[String], wake: &impl Wake) {
     match rest.statuses_by_ids(user_ids).await {
@@ -3527,12 +3576,15 @@ async fn membership(
 ) -> matterless_core::Result<(usize, ThreadMode)> {
     let teams = rest.my_teams().await?;
     let mut channels = Vec::new();
+    let mut abouts = Vec::new();
     let mut members = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for team in &teams {
-        for channel in rest.my_channels(&team.id).await? {
+        let (found, about) = rest.my_channels_with_about(&team.id).await?;
+        for (channel, about) in found.into_iter().zip(about) {
             if channel.delete_at == 0 && seen.insert(channel.id.clone()) {
                 channels.push(channel);
+                abouts.push(about);
             }
         }
         members.extend(rest.my_channel_members(&team.id).await?);
@@ -3584,6 +3636,7 @@ async fn membership(
     if let Err(error) = store
         .upsert_teams(&teams)
         .and_then(|()| store.upsert_channels(&channels))
+        .and_then(|()| store.upsert_about(&abouts))
         .and_then(|()| store.upsert_channel_members(&members))
     {
         eprintln!("storing the sidebar: {error}");

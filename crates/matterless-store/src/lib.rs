@@ -362,6 +362,46 @@ impl Store {
             .optional()?)
     }
 
+    /// Remembers what these channels say about themselves.
+    pub fn upsert_about(&self, about: &[matterless_core::model::ChannelAbout]) -> Result<()> {
+        let mut connection = self.lock();
+        let transaction = connection.transaction()?;
+        {
+            let mut statement = transaction.prepare(
+                "INSERT INTO channel_about (channel_id, purpose, header) VALUES (?1, ?2, ?3)
+                 ON CONFLICT(channel_id) DO UPDATE SET
+                    purpose = excluded.purpose,
+                    header = excluded.header",
+            )?;
+            for one in about {
+                statement.execute(params![one.id, one.purpose, one.header])?;
+            }
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// What one channel says about itself, if it has been told.
+    pub fn channel_about(
+        &self,
+        channel_id: &str,
+    ) -> Result<Option<matterless_core::model::ChannelAbout>> {
+        let connection = self.lock();
+        Ok(connection
+            .query_row(
+                "SELECT purpose, header FROM channel_about WHERE channel_id = ?1",
+                params![channel_id],
+                |row| {
+                    Ok(matterless_core::model::ChannelAbout {
+                        id: channel_id.to_string(),
+                        purpose: row.get(0)?,
+                        header: row.get(1)?,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
     /// The slug of every channel held, lowercased: what a `~channel` in a
     /// message has to name to be a link rather than a tilde and a word.
     pub fn channel_names(&self) -> Result<std::collections::HashSet<String>> {
