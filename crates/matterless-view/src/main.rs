@@ -2090,6 +2090,20 @@ impl App {
                     )
                 }) {
                     self.rebuild_sidebar();
+                    // And the list of threads, wherever it is open, so a reply
+                    // arriving shows on its row rather than on the next visit.
+                    if let Some(store) = self.store.clone() {
+                        if self.on_threads() {
+                            self.followed.refresh(matterless_view::listing::followed(
+                                &store, &self.me, THREADS,
+                            ));
+                        }
+                        if self.listing.open() && self.listing.title == "Threads" {
+                            self.listing.refresh(matterless_view::listing::followed(
+                                &store, &self.me, THREADS,
+                            ));
+                        }
+                    }
                 }
                 // A reaction names its post and no channel, so whether it
                 // matters is a question only the window can answer. Without
@@ -7492,6 +7506,7 @@ impl App {
                         true => String::new(),
                         false => "a reply".to_string(),
                     },
+                    read: None,
                     root_id,
                 }
             })

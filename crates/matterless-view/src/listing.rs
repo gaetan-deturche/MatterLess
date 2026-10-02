@@ -20,6 +20,8 @@ use crate::aside;
 
 const ROW: f32 = aside::ROW;
 const PADDING: f32 = aside::PADDING;
+/// The dot before a thread with replies not yet read.
+const UNREAD_DOT: f32 = 7.0;
 
 /// What a frame of input did to the list.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,6 +54,9 @@ pub struct Found {
     /// A short trailing fact -- "4 replies". Empty when there is none, rather
     /// than a placeholder nobody reads.
     pub note: String,
+    /// For a thread: its replies not yet read, and the mentions among them.
+    /// `None` for anything without a read state -- a search result, a draft.
+    pub read: Option<(i64, i64)>,
 }
 
 /// Resolves posts into rows, naming their authors and conversations.
@@ -251,6 +256,7 @@ pub fn found_for(
             ),
             root_id: post.root_id,
             note: String::new(),
+            read: None,
             post_id: post.id,
             channel_id: post.channel_id,
         })
@@ -318,6 +324,7 @@ pub fn followed(store: &Store, me: &str, limit: u32) -> Vec<Found> {
                 .unwrap_or(thread.author_id),
             preview: matterless_sync::notify::preview_of(&thread.message),
             note: note_for(thread.reply_count, thread.unread_replies),
+            read: Some((thread.unread_replies, thread.unread_mentions)),
             // The root is the thread, so choosing the row opens it.
             root_id: thread.root_id.clone(),
             post_id: thread.root_id,
@@ -399,6 +406,14 @@ impl Listing {
         self.chosen = 0;
         self.waiting = false;
         self.scroll = 0.0;
+    }
+
+    /// The same list again, changed underneath: kept where the reader had
+    /// it, the highlight on the same row as far as there still is one.
+    pub fn refresh(&mut self, found: Vec<Found>) {
+        self.found = found;
+        self.chosen = self.chosen.min(self.found.len().saturating_sub(1));
+        self.waiting = false;
     }
 
     pub fn hide(&mut self) {
@@ -646,24 +661,85 @@ impl Listing {
             // Cut with an ellipsis rather than by the clip: a name that ends
             // mid-letter gives a reader no way to tell a long one from one
             // that happens to end there.
-            let said = matterless_layout::elided(fonts, &said, room, label(true));
-            let who = painter.run(
-                fonts,
-                &said,
-                row.x + PADDING,
-                row.y + 6.0,
-                Run::label(f32::MAX).bold(),
+            // A thread says whether it has anything new: a dot before it and
+            // its line in bold when it has, a quieter line when it has not, and
+            // a count at the end when the reader is mentioned in what is new.
+            let (fresh, mentions) = found.read.unwrap_or((0, 0));
+            let tracked = found.read.is_some();
+            let new = !tracked || fresh > 0;
+            let indent = if tracked { UNREAD_DOT + 6.0 } else { 0.0 };
+            let left = row.x + PADDING + indent;
+            let badge = (mentions > 0).then(|| mentions.to_string());
+            let badge_width = badge.as_ref().map_or(0.0, |count| {
+                matterless_layout::extent_of(fonts, count, f32::MAX, label(true)).width + 10.0
+            });
+            let wide = (room
+                - indent
+                - if badge.is_some() {
+                    badge_width + 6.0
+                } else {
+                    0.0
+                })
+            .max(10.0);
+            let said = matterless_layout::elided(fonts, &said, wide, label(new));
+            let run = match new {
+                true => Run::label(f32::MAX).bold(),
+                false => Run::label(f32::MAX),
+            };
+            let who = painter.run(fonts, &said, left, row.y + 6.0, run);
+            scene.glyphs(
+                who,
+                if new { palette.ink } else { palette.soft },
+                palette.faint,
             );
-            scene.glyphs(who, palette.ink, palette.faint);
-            let preview = matterless_layout::elided(fonts, &found.preview, room, label(false));
-            let what = painter.run(
-                fonts,
-                &preview,
-                row.x + PADDING,
-                row.y + 26.0,
-                Run::label(f32::MAX),
+            if tracked && fresh > 0 {
+                let [red, green, blue] = palette.signal;
+                scene.rounded(
+                    row.x + PADDING,
+                    row.y + 6.0 + (18.0 - UNREAD_DOT) / 2.0,
+                    UNREAD_DOT,
+                    UNREAD_DOT,
+                    [red, green, blue, 255],
+                    UNREAD_DOT / 2.0,
+                );
+            }
+            if let Some(count) = &badge {
+                let x = row.x + PADDING + room - badge_width;
+                let [red, green, blue] = palette.signal;
+                scene.rounded(
+                    x,
+                    row.y + 6.0,
+                    badge_width,
+                    18.0,
+                    [red, green, blue, 255],
+                    9.0,
+                );
+                let [ground_red, ground_green, ground_blue, _] = palette.ground;
+                let glyphs = painter.run(
+                    fonts,
+                    count,
+                    x + 5.0,
+                    row.y + 6.0,
+                    Run::label(f32::MAX).bold(),
+                );
+                scene.glyphs(
+                    glyphs,
+                    [ground_red, ground_green, ground_blue],
+                    palette.faint,
+                );
+            }
+            let preview =
+                matterless_layout::elided(fonts, &found.preview, room - indent, label(false));
+            let what = painter.run(fonts, &preview, left, row.y + 26.0, Run::label(f32::MAX));
+            scene.glyphs(
+                what,
+                if tracked && fresh > 0 {
+                    palette.soft
+                } else {
+                    palette.faint
+                },
+                palette.faint,
             );
-            scene.glyphs(what, palette.faint, palette.faint);
             if self.clearable {
                 let cross = self.cross_rect(body, at);
                 let under = input.hovered() == Some(format!("{}/{at}/clear", self.name).as_str());
@@ -709,6 +785,7 @@ mod tests {
                 preview: "something".into(),
                 root_id: String::new(),
                 note: String::new(),
+                read: None,
             })
             .collect()
     }
