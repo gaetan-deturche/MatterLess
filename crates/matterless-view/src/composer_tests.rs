@@ -9,7 +9,7 @@ use matterless_ui::Rect;
 use matterless_ui::input::{Event, Input, Key, Mods};
 
 /// The strip's own numbers, so a test says what it means rather than a literal.
-const LINE: f32 = 20.0;
+const LINE: f32 = 22.0;
 const PADDING: f32 = 10.0;
 const MARGIN: f32 = 12.0;
 const MAX_LINES: usize = 8;

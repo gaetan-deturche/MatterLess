@@ -308,8 +308,13 @@ pub enum Button {
 /// What the channel's own composer is called.
 pub const NAME: &str = "composer";
 
-const SIZE: f32 = 14.0;
-const LINE: f32 = 20.0;
+/// A message box writes at the size messages are read at, so what is
+/// written looks like what is sent; a one-line field keeps the smaller size
+/// its strip was laid out for.
+const SIZE: f32 = 15.0;
+const LINE: f32 = 22.0;
+const FIELD_SIZE: f32 = 14.0;
+const FIELD_LINE: f32 = 20.0;
 
 /// A wavy line `width` long, as short steps up and down: the scene draws
 /// rectangles, and a run of them offset by turns reads as a wave at this size.
@@ -507,9 +512,19 @@ impl Composer {
         }
     }
 
+    /// The size its words are set at, and their line.
+    fn size(&self) -> f32 {
+        if self.plain { FIELD_SIZE } else { SIZE }
+    }
+
+    fn line(&self) -> f32 {
+        if self.plain { FIELD_LINE } else { LINE }
+    }
+
     /// The same box as a field: no paperclip, no Send, and none of their room.
     pub fn plain(mut self) -> Self {
         self.plain = true;
+        self.editor = Editor::new(Buffer::new_empty(Metrics::new(FIELD_SIZE, FIELD_LINE)));
         self
     }
 
@@ -629,8 +644,8 @@ impl Composer {
             &self.placeholder,
             width,
             matterless_layout::Style {
-                size: SIZE,
-                line_height: LINE,
+                size: self.size(),
+                line_height: self.line(),
                 bold: false,
                 italic: false,
                 mono: false,
@@ -700,7 +715,7 @@ impl Composer {
 
     /// How far the text can be scrolled inside the box.
     fn reach(&self) -> f32 {
-        ((self.written() - self.lines()) as f32 * LINE).max(0.0)
+        ((self.written() - self.lines()) as f32 * self.line()).max(0.0)
     }
 
     /// Every run, for a test that has to see how the text is broken up.
@@ -786,7 +801,7 @@ impl Composer {
             self.misspelled_spans(within)
                 .into_iter()
                 .find(|(_, _, left, top, width)| {
-                    x >= *left && x <= left + width && y >= *top && y <= top + LINE
+                    x >= *left && x <= left + width && y >= *top && y <= top + self.line()
                 })?;
         self.editor.with_buffer(|buffer| {
             let text = buffer.lines.get(line)?.text();
@@ -1097,7 +1112,12 @@ impl Composer {
     /// of the paperclip and Send below them.
     fn over(&self, within: Rect) -> Rect {
         let inner = self.inner(within);
-        Rect::new(inner.x, inner.y, inner.width, self.lines() as f32 * LINE)
+        Rect::new(
+            inner.x,
+            inner.y,
+            inner.width,
+            self.lines() as f32 * self.line(),
+        )
     }
 
     /// Keeps the caret inside the window the box shows.
@@ -1107,7 +1127,7 @@ impl Composer {
     /// blind, and re-wrapping at a new width moves one without anybody
     /// touching the keyboard.
     fn follow_caret(&mut self) {
-        let shown = self.lines() as f32 * LINE;
+        let shown = self.lines() as f32 * self.line();
         let Some((_, y)) = self.editor.cursor_position() else {
             self.scroll = self.scroll.clamp(0.0, self.reach());
             return;
@@ -1115,8 +1135,8 @@ impl Composer {
         let top = y as f32;
         if top < self.scroll {
             self.scroll = top;
-        } else if top + LINE > self.scroll + shown {
-            self.scroll = top + LINE - shown;
+        } else if top + self.line() > self.scroll + shown {
+            self.scroll = top + self.line() - shown;
         }
         self.scroll = self.scroll.clamp(0.0, self.reach());
     }
@@ -1124,7 +1144,7 @@ impl Composer {
     /// The height the strip needs, which grows with the message.
     pub fn height(&self) -> f32 {
         let tools = if self.plain { 0.0 } else { TOOLS };
-        self.lines() as f32 * LINE
+        self.lines() as f32 * self.line()
             + self.padding() * 2.0
             + self.margin() * 2.0
             + tools
@@ -2024,8 +2044,8 @@ impl Composer {
                 inner.x,
                 inner.y,
                 matterless_paint::Run {
-                    size: SIZE,
-                    line_height: LINE,
+                    size: self.size(),
+                    line_height: self.line(),
                     bold: false,
                     mono: false,
                     wrap: f32::MAX,
@@ -2039,7 +2059,12 @@ impl Composer {
         // Everything below is a window onto the text rather than the whole
         // of it: a box of eight lines holding twenty has lines above and
         // below, and nothing else says where the window ends.
-        scene.clip_to(inner.x, inner.y, inner.width, self.lines() as f32 * LINE);
+        scene.clip_to(
+            inner.x,
+            inner.y,
+            inner.width,
+            self.lines() as f32 * self.line(),
+        );
 
         // The selection goes down first, or it would cover the letters it is
         // meant to be behind.
@@ -2049,7 +2074,7 @@ impl Composer {
                 x,
                 y,
                 width,
-                LINE,
+                self.line(),
                 [palette.ink[0], palette.ink[1], palette.ink[2], 60],
             );
         }
@@ -2063,7 +2088,7 @@ impl Composer {
         // at the foot of its line and in the colour for something wrong.
         let wrong = [palette.danger[0], palette.danger[1], palette.danger[2], 255];
         for (x, y, width) in self.spelling_marks(within) {
-            squiggle(scene, x, y + LINE - 4.0, width, wrong);
+            squiggle(scene, x, y + self.line() - 4.0, width, wrong);
         }
 
         // Solid rather than blinking: a blink needs a clock and a redraw of its
@@ -2073,7 +2098,7 @@ impl Composer {
                 x,
                 y,
                 1.5,
-                LINE,
+                self.line(),
                 [palette.ink[0], palette.ink[1], palette.ink[2], 255],
             );
         }
