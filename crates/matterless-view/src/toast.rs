@@ -14,17 +14,25 @@
 /// The toast fires its callback on a thread of its own, so the answer travels
 /// back the same way everything else does: as an update, on the thread that
 /// owns the window.
-pub type Clicked = Box<dyn Fn(String) + Send + Sync + 'static>;
+/// It is handed the conversation and the message, in that order.
+pub type Clicked = Box<dyn Fn(String, String) + Send + Sync + 'static>;
 
 /// Shows a notification, and reports whether the platform accepted it.
 ///
-/// `channel_id` rides through the callback so a click lands the reader in the
-/// conversation it came from rather than wherever they were last.
+/// `channel_id` and `post_id` ride through the callback so a click lands the
+/// reader on the message it came from -- in its thread, for a reply -- rather
+/// than wherever they were last.
 #[cfg(target_os = "windows")]
-pub fn raise(channel_id: &str, title: &str, body: &str, clicked: std::sync::Arc<Clicked>) -> bool {
+pub fn raise(
+    channel_id: &str,
+    post_id: &str,
+    title: &str,
+    body: &str,
+    clicked: std::sync::Arc<Clicked>,
+) -> bool {
     use tauri_winrt_notification::{Duration, Toast};
 
-    let target = channel_id.to_string();
+    let target = (channel_id.to_string(), post_id.to_string());
     // An installed build says who it is; anything else borrows PowerShell's
     // id, because a toast is refused outright under an AppUserModelID the
     // shell does not know and a dev build has nothing registering one.
@@ -39,7 +47,7 @@ pub fn raise(channel_id: &str, title: &str, body: &str, clicked: std::sync::Arc<
         // screen real estate.
         .duration(Duration::Short)
         .on_activated(move |_action| {
-            clicked(target.clone());
+            clicked(target.0.clone(), target.1.clone());
             Ok(())
         })
         .show();
@@ -53,6 +61,7 @@ pub fn raise(channel_id: &str, title: &str, body: &str, clicked: std::sync::Arc<
 #[cfg(not(target_os = "windows"))]
 pub fn raise(
     _channel_id: &str,
+    _post_id: &str,
     _title: &str,
     _body: &str,
     _clicked: std::sync::Arc<Clicked>,
@@ -70,14 +79,25 @@ pub fn raise(
 /// A group is a channel for this purpose, not a direct message. It has several
 /// people in it, so the author alone does not say which one it was -- and with
 /// nine groups of overlapping membership, that is the whole question.
+///
+/// A reply says it is one in the title, as the official client's "Reply in"
+/// does: the reader then knows to look in a thread and not down the channel.
 pub fn wording(announcement: &matterless_sync::notify::Announcement) -> (String, String) {
     if announcement.kind == matterless_sync::notify::Kind::Direct {
-        (announcement.author.clone(), announcement.preview.clone())
+        let title = match announcement.reply {
+            true => format!("Reply from {}", announcement.author),
+            false => announcement.author.clone(),
+        };
+        (title, announcement.preview.clone())
     } else {
         let title = if announcement.channel.is_empty() {
             announcement.author.clone()
         } else {
             announcement.channel.clone()
+        };
+        let title = match announcement.reply {
+            true => format!("Reply in {title}"),
+            false => title,
         };
         (
             title,
@@ -99,7 +119,32 @@ mod tests {
             channel: channel.into(),
             preview: "the build is green".into(),
             kind,
+            reply: false,
         }
+    }
+
+    /// A reply says so, or the reader looks for it down the channel and finds
+    /// nothing new there.
+    #[test]
+    fn a_reply_says_it_is_one() {
+        let reply = |channel: &str, kind: Kind| Announcement {
+            reply: true,
+            ..from(channel, kind)
+        };
+        assert_eq!(
+            wording(&reply("Dev", Kind::Channel)),
+            (
+                "Reply in Dev".to_string(),
+                "ada: the build is green".to_string()
+            )
+        );
+        assert_eq!(
+            wording(&reply("ada", Kind::Direct)),
+            (
+                "Reply from ada".to_string(),
+                "the build is green".to_string()
+            )
+        );
     }
 
     /// A direct message is the person, so the person is the title and saying it

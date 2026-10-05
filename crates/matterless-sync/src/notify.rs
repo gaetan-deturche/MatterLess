@@ -546,6 +546,9 @@ pub struct Announcement {
     /// Which of the three kinds it came from, because each is announced
     /// differently.
     pub kind: Kind,
+    /// A reply in a thread, which says so: otherwise it reads as a message in
+    /// the channel, and the reader looks for it there.
+    pub reply: bool,
 }
 
 /// What sort of conversation a notification came from.
@@ -593,6 +596,7 @@ pub fn announce(store: &matterless_store::Store, post_id: &str, me_id: &str) -> 
     );
     Announcement {
         resolved: known.is_some(),
+        reply: !post.root_id.is_empty(),
         author: known.unwrap_or_else(|| post.user_id.clone()),
         author_id: post.user_id,
         channel,

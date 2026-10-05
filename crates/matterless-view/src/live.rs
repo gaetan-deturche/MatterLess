@@ -64,10 +64,10 @@ pub enum Update {
         channel_id: String,
         failed: bool,
     },
-    /// A notification was clicked, naming the conversation to open. Raised
-    /// from whatever thread the platform fires its callback on, and delivered
-    /// like everything else on the one that owns the window.
-    Activated(String),
+    /// A notification was clicked, naming the conversation and the message to
+    /// open. Raised from whatever thread the platform fires its callback on,
+    /// and delivered like everything else on the one that owns the window.
+    Activated { channel_id: String, post_id: String },
     /// A newer build is there, and here is what it would take to install it.
     ///
     /// Offered, never taken: nothing has been fetched at this point beyond the

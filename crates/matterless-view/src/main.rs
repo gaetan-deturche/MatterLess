@@ -1605,9 +1605,14 @@ impl App {
         // socket thread wakes the window with: a toast fires its callback on a
         // thread of its own, and this is how the answer gets home.
         let waking = proxy.clone();
-        self.clicked = Some(Arc::new(Box::new(move |channel_id: String| {
-            let _ = waking.send_event(matterless_view::live::Update::Activated(channel_id));
-        })));
+        self.clicked = Some(Arc::new(Box::new(
+            move |channel_id: String, post_id: String| {
+                let _ = waking.send_event(matterless_view::live::Update::Activated {
+                    channel_id,
+                    post_id,
+                });
+            },
+        )));
         println!("connecting to {server}");
         self.server = server.clone();
         self.link = Some(matterless_view::live::start(
@@ -1902,14 +1907,24 @@ impl App {
                     self.hold_place();
                 }
             }
-            Update::Activated(channel_id) => {
+            Update::Activated {
+                channel_id,
+                post_id,
+            } => {
                 // Clicking a notification is the reader saying they want to be
                 // looking at that conversation -- which means the window, and
                 // by now it may be hidden in the tray rather than merely
                 // behind something.
                 self.raise();
-                self.sidebar.selected = Some(channel_id.clone());
-                self.open_channel(&channel_id);
+                // At the message, as following a link to it is: a reply opens
+                // its thread rather than leaving the reader in the channel.
+                self.press(
+                    matterless_layout::row::Press::Post {
+                        channel_id,
+                        post_id,
+                    },
+                    None,
+                );
             }
             Update::Picture {
                 key,
@@ -4986,7 +5001,7 @@ impl App {
             let Some(clicked) = self.clicked.clone() else {
                 continue;
             };
-            matterless_view::toast::raise(channel_id, &title, &body, clicked);
+            matterless_view::toast::raise(channel_id, post_id, &title, &body, clicked);
         }
         // The button lights for the same things the toast fires for, and only
         // while the window is not being looked at: asking for attention you
@@ -10094,8 +10109,11 @@ fn main() {
     if let Some(text) = std::env::var_os("MATTERLESS_TOAST") {
         let text = text.to_string_lossy().to_string();
         let clicked: std::sync::Arc<matterless_view::toast::Clicked> =
-            std::sync::Arc::new(Box::new(|channel| println!("clicked, for {channel}")));
-        let shown = matterless_view::toast::raise("a-channel", "MatterLess", &text, clicked);
+            std::sync::Arc::new(Box::new(|channel, post| {
+                println!("clicked, for {post} in {channel}")
+            }));
+        let shown =
+            matterless_view::toast::raise("a-channel", "a-post", "MatterLess", &text, clicked);
         println!("raised a notification: {shown}");
         // A toast is handed to the shell and drawn by it, so this process has
         // to outlive the handover.
