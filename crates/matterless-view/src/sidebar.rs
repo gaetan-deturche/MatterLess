@@ -19,6 +19,15 @@ use matterless_ui::{Axis, Node, Placed, Rect, Size};
 /// from, and moving thirty import lines is a change about nothing.
 pub use matterless_widgets::Canvas;
 
+/// A category's heading that folds: which category, and whether it is folded.
+///
+/// `direct_messages` stands for every team's, which the list shows as one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Fold {
+    pub category: String,
+    pub folded: bool,
+}
+
 /// One line in the list: a channel, or the heading of a group.
 #[derive(Debug, Clone)]
 pub enum Entry {
@@ -52,7 +61,14 @@ pub enum Entry {
     /// `directs` marks the one the rail's envelope points at: it is the only
     /// group that belongs to no team and so the only one the rail cannot
     /// reach by a team's id.
-    Heading { label: String, directs: bool },
+    ///
+    /// `fold` is there for a group that folds -- one of the reader's
+    /// categories, not the gathered Unreads -- and says whether it is folded.
+    Heading {
+        label: String,
+        directs: bool,
+        fold: Option<Fold>,
+    },
     /// The threads this reader follows, as a row of the list.
     ///
     /// First, and shaped like a channel, because that is what it is: a place
@@ -127,6 +143,9 @@ const ROW: f32 = 26.0;
 const HEADING: f32 = 26.0;
 /// The strip at the very top: a name on one line and a status on the next.
 const ME: f32 = 52.0;
+/// The room before a heading's name for the chevron that folds it, kept on
+/// every heading so their names line up.
+const FOLD_MARK: f32 = 14.0;
 /// A team's name, above the groups belonging to it.
 const TEAM: f32 = 30.0;
 const PADDING: f32 = 8.0;
@@ -164,7 +183,10 @@ impl Sidebar {
         let mut column = Node::new("sidebar", Size::Grow(1.0))
             .axis(Axis::Column)
             .padding(PADDING);
-        for (index, entry) in self.entries.iter().enumerate() {
+        for ((index, entry), shown) in self.entries.iter().enumerate().zip(self.shown()) {
+            if !shown {
+                continue;
+            }
             let height = height_of(entry);
             column = column.with(Node::new(Self::name_of(entry, index), Size::Fixed(height)));
         }
@@ -323,7 +345,11 @@ impl Sidebar {
     pub fn scroll_to_unread(&mut self, within: Rect) -> bool {
         let mut above = PADDING;
         let mut first = None;
+        let shown = self.shown();
         for (at, entry) in self.entries.iter().enumerate() {
+            if !shown[at] {
+                continue;
+            }
             if let Entry::Heading { label, .. } = entry
                 && label == UNREADS
             {
@@ -344,7 +370,10 @@ impl Sidebar {
 
     pub fn scroll_to(&mut self, wanted: &str, within: Rect) {
         let mut above = PADDING;
-        for entry in &self.entries {
+        for (entry, shown) in self.entries.iter().zip(self.shown()) {
+            if !shown {
+                continue;
+            }
             let hit = match entry {
                 Entry::Team { id, .. } => id == wanted,
                 Entry::Heading { directs, .. } => *directs && wanted == crate::rail::DIRECTS,
@@ -360,8 +389,66 @@ impl Sidebar {
 
     /// How far the list can be scrolled before it runs out.
     pub fn reach(&self, within: Rect) -> f32 {
-        let content: f32 = self.entries.iter().map(height_of).sum();
+        let content: f32 = self
+            .entries
+            .iter()
+            .zip(self.shown())
+            .filter(|(_, shown)| *shown)
+            .map(|(entry, _)| height_of(entry))
+            .sum();
         (content + PADDING * 2.0 - within.height).max(0.0)
+    }
+
+    /// Whether each row is in the list, or folded away under its heading.
+    ///
+    /// A folded category still shows what is waiting in it and the channel
+    /// being read, as the official client does: folding tidies away what is
+    /// quiet, it does not hide what wants an answer.
+    fn shown(&self) -> Vec<bool> {
+        let mut folded = false;
+        self.entries
+            .iter()
+            .map(|entry| match entry {
+                Entry::Heading { fold, .. } => {
+                    folded = fold.as_ref().is_some_and(|fold| fold.folded);
+                    true
+                }
+                Entry::Channel {
+                    id,
+                    unread,
+                    mentions,
+                    muted,
+                    ..
+                } => {
+                    !folded
+                        || (!muted && (*unread > 0 || *mentions > 0))
+                        || self.selected.as_deref() == Some(id.as_str())
+                }
+                _ => {
+                    folded = false;
+                    true
+                }
+            })
+            .collect()
+    }
+
+    /// The heading a click landed on, folded the other way, when it folds.
+    pub fn fold_clicked(&self, input: &Input, placed: &[Placed], within: Rect) -> Option<Fold> {
+        let clicked = input.clicked()?;
+        let index: usize = clicked.strip_prefix("sidebar/heading/")?.parse().ok()?;
+        let row = placed.iter().find(|item| item.name == clicked)?;
+        if row.rect.y < within.y || row.rect.bottom() > within.bottom() {
+            return None;
+        }
+        match self.entries.get(index)? {
+            Entry::Heading {
+                fold: Some(fold), ..
+            } => Some(Fold {
+                category: fold.category.clone(),
+                folded: !fold.folded,
+            }),
+            _ => None,
+        }
     }
 
     /// Applies a frame's input: what was clicked, and how far the wheel turned.
@@ -563,11 +650,35 @@ impl Sidebar {
                     );
                     scene.glyphs(glyphs, palette.ink, palette.faint);
                 }
-                Entry::Heading { label, directs } => {
+                Entry::Heading {
+                    label,
+                    directs,
+                    fold,
+                } => {
+                    // A chevron before a heading that folds: down while its
+                    // channels are listed, right while they are put away.
+                    let lit = fold.is_some() && input.hovered() == Some(name.as_str());
+                    if let Some(fold) = fold {
+                        let glyphs = painter.run(
+                            fonts,
+                            match fold.folded {
+                                true => matterless_layout::marks::NEXT,
+                                false => matterless_layout::marks::CHEVRON_DOWN,
+                            },
+                            row.rect.x + 2.0,
+                            row.rect.y + 7.0,
+                            Run::mark(12.0),
+                        );
+                        scene.glyphs(
+                            glyphs,
+                            if lit { palette.ink } else { palette.faint },
+                            palette.faint,
+                        );
+                    }
                     let glyphs = painter.run(
                         fonts,
                         &small_caps(label),
-                        row.rect.x + 4.0,
+                        row.rect.x + 4.0 + FOLD_MARK,
                         row.rect.y + 8.0,
                         Run {
                             size: 10.5,
@@ -579,7 +690,11 @@ impl Sidebar {
                             smooth: false,
                         },
                     );
-                    scene.glyphs(glyphs, palette.faint, palette.faint);
+                    scene.glyphs(
+                        glyphs,
+                        if lit { palette.soft } else { palette.faint },
+                        palette.faint,
+                    );
                     // Starting a conversation belongs beside the
                     // conversations, which is where the app puts it: on the
                     // one group that is people rather than channels.
@@ -1250,6 +1365,7 @@ mod tests {
         let mut entries = vec![Entry::Heading {
             label: "Channels".into(),
             directs: false,
+            fold: None,
         }];
         for at in 0..40 {
             entries.push(channel(&format!("read{at}"), 0, false));
@@ -1259,6 +1375,7 @@ mod tests {
             entries.push(Entry::Heading {
                 label: UNREADS.into(),
                 directs: false,
+                fold: None,
             });
         }
         entries.push(channel("waiting", 2, false));
@@ -1333,6 +1450,7 @@ mod tests {
             Entry::Heading {
                 label: "Channels".into(),
                 directs: false,
+                fold: None,
             },
             channel("quiet", 0, false),
             channel("dev", 3, false),
@@ -1581,10 +1699,12 @@ mod tests {
             Entry::Heading {
                 label: "Channels".into(),
                 directs: false,
+                fold: None,
             },
             Entry::Heading {
                 label: "Direct messages".into(),
                 directs: true,
+                fold: None,
             },
         ]);
         let within = Rect::new(0.0, 0.0, 240.0, 400.0);
@@ -1638,6 +1758,7 @@ mod tests {
             Entry::Heading {
                 label: "Channels".into(),
                 directs: false,
+                fold: None,
             },
             Entry::Channel {
                 id: "one".into(),
@@ -1687,6 +1808,55 @@ mod tests {
         assert_eq!(sidebar.selected.as_deref(), Some("one"));
     }
 
+    /// A folded category puts away its quiet channels and keeps the ones with
+    /// something waiting and the one being read; a click on its heading asks
+    /// for it the other way.
+    #[test]
+    fn a_folded_category_keeps_only_what_is_waiting() {
+        let mut sidebar = channels();
+        sidebar.entries[0] = Entry::Heading {
+            label: "Channels".into(),
+            directs: false,
+            fold: Some(Fold {
+                category: "c1".into(),
+                folded: true,
+            }),
+        };
+        let placed = sidebar.boxes(panel());
+        let named = |id: &str| {
+            placed
+                .iter()
+                .any(|one| one.name == format!("sidebar/channel/{id}"))
+        };
+        assert!(!named("one"), "a quiet channel stayed out");
+        assert!(named("two"), "an unread channel stays in sight");
+
+        sidebar.selected = Some("one".into());
+        let placed = sidebar.boxes(panel());
+        assert!(
+            placed.iter().any(|one| one.name == "sidebar/channel/one"),
+            "the channel being read stays in sight"
+        );
+
+        let mut input = Input::default();
+        input.apply(
+            Event::PointerMoved {
+                x: 100.0,
+                y: PADDING + 5.0,
+            },
+            &placed,
+        );
+        input.apply(Event::PointerPressed, &placed);
+        input.apply(Event::PointerReleased, &placed);
+        assert_eq!(
+            sidebar.fold_clicked(&input, &placed, panel()),
+            Some(Fold {
+                category: "c1".into(),
+                folded: false,
+            })
+        );
+    }
+
     #[test]
     fn a_click_on_a_heading_chooses_nothing() {
         let mut sidebar = channels();
@@ -1732,6 +1902,7 @@ mod tests {
             Entry::Heading {
                 label: "Channels".into(),
                 directs: false,
+                fold: None,
             },
             Entry::Channel {
                 id: "c1".into(),
@@ -1751,6 +1922,7 @@ mod tests {
             Entry::Heading {
                 label: "Direct messages".into(),
                 directs: true,
+                fold: None,
             },
         ]);
         // Short enough that there is somewhere to scroll to.

@@ -1446,6 +1446,7 @@ impl App {
                 entries.push(Entry::Heading {
                     label: matterless_view::sidebar::UNREADS.to_string(),
                     directs: false,
+                    fold: None,
                 });
                 entries.extend(waiting.into_iter().map(row));
             }
@@ -1471,6 +1472,12 @@ impl App {
             }
             entries.push(Entry::Heading {
                 directs: group.category_type == "direct_messages",
+                // Every category the reader has folds; the catch-all for
+                // channels in none is not one of theirs.
+                fold: (group.id != "uncategorised").then(|| matterless_view::sidebar::Fold {
+                    category: group.id.clone(),
+                    folded: group.collapsed,
+                }),
                 label: group.display_name,
             });
             entries.extend(group.channels.into_iter().map(row));
@@ -4217,6 +4224,23 @@ impl App {
         ));
         self.sidebar.selected = open;
         self.sidebar.scroll = scroll;
+    }
+
+    /// Folds a sidebar category, or unfolds it: here at once, and on the
+    /// server so the reader's other clients agree.
+    fn fold_category(&mut self, fold: matterless_view::sidebar::Fold) {
+        if let Some(store) = self.store.as_ref()
+            && let Err(error) = store.fold_category(&fold.category, fold.folded)
+        {
+            eprintln!("folding {}: {error}", fold.category);
+        }
+        self.rebuild_sidebar();
+        if let Some(link) = self.link.as_ref() {
+            link.send(matterless_view::live::Ask::Fold {
+                category_id: fold.category,
+                folded: fold.folded,
+            });
+        }
     }
 
     /// Records why the window stayed offline, and puts the way in on screen.
@@ -9878,6 +9902,9 @@ impl ApplicationHandler<Update> for App {
                     return;
                 }
                 let within = self.sidebar_rect();
+                if let Some(fold) = self.sidebar.fold_clicked(&self.input, &boxes, within) {
+                    self.fold_category(fold);
+                }
                 let stood_in = self.sidebar.selected.clone();
                 if let Some(channel) = self.sidebar.react(&self.input, &boxes, within) {
                     self.open_channel(&channel);

@@ -87,6 +87,8 @@ pub const NEW: &str = "\u{e13d}";
 pub const BACK: &str = "\u{e06e}";
 /// The next picture, and a submenu.  `chevron-right`
 pub const NEXT: &str = "\u{e06f}";
+/// A sidebar category that is unfolded.  `chevron-down`
+pub const CHEVRON_DOWN: &str = "\u{e06d}";
 /// Keep a file next to the reader’s other downloads.  `download`
 pub const SAVE_FILE: &str = "\u{e0b2}";
 /// Delete a message.  `trash-2`

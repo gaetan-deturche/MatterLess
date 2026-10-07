@@ -1291,6 +1291,20 @@ impl Store {
         Ok(())
     }
 
+    /// Folds or unfolds a sidebar category ahead of the server agreeing.
+    /// `direct_messages` stands for every team's, which the sidebar shows as
+    /// one.
+    pub fn fold_category(&self, category_id: &str, folded: bool) -> Result<()> {
+        let connection = self.lock();
+        connection.execute(
+            "UPDATE sidebar_categories SET collapsed = ?2
+             WHERE id = ?1
+                OR (?1 = 'direct_messages' AND category_type = 'direct_messages')",
+            params![category_id, i64::from(folded)],
+        )?;
+        Ok(())
+    }
+
     /// Sorts every team's direct messages `alpha` or `recent` ahead of the
     /// server agreeing, so the list reorders on the click.
     pub fn sort_directs(&self, sorting: &str) -> Result<()> {

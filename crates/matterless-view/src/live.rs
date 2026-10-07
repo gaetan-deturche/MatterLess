@@ -296,6 +296,9 @@ pub enum Ask {
         team_id: String,
         category_id: String,
     },
+    /// Fold or unfold a sidebar category, so the official client agrees.
+    /// `direct_messages` stands for every team's.
+    Fold { category_id: String, folded: bool },
     /// Set the reader's own status: `online`, `away`, `dnd` or `offline`.
     SetStatus { status: String },
     /// Order the direct messages `alpha` or `recent`, in every team's
@@ -1154,6 +1157,18 @@ async fn run(
                                 }
                             }
                             Err(error) => eprintln!("moving {channel_id}: {error}"),
+                        }
+                    }
+                    Ask::Fold {
+                        category_id,
+                        folded,
+                    } => {
+                        for team in engine.store().teams().unwrap_or_default() {
+                            if let Err(error) =
+                                fold(&rest, &me_id, &team.id, &category_id, folded).await
+                            {
+                                eprintln!("folding {category_id} in {}: {error}", team.id);
+                            }
                         }
                     }
                     Ask::SetStatus { status } => match rest.set_my_status(&me_id, &status).await {
@@ -3490,6 +3505,36 @@ async fn sort_directs(
         .filter(|category| category.sorting != sorting)
         .map(|category| matterless_core::model::SidebarCategory {
             sorting: sorting.to_string(),
+            ..category.clone()
+        })
+        .collect();
+    if changed.is_empty() {
+        return Ok(());
+    }
+    rest.update_sidebar_categories(me_id, team_id, &changed)
+        .await
+}
+
+/// Folds one of a team's sidebar categories on the server, or all of its
+/// direct-message ones for `direct_messages`. A team without it sends nothing.
+async fn fold(
+    rest: &matterless_core::rest::RestClient,
+    me_id: &str,
+    team_id: &str,
+    category_id: &str,
+    folded: bool,
+) -> matterless_core::Result<()> {
+    let held = rest.sidebar_categories(me_id, team_id).await?;
+    let changed: Vec<matterless_core::model::SidebarCategory> = held
+        .categories
+        .iter()
+        .filter(|category| {
+            category.id == category_id
+                || (category_id == "direct_messages" && category.category_type == "direct_messages")
+        })
+        .filter(|category| category.collapsed != folded)
+        .map(|category| matterless_core::model::SidebarCategory {
+            collapsed: folded,
             ..category.clone()
         })
         .collect();
