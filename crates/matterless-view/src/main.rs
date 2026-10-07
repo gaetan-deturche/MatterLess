@@ -633,6 +633,8 @@ struct App {
     /// What a clicked notification does. Held once and shared with every toast,
     /// because each one outlives the call that raised it.
     clicked: Option<Arc<matterless_view::toast::Clicked>>,
+    /// The team listed, when teams are listed one at a time.
+    team: Option<String>,
     /// Jumping to a conversation by name, which is how a reader gets around a
     /// hundred and fourteen channels without hunting the sidebar.
     switcher: matterless_view::switcher::Switcher,
@@ -900,6 +902,7 @@ impl App {
                 live: false,
                 offline: None,
             },
+            None,
         );
         let sidebar = Sidebar::new(entries);
         drop(listing);
@@ -982,6 +985,7 @@ impl App {
             watching: false,
             session: None,
             clicked: None,
+            team: None,
             switcher: matterless_view::switcher::Switcher::default(),
             search: matterless_view::search::Search::default(),
             picker: matterless_view::picker::Picker::default(),
@@ -1336,6 +1340,8 @@ impl App {
         me: &str,
         threads: matterless_core::model::ThreadMode,
         who: Who<'_>,
+        // The one team listed, when teams are listed one at a time.
+        only: Option<&str>,
     ) -> Vec<Entry> {
         let groups = store
             .map(|store| matterless_view::sidebar_feed::groups(store, me, threads))
@@ -1433,6 +1439,11 @@ impl App {
         if counted && store.is_some_and(|store| lifts_unreads(store, me)) {
             let mut waiting: Vec<matterless_sidebar::ChannelSummary> = Vec::new();
             for group in &mut groups {
+                // Another team's, with one team listed: it stays with its team,
+                // out of sight, as the official client keeps each team's own.
+                if only.is_some_and(|only| !group.team_id.is_empty() && group.team_id != only) {
+                    continue;
+                }
                 group.channels.retain(|channel| {
                     let asking = channel.unread > 0 && !channel.muted;
                     if asking {
@@ -4196,13 +4207,26 @@ impl App {
                 kind: matterless_view::rail::Kind::Unread,
             },
         );
-        self.rail.teams = teams;
-        self.rail.chosen = self
+        // One team at a time starts on the one being read, or the first.
+        let one = self.settings.teams == matterless_view::settings::Teams::One;
+        let reading = self
             .sidebar
             .selected
             .as_ref()
             .and_then(|id| self.store.as_ref()?.channel(id).ok().flatten())
-            .map(|channel| channel.team_id);
+            .map(|channel| channel.team_id)
+            .filter(|team| !team.is_empty());
+        if one && self.team.is_none() {
+            self.team = reading.clone().or_else(|| {
+                teams
+                    .iter()
+                    .find(|tile| tile.kind == matterless_view::rail::Kind::Team)
+                    .map(|tile| tile.id.clone())
+            });
+        }
+        let only = if one { self.team.clone() } else { None };
+        self.rail.teams = teams;
+        self.rail.chosen = if one { only.clone() } else { reading };
         let open = self.sidebar.selected.clone();
         let scroll = self.sidebar.scroll;
         // "Signing in" is only true while something is: with no session and
@@ -4223,9 +4247,11 @@ impl App {
                 live: self.connected,
                 offline: self.offline,
             },
+            only.as_deref(),
         ));
         self.sidebar.selected = open;
         self.sidebar.scroll = scroll;
+        self.sidebar.only = only;
     }
 
     /// Folds a sidebar category, or unfolds it: here at once, and on the
@@ -4243,6 +4269,14 @@ impl App {
                 folded: fold.folded,
             });
         }
+    }
+
+    /// Lists this team, when teams are listed one at a time, and remembers it
+    /// for the next start.
+    fn show_team(&mut self, team: &str) {
+        self.team = Some(team.to_string());
+        self.keep_setting(TEAM_SHOWN, team);
+        self.rebuild_sidebar();
     }
 
     /// Folds a team's block of the sidebar, or unfolds it. Kept on this
@@ -6882,6 +6916,13 @@ impl App {
                             eprintln!("keeping the picture budget: {error}");
                         }
                     }
+                    matterless_view::settings::Did::Teams(teams) => {
+                        self.keep_setting(
+                            matterless_view::settings::Teams::SETTING,
+                            teams.stored(),
+                        );
+                        self.rebuild_sidebar();
+                    }
                     matterless_view::settings::Did::Unreads(on) => {
                         // Here at once, and on the server for every other
                         // client, which echoes it back unchanged.
@@ -7644,6 +7685,15 @@ impl App {
         if channel == matterless_view::sidebar::DRAFTS {
             self.open_drafts();
             return;
+        }
+        // One team at a time: a channel of another team -- from the switcher,
+        // a link, a notification -- brings its team into the list with it.
+        if self.settings.teams == matterless_view::settings::Teams::One
+            && let Ok(Some(held)) = store.channel(channel)
+            && !held.team_id.is_empty()
+            && self.team.as_deref() != Some(held.team_id.as_str())
+        {
+            self.show_team(&held.team_id);
         }
         self.load_about_for(channel);
         // The members pane follows the reader to the channel they open.
@@ -9495,6 +9545,12 @@ impl ApplicationHandler<Update> for App {
         let theme = matterless_view::settings::Theme::read(
             read(matterless_view::settings::Theme::SETTING).as_deref(),
         );
+        let teams = matterless_view::settings::Teams::read(
+            read(matterless_view::settings::Teams::SETTING).as_deref(),
+        );
+        let team = read(TEAM_SHOWN).filter(|team| !team.is_empty());
+        self.settings.teams = teams;
+        self.team = team;
         self.settings.contrast = contrast;
         self.settings.theme = theme;
         self.wear(theme);
@@ -9902,6 +9958,12 @@ impl ApplicationHandler<Update> for App {
                         self.settings.show();
                         let window = self.window_rect();
                         self.settings.measure(&mut self.fonts, window);
+                    } else if self.settings.teams == matterless_view::settings::Teams::One
+                        && pressed != matterless_view::rail::DIRECTS
+                    {
+                        // One team at a time: the tile lists that team.
+                        self.show_team(&pressed);
+                        self.sidebar.scroll = 0.0;
                     } else {
                         let within = self.sidebar_rect();
                         self.sidebar.scroll_to(&pressed, within);
@@ -10397,6 +10459,9 @@ fn worth_raising(put_off: Option<&str>, version: &str) -> bool {
 /// server is worse than either arrangement.
 /// The teams folded in the sidebar, as this machine remembers them.
 const FOLDED_TEAMS: &str = "folded-teams";
+
+/// The team listed when teams are listed one at a time.
+const TEAM_SHOWN: &str = "team-shown";
 
 fn folded_teams(store: &matterless_store::Store) -> std::collections::HashSet<String> {
     store

@@ -125,6 +125,10 @@ pub struct Sidebar {
     /// Its own bar. A hundred and fourteen channels is a scroll, and a list
     /// that scrolls with nothing to say how far is a list you get lost in.
     pub bar: crate::scrollbar::Scrollbar,
+    /// The one team listed, when teams are listed one at a time. The others
+    /// stay in `entries` -- the switcher and the rail's counts read every
+    /// channel from there -- and are only left out of the list.
+    pub only: Option<String>,
 }
 
 /// What the threads row is selected as.
@@ -162,6 +166,7 @@ impl Sidebar {
             selected: None,
             scroll: 0.0,
             bar: crate::scrollbar::Scrollbar::default(),
+            only: None,
         }
     }
 
@@ -415,21 +420,27 @@ impl Sidebar {
     fn shown(&self) -> Vec<bool> {
         let mut folded = false;
         let mut team_folded = false;
+        // A team other than the one listed, when teams are listed one at a time.
+        let mut elsewhere = false;
         self.entries
             .iter()
             .map(|entry| match entry {
-                Entry::Team { folded: team, .. } => {
+                Entry::Team {
+                    id, folded: team, ..
+                } => {
+                    elsewhere = self.only.as_ref().is_some_and(|only| only != id);
                     team_folded = *team;
                     folded = false;
-                    true
+                    !elsewhere
                 }
                 Entry::Heading { fold, directs, .. } => {
                     // Direct messages and the catch-all belong to no team.
                     if *directs || fold.is_none() {
                         team_folded = false;
+                        elsewhere = false;
                     }
                     folded = team_folded || fold.as_ref().is_some_and(|fold| fold.folded);
-                    !team_folded
+                    !team_folded && !elsewhere
                 }
                 Entry::Channel {
                     id,
@@ -438,13 +449,15 @@ impl Sidebar {
                     muted,
                     ..
                 } => {
-                    !folded
-                        || (!muted && (*unread > 0 || *mentions > 0))
-                        || self.selected.as_deref() == Some(id.as_str())
+                    !elsewhere
+                        && (!folded
+                            || (!muted && (*unread > 0 || *mentions > 0))
+                            || self.selected.as_deref() == Some(id.as_str()))
                 }
                 _ => {
                     folded = false;
                     team_folded = false;
+                    elsewhere = false;
                     true
                 }
             })
@@ -1982,6 +1995,68 @@ mod tests {
             sidebar.team_clicked(&input, &placed, panel()),
             Some(("t1".to_string(), false))
         );
+    }
+
+    /// One team at a time leaves the others' names, headings and channels out
+    /// -- even what is waiting in them, which the rail's dot says -- and keeps
+    /// direct messages, which are nobody's team.
+    #[test]
+    fn one_team_at_a_time_lists_only_that_team() {
+        let fold = |category: &str| {
+            Some(Fold {
+                category: category.into(),
+                folded: false,
+            })
+        };
+        let team = |id: &str| Entry::Team {
+            id: id.into(),
+            label: id.into(),
+            folded: false,
+        };
+        let row = |id: &str, unread: i64| Entry::Channel {
+            id: id.into(),
+            label: id.into(),
+            unread,
+            mentions: 0,
+            muted: false,
+            direct: false,
+            private: false,
+            counterpart: None,
+            counterpart_avatar_at: 0,
+        };
+        let mut sidebar = Sidebar::new(vec![
+            team("t1"),
+            Entry::Heading {
+                label: "Channels".into(),
+                directs: false,
+                fold: fold("c1"),
+            },
+            row("here", 0),
+            team("t2"),
+            Entry::Heading {
+                label: "Channels".into(),
+                directs: false,
+                fold: fold("c2"),
+            },
+            row("there", 4),
+            Entry::Heading {
+                label: "Direct messages".into(),
+                directs: true,
+                fold: fold("direct_messages"),
+            },
+            row("dm", 0),
+        ]);
+        sidebar.only = Some("t1".into());
+        let placed = sidebar.boxes(panel());
+        let has = |name: &str| placed.iter().any(|one| one.name == name);
+        assert!(has("sidebar/team/t1") && has("sidebar/channel/here"));
+        assert!(!has("sidebar/team/t2"), "another team's name stayed");
+        assert!(!has("sidebar/heading/4"), "another team's heading stayed");
+        assert!(
+            !has("sidebar/channel/there"),
+            "another team's channel stayed"
+        );
+        assert!(has("sidebar/channel/dm"), "direct messages are no team's");
     }
 
     #[test]

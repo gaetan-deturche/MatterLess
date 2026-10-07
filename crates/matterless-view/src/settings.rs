@@ -194,6 +194,50 @@ impl Contrast {
     }
 }
 
+/// Every team's channels in one list, or one team's at a time with the rail
+/// switching between them, as the official client does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Teams {
+    #[default]
+    All,
+    One,
+}
+
+impl Teams {
+    /// What this is called in the settings table.
+    pub const SETTING: &'static str = "teams-shown";
+
+    pub fn stored(&self) -> &'static str {
+        self.slug()
+    }
+
+    /// Reads one back; anything else is the default.
+    pub fn read(said: Option<&str>) -> Self {
+        Self::all()
+            .into_iter()
+            .find(|one| Some(one.slug()) == said)
+            .unwrap_or_default()
+    }
+
+    fn title(&self) -> &'static str {
+        match self {
+            Teams::All => "All together",
+            Teams::One => "One at a time",
+        }
+    }
+
+    fn slug(&self) -> &'static str {
+        match self {
+            Teams::All => "teams-all",
+            Teams::One => "teams-one",
+        }
+    }
+
+    fn all() -> [Teams; 2] {
+        [Teams::All, Teams::One]
+    }
+}
+
 /// Light text on a dark ground, or dark on light.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Theme {
@@ -345,6 +389,9 @@ struct Card {
     /// The heading over gathering unread channels, and its two buttons.
     unreads: Rect,
     groupings: Laid,
+    /// The heading over how teams are listed, and its two buttons.
+    teams: Rect,
+    showings: Laid,
     /// The heading over how much opened pictures keep, and its buttons.
     kept: Rect,
     sizes: Laid,
@@ -365,10 +412,11 @@ struct Card {
 impl Card {
     /// Every row of buttons, in one place: what is drawn and what answers a
     /// press come from the same list, so a row cannot be one without the other.
-    fn rows(&self) -> [&Laid; 6] {
+    fn rows(&self) -> [&Laid; 7] {
         [
             &self.themes,
             &self.groupings,
+            &self.showings,
             &self.sizes,
             &self.starts,
             &self.look,
@@ -392,6 +440,7 @@ pub struct Settings {
     /// Mattermost's own setting, kept on the server and shared with the
     /// reader's other clients: the window reads it in as the panel opens.
     pub unreads: bool,
+    pub teams: Teams,
     /// Whether a look for a newer build is out, so it is not asked for twice
     /// and the button can say what it is doing.
     looking: bool,
@@ -421,6 +470,8 @@ pub enum Did {
     /// Gather unread channels at the top of the sidebar, or leave them where
     /// they are.
     Unreads(bool),
+    /// List the teams this way from now on.
+    Teams(Teams),
     /// Start with Windows, or stop.
     Startup(bool),
     /// Go and see whether there is a newer build.
@@ -507,6 +558,7 @@ impl Settings {
         let contrast = tall(fonts, CONTRAST_HEADING, inner, GROUP_SIZE);
         let theme = tall(fonts, THEME_HEADING, inner, GROUP_SIZE);
         let unreads = tall(fonts, UNREADS_HEADING, inner, GROUP_SIZE);
+        let teams = tall(fonts, TEAMS_HEADING, inner, GROUP_SIZE);
         let kept = tall(fonts, KEPT_HEADING, inner, GROUP_SIZE);
         let starting = tall(fonts, STARTUP_HEADING, inner, GROUP_SIZE);
 
@@ -537,6 +589,10 @@ impl Settings {
             + BUTTON_HEIGHT
             + GAP
             + unreads
+            + ROW_GAP
+            + BUTTON_HEIGHT
+            + GAP
+            + teams
             + ROW_GAP
             + BUTTON_HEIGHT
             + GAP
@@ -633,6 +689,28 @@ impl Settings {
             )
             .measure(fonts);
         let y = unreads.bottom() + ROW_GAP + BUTTON_HEIGHT + ROW_GAP;
+
+        let teams = Rect::new(rect.x + PAD, y - ROW_GAP + GAP, inner, teams);
+        let listed = self.teams;
+        let showings = Teams::all()
+            .into_iter()
+            .fold(
+                Row::new(
+                    NAME,
+                    Rect::new(rect.x, teams.bottom() + ROW_GAP, rect.width, BUTTON_HEIGHT),
+                )
+                .against(matterless_widgets::Against::Left)
+                .pad(PAD)
+                .depth(63),
+                |row, one| {
+                    row.button(match one == listed {
+                        true => Button::primary(one.slug(), one.title()),
+                        false => Button::plain(one.slug(), one.title()),
+                    })
+                },
+            )
+            .measure(fonts);
+        let y = teams.bottom() + ROW_GAP + BUTTON_HEIGHT + ROW_GAP;
 
         let kept = Rect::new(rect.x + PAD, y - ROW_GAP + GAP, inner, kept);
         let chosen = self.kept;
@@ -735,6 +813,8 @@ impl Settings {
             themes,
             unreads,
             groupings,
+            teams,
+            showings,
             kept,
             sizes,
             starting,
@@ -903,6 +983,13 @@ impl Settings {
             self.unreads = on;
             self.placed = None;
             return Some(Did::Unreads(on));
+        }
+        if let Some(slug) = self.laid().and_then(|card| card.showings.clicked(input))
+            && let Some(one) = Teams::all().into_iter().find(|one| one.slug() == slug)
+        {
+            self.teams = one;
+            self.placed = None;
+            return Some(Did::Teams(one));
         }
         if let Some(slug) = self.laid().and_then(|card| card.starts.clicked(input)) {
             let on = slug == "startup-on";
@@ -1110,6 +1197,15 @@ impl Settings {
 
             let glyphs = painter.run(
                 fonts,
+                TEAMS_HEADING,
+                card.teams.x,
+                card.teams.y,
+                Run::label(card.teams.width).sized(GROUP_SIZE),
+            );
+            scene.glyphs(glyphs, palette.faint, palette.faint);
+
+            let glyphs = painter.run(
+                fonts,
                 KEPT_HEADING,
                 card.kept.x,
                 card.kept.y,
@@ -1185,6 +1281,9 @@ const KEPT_HEADING: &str = "Opened pictures kept on disk";
 
 /// The heading over gathering unread channels, in Mattermost's own words.
 const UNREADS_HEADING: &str = "Group unread channels separately";
+
+/// The heading over how teams are listed.
+const TEAMS_HEADING: &str = "Teams in the sidebar";
 
 /// The heading over starting when the reader signs in to Windows.
 const STARTUP_HEADING: &str = "Start with Windows";
@@ -1308,9 +1407,10 @@ mod tests {
         // A box for each, plus the card, the window behind it, the sizes, On
         // and Off for starting with Windows, the two buttons -- the one that
         // looks for a build and the one that shuts it -- the contrast slider,
-        // the two themes, and On and Off for grouping unread channels.
+        // the two themes, On and Off for grouping unread channels, and the two
+        // ways of listing teams.
         let boxes = settings.boxes(window());
-        assert_eq!(boxes.len(), 6 + card.choices.len() + sizes.len() + 5);
+        assert_eq!(boxes.len(), 6 + card.choices.len() + sizes.len() + 7);
         // Every button drawn is a button that can be pressed.
         for slug in ["theme-dark", "theme-light"] {
             assert!(
@@ -1555,6 +1655,28 @@ mod tests {
         let mut input = Input::default();
         press(&mut input, &boxes, off);
         assert_eq!(settings.react(&mut input), Some(Did::Startup(false)));
+    }
+
+    /// How teams are listed sits under grouping unread channels, and its
+    /// buttons ask for exactly what they say.
+    #[test]
+    fn listing_teams_is_asked_for_by_its_buttons() {
+        let (mut settings, _fonts) = shown();
+        let card = settings.laid().expect("measured");
+        let one = card.showings.rect("teams-one").expect("placed");
+        assert!(
+            card.unreads.bottom() <= card.teams.y,
+            "under grouping unreads"
+        );
+        assert!(one.bottom() <= card.kept.y, "above the disk budget");
+
+        let boxes = settings.boxes(window());
+        let mut input = Input::default();
+        press(&mut input, &boxes, one);
+        assert_eq!(settings.react(&mut input), Some(Did::Teams(Teams::One)));
+        assert_eq!(settings.teams, Teams::One);
+        assert_eq!(Teams::read(Some(Teams::One.stored())), Teams::One);
+        assert_eq!(Teams::read(None), Teams::All);
     }
 
     /// Grouping unread channels sits under the theme, and its buttons ask for
