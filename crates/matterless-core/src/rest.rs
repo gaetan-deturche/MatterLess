@@ -356,6 +356,35 @@ impl RestClient {
         self.get(&format!("/users/{user_id}/preferences")).await
     }
 
+    /// Sets one preference for this reader. The server echoes it on the
+    /// socket, to this window and to every other client they have open.
+    pub async fn set_preference(
+        &self,
+        user_id: &str,
+        category: &str,
+        name: &str,
+        value: &str,
+    ) -> Result<()> {
+        let body = vec![Preference {
+            user_id: user_id.to_string(),
+            category: category.to_string(),
+            name: name.to_string(),
+            value: value.to_string(),
+        }];
+        let path = format!("/users/{user_id}/preferences");
+        let response = self
+            .send(self.builder(Method::PUT, &path)?.json(&body))
+            .await?;
+        if response.status().is_success() {
+            Ok(())
+        } else {
+            Err(Error::Protocol(format!(
+                "setting {category}/{name}: {}",
+                response.status()
+            )))
+        }
+    }
+
     pub async fn statuses_by_ids(&self, ids: &[String]) -> Result<Vec<Status>> {
         if ids.is_empty() {
             return Ok(Vec::new());

@@ -2102,6 +2102,8 @@ impl App {
                         delta,
                         matterless_sync::Delta::UnreadChanged { .. }
                             | matterless_sync::Delta::ThreadChanged { .. }
+                            // Grouping unread channels, switched in another client.
+                            | matterless_sync::Delta::PreferencesChanged { .. }
                     )
                 }) {
                     self.rebuild_sidebar();
@@ -6834,6 +6836,29 @@ impl App {
                             eprintln!("keeping the picture budget: {error}");
                         }
                     }
+                    matterless_view::settings::Did::Unreads(on) => {
+                        // Here at once, and on the server for every other
+                        // client, which echoes it back unchanged.
+                        let value = if on { "true" } else { "false" };
+                        if let Some(store) = self.store.as_ref()
+                            && let Err(error) = store.set_preference(
+                                &self.me,
+                                "sidebar_settings",
+                                "show_unread_section",
+                                value,
+                            )
+                        {
+                            eprintln!("grouping unread channels: {error}");
+                        }
+                        if let Some(link) = self.link.as_ref() {
+                            link.send(matterless_view::live::Ask::Prefer {
+                                category: "sidebar_settings".to_string(),
+                                name: "show_unread_section".to_string(),
+                                value: value.to_string(),
+                            });
+                        }
+                        self.rebuild_sidebar();
+                    }
                     matterless_view::settings::Did::Startup(on) => {
                         // What it ended up as, which a locked-down machine or a
                         // build that is not the installed one may refuse.
@@ -9820,6 +9845,10 @@ impl ApplicationHandler<Update> for App {
                     } else if pressed == matterless_view::rail::SETTINGS {
                         // Asked each time: the tray's menu switches it too.
                         self.settings.startup = matterless_view::tray::startup::enabled();
+                        self.settings.unreads = self
+                            .store
+                            .as_deref()
+                            .is_some_and(|store| lifts_unreads(store, &self.me));
                         // A build already on offer is installed from here too.
                         let ready = self.offer.as_ref().map(|offer| offer.version.clone());
                         self.settings.ready(ready.as_deref());

@@ -342,6 +342,9 @@ struct Card {
     /// The heading over the theme, and its two buttons.
     theme: Rect,
     themes: Laid,
+    /// The heading over gathering unread channels, and its two buttons.
+    unreads: Rect,
+    groupings: Laid,
     /// The heading over how much opened pictures keep, and its buttons.
     kept: Rect,
     sizes: Laid,
@@ -362,9 +365,10 @@ struct Card {
 impl Card {
     /// Every row of buttons, in one place: what is drawn and what answers a
     /// press come from the same list, so a row cannot be one without the other.
-    fn rows(&self) -> [&Laid; 5] {
+    fn rows(&self) -> [&Laid; 6] {
         [
             &self.themes,
+            &self.groupings,
             &self.sizes,
             &self.starts,
             &self.look,
@@ -384,6 +388,10 @@ pub struct Settings {
     /// Whether this client starts when the reader signs in to Windows. Kept in
     /// the registry, not here: the window reads it in as the panel opens.
     pub startup: bool,
+    /// Whether unread channels are gathered at the top of the sidebar.
+    /// Mattermost's own setting, kept on the server and shared with the
+    /// reader's other clients: the window reads it in as the panel opens.
+    pub unreads: bool,
     /// Whether a look for a newer build is out, so it is not asked for twice
     /// and the button can say what it is doing.
     looking: bool,
@@ -410,6 +418,9 @@ pub enum Did {
     Theme(Theme),
     /// Opened pictures may keep this much on disk from now on.
     Kept(Kept),
+    /// Gather unread channels at the top of the sidebar, or leave them where
+    /// they are.
+    Unreads(bool),
     /// Start with Windows, or stop.
     Startup(bool),
     /// Go and see whether there is a newer build.
@@ -495,6 +506,7 @@ impl Settings {
 
         let contrast = tall(fonts, CONTRAST_HEADING, inner, GROUP_SIZE);
         let theme = tall(fonts, THEME_HEADING, inner, GROUP_SIZE);
+        let unreads = tall(fonts, UNREADS_HEADING, inner, GROUP_SIZE);
         let kept = tall(fonts, KEPT_HEADING, inner, GROUP_SIZE);
         let starting = tall(fonts, STARTUP_HEADING, inner, GROUP_SIZE);
 
@@ -521,6 +533,10 @@ impl Settings {
             + BUTTON_HEIGHT
             + GAP
             + theme
+            + ROW_GAP
+            + BUTTON_HEIGHT
+            + GAP
+            + unreads
             + ROW_GAP
             + BUTTON_HEIGHT
             + GAP
@@ -591,6 +607,32 @@ impl Settings {
             )
             .measure(fonts);
         let y = theme.bottom() + ROW_GAP + BUTTON_HEIGHT + ROW_GAP;
+
+        let unreads = Rect::new(rect.x + PAD, y - ROW_GAP + GAP, inner, unreads);
+        let groupings = [(true, "unreads-on", "On"), (false, "unreads-off", "Off")]
+            .into_iter()
+            .fold(
+                Row::new(
+                    NAME,
+                    Rect::new(
+                        rect.x,
+                        unreads.bottom() + ROW_GAP,
+                        rect.width,
+                        BUTTON_HEIGHT,
+                    ),
+                )
+                .against(matterless_widgets::Against::Left)
+                .pad(PAD)
+                .depth(63),
+                |row, (on, slug, title)| {
+                    row.button(match on == self.unreads {
+                        true => Button::primary(slug, title),
+                        false => Button::plain(slug, title),
+                    })
+                },
+            )
+            .measure(fonts);
+        let y = unreads.bottom() + ROW_GAP + BUTTON_HEIGHT + ROW_GAP;
 
         let kept = Rect::new(rect.x + PAD, y - ROW_GAP + GAP, inner, kept);
         let chosen = self.kept;
@@ -691,6 +733,8 @@ impl Settings {
             slider,
             theme,
             themes,
+            unreads,
+            groupings,
             kept,
             sizes,
             starting,
@@ -853,6 +897,12 @@ impl Settings {
             // Measured again, so the chosen button is drawn as chosen.
             self.placed = None;
             return Some(Did::Kept(one));
+        }
+        if let Some(slug) = self.laid().and_then(|card| card.groupings.clicked(input)) {
+            let on = slug == "unreads-on";
+            self.unreads = on;
+            self.placed = None;
+            return Some(Did::Unreads(on));
         }
         if let Some(slug) = self.laid().and_then(|card| card.starts.clicked(input)) {
             let on = slug == "startup-on";
@@ -1051,6 +1101,15 @@ impl Settings {
 
             let glyphs = painter.run(
                 fonts,
+                UNREADS_HEADING,
+                card.unreads.x,
+                card.unreads.y,
+                Run::label(card.unreads.width).sized(GROUP_SIZE),
+            );
+            scene.glyphs(glyphs, palette.faint, palette.faint);
+
+            let glyphs = painter.run(
+                fonts,
                 KEPT_HEADING,
                 card.kept.x,
                 card.kept.y,
@@ -1123,6 +1182,9 @@ const THEME_HEADING: &str = "Theme";
 
 /// The heading over how much disk opened pictures may keep.
 const KEPT_HEADING: &str = "Opened pictures kept on disk";
+
+/// The heading over gathering unread channels, in Mattermost's own words.
+const UNREADS_HEADING: &str = "Group unread channels separately";
 
 /// The heading over starting when the reader signs in to Windows.
 const STARTUP_HEADING: &str = "Start with Windows";
@@ -1245,10 +1307,10 @@ mod tests {
         }
         // A box for each, plus the card, the window behind it, the sizes, On
         // and Off for starting with Windows, the two buttons -- the one that
-        // looks for a build and the one that shuts it -- the contrast slider
-        // and the two themes.
+        // looks for a build and the one that shuts it -- the contrast slider,
+        // the two themes, and On and Off for grouping unread channels.
         let boxes = settings.boxes(window());
-        assert_eq!(boxes.len(), 6 + card.choices.len() + sizes.len() + 3);
+        assert_eq!(boxes.len(), 6 + card.choices.len() + sizes.len() + 5);
         // Every button drawn is a button that can be pressed.
         for slug in ["theme-dark", "theme-light"] {
             assert!(
@@ -1493,5 +1555,34 @@ mod tests {
         let mut input = Input::default();
         press(&mut input, &boxes, off);
         assert_eq!(settings.react(&mut input), Some(Did::Startup(false)));
+    }
+
+    /// Grouping unread channels sits under the theme, and its buttons ask for
+    /// exactly what they say.
+    #[test]
+    fn grouping_unreads_is_asked_for_by_its_buttons() {
+        let (mut settings, _fonts) = shown();
+        let card = settings.laid().expect("measured");
+        let on = card.groupings.rect("unreads-on").expect("placed");
+        assert!(card.theme.bottom() <= card.unreads.y, "under the theme");
+        assert!(on.bottom() <= card.kept.y, "above the disk budget");
+
+        let boxes = settings.boxes(window());
+        let mut input = Input::default();
+        press(&mut input, &boxes, on);
+        assert_eq!(settings.react(&mut input), Some(Did::Unreads(true)));
+        assert!(settings.unreads);
+
+        let (mut settings, _fonts) = shown();
+        let off = settings
+            .laid()
+            .expect("measured")
+            .groupings
+            .rect("unreads-off")
+            .expect("placed");
+        let boxes = settings.boxes(window());
+        let mut input = Input::default();
+        press(&mut input, &boxes, off);
+        assert_eq!(settings.react(&mut input), Some(Did::Unreads(false)));
     }
 }

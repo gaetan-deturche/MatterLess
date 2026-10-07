@@ -327,6 +327,13 @@ pub enum Ask {
     Membership,
     /// The messages this reader has saved, across every conversation.
     Saved,
+    /// Set one of the reader's Mattermost preferences, which every client of
+    /// theirs shares.
+    Prefer {
+        category: String,
+        name: String,
+        value: String,
+    },
     /// The messages pinned in one channel, for everyone.
     Pinned { channel_id: String },
     /// Who is around, for the conversations on screen.
@@ -1259,6 +1266,14 @@ async fn run(
                             wake.wake(Update::Membership(mode));
                         }
                         Err(error) => eprintln!("refreshing the sidebar: {error}"),
+                    },
+                    Ask::Prefer {
+                        category,
+                        name,
+                        value,
+                    } => match rest.set_preference(&me_id, &category, &name, &value).await {
+                        Ok(()) => println!("{category}/{name} is {value}"),
+                        Err(error) => eprintln!("setting {category}/{name}: {error}"),
                     },
                     Ask::Saved => {
                         // From the server rather than the store: a message
