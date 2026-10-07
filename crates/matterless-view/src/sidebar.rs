@@ -54,8 +54,13 @@ pub enum Entry {
         /// drawn with any other.
         version: String,
     },
-    /// A team's name, above the groups that belong to it.
-    Team { id: String, label: String },
+    /// A team's name, above the groups that belong to it, and whether the
+    /// reader has folded them away.
+    Team {
+        id: String,
+        label: String,
+        folded: bool,
+    },
     /// A group's name -- "Favourites", "Channels", "Direct messages".
     ///
     /// `directs` marks the one the rail's envelope points at: it is the only
@@ -404,14 +409,27 @@ impl Sidebar {
     /// A folded category still shows what is waiting in it and the channel
     /// being read, as the official client does: folding tidies away what is
     /// quiet, it does not hide what wants an answer.
+    ///
+    /// A folded team puts away its headings too, and keeps the same rows a
+    /// folded category keeps.
     fn shown(&self) -> Vec<bool> {
         let mut folded = false;
+        let mut team_folded = false;
         self.entries
             .iter()
             .map(|entry| match entry {
-                Entry::Heading { fold, .. } => {
-                    folded = fold.as_ref().is_some_and(|fold| fold.folded);
+                Entry::Team { folded: team, .. } => {
+                    team_folded = *team;
+                    folded = false;
                     true
+                }
+                Entry::Heading { fold, directs, .. } => {
+                    // Direct messages and the catch-all belong to no team.
+                    if *directs || fold.is_none() {
+                        team_folded = false;
+                    }
+                    folded = team_folded || fold.as_ref().is_some_and(|fold| fold.folded);
+                    !team_folded
                 }
                 Entry::Channel {
                     id,
@@ -426,10 +444,31 @@ impl Sidebar {
                 }
                 _ => {
                     folded = false;
+                    team_folded = false;
                     true
                 }
             })
             .collect()
+    }
+
+    /// The team whose name a click landed on, and whether it is now to be
+    /// folded.
+    pub fn team_clicked(
+        &self,
+        input: &Input,
+        placed: &[Placed],
+        within: Rect,
+    ) -> Option<(String, bool)> {
+        let clicked = input.clicked()?;
+        let wanted = clicked.strip_prefix("sidebar/team/")?;
+        let row = placed.iter().find(|item| item.name == clicked)?;
+        if row.rect.y < within.y || row.rect.bottom() > within.bottom() {
+            return None;
+        }
+        self.entries.iter().find_map(|entry| match entry {
+            Entry::Team { id, folded, .. } if id == wanted => Some((id.clone(), !folded)),
+            _ => None,
+        })
     }
 
     /// The heading a click landed on, folded the other way, when it folds.
@@ -612,7 +651,7 @@ impl Sidebar {
                 // "Favorites" and a "Channels", and unqualified they read as
                 // duplicates -- but qualifying each one says the team four
                 // times over.
-                Entry::Team { id, label } => {
+                Entry::Team { id, label, folded } => {
                     // The team's own picture, which tells two teams apart
                     // faster than their names do. A tile behind it, so one
                     // with transparency in it -- or one that has not arrived
@@ -649,6 +688,37 @@ impl Sidebar {
                         },
                     );
                     scene.glyphs(glyphs, palette.ink, palette.faint);
+                    // After the name, the chevron that folds the team, as a
+                    // category's does before its own.
+                    let named = matterless_layout::extent_of(
+                        fonts,
+                        label,
+                        f32::MAX,
+                        matterless_layout::Style {
+                            size: 14.5,
+                            line_height: 20.0,
+                            bold: true,
+                            italic: false,
+                            mono: false,
+                        },
+                    )
+                    .width;
+                    let lit = input.hovered() == Some(name.as_str());
+                    let glyphs = painter.run(
+                        fonts,
+                        match folded {
+                            true => matterless_layout::marks::NEXT,
+                            false => matterless_layout::marks::CHEVRON_DOWN,
+                        },
+                        row.rect.x + 4.0 + TEAM_ICON + 7.0 + named + 5.0,
+                        row.rect.y + 10.0,
+                        Run::mark(12.0),
+                    );
+                    scene.glyphs(
+                        glyphs,
+                        if lit { palette.ink } else { palette.faint },
+                        palette.faint,
+                    );
                 }
                 Entry::Heading {
                     label,
@@ -1857,6 +1927,63 @@ mod tests {
         );
     }
 
+    /// A folded team puts its headings and quiet channels away, keeps what is
+    /// waiting, and leaves direct messages alone; a click on its name asks
+    /// for it the other way.
+    #[test]
+    fn a_folded_team_keeps_only_what_is_waiting() {
+        let mut sidebar = channels();
+        sidebar.entries[0] = Entry::Heading {
+            label: "Channels".into(),
+            directs: false,
+            fold: Some(Fold {
+                category: "c1".into(),
+                folded: false,
+            }),
+        };
+        sidebar.entries.insert(
+            0,
+            Entry::Team {
+                id: "t1".into(),
+                label: "Voyager".into(),
+                folded: true,
+            },
+        );
+        sidebar.entries.push(Entry::Heading {
+            label: "Direct messages".into(),
+            directs: true,
+            fold: Some(Fold {
+                category: "direct_messages".into(),
+                folded: false,
+            }),
+        });
+        let placed = sidebar.boxes(panel());
+        let has = |name: &str| placed.iter().any(|one| one.name == name);
+        assert!(has("sidebar/team/t1"), "the team's name stays");
+        assert!(!has("sidebar/heading/1"), "its heading is put away");
+        assert!(!has("sidebar/channel/one"), "and its quiet channel");
+        assert!(
+            has("sidebar/channel/two"),
+            "an unread channel stays in sight"
+        );
+        assert!(has("sidebar/heading/4"), "direct messages are no team's");
+
+        let mut input = Input::default();
+        input.apply(
+            Event::PointerMoved {
+                x: 100.0,
+                y: PADDING + 5.0,
+            },
+            &placed,
+        );
+        input.apply(Event::PointerPressed, &placed);
+        input.apply(Event::PointerReleased, &placed);
+        assert_eq!(
+            sidebar.team_clicked(&input, &placed, panel()),
+            Some(("t1".to_string(), false))
+        );
+    }
+
     #[test]
     fn a_click_on_a_heading_chooses_nothing() {
         let mut sidebar = channels();
@@ -1898,6 +2025,7 @@ mod tests {
             Entry::Team {
                 id: "t1".into(),
                 label: "Voyager".into(),
+                folded: false,
             },
             Entry::Heading {
                 label: "Channels".into(),
@@ -1918,6 +2046,7 @@ mod tests {
             Entry::Team {
                 id: "t2".into(),
                 label: "Northwind".into(),
+                folded: false,
             },
             Entry::Heading {
                 label: "Direct messages".into(),

@@ -1456,6 +1456,7 @@ impl App {
         // each of them: two teams each bring a "Favorites" and a "Channels",
         // and unqualified they read as duplicates -- but qualifying every one
         // says the team's name four times down the list.
+        let folded_teams = store.map(folded_teams).unwrap_or_default();
         let mut team = String::new();
         for group in groups {
             if group.channels.is_empty() {
@@ -1465,6 +1466,7 @@ impl App {
                 team = group.team_name.clone();
                 if !team.is_empty() {
                     entries.push(Entry::Team {
+                        folded: folded_teams.contains(&group.team_id),
                         id: group.team_id.clone(),
                         label: team.clone(),
                     });
@@ -4241,6 +4243,26 @@ impl App {
                 folded: fold.folded,
             });
         }
+    }
+
+    /// Folds a team's block of the sidebar, or unfolds it. Kept on this
+    /// machine: the server has no such thing, since its client shows one team
+    /// at a time.
+    fn fold_team(&mut self, team: &str, folded: bool) {
+        let Some(store) = self.store.as_ref() else {
+            return;
+        };
+        let mut held = folded_teams(store);
+        match folded {
+            true => held.insert(team.to_string()),
+            false => held.remove(team),
+        };
+        let mut kept: Vec<String> = held.into_iter().collect();
+        kept.sort();
+        if let Err(error) = store.remember_setting(FOLDED_TEAMS, &kept.join(",")) {
+            eprintln!("folding a team: {error}");
+        }
+        self.rebuild_sidebar();
     }
 
     /// Records why the window stayed offline, and puts the way in on screen.
@@ -8816,6 +8838,7 @@ impl App {
         const BUTTONS: [&str; 4] = ["/send", "/attach", "/close", "/newest"];
         name.starts_with("sidebar/channel/")
             || name.starts_with("sidebar/team/")
+            || name.starts_with("sidebar/heading/")
             || name == "sidebar/me"
             || name.starts_with("header/link/")
             || name.starts_with("topicpop/link/")
@@ -9905,6 +9928,10 @@ impl ApplicationHandler<Update> for App {
                 if let Some(fold) = self.sidebar.fold_clicked(&self.input, &boxes, within) {
                     self.fold_category(fold);
                 }
+                if let Some((team, folded)) = self.sidebar.team_clicked(&self.input, &boxes, within)
+                {
+                    self.fold_team(&team, folded);
+                }
                 let stood_in = self.sidebar.selected.clone();
                 if let Some(channel) = self.sidebar.react(&self.input, &boxes, within) {
                     self.open_channel(&channel);
@@ -10368,6 +10395,21 @@ fn worth_raising(put_off: Option<&str>, version: &str) -> bool {
 /// A preference rather than a choice made here: the app reads the same one,
 /// and a sidebar that rearranges itself differently in two clients of one
 /// server is worse than either arrangement.
+/// The teams folded in the sidebar, as this machine remembers them.
+const FOLDED_TEAMS: &str = "folded-teams";
+
+fn folded_teams(store: &matterless_store::Store) -> std::collections::HashSet<String> {
+    store
+        .setting(FOLDED_TEAMS)
+        .ok()
+        .flatten()
+        .unwrap_or_default()
+        .split(',')
+        .filter(|team| !team.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
 fn lifts_unreads(store: &matterless_store::Store, me: &str) -> bool {
     store
         .preference(me, "sidebar_settings", "show_unread_section")
