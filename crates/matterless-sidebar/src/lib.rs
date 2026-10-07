@@ -204,6 +204,11 @@ pub fn arrange(
             continue;
         }
 
+        // A team with nothing favourited has no Favorites heading, as in the
+        // official client: an empty one is a heading over a blank line.
+        if category.category_type == "favorites" && channels.is_empty() {
+            continue;
+        }
         for channel in &channels {
             placed.insert(channel.id.clone());
         }

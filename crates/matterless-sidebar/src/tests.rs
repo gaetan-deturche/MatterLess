@@ -165,6 +165,26 @@ fn favourites_lead_and_direct_messages_trail() {
     assert_eq!(order, vec!["favorites", "channels", "direct_messages"]);
 }
 
+/// Nothing favourited, no Favorites heading over an empty line.
+#[test]
+fn an_empty_favourites_category_is_not_shown() {
+    let categories = vec![
+        (category("Favorites", "favorites", "", 0), Vec::new()),
+        (category("Channels", "channels", "", 1), vec!["chan".into()]),
+    ];
+    let groups = arrange(
+        vec![summary("chan", "channel", 0)],
+        categories,
+        &HashMap::new(),
+        &HashMap::from([("t1".to_string(), 0usize)]),
+    );
+    let order: Vec<&str> = groups
+        .iter()
+        .map(|group| group.category_type.as_str())
+        .collect();
+    assert_eq!(order, vec!["channels"]);
+}
+
 /// The duplication that turns 114 channels into 172 if the groups are summed:
 /// every team returns the same direct-message conversations.
 #[test]
