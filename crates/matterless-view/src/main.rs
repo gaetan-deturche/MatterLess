@@ -5439,7 +5439,7 @@ impl App {
             .unwrap_or(0);
         let held = (self.viewed_in == channel).then_some(self.viewed_at);
         self.viewed_in = channel.to_string();
-        self.viewed_at = matterless_view::feed::watermark(held, seen);
+        self.viewed_at = matterless_view::feed::watermark(held, seen, self.focused);
         // A watermark that moved back is the reader marking a message unread,
         // and the divider they asked for is not on a clock.
         if held.is_some_and(|held| self.viewed_at < held) {

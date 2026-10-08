@@ -126,8 +126,13 @@ fn busiest(store: &Store) -> Option<String> {
 /// A watermark of zero is the store saying it does not know -- a membership
 /// row that has not arrived yet -- and is never allowed to take a divider away
 /// from a channel that has one.
-pub fn watermark(held: Option<i64>, seen: i64) -> i64 {
+///
+/// A divider already taken away (`held` of zero) stays away while the reader
+/// is `looking`. With the window not focused, what arrives is not read -- the
+/// sidebar counts it -- so the divider comes back to say where it starts.
+pub fn watermark(held: Option<i64>, seen: i64, looking: bool) -> i64 {
     match held {
+        Some(0) if !looking => seen,
         Some(held) if seen > 0 => held.min(seen),
         Some(held) => held,
         None => seen,
@@ -663,9 +668,13 @@ mod tests {
     fn the_watermark_is_not_carried_forward_by_the_reading_of_the_channel() {
         let before = 1_783_001_649_901;
         let newest = 1_789_396_342_658;
-        assert_eq!(super::watermark(None, before), before, "on the way in");
         assert_eq!(
-            super::watermark(Some(before), newest),
+            super::watermark(None, before, true),
+            before,
+            "on the way in"
+        );
+        assert_eq!(
+            super::watermark(Some(before), newest, true),
             before,
             "the divider stays where the reader left off"
         );
@@ -676,7 +685,7 @@ mod tests {
     fn marking_a_message_unread_moves_the_watermark_back() {
         let before = 1_789_396_342_658;
         let asked_for = 1_783_001_649_901;
-        assert_eq!(super::watermark(Some(before), asked_for), asked_for);
+        assert_eq!(super::watermark(Some(before), asked_for, true), asked_for);
     }
 
     /// A membership row the sync has not fetched yet reads as zero, which is
@@ -684,14 +693,24 @@ mod tests {
     #[test]
     fn an_unknown_watermark_leaves_the_divider_alone() {
         assert_eq!(
-            super::watermark(Some(1_783_001_649_901), 0),
+            super::watermark(Some(1_783_001_649_901), 0, true),
             1_783_001_649_901
         );
         assert_eq!(
-            super::watermark(None, 0),
+            super::watermark(None, 0, true),
             0,
             "but it is honest on the way in"
         );
+    }
+
+    /// A divider gone because the reader looked stays gone while they look,
+    /// and comes back for what arrives while the window is elsewhere: the
+    /// sidebar counts that as unread, and the channel has to agree.
+    #[test]
+    fn what_arrives_unwatched_brings_the_divider_back() {
+        let seen = 1_789_396_342_658;
+        assert_eq!(super::watermark(Some(0), seen, true), 0, "still looking");
+        assert_eq!(super::watermark(Some(0), seen, false), seen, "looked away");
     }
 
     /// One post whose body is `body`, parsed the way the app parses it.
