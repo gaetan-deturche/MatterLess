@@ -1814,6 +1814,19 @@ impl Stream {
         None
     }
 
+    /// Whether the "New messages" divider is on screen.
+    pub fn divider_in_view(&self, within: Rect) -> bool {
+        let mut top = self.first_row_at(within);
+        for (index, laid) in self.laid.iter().enumerate() {
+            let bottom = top + laid.height;
+            if matches!(self.rows.get(index), Some(Row::UnreadDivider)) {
+                return bottom >= within.y && top <= within.bottom();
+            }
+            top = bottom;
+        }
+        false
+    }
+
     /// Applies a frame's input. Answers what the click asked for.
     pub fn react(&mut self, input: &Input, placed: &[Placed], within: Rect) -> Option<Chose> {
         // The bar first: while it is held, the hand decides where the list is

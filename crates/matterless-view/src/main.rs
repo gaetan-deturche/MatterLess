@@ -5460,10 +5460,18 @@ impl App {
             .iter()
             .any(|row| matches!(row, Row::UnreadDivider));
         match (shown, self.rest.wakes().is_some()) {
-            (true, false) => self.rest.begin(std::time::Instant::now(), self.focused),
+            (true, false) => self
+                .rest
+                .begin(std::time::Instant::now(), self.looking_at_divider()),
             (false, _) => self.rest.stop(),
             (true, true) => {}
         }
+    }
+
+    /// Whether the reader can see the divider: the window focused, and the
+    /// divider on screen rather than above it, still to be scrolled up to.
+    fn looking_at_divider(&self) -> bool {
+        self.focused && !self.on_threads() && self.stream.divider_in_view(self.stream_rect())
     }
 
     /// Takes the divider away, the reader having seen it.
@@ -9359,6 +9367,10 @@ impl ApplicationHandler<Update> for App {
         // The same trick for the unread divider: it goes with nothing having
         // happened, so the window has to be woken to draw the frame without
         // it.
+        // Only while it is on screen: scrolled past, or not reached yet, it
+        // has not been seen.
+        let looking = self.looking_at_divider();
+        self.rest.focus(std::time::Instant::now(), looking);
         if self.rest.ripened(std::time::Instant::now()) {
             self.forget_divider();
         }
@@ -9716,7 +9728,8 @@ impl ApplicationHandler<Update> for App {
             WindowEvent::Focused(focused) => {
                 self.focused = focused;
                 // A channel left open behind an editor is not being read.
-                self.rest.focus(std::time::Instant::now(), focused);
+                let looking = self.looking_at_divider();
+                self.rest.focus(std::time::Instant::now(), looking);
                 if focused {
                     // Looked at, so it has been answered: the flashing stops
                     // even though whatever caused it may still be unread. The

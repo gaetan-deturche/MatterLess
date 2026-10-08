@@ -7,9 +7,11 @@
 //! the oldest thing on the screen.
 //!
 //! So it is a moment, not a state. The clock runs only while the window has
-//! focus -- a channel opened and then abandoned behind an editor has not been
-//! read, and a divider that expired while nobody was looking would take the
-//! only mark of where to start reading with it.
+//! focus and the divider is on screen -- a channel opened and then abandoned
+//! behind an editor has not been read, and neither has a divider still above
+//! the screen while the reader scrolls up to it. One that expired while
+//! nobody was looking would take the only mark of where to start reading with
+//! it.
 
 use std::time::{Duration, Instant};
 
@@ -52,7 +54,7 @@ impl Rest {
     /// Follows the window in and out of focus.
     ///
     /// What is owed is kept rather than restarted: a reader glancing at
-    /// another window twice would otherwise never spend four unbroken seconds
+    /// another window twice would otherwise never spend the whole rest unbroken
     /// here and the divider would never go.
     pub fn focus(&mut self, now: Instant, focused: bool) {
         *self = match (std::mem::take(self), focused) {
@@ -111,8 +113,8 @@ mod tests {
         assert!(rest.ripened(now + REST * 11));
     }
 
-    /// Three seconds here, away, three seconds here: that is six seconds of
-    /// looking, and the divider has long gone.
+    /// Three seconds here, then away for an hour: the rest of the wait is
+    /// still owed, not started again.
     #[test]
     fn what_is_owed_survives_looking_away() {
         let now = Instant::now();

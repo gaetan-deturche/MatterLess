@@ -1934,6 +1934,29 @@ fn the_unread_mark_can_be_scrolled_to() {
     );
 }
 
+/// The divider's clock only runs while it is on screen, so the list has to
+/// say when it is: not while the reader is at the newest end with the divider
+/// far above, and yes once they have scrolled up to it.
+#[test]
+fn the_list_says_whether_the_divider_is_in_view() {
+    let mut fonts = Fonts::new();
+    let mut stream = Stream::new("stream");
+    let mut rows: Vec<Row> = (0..60)
+        .map(|at| Row::Post {
+            post: post(&format!("p{at}"), "something said"),
+        })
+        .collect();
+    rows.insert(10, Row::UnreadDivider);
+    stream.rows = rows;
+    stream.lay_out(&mut fonts, panel().width);
+
+    let within = panel();
+    stream.to_bottom(within);
+    assert!(!stream.divider_in_view(within), "fifty messages below it");
+    assert!(stream.to_row(crate::stream::DIVIDER, 72.0, within));
+    assert!(stream.divider_in_view(within), "scrolled up to it");
+}
+
 /// A channel with nothing unread has no mark in its plan, and says so rather
 /// than scrolling somewhere arbitrary -- which is what lets the caller decide
 /// to go to the end instead.
