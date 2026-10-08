@@ -2614,6 +2614,29 @@ impl App {
             composer::Button::Attach => {
                 println!("drop a file on the window, or paste one into the box");
             }
+            // The picker, opened over the box; a choice is typed in at the
+            // caret rather than reacted with.
+            composer::Button::Emoji => {
+                let (name, near) = match root_id.is_empty() {
+                    true => (
+                        composer::NAME,
+                        self.composer.emoji(header::below(self.channel_rect())),
+                    ),
+                    false => match self.thread_body() {
+                        Some(body) => (THREAD_COMPOSER, self.thread_composer.emoji(body)),
+                        None => return,
+                    },
+                };
+                self.picked_near = near;
+                self.picker.show(
+                    &format!("{}{name}", matterless_view::picker::INTO_BOX),
+                    &mut self.fonts,
+                    &mut self.input,
+                );
+                // Filled now rather than on the next event, so it does not
+                // open empty under a pointer that has stopped.
+                self.picker.ask(self.store.as_deref());
+            }
             // Straight into the box's own text. Markdown is what the server
             // stores and what this window already draws, so a formatting
             // button is a text edit and there is no second representation of
@@ -5236,6 +5259,7 @@ impl App {
         // The picker's grid is mostly custom emoji, which are pictures like any
         // other and go through the same asked set.
         wanted.extend(self.picker.wants());
+        wanted.extend(self.naming.wants());
         wanted.extend(self.profile.wants());
         wanted.extend(self.tooltip.wants());
         wanted.extend(self.rail.wants());
@@ -6183,7 +6207,16 @@ impl App {
     /// beside it, and clamped to the channel it would be pushed left off the
     /// message it belongs to -- or off the pane entirely.
     fn picker_within(&self) -> matterless_ui::Rect {
-        self.column_rect()
+        // Opened from the thread's box, the thread pane is outside the column.
+        match self
+            .picker
+            .for_post
+            .as_deref()
+            .is_some_and(|held| held.starts_with(matterless_view::picker::INTO_BOX))
+        {
+            true => self.window_rect(),
+            false => self.column_rect(),
+        }
     }
 
     /// Puts a half-written message away under the conversation it was for.
@@ -6720,8 +6753,58 @@ impl App {
                     insert: channel.name,
                     label: channel.display_name,
                     face: None,
+                    picture: None,
                 })
                 .collect(),
+            // Two letters before anything is offered, as the official client
+            // waits: one letter matches half the table, and a colon is also
+            // how a sentence introduces a list.
+            matterless_view::offer::EMOJI if said.chars().count() < 2 => {
+                self.naming.hide();
+                return;
+            }
+            // The team's own first, then the standard ones, each completed
+            // with its closing colon.
+            matterless_view::offer::EMOJI => {
+                let mut found: Vec<matterless_view::offer::Suggestion> = store
+                    .custom_emoji_matching(&said, 6)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|(name, id)| matterless_view::offer::Suggestion {
+                        insert: format!("{name}:"),
+                        label: format!(":{name}:"),
+                        face: None,
+                        picture: Some(id),
+                    })
+                    .collect();
+                found.extend(
+                    matterless_render::emoji::names_matching(&said, 6)
+                        .into_iter()
+                        .filter_map(|name| {
+                            let character = matterless_render::emoji::character_for(name)?;
+                            Some(matterless_view::offer::Suggestion {
+                                insert: format!("{name}:"),
+                                label: format!("{character}  :{name}:"),
+                                face: None,
+                                picture: None,
+                            })
+                        }),
+                );
+                // One list, whoever's they are -- the team's own came first
+                // and six of them crowded out `:smile:` -- with the names that
+                // start with what was typed ahead, as the official client
+                // ranks them, and the fuzzy score after.
+                let typed = said.to_lowercase();
+                found.sort_by_key(|one| {
+                    let name = one.insert.trim_end_matches(':');
+                    (
+                        !name.to_lowercase().starts_with(&typed),
+                        std::cmp::Reverse(matterless_core::fuzzy::score(name, &said).unwrap_or(0)),
+                    )
+                });
+                found.truncate(6);
+                found
+            }
             _ => store
                 .users_matching(&said, 6)
                 .unwrap_or_default()
@@ -6733,6 +6816,7 @@ impl App {
                     let real = format!("{} {}", user.first_name, user.last_name);
                     let real = real.trim().to_string();
                     matterless_view::offer::Suggestion {
+                        picture: None,
                         label: match real.is_empty() {
                             true => user.username.clone(),
                             false => format!("{real}  {}", user.username),
@@ -7370,6 +7454,16 @@ impl App {
                 let post_id = self.picker.for_post.clone().unwrap_or_default();
                 self.picker.hide(&mut input);
                 self.input = input;
+                if let Some(name) = post_id.strip_prefix(matterless_view::picker::INTO_BOX) {
+                    let box_of = match name {
+                        THREAD_COMPOSER => &mut self.thread_composer,
+                        _ => &mut self.composer,
+                    };
+                    box_of.insert(&mut self.fonts, &format!(":{emoji}: "));
+                    self.relayout();
+                    self.redraw();
+                    return;
+                }
                 if let Some(link) = self.link.as_ref() {
                     link.send(matterless_view::live::Ask::React {
                         post_id,

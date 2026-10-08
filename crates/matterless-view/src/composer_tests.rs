@@ -361,6 +361,32 @@ fn choosing_a_name_replaces_what_was_typed_for_it() {
     );
 }
 
+/// An emoji is named after a colon and finished with one: `:sm` becomes
+/// `:smile: `. A colon inside a word -- a time, a URL -- opens nothing.
+#[test]
+fn an_emoji_name_is_completed_with_its_colons() {
+    let mut fonts = Fonts::new();
+    let sigils = crate::offer::SIGILS;
+    let mut composer = Composer::new(NAME);
+    composer.lay_out(&mut fonts, panel().width);
+    composer.fill("nice :sm", &mut fonts);
+    composer.lay_out(&mut fonts, panel().width);
+    let (sigil, said) = composer.being_named(&sigils).expect("an emoji being named");
+    assert_eq!((sigil, said.as_str()), (':', "sm"));
+    composer.name_it(&mut fonts, sigil, &said, "smile:");
+    assert_eq!(composer.text(), "nice :smile: ");
+
+    let mut composer = Composer::new(NAME);
+    composer.lay_out(&mut fonts, panel().width);
+    composer.fill("at 10:30", &mut fonts);
+    composer.lay_out(&mut fonts, panel().width);
+    assert_eq!(
+        composer.being_named(&sigils),
+        None,
+        "a time is not an emoji"
+    );
+}
+
 /// It reads back from the caret, not forward from the sigil.
 ///
 /// The question is "what is being typed here". Read forward, a caret parked

@@ -303,6 +303,8 @@ pub enum Button {
     Unattach(usize),
     /// Mark the selection up, or open the marks to type between.
     Mark(Format),
+    /// Pick an emoji to put in at the caret.
+    Emoji,
 }
 
 /// What the channel's own composer is called.
@@ -584,6 +586,14 @@ impl Composer {
             self.act(fonts, Action::Backspace);
         }
         for character in format!("{sigil}{name} ").chars() {
+            self.act(fonts, Action::Insert(character));
+        }
+        self.touched = true;
+    }
+
+    /// Types `text` in at the caret, through the editor so it can be undone.
+    pub fn insert(&mut self, fonts: &mut Fonts, text: &str) {
+        for character in text.chars() {
             self.act(fonts, Action::Insert(character));
         }
         self.touched = true;
@@ -966,6 +976,27 @@ impl Composer {
             );
         }
 
+        // The way to an emoji without knowing its name.
+        if !self.plain && self.tools_for == Tools::Writing {
+            let rect = self.emoji(within);
+            let under = input.hovered() == Some(format!("{}/emoji", self.name).as_str());
+            if under {
+                scene.rounded(rect.x, rect.y, rect.width, rect.height, palette.raised, 5.0);
+            }
+            let mark = painter.run(
+                fonts,
+                matterless_layout::marks::REACT,
+                rect.x + 5.0,
+                rect.y + 2.0,
+                Run::mark(15.0),
+            );
+            scene.glyphs(
+                mark,
+                if under { palette.ink } else { palette.soft },
+                palette.faint,
+            );
+        }
+
         // What is waiting to go with this message, above the tools. A press
         // takes one off: the window holds the uploads, so this only says
         // which one was pressed.
@@ -1276,6 +1307,12 @@ impl Composer {
         Rect::new(tools.right() - width - 6.0, tools.y + 4.0, width, BUTTON)
     }
 
+    /// Where the emoji button sits: beside Send, as in the official client.
+    pub fn emoji(&self, within: Rect) -> Rect {
+        let send = self.send(within);
+        Rect::new(send.x - MARK_GAP * 2.0 - BUTTON, send.y, BUTTON, BUTTON)
+    }
+
     /// Where the marking-up buttons sit, left to right after the paperclip.
     ///
     /// Empty when the strip is too narrow for them. The same rule the
@@ -1290,6 +1327,7 @@ impl Composer {
         let from = self.attach(within).right() + MARK_GAP * 2.0;
         let to = match self.cancel(within) {
             Some(cancel) => cancel.x,
+            None if self.tools_for == Tools::Writing => self.emoji(within).x,
             None => self.send(within).x,
         };
         let each = BUTTON + MARK_GAP;
@@ -1350,6 +1388,11 @@ impl Composer {
                 rect: self.attach(within),
                 depth: 3,
             });
+            placed.push(Placed {
+                name: format!("{}/emoji", self.name),
+                rect: self.emoji(within),
+                depth: 3,
+            });
         }
         for (how, rect) in self.marks(within) {
             placed.push(Placed {
@@ -1378,6 +1421,7 @@ impl Composer {
         let clicked = input.clicked()?;
         match clicked.strip_prefix(&format!("{}/", self.name))? {
             "attach" => Some(Button::Attach),
+            "emoji" => Some(Button::Emoji),
             "cancel" => Some(Button::Cancel),
             // One name for the button on the right, because it is one button
             // in one place -- what it means is the box's business, not the hit

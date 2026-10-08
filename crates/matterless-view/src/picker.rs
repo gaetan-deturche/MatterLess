@@ -128,6 +128,11 @@ pub struct Choice {
     pub id: Option<String>,
 }
 
+/// What `for_post` starts with when the picker was opened from a message box
+/// rather than a message: the box's name follows, and a choice is typed into
+/// it instead of reacted with.
+pub const INTO_BOX: &str = "box:";
+
 /// The picker, and the message it was opened for.
 pub struct Picker {
     /// The post a chosen emoji would go on. `None` when it is shut.
@@ -195,6 +200,11 @@ impl Picker {
 
     pub fn show(&mut self, post_id: &str, fonts: &mut Fonts, input: &mut Input) {
         self.for_post = Some(post_id.to_string());
+        self.query.placeholder = match post_id.starts_with(INTO_BOX) {
+            true => "Find an emoji…",
+            false => "React with…",
+        }
+        .to_string();
         self.query.clear(fonts);
         self.found.clear();
         self.chosen = 0;
@@ -207,10 +217,14 @@ impl Picker {
     }
 
     pub fn hide(&mut self, input: &mut Input) {
-        self.for_post = None;
+        // Back to the box it was opened from, if it was opened from one.
+        let back = self
+            .for_post
+            .take()
+            .and_then(|held| held.strip_prefix(INTO_BOX).map(str::to_string));
         self.fresh = false;
         if input.focus() == Some(NAME) {
-            input.focus_on(crate::composer::NAME);
+            input.focus_on(back.unwrap_or_else(|| crate::composer::NAME.to_string()));
         }
     }
 
@@ -361,7 +375,7 @@ impl Picker {
     }
 
     /// Narrows the offered set, if the query has changed.
-    fn ask(&mut self, store: Option<&matterless_store::Store>) {
+    pub fn ask(&mut self, store: Option<&matterless_store::Store>) {
         let typed = self.query.text().trim().to_lowercase();
         if self.asked.as_deref() == Some(typed.as_str()) {
             return;

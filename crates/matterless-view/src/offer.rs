@@ -29,7 +29,9 @@ fn named() -> Named {
 /// `channels_matching` already says it is for.
 pub const PEOPLE: char = '@';
 pub const CHANNELS: char = '~';
-pub const SIGILS: [char; 2] = [PEOPLE, CHANNELS];
+/// An emoji by name, `:smile:`, as every Mattermost client completes it.
+pub const EMOJI: char = ':';
+pub const SIGILS: [char; 3] = [PEOPLE, CHANNELS, EMOJI];
 
 /// One thing a half-typed name could mean.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,6 +43,8 @@ pub struct Suggestion {
     pub label: String,
     /// Whose face to show, for a person.
     pub face: Option<Face>,
+    /// The picture to show, for a custom emoji: its id.
+    pub picture: Option<String>,
 }
 
 /// How many are shown. Past this the reader should type another letter rather
@@ -205,6 +209,19 @@ impl Offer {
     /// not be typed in.
     pub const CLAIMS: [Key; 5] = [Key::Up, Key::Down, Key::Enter, Key::Tab, Key::Escape];
 
+    /// The custom emoji pictures the list shows, to be fetched.
+    pub fn wants(&self) -> Vec<(String, u32, u32)> {
+        match self.open() {
+            true => self
+                .found
+                .iter()
+                .filter_map(|one| one.picture.as_ref())
+                .map(|id| (crate::stream::emoji_key(id), 32, 32))
+                .collect(),
+            false => Vec::new(),
+        }
+    }
+
     pub fn draw(&self, into: &mut Canvas<'_>, box_of: Rect, within: Rect, input: &Input) {
         if !self.open() {
             return;
@@ -249,6 +266,17 @@ impl Offer {
                 }]);
                 left += FACE + 8.0;
             }
+            if let Some(id) = &one.picture {
+                scene.extend([matterless_paint::Piece::Image {
+                    x: left,
+                    y: row.y + (ROW - FACE) / 2.0,
+                    width: FACE,
+                    height: FACE,
+                    key: crate::stream::emoji_key(id),
+                    radius: 0.0,
+                }]);
+                left += FACE + 8.0;
+            }
             let said = matterless_layout::elided(
                 fonts,
                 &one.label,
@@ -272,6 +300,7 @@ mod tests {
                 insert: (*name).to_string(),
                 label: (*name).to_string(),
                 face: None,
+                picture: None,
             })
             .collect()
     }
@@ -281,6 +310,7 @@ mod tests {
             insert: name.to_string(),
             label: name.to_string(),
             face: None,
+            picture: None,
         }))
     }
 
