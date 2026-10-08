@@ -68,6 +68,15 @@ pub enum Update {
     /// open. Raised from whatever thread the platform fires its callback on,
     /// and delivered like everything else on the one that owns the window.
     Activated { channel_id: String, post_id: String },
+    /// A file was kept, here.
+    Kept {
+        file_id: String,
+        path: std::path::PathBuf,
+    },
+    /// A file could not be kept.
+    NotKept { file_id: String },
+    /// A picture went to the clipboard, or could not.
+    Copied { file_id: String, done: bool },
     /// A newer build is there, and here is what it would take to install it.
     ///
     /// Offered, never taken: nothing has been fetched at this point beyond the
@@ -238,8 +247,15 @@ pub enum Ask {
         emoji: String,
         on: bool,
     },
-    /// Keep a file somebody attached, next to the reader's other downloads.
-    Download { file_id: String, name: String },
+    /// Keep a file somebody attached: where the reader chose, or next to
+    /// their other downloads when there was no asking them.
+    Download {
+        file_id: String,
+        name: String,
+        to: Option<std::path::PathBuf>,
+    },
+    /// Put a picture somebody attached on the clipboard.
+    CopyPicture { file_id: String },
     /// Fetch a video to the disk, to be played from there.
     Film { file_id: String },
     /// Fetch a text file, to be read. Its name says what grammar colours it.
@@ -998,21 +1014,59 @@ async fn run(
                             }
                         });
                     }
-                    Ask::Download { file_id, name } => {
+                    Ask::Download { file_id, name, to } => {
                         // A linked picture comes from its own host, without
                         // the session; everything else is this server's file.
                         let route = match file_id.starts_with("https://") {
                             true => file_id.clone(),
                             false => format!("/files/{file_id}"),
                         };
-                        match fetch_route(&rest, &route).await {
-                            Ok(Some((bytes, _))) => match keep(&downloads(), &name, &bytes) {
-                                Ok(path) => println!("kept {}", path.display()),
-                                Err(error) => eprintln!("keeping {name}: {error}"),
+                        // Where the reader chose, over anything there: the
+                        // dialog has already asked about that.
+                        let written = |bytes: &[u8]| match &to {
+                            Some(to) => std::fs::write(to, bytes).map(|()| to.clone()),
+                            None => keep(&downloads(), &name, bytes),
+                        };
+                        let kept = match fetch_route(&rest, &route).await {
+                            Ok(Some((bytes, _))) => match written(&bytes) {
+                                Ok(path) => {
+                                    println!("kept {}", path.display());
+                                    Some(path)
+                                }
+                                Err(error) => {
+                                    eprintln!("keeping {name}: {error}");
+                                    None
+                                }
                             },
-                            Ok(None) => eprintln!("{name}: the server sent nothing"),
-                            Err(error) => eprintln!("fetching {name}: {error}"),
-                        }
+                            Ok(None) => {
+                                eprintln!("{name}: the server sent nothing");
+                                None
+                            }
+                            Err(error) => {
+                                eprintln!("fetching {name}: {error}");
+                                None
+                            }
+                        };
+                        wake.wake(match kept {
+                            Some(path) => Update::Kept { file_id, path },
+                            None => Update::NotKept { file_id },
+                        });
+                    }
+                    Ask::CopyPicture { file_id } => {
+                        let route = match file_id.starts_with("https://") {
+                            true => file_id.clone(),
+                            false => format!("/files/{file_id}"),
+                        };
+                        let done = match fetch_route(&rest, &route).await {
+                            Ok(Some((bytes, _))) => crate::clip::write_picture(&bytes),
+                            Ok(None) => false,
+                            Err(error) => {
+                                eprintln!("fetching a picture to copy: {error}");
+                                false
+                            }
+                        };
+                        println!("copied a picture: {done}");
+                        wake.wake(Update::Copied { file_id, done });
                     }
                     Ask::Attach {
                         channel_id,
@@ -4104,7 +4158,7 @@ fn keep_film(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
     Ok(())
 }
 
-fn downloads() -> std::path::PathBuf {
+pub fn downloads() -> std::path::PathBuf {
     let home = std::env::var_os("USERPROFILE")
         .or_else(|| std::env::var_os("HOME"))
         .map(std::path::PathBuf::from)

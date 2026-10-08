@@ -307,6 +307,105 @@ fn close(said: Option<String>) -> Option<String> {
     said
 }
 
+/// Puts a picture on the system clipboard, from the bytes of its file.
+///
+/// Twice over: as a PNG, which keeps transparency and is what browsers, chat
+/// clients and Office paste, and as a plain bitmap for everything older --
+/// Paint, and most of what predates PNG on the clipboard. Answers whether the
+/// clipboard took it.
+#[cfg(windows)]
+pub fn write_picture(bytes: &[u8]) -> bool {
+    use windows::Win32::System::DataExchange::{
+        CloseClipboard, EmptyClipboard, OpenClipboard, RegisterClipboardFormatW,
+    };
+    use windows::Win32::System::Ole::CF_DIB;
+    use windows::core::w;
+
+    let Ok(decoded) = image::load_from_memory(bytes) else {
+        return false;
+    };
+    let pixels = decoded.into_rgba8();
+    let mut png = std::io::Cursor::new(Vec::new());
+    if pixels.write_to(&mut png, image::ImageFormat::Png).is_err() {
+        return false;
+    }
+    let png = png.into_inner();
+    let dib = as_a_dib(&pixels);
+    if unsafe { OpenClipboard(None) }.is_err() {
+        return false;
+    }
+    let format = unsafe { RegisterClipboardFormatW(w!("PNG")) };
+    let put = unsafe {
+        let _ = EmptyClipboard();
+        let bitmap = put_bytes(CF_DIB.0 as u32, &dib);
+        let portable = format != 0 && put_bytes(format, &png);
+        bitmap || portable
+    };
+    let _ = unsafe { CloseClipboard() };
+    put
+}
+
+/// A picture as a `CF_DIB`: a forty-byte header and the pixels, blue first,
+/// from the bottom row up.
+fn as_a_dib(pixels: &image::RgbaImage) -> Vec<u8> {
+    let (width, height) = pixels.dimensions();
+    let mut dib = Vec::with_capacity(40 + (width * height * 4) as usize);
+    dib.extend_from_slice(&40u32.to_le_bytes());
+    dib.extend_from_slice(&(width as i32).to_le_bytes());
+    dib.extend_from_slice(&(height as i32).to_le_bytes());
+    dib.extend_from_slice(&1u16.to_le_bytes());
+    dib.extend_from_slice(&32u16.to_le_bytes());
+    // Uncompressed, its size, no resolution, no colour table.
+    dib.extend_from_slice(&0u32.to_le_bytes());
+    dib.extend_from_slice(&(width * height * 4).to_le_bytes());
+    dib.extend_from_slice(&[0; 16]);
+    for row in (0..height).rev() {
+        for column in 0..width {
+            let [red, green, blue, alpha] = pixels.get_pixel(column, row).0;
+            dib.extend_from_slice(&[blue, green, red, alpha]);
+        }
+    }
+    dib
+}
+
+/// Hands one format's bytes to the open clipboard. Answers whether it took
+/// them.
+///
+/// # Safety
+/// The clipboard must be open, and emptied by this process.
+#[cfg(windows)]
+unsafe fn put_bytes(format: u32, bytes: &[u8]) -> bool {
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::System::DataExchange::SetClipboardData;
+    use windows::Win32::System::Memory::{
+        GLOBAL_ALLOC_FLAGS, GlobalAlloc, GlobalLock, GlobalUnlock,
+    };
+
+    /// `GMEM_MOVEABLE`, which is the only kind of handle the clipboard takes.
+    const MOVEABLE: GLOBAL_ALLOC_FLAGS = GLOBAL_ALLOC_FLAGS(0x0002);
+
+    unsafe {
+        let Ok(held) = GlobalAlloc(MOVEABLE, bytes.len()) else {
+            return false;
+        };
+        let at = GlobalLock(held) as *mut u8;
+        if at.is_null() {
+            let _ = windows::Win32::Foundation::GlobalFree(Some(held));
+            return false;
+        }
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), at, bytes.len());
+        let _ = GlobalUnlock(held);
+        // Taken on success and freed by the system; refused, it is ours.
+        match SetClipboardData(format, Some(HANDLE(held.0))) {
+            Ok(_) => true,
+            Err(_) => {
+                let _ = windows::Win32::Foundation::GlobalFree(Some(held));
+                false
+            }
+        }
+    }
+}
+
 /// Puts text on the system clipboard.
 #[cfg(windows)]
 pub fn write(text: &str) {
@@ -367,6 +466,11 @@ pub fn held() -> Option<Held> {
 
 #[cfg(not(windows))]
 pub fn write(_text: &str) {}
+
+#[cfg(not(windows))]
+pub fn write_picture(_bytes: &[u8]) -> bool {
+    false
+}
 
 #[cfg(all(test, windows))]
 mod tests {
@@ -447,6 +551,21 @@ mod tests {
             Some(14 + 40),
             "and start right after the header when there are none"
         );
+    }
+
+    /// A picture copied out reads back as the same picture through the same
+    /// path a pasted bitmap takes in: rows the right way up, colours in the
+    /// right channels.
+    #[test]
+    fn a_copied_picture_reads_back_as_itself() {
+        let mut picture = image::RgbaImage::new(3, 2);
+        for (column, row, pixel) in picture.enumerate_pixels_mut() {
+            *pixel = image::Rgba([column as u8 * 80, row as u8 * 200, 30, 255]);
+        }
+        let file = super::as_a_file(&super::as_a_dib(&picture)).expect("a file");
+        let png = super::as_a_png(&file).expect("a picture");
+        let back = image::load_from_memory(&png).expect("decoded").into_rgba8();
+        assert_eq!(back, picture);
     }
 
     /// A bitmap needs a file header, and the offset in it has to clear the

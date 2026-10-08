@@ -152,8 +152,12 @@ pub enum Did {
     Close,
     /// Show a different one; the caller fetches it.
     Show(Looking),
-    /// Keep this one, next to the reader's other downloads.
+    /// Keep this one, where the reader chooses.
     Save { file_id: String, name: String },
+    /// Put this picture on the clipboard.
+    Copy { file_id: String },
+    /// Open the folder this one was kept in, with it chosen.
+    Reveal(std::path::PathBuf),
     /// Play the video, or pause it.
     Toggle,
     /// Go to this far through the video, from nothing to one.
@@ -266,9 +270,77 @@ pub struct Viewer {
     /// the last frame drew it.
     scroll: f32,
     reach: std::cell::Cell<f32>,
+    /// What Save and Copy have done, by file, so their buttons can say so:
+    /// a press that answers nothing reads as a press that did nothing.
+    saving: std::collections::HashSet<String>,
+    kept: std::collections::HashMap<String, std::path::PathBuf>,
+    copying: std::collections::HashSet<String>,
+    copied: std::collections::HashSet<String>,
 }
 
 impl Viewer {
+    /// A save has been asked for.
+    pub fn saving(&mut self, file_id: &str) {
+        self.saving.insert(file_id.to_string());
+    }
+
+    /// A save landed. One asked for from here gets its button changed to
+    /// open where it went.
+    pub fn saved(&mut self, file_id: &str, path: &std::path::Path) {
+        if self.saving.remove(file_id) {
+            self.kept.insert(file_id.to_string(), path.to_path_buf());
+        }
+    }
+
+    /// A save failed: the button goes back to offering it.
+    pub fn not_saved(&mut self, file_id: &str) {
+        self.saving.remove(file_id);
+    }
+
+    /// A copy has been asked for.
+    pub fn copying(&mut self, file_id: &str) {
+        self.copied.remove(file_id);
+        self.copying.insert(file_id.to_string());
+    }
+
+    /// A copy has gone to the clipboard, or not.
+    pub fn copied(&mut self, file_id: &str, done: bool) {
+        self.copying.remove(file_id);
+        if done {
+            self.copied.insert(file_id.to_string());
+        }
+    }
+
+    /// What the Save button says for the one showing, and how wide it is.
+    fn save_label(&self) -> (&'static str, f32) {
+        let id = self.current().map(|one| one.file_id.as_str()).unwrap_or("");
+        if self.kept.contains_key(id) {
+            ("Show in folder", 116.0)
+        } else if self.saving.contains(id) {
+            ("Saving...", 82.0)
+        } else {
+            ("Save", 62.0)
+        }
+    }
+
+    /// What the Copy button says for the one showing, and how wide it is.
+    fn copy_label(&self) -> (&'static str, f32) {
+        let id = self.current().map(|one| one.file_id.as_str()).unwrap_or("");
+        if self.copying.contains(id) {
+            ("Copying...", 90.0)
+        } else if self.copied.contains(id) {
+            ("Copied", 72.0)
+        } else {
+            ("Copy", 62.0)
+        }
+    }
+
+    /// Whether the one showing is a picture, which is what can be copied.
+    fn copyable(&self) -> bool {
+        self.current()
+            .is_some_and(|one| !one.video && !one.text && one.youtube.is_none())
+    }
+
     pub fn open(&self) -> bool {
         !self.shown.is_empty()
     }
@@ -460,14 +532,18 @@ impl Viewer {
             true => "browse",
             false => "save",
         };
-        for name in [keep, "next", "back"] {
+        for name in [keep, "copy", "next", "back"] {
             // Only one picture, so there is nowhere to step: a button that
             // does nothing is a button that has to be pressed to find out.
             if (name == "next" || name == "back") && self.shown.len() < 2 {
                 continue;
             }
+            if name == "copy" && !self.copyable() {
+                continue;
+            }
             let width = match name {
-                "save" => 62.0,
+                "save" => self.save_label().1,
+                "copy" => self.copy_label().1,
                 "browse" => 132.0,
                 _ => BUTTON,
             };
@@ -575,10 +651,28 @@ impl Viewer {
         match named().slug(clicked) {
             Some("back") => self.step(-1).map(Did::Show),
             Some("next") => self.step(1).map(Did::Show),
-            Some("save") => self.current().map(|one| Did::Save {
-                file_id: one.file_id.clone(),
-                name: one.name.clone(),
-            }),
+            Some("save") => {
+                let one = self.current()?;
+                if let Some(path) = self.kept.get(&one.file_id) {
+                    return Some(Did::Reveal(path.clone()));
+                }
+                if self.saving.contains(&one.file_id) {
+                    return None;
+                }
+                Some(Did::Save {
+                    file_id: one.file_id.clone(),
+                    name: one.name.clone(),
+                })
+            }
+            Some("copy") => {
+                let one = self.current()?;
+                if self.copying.contains(&one.file_id) {
+                    return None;
+                }
+                Some(Did::Copy {
+                    file_id: one.file_id.clone(),
+                })
+            }
             Some("browse") => self
                 .current()
                 .and_then(|one| one.youtube.as_ref())
@@ -826,7 +920,8 @@ impl Viewer {
                 6.0,
             );
             let said = match name {
-                "save" => "Save",
+                "save" => self.save_label().0,
+                "copy" => self.copy_label().0,
                 "browse" => "Open in YouTube",
                 "back" => matterless_layout::marks::BACK,
                 _ => matterless_layout::marks::NEXT,
@@ -834,7 +929,7 @@ impl Viewer {
             // The arrows are marks and "Save" is a word, so they are neither
             // the same size nor from the same family, and only the word can be
             // measured with the text metrics.
-            let mark = name != "save" && name != "browse";
+            let mark = name == "back" || name == "next";
             let wide = if mark {
                 15.0
             } else {

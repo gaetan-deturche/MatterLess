@@ -22,6 +22,119 @@ pub fn link(href: &str) -> bool {
     show(href)
 }
 
+/// Opens the folder a file was kept in, with the file chosen in it.
+///
+/// Only ever a path this program wrote, never one out of a message.
+#[cfg(windows)]
+pub fn reveal(path: &std::path::Path) -> bool {
+    use windows::Win32::UI::Shell::ShellExecuteW;
+    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+    use windows::core::HSTRING;
+
+    let action = HSTRING::from("open");
+    let explorer = HSTRING::from("explorer.exe");
+    let chosen = HSTRING::from(format!("/select,\"{}\"", path.display()));
+    let result = unsafe { ShellExecuteW(None, &action, &explorer, &chosen, None, SW_SHOWNORMAL) };
+    result.0 as usize > 32
+}
+
+#[cfg(not(windows))]
+pub fn reveal(_path: &std::path::Path) -> bool {
+    false
+}
+
+/// What the Save dialog came back with.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Chosen {
+    /// Keep it here.
+    Here(std::path::PathBuf),
+    /// The reader thought better of it.
+    Cancelled,
+    /// There was no dialog to ask with, which leaves the caller to choose.
+    NoDialog,
+}
+
+/// Asks where to keep a file, in the system's own Save dialog, starting in
+/// `folder` with `name` filled in.
+#[cfg(windows)]
+pub fn choose_where(name: &str, folder: &std::path::Path, owner: isize) -> Chosen {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::System::Com::{
+        CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
+        CoTaskMemFree,
+    };
+    use windows::Win32::UI::Shell::{
+        FileSaveDialog, IFileSaveDialog, IShellItem, SHCreateItemFromParsingName, SIGDN_FILESYSPATH,
+    };
+    use windows::core::HSTRING;
+
+    /// What `Show` answers when the reader cancels: `ERROR_CANCELLED`.
+    const CANCELLED: i32 = 0x800704C7_u32 as i32;
+
+    unsafe {
+        // Already initialised is a success: the taskbar got there first.
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        let Ok(dialog) =
+            CoCreateInstance::<_, IFileSaveDialog>(&FileSaveDialog, None, CLSCTX_INPROC_SERVER)
+        else {
+            return Chosen::NoDialog;
+        };
+        let _ = dialog.SetFileName(&HSTRING::from(suggested(name)));
+        if let Some((_, extension)) = name.rsplit_once('.') {
+            let _ = dialog.SetDefaultExtension(&HSTRING::from(extension));
+        }
+        if let Ok(start) = SHCreateItemFromParsingName::<_, _, IShellItem>(
+            &HSTRING::from(folder.as_os_str()),
+            None,
+        ) {
+            let _ = dialog.SetFolder(&start);
+        }
+        let owner = (owner != 0).then_some(HWND(owner as *mut _));
+        match dialog.Show(owner) {
+            Ok(()) => {}
+            Err(error) if error.code().0 == CANCELLED => return Chosen::Cancelled,
+            Err(_) => return Chosen::NoDialog,
+        }
+        let Ok(path) = dialog
+            .GetResult()
+            .and_then(|chosen| chosen.GetDisplayName(SIGDN_FILESYSPATH))
+        else {
+            return Chosen::NoDialog;
+        };
+        let said = path.to_string();
+        CoTaskMemFree(Some(path.0 as *const _));
+        match said {
+            Ok(said) => Chosen::Here(std::path::PathBuf::from(said)),
+            Err(_) => Chosen::NoDialog,
+        }
+    }
+}
+
+#[cfg(not(windows))]
+pub fn choose_where(_name: &str, _folder: &std::path::Path, _owner: isize) -> Chosen {
+    Chosen::NoDialog
+}
+
+/// A file's name as the dialog should offer it: the server's string, with
+/// nothing in it a file name cannot hold -- a separator in it would be a
+/// folder nobody chose.
+fn suggested(name: &str) -> String {
+    let said: String = name
+        .chars()
+        .map(|character| match character {
+            '\\' | '/' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
+            character if character.is_control() => '_',
+            character => character,
+        })
+        .collect();
+    let said = said.trim_matches(['.', ' ']).to_string();
+    if said.is_empty() {
+        "attachment".to_string()
+    } else {
+        said
+    }
+}
+
 fn scheme_of(href: &str) -> Option<&str> {
     href.split_once("://").map(|(scheme, _)| scheme)
 }
@@ -80,6 +193,16 @@ mod tests {
         assert!(!worth_opening("mailto:someone@example.invalid"));
         assert!(!worth_opening("example.invalid"));
         assert!(!worth_opening(""));
+    }
+
+    /// A name offered in the Save dialog is a file's name and nothing more:
+    /// no folder hidden in it, and never empty.
+    #[test]
+    fn a_suggested_name_holds_no_folder() {
+        assert_eq!(suggested("shot 1.png"), "shot 1.png");
+        assert_eq!(suggested(r"..\..\evil.exe"), "_.._evil.exe");
+        assert_eq!(suggested("a/b:c?.png"), "a_b_c_.png");
+        assert_eq!(suggested(" . "), "attachment");
     }
 
     /// A newline inside a link is not a link. It cannot appear in a real URL,

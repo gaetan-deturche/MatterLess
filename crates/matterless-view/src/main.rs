@@ -1927,6 +1927,10 @@ impl App {
                     self.hold_place();
                 }
             }
+            // Saved from the viewer, its button now opens where it went.
+            Update::Kept { file_id, path } => self.viewer.saved(&file_id, &path),
+            Update::NotKept { file_id } => self.viewer.not_saved(&file_id),
+            Update::Copied { file_id, done } => self.viewer.copied(&file_id, done),
             Update::Activated {
                 channel_id,
                 post_id,
@@ -3251,6 +3255,89 @@ impl App {
         );
     }
 
+    /// Copy and Save for a picture under a right-click: in a message, in a
+    /// thread, or open in the viewer.
+    fn offer_picture_menu(&mut self) {
+        use matterless_view::menu::{Item, Style};
+        let Some(name) = self.input.contexted().map(str::to_string) else {
+            return;
+        };
+        let Some((x, y)) = self.input.pointer_at() else {
+            return;
+        };
+        let viewed = (name == format!("{}/picture", matterless_view::viewer::NAME))
+            .then(|| self.viewer.current())
+            .flatten()
+            .filter(|one| one.youtube.is_none() && !one.text)
+            .map(|one| (one.file_id.clone(), one.name.clone(), !one.video));
+        let Some((file_id, called, picture)) = viewed
+            .or_else(|| self.stream.picture_at(&name))
+            .or_else(|| {
+                self.thread
+                    .as_ref()
+                    .and_then(|thread| thread.picture_at(&name))
+            })
+        else {
+            return;
+        };
+        let mut items = Vec::new();
+        if picture {
+            items.push(
+                Item::new("picture.copy", "Copy image").marked(matterless_layout::marks::COPY),
+            );
+        }
+        items.push(
+            Item::new(
+                "picture.save",
+                if picture {
+                    "Save image as..."
+                } else {
+                    "Save video as..."
+                },
+            )
+            .marked(matterless_layout::marks::SAVE_FILE),
+        );
+        self.menu.show(
+            &format!("{file_id}\n{called}"),
+            matterless_view::menu::Anchor::At(x, y),
+            Style::channel(),
+            items,
+        );
+    }
+
+    /// Keeps a file where the reader says, asked in the system's Save
+    /// dialog. With no dialog to ask in, it goes to their downloads.
+    fn save_file(&mut self, file_id: String, name: String) {
+        let folder = matterless_view::live::downloads();
+        let to = match matterless_view::open::choose_where(
+            &name,
+            &folder,
+            raw_window(self.window.as_ref()),
+        ) {
+            matterless_view::open::Chosen::Here(path) => Some(path),
+            matterless_view::open::Chosen::Cancelled => return,
+            matterless_view::open::Chosen::NoDialog => None,
+        };
+        if self
+            .viewer
+            .current()
+            .is_some_and(|one| one.file_id == file_id)
+        {
+            self.viewer.saving(&file_id);
+        }
+        if let Some(link) = self.link.as_ref() {
+            link.send(matterless_view::live::Ask::Download { file_id, name, to });
+        }
+    }
+
+    /// Puts a picture on the clipboard, saying so on the viewer's button.
+    fn copy_picture(&mut self, file_id: String) {
+        self.viewer.copying(&file_id);
+        if let Some(link) = self.link.as_ref() {
+            link.send(matterless_view::live::Ask::CopyPicture { file_id });
+        }
+    }
+
     /// Suggestions for the misspelled word under a right-click in a message
     /// box, and a way to say it is right.
     fn offer_spelling_menu(&mut self) {
@@ -3356,6 +3443,15 @@ impl App {
     /// Unread" and they mean different things by it.
     fn act_on_menu(&mut self, about: &str, chosen: &str) {
         use matterless_view::actions::Action;
+        if let Some(rest) = chosen.strip_prefix("picture.") {
+            let (file_id, name) = about.split_once('\n').unwrap_or((about, "picture"));
+            match rest {
+                "copy" => self.copy_picture(file_id.to_string()),
+                "save" => self.save_file(file_id.to_string(), name.to_string()),
+                _ => {}
+            }
+            return;
+        }
         if let Some(rest) = chosen.strip_prefix("spell.") {
             self.act_on_spelling(about, rest);
             return;
@@ -3579,11 +3675,7 @@ impl App {
                 on,
             }) => self.act(action, post_id, on),
             Some(Chose::Press { press, at }) => self.press(press, at),
-            Some(Chose::Save { file_id, name }) => {
-                if let Some(link) = self.link.as_ref() {
-                    link.send(matterless_view::live::Ask::Download { file_id, name });
-                }
-            }
+            Some(Chose::Save { file_id, name }) => self.save_file(file_id, name),
             Some(Chose::React { post_id, emoji, on }) => {
                 if let Some(link) = self.link.as_ref() {
                     link.send(matterless_view::live::Ask::React { post_id, emoji, on });
@@ -7016,9 +7108,13 @@ impl App {
                     self.fetch_looked(&one);
                 }
                 Some(matterless_view::viewer::Did::Save { file_id, name }) => {
-                    if let Some(link) = self.link.as_ref() {
-                        link.send(matterless_view::live::Ask::Download { file_id, name });
-                    }
+                    self.save_file(file_id, name);
+                }
+                Some(matterless_view::viewer::Did::Copy { file_id }) => {
+                    self.copy_picture(file_id);
+                }
+                Some(matterless_view::viewer::Did::Reveal(path)) => {
+                    matterless_view::open::reveal(&path);
                 }
                 Some(matterless_view::viewer::Did::Browse(url)) => {
                     matterless_view::open::link(&url);
@@ -9893,6 +9989,7 @@ impl ApplicationHandler<Update> for App {
                     self.offer_channel_menu();
                     self.offer_directs_menu();
                     self.offer_spelling_menu();
+                    self.offer_picture_menu();
                     self.react();
                     self.redraw();
                     return;

@@ -1814,6 +1814,20 @@ impl Stream {
         None
     }
 
+    /// The picture a box of this list stands for: its file, its name, and
+    /// whether it is a picture rather than a video.
+    pub fn picture_at(&self, name: &str) -> Option<(String, String, bool)> {
+        let rest = name.strip_prefix(&format!("{}/row/", self.name))?;
+        let (index, ordinal) = rest.split_once("/look/")?;
+        let (index, ordinal) = (index.parse::<usize>().ok()?, ordinal.parse::<usize>().ok()?);
+        let (_, file) = self.pictured(index).into_iter().nth(ordinal)?;
+        Some((
+            file.id.clone(),
+            file.name.clone(),
+            file.image && !file.video,
+        ))
+    }
+
     /// Whether the "New messages" divider is on screen.
     pub fn divider_in_view(&self, within: Rect) -> bool {
         let mut top = self.first_row_at(within);
