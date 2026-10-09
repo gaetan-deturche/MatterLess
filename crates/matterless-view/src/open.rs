@@ -115,6 +115,60 @@ pub fn choose_where(_name: &str, _folder: &std::path::Path, _owner: isize) -> Ch
     Chosen::NoDialog
 }
 
+/// Asks which files to attach, in the system's own Open dialog. Empty when
+/// the reader cancels, or when there is no dialog to ask with.
+#[cfg(windows)]
+pub fn choose_files(owner: isize) -> Vec<std::path::PathBuf> {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::System::Com::{
+        CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
+        CoTaskMemFree,
+    };
+    use windows::Win32::UI::Shell::{
+        FOS_ALLOWMULTISELECT, FOS_FILEMUSTEXIST, FileOpenDialog, IFileOpenDialog, SIGDN_FILESYSPATH,
+    };
+
+    let mut chosen = Vec::new();
+    unsafe {
+        // Already initialised is a success: the taskbar got there first.
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        let Ok(dialog) =
+            CoCreateInstance::<_, IFileOpenDialog>(&FileOpenDialog, None, CLSCTX_INPROC_SERVER)
+        else {
+            return chosen;
+        };
+        if let Ok(options) = dialog.GetOptions() {
+            let _ = dialog.SetOptions(options | FOS_ALLOWMULTISELECT | FOS_FILEMUSTEXIST);
+        }
+        let owner = (owner != 0).then_some(HWND(owner as *mut _));
+        // Cancelling is an error here too, and means nothing was chosen.
+        if dialog.Show(owner).is_err() {
+            return chosen;
+        }
+        let Ok(items) = dialog.GetResults() else {
+            return chosen;
+        };
+        for at in 0..items.GetCount().unwrap_or(0) {
+            let Ok(path) = items
+                .GetItemAt(at)
+                .and_then(|item| item.GetDisplayName(SIGDN_FILESYSPATH))
+            else {
+                continue;
+            };
+            if let Ok(said) = path.to_string() {
+                chosen.push(std::path::PathBuf::from(said));
+            }
+            CoTaskMemFree(Some(path.0 as *const _));
+        }
+    }
+    chosen
+}
+
+#[cfg(not(windows))]
+pub fn choose_files(_owner: isize) -> Vec<std::path::PathBuf> {
+    Vec::new()
+}
+
 /// A file's name as the dialog should offer it: the server's string, with
 /// nothing in it a file name cannot hold -- a separator in it would be a
 /// folder nobody chose.

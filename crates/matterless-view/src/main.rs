@@ -2611,8 +2611,11 @@ impl App {
                     self.post_message(&channel, root_id, text);
                 }
             }
+            // The same errand a drop runs, for each file chosen.
             composer::Button::Attach => {
-                println!("drop a file on the window, or paste one into the box");
+                for path in matterless_view::open::choose_files(raw_window(self.window.as_ref())) {
+                    self.attach_file(path, root_id);
+                }
             }
             // The picker, opened over the box; a choice is typed in at the
             // caret rather than reacted with.
@@ -3351,6 +3354,40 @@ impl App {
         if let Some(link) = self.link.as_ref() {
             link.send(matterless_view::live::Ask::Download { file_id, name, to });
         }
+    }
+
+    /// Uploads a file to go with the next message: the channel's, or the
+    /// thread's when `root_id` names one.
+    fn attach_file(&mut self, path: std::path::PathBuf, root_id: &str) {
+        // A reply goes to the thread's own channel: from the Threads list the
+        // sidebar's selection is the list, not a channel.
+        let channel = match root_id.is_empty() {
+            true => self.sidebar.selected.clone(),
+            false => self.thread_in.clone(),
+        };
+        let Some(channel_id) = channel else {
+            eprintln!("nowhere to attach that");
+            return;
+        };
+        let Some(link) = self.link.as_ref() else {
+            return;
+        };
+        link.send(matterless_view::live::Ask::Attach {
+            channel_id: channel_id.clone(),
+            root_id: root_id.to_string(),
+            path: path.clone(),
+        });
+        // On screen now, not when the server answers. A large file is seconds
+        // of upload and then another round trip for its thumbnail, and until
+        // both were done the window showed nothing at all -- so a drop looked
+        // like it had missed.
+        let under = match root_id.is_empty() {
+            true => channel_id,
+            false => thread_name(root_id),
+        };
+        self.attaching.entry(under).or_default().push(path);
+        self.relayout();
+        self.redraw();
     }
 
     /// Puts a picture on the clipboard, saying so on the viewer's button.
@@ -9881,10 +9918,6 @@ impl ApplicationHandler<Update> for App {
             // same thing now: here is a file for what I am writing. Sending is
             // still the reader's own gesture.
             WindowEvent::DroppedFile(path) => {
-                let Some(channel_id) = self.sidebar.selected.clone() else {
-                    eprintln!("nowhere to attach that");
-                    return;
-                };
                 let over_thread = self.thread_rect().zip(self.input.pointer_at()).is_some_and(
                     |(pane, (x, y))| {
                         x >= pane.x && x <= pane.right() && y >= pane.y && y <= pane.bottom()
@@ -9895,25 +9928,7 @@ impl ApplicationHandler<Update> for App {
                 } else {
                     String::new()
                 };
-                if let Some(link) = self.link.as_ref() {
-                    link.send(matterless_view::live::Ask::Attach {
-                        channel_id: channel_id.clone(),
-                        root_id: root_id.clone(),
-                        path: path.clone(),
-                    });
-                    // On screen now, not when the server answers. A large
-                    // file is seconds of upload and then another round trip
-                    // for its thumbnail, and until both were done the window
-                    // showed nothing at all -- so a drop looked like it had
-                    // missed.
-                    let under = match root_id.is_empty() {
-                        true => channel_id,
-                        false => thread_name(&root_id),
-                    };
-                    self.attaching.entry(under).or_default().push(path);
-                    self.relayout();
-                    self.redraw();
-                }
+                self.attach_file(path, &root_id);
             }
             WindowEvent::Focused(focused) => {
                 self.focused = focused;
