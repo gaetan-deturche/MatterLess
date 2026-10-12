@@ -361,14 +361,7 @@ impl FileRef {
         // nor preview, so both want the file itself however big it is.
         let rendered = !matches!(file.mime_type.as_str(), "image/gif" | "image/svg+xml");
 
-        // What a webview will actually play. The container is only half of it --
-        // an AVI or a MKV is refused whatever its extension says -- so the list
-        // is the formats WebView2 decodes rather than everything video-shaped.
-        let video = !file.archived
-            && matches!(
-                file.mime_type.as_str(),
-                "video/mp4" | "video/webm" | "video/ogg" | "video/quicktime"
-            );
+        let video = !file.archived && playable(file);
 
         let variant = match (rendered, layout.gallery, layout.full_res) {
             (false, _, _) => ImageVariant::Original,
@@ -465,9 +458,7 @@ fn files_of(post: &Post, options: &PlanOptions) -> Vec<FileRef> {
         .metadata
         .files
         .iter()
-        .filter(|file| {
-            is_a_picture(file) || (!file.archived && file.mime_type.starts_with("video/"))
-        })
+        .filter(|file| is_a_picture(file) || (!file.archived && playable(file)))
         .count();
     let layout = FileLayout {
         // One gets the room; several get a row of thumbnails, which is both more
@@ -712,6 +703,31 @@ fn only_known(nodes: &[markdown::Node], known: &Typed) -> Vec<markdown::Node> {
 /// by nothing high, so it drew as nothing at all -- not a broken image, not a
 /// card. The message arrived looking empty, with four megabytes attached to
 /// it. A picture nobody can draw is a file, and a file has a card.
+/// Whether the player can open it: the containers `tools/build-ffmpeg.sh`
+/// builds a demuxer for. By type, or by extension when the server only knew
+/// it as bytes -- an MKV often arrives as `application/octet-stream`.
+fn playable(file: &matterless_core::model::FileInfo) -> bool {
+    matches!(
+        file.mime_type.as_str(),
+        "video/mp4"
+            | "video/webm"
+            | "video/ogg"
+            | "video/quicktime"
+            | "video/x-matroska"
+            | "video/x-msvideo"
+            | "video/avi"
+            | "video/msvideo"
+            | "video/mp2t"
+            | "video/mpeg"
+            | "video/x-m4v"
+    ) || matches!(
+        file.extension.to_ascii_lowercase().as_str(),
+        "mp4" | "m4v" | "webm" | "ogv" | "mov" | "mkv" | "avi" | "ts" | "mpg" | "mpeg"
+    ) && (file.mime_type.starts_with("video/")
+        || file.mime_type == "application/octet-stream"
+        || file.mime_type.is_empty())
+}
+
 fn is_a_picture(file: &matterless_core::model::FileInfo) -> bool {
     !file.archived
         && (file.has_preview_image || file.mime_type.starts_with("image/"))

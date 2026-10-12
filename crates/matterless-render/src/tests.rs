@@ -1356,6 +1356,32 @@ fn a_gif_and_a_video_share_a_gallery_like_a_picture() {
     assert!(video.video, "a playable container plays");
 }
 
+/// The player is ffmpeg, so what plays is what its build reads: an MKV and
+/// an AVI as much as an MP4, whether the server typed it as video or only as
+/// bytes. A video it has no demuxer for stays a file card.
+#[test]
+fn what_the_player_reads_plays() {
+    let alone = FileLayout {
+        gallery: false,
+        full_res: false,
+        allow_svg: false,
+        pixel_ratio: 1.0,
+    };
+    let film = |mime: &str, extension: &str| {
+        let mut info = image_info("f1", 800, 600);
+        info.mime_type = mime.into();
+        info.extension = extension.into();
+        info.has_preview_image = false;
+        FileRef::from_info(&info, alone).video
+    };
+    assert!(film("video/x-matroska", "mkv"));
+    assert!(film("application/octet-stream", "mkv"));
+    assert!(film("video/x-msvideo", "avi"));
+    assert!(film("video/mp4", "mp4"));
+    assert!(!film("video/x-ms-wmv", "wmv"), "no demuxer for it");
+    assert!(!film("application/zip", "mkv"), "a zip named .mkv is a zip");
+}
+
 fn document_info(id: &str) -> matterless_core::model::FileInfo {
     matterless_core::model::FileInfo {
         id: id.into(),
