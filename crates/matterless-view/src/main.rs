@@ -10167,6 +10167,9 @@ impl ApplicationHandler<Update> for App {
                         self.close_thread();
                     }
                     self.react();
+                    // Acted on, so the next keystroke -- which may arrive
+                    // before any frame is drawn -- does not act on it again.
+                    self.input.spent_keys();
                     self.redraw();
                 }
             }

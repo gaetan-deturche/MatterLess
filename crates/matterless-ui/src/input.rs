@@ -300,6 +300,18 @@ impl Input {
         &self.typed
     }
 
+    /// Forgets a keystroke once it has been acted on, before the frame ends.
+    ///
+    /// Keys and text otherwise last until the frame is drawn, and a burst of
+    /// them arriving between two frames -- a password manager typing a login,
+    /// a Tab, then a password -- was read again by every keystroke after it:
+    /// each character typed several times, and the Tab acted on before the
+    /// words around it.
+    pub fn spent_keys(&mut self) {
+        self.typed.clear();
+        self.keys.clear();
+    }
+
     /// Clears what only lasted a frame, keeping what is still true.
     ///
     /// Hover, focus and a held press survive; a click, a wheel turn, keys and
@@ -319,6 +331,26 @@ mod tests {
     use super::*;
     use crate::solve::solve;
     use crate::{Axis, Node, Rect, Size};
+
+    /// A keystroke acted on is not read again by the next one: a burst of
+    /// them between two frames is each read once, in order.
+    #[test]
+    fn a_spent_keystroke_is_not_read_again() {
+        let mut input = Input::default();
+        input.apply(Event::Typed("a".into()), &[]);
+        assert_eq!(input.typed(), "a");
+        input.spent_keys();
+        input.apply(
+            Event::Key {
+                key: Key::Tab,
+                down: true,
+            },
+            &[],
+        );
+        input.apply(Event::Typed("b".into()), &[]);
+        assert_eq!(input.typed(), "b", "the first letter is not read twice");
+        assert!(input.struck(Key::Tab));
+    }
 
     /// A key taken is a key the next reader of the frame does not see.
     ///
