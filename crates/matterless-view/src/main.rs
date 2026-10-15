@@ -6595,10 +6595,6 @@ impl App {
     /// is where a *drop* goes: a paste belongs to whoever is typing, and they
     /// may well be reading somewhere else while they do it.
     fn attach_held(&mut self, held: matterless_view::clip::Held) {
-        let Some(channel_id) = self.sidebar.selected.clone() else {
-            eprintln!("no conversation to attach that to");
-            return;
-        };
         let root_id = match self.input.focus() == Some(THREAD_COMPOSER) {
             true => self.open_root().unwrap_or_default(),
             false => String::new(),
@@ -6615,18 +6611,12 @@ impl App {
             // where the keyboard is.
             matterless_view::clip::Held::Words(_) => return,
         };
-        let Some(link) = self.link.as_ref() else {
-            return;
-        };
+        // Attached, not sent: it waits in the box with whatever is being
+        // written. Through the same errand as a drop, so its card is on screen
+        // while it uploads -- a paste used to show nothing until the server
+        // had answered, seconds later for a screenshot.
         for path in paths {
-            // Attached, not sent. A file dropped on the window is the whole
-            // message; one pasted into the box waits there with whatever is
-            // being written until the reader sends both.
-            link.send(matterless_view::live::Ask::Attach {
-                channel_id: channel_id.clone(),
-                root_id: root_id.clone(),
-                path,
-            });
+            self.attach_file(path, &root_id);
         }
     }
 
