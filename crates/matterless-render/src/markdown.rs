@@ -256,6 +256,80 @@ fn scan_emoji(text: &str, from: usize) -> Option<Found> {
     None
 }
 
+/// Mattermost's emoticons, as its "render emoticons as emoji" setting turns
+/// them into emoji: what is typed, and the emoji it stands for. Longest first
+/// at each start, so `:-)` is not read as `:-` and a stray `)`. The letters
+/// match in either case.
+const EMOTICONS: [(&str, &str); 31] = [
+    (":-)", "slightly_smiling_face"),
+    (":)", "slightly_smiling_face"),
+    (";-)", "wink"),
+    (";)", "wink"),
+    (":-o", "scream"),
+    (":o", "open_mouth"),
+    (":-]", "smirk"),
+    (":]", "smirk"),
+    (":-d", "smile"),
+    (":d", "smile"),
+    ("x-d", "stuck_out_tongue_closed_eyes"),
+    (":-p", "stuck_out_tongue"),
+    (":p", "stuck_out_tongue"),
+    (":-[", "rage"),
+    (":[", "rage"),
+    (":-@", "rage"),
+    (":@", "rage"),
+    (":-(", "slightly_frowning_face"),
+    (":(", "slightly_frowning_face"),
+    (":'-(", "cry"),
+    (":'(", "cry"),
+    (":-/", "confused"),
+    (":/", "confused"),
+    (":-s", "confounded"),
+    (":s", "confounded"),
+    (":-|", "neutral_face"),
+    (":|", "neutral_face"),
+    (":-$", "flushed"),
+    (":$", "flushed"),
+    ("</3", "broken_heart"),
+    ("<3", "heart"),
+];
+
+/// The first emoticon from `from` that stands apart: nothing but a space or
+/// the start of the text before it, and nothing but a space, the end or a
+/// sentence's punctuation after it -- so `10:30`, `http://` and `a:p` stay
+/// what they are.
+fn scan_emoticon(text: &str, from: usize) -> Option<Found> {
+    for (start, _) in text[from..].char_indices().map(|(at, c)| (from + at, c)) {
+        let alone_before = text[..start]
+            .chars()
+            .next_back()
+            .is_none_or(char::is_whitespace);
+        if !alone_before {
+            continue;
+        }
+        for (typed, name) in EMOTICONS {
+            let Some(here) = text.get(start..start + typed.len()) else {
+                continue;
+            };
+            if !here.eq_ignore_ascii_case(typed) {
+                continue;
+            }
+            let end = start + typed.len();
+            let alone_after = text[end..].chars().next().is_none_or(|character| {
+                character.is_whitespace() || matches!(character, '.' | ',' | '!' | '?' | ';')
+            });
+            if alone_after {
+                return Some(Found::Emoji {
+                    start,
+                    end,
+                    name: name.to_string(),
+                });
+            }
+        }
+    }
+    None
+}
+
 /// Mattermost's marked: math opens at a `$` no word character precedes and
 /// closes at the next `$` on the line, unless a word character follows it --
 /// so a price like "10$ ... 150$" stays text.
@@ -303,6 +377,9 @@ fn expand_text(text: &str) -> Vec<Node> {
             candidates.push(Found::Channel { start, end, name });
         }
         if let Some(found) = scan_emoji(text, cursor) {
+            candidates.push(found);
+        }
+        if let Some(found) = scan_emoticon(text, cursor) {
             candidates.push(found);
         }
         if let Some(found) = scan_math(text, cursor) {
@@ -908,6 +985,30 @@ mod tests {
             username: "ada".into(),
             everyone: false,
         }));
+    }
+
+    /// Emoticons are emoji, as the official client draws them -- but only when
+    /// they stand apart from the words, so a time or an address is left alone.
+    #[test]
+    fn an_emoticon_standing_apart_is_an_emoji() {
+        let named = |typed: &str| -> Vec<String> {
+            inline(typed)
+                .into_iter()
+                .filter_map(|node| match node {
+                    Node::Emoji { name, .. } => Some(name),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(named("nice :)"), vec!["slightly_smiling_face"]);
+        assert_eq!(named(":D great"), vec!["smile"]);
+        assert_eq!(named("ok ;-) see you"), vec!["wink"]);
+        assert_eq!(named("love it <3"), vec!["heart"]);
+        assert_eq!(named("too bad :(."), vec!["slightly_frowning_face"]);
+        assert!(named("at 10:30").is_empty(), "a time");
+        assert!(named("see http://x").is_empty(), "an address");
+        assert!(named("a:p").is_empty(), "inside a word");
+        assert_eq!(named(":smile:"), vec!["smile"], "a name is still a name");
     }
 
     #[test]
