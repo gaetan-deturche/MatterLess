@@ -116,6 +116,9 @@ pub enum Preview {
         /// `id__id` pair.
         channel_label: String,
         author_name: String,
+        /// Who said it, and which of their pictures, for the face on the card.
+        author_id: String,
+        author_avatar_at: Timestamp,
         create_at: Timestamp,
         /// The quoted message, parsed the same way any other body is.
         nodes: Vec<Node>,
@@ -232,6 +235,12 @@ fn permalink_preview(
     };
 
     Some(Preview::Permalink {
+        author_avatar_at: options
+            .author_avatars
+            .get(&quoted.user_id)
+            .copied()
+            .unwrap_or(0),
+        author_id: quoted.user_id.clone(),
         author_name: options
             .author_names
             .get(&quoted.user_id)

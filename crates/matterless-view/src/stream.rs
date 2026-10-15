@@ -1592,6 +1592,45 @@ impl Stream {
     }
 
     /// Draws each preview card: its own ground, and the bar down its left.
+    /// Each quoted message's face, where its card left room for it: the header
+    /// lines are the only preview lines set in from the card's edge, and they
+    /// come in the order the quotes do.
+    fn quoted_faces(&self, index: usize, top: f32, left: f32) -> Vec<(Rect, String)> {
+        let (Some(laid), Some(Row::Post { post } | Row::Continuation { post })) =
+            (self.laid.get(index), self.rows.get(index))
+        else {
+            return Vec::new();
+        };
+        let edge = self.theme.quote_bar + self.theme.indent / 2.0;
+        let who = post.previews.iter().filter_map(|preview| match preview {
+            matterless_render::Preview::Permalink {
+                author_id,
+                author_avatar_at,
+                ..
+            } => Some(avatar_key(author_id, *author_avatar_at)),
+            _ => None,
+        });
+        let face = matterless_layout::row::PREVIEW_FACE;
+        laid.blocks
+            .iter()
+            .filter(|block| {
+                block.kind == matterless_layout::row::Kind::Preview && block.x > edge + 1.0
+            })
+            .zip(who)
+            .map(|(block, key)| {
+                (
+                    Rect::new(
+                        left + self.theme.gutter + block.x - face - 6.0,
+                        top + block.y + (self.theme.line_height - face) / 2.0,
+                        face,
+                        face,
+                    ),
+                    key,
+                )
+            })
+            .collect()
+    }
+
     fn quote_bars(&self, into: &mut Canvas<'_>, index: usize, top: f32, left: f32, input: &Input) {
         for (ordinal, rect) in self.preview_runs(index, top, left).into_iter().enumerate() {
             let under = input.hovered() == Some(self.preview_name(index, ordinal).as_str());
@@ -1622,6 +1661,16 @@ impl Stream {
                     into.palette.rule
                 },
             );
+        }
+        for (rect, key) in self.quoted_faces(index, top, left) {
+            into.scene.extend([matterless_paint::Piece::Image {
+                x: rect.x,
+                y: rect.y,
+                width: rect.width,
+                height: rect.height,
+                key,
+                radius: rect.width / 2.0,
+            }]);
         }
     }
 
@@ -2191,6 +2240,11 @@ impl Stream {
                             wanted.push((emoji_key(id), side, side));
                         }
                     }
+                }
+                // The faces on quoted messages, at the size a message's own
+                // face is asked for: one picture per name serves both.
+                for (_, key) in self.quoted_faces(index, 0.0, 0.0) {
+                    wanted.push((key, AVATAR as u32, AVATAR as u32));
                 }
                 if let Some(Row::Post { post }) = self.rows.get(index) {
                     wanted.push((

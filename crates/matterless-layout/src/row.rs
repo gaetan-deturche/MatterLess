@@ -1283,16 +1283,6 @@ pub fn lay_out_opened(fonts: &mut Fonts, row: &Row, theme: &Theme, opened: bool)
     let mut blocks = Vec::new();
     let mut y = 0.0_f32;
 
-    /// A message's own time, on the reader's clock.
-    ///
-    /// Hours and minutes only. A date belongs to the separator above the run,
-    /// which is why one exists.
-    fn clock(at: i64, offset_minutes: i32) -> String {
-        let local = at / 1000 + i64::from(offset_minutes) * 60;
-        let day = local.rem_euclid(86_400);
-        format!("{:02}:{:02}", day / 3600, (day % 3600) / 60)
-    }
-
     let (nodes, post, header) = match row {
         Row::DateSeparator { epoch_day } => {
             return RowLayout {
@@ -1785,21 +1775,78 @@ pub fn lay_out_opened(fonts: &mut Fonts, row: &Row, theme: &Theme, opened: bool)
             matterless_render::Preview::Permalink {
                 channel_label,
                 author_name,
+                create_at,
                 nodes,
                 ..
             } => {
-                push(
-                    &format!("{author_name} in {channel_label}"),
-                    true,
-                    false,
-                    1,
-                    fonts,
-                );
-                // The quoted body as plain text: a card is a summary, and a
-                // quote that re-renders headings and lists inside a message is
-                // a second message.
-                let quoted = matterless_render::markdown::plain_text(nodes);
-                push(&quoted, false, true, theme.preview_lines, fonts);
+                // Who said it, then where and when, quieter: the face goes in
+                // the room left before the name, as on a message of its own.
+                let face = PREVIEW_FACE + 6.0;
+                let mut said = format!("  {}", clock(*create_at, theme.utc_offset_minutes));
+                if !channel_label.is_empty() {
+                    said = format!("  in {channel_label} \u{b7} {}", said.trim_start());
+                }
+                blocks.push(Block {
+                    y,
+                    x: x + face,
+                    height: theme.line_height,
+                    lines: 1,
+                    kind: Kind::Preview,
+                    spans: vec![
+                        TextSpan {
+                            text: author_name.clone(),
+                            bold: true,
+                            italic: false,
+                            mono: false,
+                            faint: false,
+                            press: None,
+                            emoji: None,
+                        },
+                        TextSpan {
+                            text: said,
+                            bold: false,
+                            italic: false,
+                            mono: false,
+                            faint: true,
+                            press: None,
+                            emoji: None,
+                        },
+                    ],
+                    size: theme.body_size,
+                    wrap: (wrap - face).max(40.0),
+                });
+                y += theme.line_height;
+                // The quoted body as plain text, in its own lines: a card is a
+                // summary, and a quote that re-renders headings and lists
+                // inside a message is a second message. Read as words, not
+                // greyed out, and whole: it is what the link was shared for.
+                let quoted = matterless_render::markdown::plain_lines(nodes)
+                    .lines()
+                    .map(str::trim)
+                    .filter(|line| !line.is_empty())
+                    .collect::<Vec<&str>>()
+                    .join("\n");
+                let style = crate::Style {
+                    size: theme.body_size,
+                    line_height: theme.line_height,
+                    bold: false,
+                    italic: false,
+                    mono: false,
+                };
+                if !quoted.is_empty() {
+                    let count = crate::extent_of(fonts, &quoted, wrap, style).lines.max(1);
+                    blocks.push(Block {
+                        y,
+                        x,
+                        height: count as f32 * theme.line_height,
+                        lines: count,
+                        kind: Kind::Preview,
+                        spans: vec![plain(quoted)],
+                        size: theme.body_size,
+                        wrap,
+                    });
+                    y += count as f32 * theme.line_height;
+                }
             }
         }
         y += theme.block_gap;
@@ -1934,6 +1981,19 @@ const HAIR: char = ' ';
 /// enough that "Tuesday 4 September" could be any of several years is exactly
 /// when it matters, and repeating it on every separator would be noise the
 /// rest of the time.
+/// A message's own time, on the reader's clock.
+///
+/// Hours and minutes only. A date belongs to the separator above the run,
+/// which is why one exists.
+fn clock(at: i64, offset_minutes: i32) -> String {
+    let local = at / 1000 + i64::from(offset_minutes) * 60;
+    let day = local.rem_euclid(86_400);
+    format!("{:02}:{:02}", day / 3600, (day % 3600) / 60)
+}
+
+/// The side of the face on a quoted message's card.
+pub const PREVIEW_FACE: f32 = 20.0;
+
 fn day_name(epoch_day: i64, today: i64) -> String {
     let (year, month, day) = civil_from_days(epoch_day);
     // 1970-01-01 was a Thursday, which is where the offset of 4 comes from.
@@ -2451,6 +2511,40 @@ mod tests {
             longest <= theme.preview_lines,
             "{longest} lines is not a summary"
         );
+    }
+
+    /// A quoted message is said with who said it, in its own lines, and
+    /// shown whole.
+    #[test]
+    fn a_quoted_message_says_who_and_is_shown_whole() {
+        let mut fonts = Fonts::new();
+        let theme = Theme::default();
+        let mut carded = post(vec![text("look")]);
+        carded.previews = vec![matterless_render::Preview::Permalink {
+            post_id: "q1".into(),
+            channel_id: "c1".into(),
+            channel_label: "Dev".into(),
+            author_name: "ada".into(),
+            author_id: "u1".into(),
+            author_avatar_at: 0,
+            create_at: 0,
+            nodes: matterless_render::markdown::parse(&"word ".repeat(400)),
+        }];
+        let laid = lay_out(&mut fonts, &Row::Post { post: carded }, &theme);
+        let card: Vec<&Block> = laid
+            .blocks
+            .iter()
+            .filter(|block| block.kind == Kind::Preview)
+            .collect();
+        let header = card.first().expect("a header");
+        assert_eq!(header.spans[0].text, "ada");
+        assert!(header.spans[0].bold);
+        assert!(header.spans[1].text.contains("in Dev"));
+        assert!(header.x > card[1].x, "room for the face before the name");
+        let body = card.last().expect("a body");
+        assert!(body.lines > theme.preview_lines, "not cut to a summary");
+        assert!(!body.spans[0].faint, "the words read as words");
+        assert!(!body.spans[0].text.ends_with('…'));
     }
 
     /// The whole point: a row's height is known, and it is different at two

@@ -418,6 +418,8 @@ fn carded(fonts: &mut Fonts) -> Stream {
             channel_id: "c9".into(),
             channel_label: "somewhere".into(),
             author_name: "somebody".into(),
+            author_id: "u9".into(),
+            author_avatar_at: 0,
             create_at: 0,
             nodes: vec![Node::Paragraph {
                 children: vec![Node::Text {
