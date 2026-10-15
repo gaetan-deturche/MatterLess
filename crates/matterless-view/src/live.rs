@@ -2461,6 +2461,25 @@ mod tests {
 
     /// Two files of one name are two files. Replacing the one a reader kept
     /// earlier is the kind of thing they only notice afterwards.
+    /// A loop longer than its budget plays whole, at a lower rate, rather
+    /// than its first few seconds.
+    #[test]
+    fn a_long_loop_is_thinned_not_cut() {
+        let mut reel = super::Reel::new(40);
+        for _ in 0..100 {
+            reel.push(vec![0; 4], std::time::Duration::from_millis(10));
+        }
+        let frames = reel.finish().expect("a loop");
+        let length: std::time::Duration = frames.iter().map(|(_, delay)| *delay).sum();
+        assert_eq!(length, std::time::Duration::from_secs(1), "all of it");
+        assert!(
+            frames.len() * 4 <= 44,
+            "{} frames is over the budget",
+            frames.len()
+        );
+        assert!(frames.len() > 2, "and still moving");
+    }
+
     #[test]
     fn a_second_file_of_the_same_name_does_not_replace_the_first() {
         let folder = std::env::temp_dir().join("matterless-twice");
@@ -2647,7 +2666,7 @@ fn frames_of(bytes: &[u8], width: u32, height: u32) -> Option<Vec<(Vec<u8>, std:
         return None;
     }
     let decoder = image::codecs::gif::GifDecoder::new(std::io::Cursor::new(bytes)).ok()?;
-    let mut frames = Vec::new();
+    let mut reel = Reel::new(PREVIEW_REEL_BYTES);
     for frame in decoder.into_frames() {
         let Ok(frame) = frame else {
             // Whatever was read before the file went wrong is still a loop,
@@ -2670,14 +2689,9 @@ fn frames_of(bytes: &[u8], width: u32, height: u32) -> Option<Vec<(Vec<u8>, std:
                 .thumbnail_exact(wanted.0, wanted.1)
                 .into_rgba8();
         }
-        frames.push((rgba.into_raw(), delay));
-        // A loop longer than this is somebody's video, not an emoji, and the
-        // frames are held in memory for as long as the picture is on screen.
-        if frames.len() >= 240 {
-            break;
-        }
+        reel.push(rgba.into_raw(), delay);
     }
-    (frames.len() > 1).then_some(frames)
+    reel.finish()
 }
 
 /// Decodes a picture to straight RGBA at its own size.
@@ -2824,8 +2838,67 @@ fn looked_key(file_id: &str, original: bool, linked: bool) -> String {
 
 /// The most the frames of one picture in the viewer may take. A GIF from the
 /// picker is a few megabytes of frames; a screen recording at window size is
-/// hundreds, and past this its loop is cut short rather than the memory spent.
+/// hundreds, and past this every other frame is dropped rather than the memory
+/// spent.
 const REEL_BYTES: usize = 192 * 1024 * 1024;
+
+/// The same for a moving picture in a message, which is drawn small.
+const PREVIEW_REEL_BYTES: usize = 48 * 1024 * 1024;
+
+/// A moving picture's frames, kept within `budget` bytes by dropping every
+/// other frame whenever it would go over, and giving its time to the frame
+/// before: the whole loop plays, at a lower rate, where cutting it at a count
+/// of frames played the first few seconds of a screen recording and no more.
+struct Reel {
+    frames: Vec<(Vec<u8>, std::time::Duration)>,
+    held: usize,
+    budget: usize,
+    /// Keep one frame in this many.
+    stride: usize,
+    seen: usize,
+}
+
+impl Reel {
+    fn new(budget: usize) -> Self {
+        Self {
+            frames: Vec::new(),
+            held: 0,
+            budget,
+            stride: 1,
+            seen: 0,
+        }
+    }
+
+    fn push(&mut self, pixels: Vec<u8>, delay: std::time::Duration) {
+        let kept = self.seen.is_multiple_of(self.stride);
+        self.seen += 1;
+        if !kept {
+            if let Some((_, last)) = self.frames.last_mut() {
+                *last += delay;
+            }
+            return;
+        }
+        self.held += pixels.len();
+        self.frames.push((pixels, delay));
+        if self.held > self.budget && self.frames.len() > 2 {
+            let mut thinned: Vec<(Vec<u8>, std::time::Duration)> =
+                Vec::with_capacity(self.frames.len() / 2 + 1);
+            for (at, (pixels, delay)) in std::mem::take(&mut self.frames).into_iter().enumerate() {
+                match (at % 2, thinned.last_mut()) {
+                    (1, Some((_, last))) => *last += delay,
+                    _ => thinned.push((pixels, delay)),
+                }
+            }
+            self.held = thinned.iter().map(|(pixels, _)| pixels.len()).sum();
+            self.frames = thinned;
+            self.stride *= 2;
+        }
+    }
+
+    fn finish(self) -> Option<Vec<(Vec<u8>, std::time::Duration)>> {
+        (self.frames.len() > 1).then_some(self.frames)
+    }
+}
 
 /// Every frame of a moving picture at exactly `width` by `height`, for the
 /// viewer. `None` for anything with one frame, which is nearly everything.
@@ -2835,8 +2908,7 @@ fn reel_of(bytes: &[u8], width: u32, height: u32) -> Option<Vec<(Vec<u8>, std::t
         return None;
     }
     let decoder = image::codecs::gif::GifDecoder::new(std::io::Cursor::new(bytes)).ok()?;
-    let mut frames = Vec::new();
-    let mut held = 0usize;
+    let mut reel = Reel::new(REEL_BYTES);
     for frame in decoder.into_frames() {
         let Ok(frame) = frame else { break };
         let (numerator, denominator) = frame.delay().numer_denom_ms();
@@ -2847,13 +2919,9 @@ fn reel_of(bytes: &[u8], width: u32, height: u32) -> Option<Vec<(Vec<u8>, std::t
         if (rgba.width(), rgba.height()) != (width, height) {
             rgba = image::imageops::thumbnail(&rgba, width.max(1), height.max(1));
         }
-        held += rgba.as_raw().len();
-        frames.push((rgba.into_raw(), delay));
-        if held > REEL_BYTES || frames.len() >= 240 {
-            break;
-        }
+        reel.push(rgba.into_raw(), delay);
     }
-    (frames.len() > 1).then_some(frames)
+    reel.finish()
 }
 
 /// Everybody in a channel: their records kept, the window told who they are,
