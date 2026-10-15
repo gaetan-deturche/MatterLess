@@ -65,6 +65,12 @@ fn the_counterpart_is_found_whichever_half_the_reader_is() {
 fn a_note_to_self_is_called_you() {
     let dm = channel("c1", "D", "me__me", "");
     assert_eq!(label(&dm, "me", &HashMap::new()), "You");
+    let named = HashMap::from([("me".to_string(), "gaetan".to_string())]);
+    assert_eq!(
+        label(&dm, "me", &named),
+        "gaetan (you)",
+        "named, so the name finds it"
+    );
 }
 
 /// The failure the native window shows today: with nobody resolved, the label

@@ -3857,12 +3857,15 @@ async fn discover(
         eprintln!("storing the people found: {error}");
     }
     for person in people.into_iter().take(DISCOVERED as usize) {
-        if person.id == me_id {
-            continue;
-        }
+        // The reader too: a conversation with yourself is where notes go, and
+        // searching for your own name and finding nothing reads as broken.
+        let you = match person.id == me_id {
+            true => " (you)",
+            false => "",
+        };
         found.push(crate::switcher::Match {
             id: person.id.clone(),
-            label: format!("@{} -- message", person.username),
+            label: format!("@{}{you} -- message", person.username),
             direct: true,
             reach: crate::switcher::Reach::Direct,
             face: Some(crate::switcher::Face {

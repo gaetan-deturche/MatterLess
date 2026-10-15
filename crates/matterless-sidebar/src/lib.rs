@@ -82,7 +82,12 @@ pub fn label(channel: &Channel, me_id: &str, names: &HashMap<String, String>) ->
     }
     if channel.channel_type == "D" {
         return match counterpart(&channel.name, me_id) {
-            Some(id) if id == me_id => "You".to_string(),
+            // By the reader's name, as the official client calls it, so typing
+            // that name finds it.
+            Some(id) if id == me_id => match names.get(me_id) {
+                Some(name) => format!("{name} (you)"),
+                None => "You".to_string(),
+            },
             Some(id) => names.get(&id).cloned().unwrap_or(id),
             None => channel.name.clone(),
         };
