@@ -1284,6 +1284,17 @@ impl Stream {
                 depth: 3,
             });
         }
+        // Everything held to the panel: a picture scrolled half under the box
+        // below is only something to press where it can be seen, or a click on
+        // the reply field lands on the picture behind it.
+        for one in &mut placed {
+            let left = one.rect.x.max(within.x);
+            let top = one.rect.y.max(within.y);
+            let right = one.rect.right().min(within.right());
+            let bottom = one.rect.bottom().min(within.bottom());
+            one.rect = Rect::new(left, top, (right - left).max(0.0), (bottom - top).max(0.0));
+        }
+        placed.retain(|one| one.rect.width > 0.0 && one.rect.height > 0.0);
         placed
     }
 
