@@ -7840,13 +7840,25 @@ impl App {
                         .map(|root| root.channel_id)
                         .unwrap_or_default(),
                 };
-                let channel = store
-                    .channel(&channel_id)
-                    .ok()
-                    .flatten()
-                    .map(|channel| match channel.display_name.is_empty() {
-                        true => channel.name,
-                        false => channel.display_name,
+                // Called what the sidebar calls it: a direct message's own
+                // name is a pair of ids, which is what this row used to say.
+                let channel = self
+                    .sidebar
+                    .entries
+                    .iter()
+                    .find_map(|entry| match entry {
+                        Entry::Channel { id, label, .. } if *id == channel_id => {
+                            Some(label.clone())
+                        }
+                        _ => None,
+                    })
+                    .or_else(|| {
+                        store.channel(&channel_id).ok().flatten().map(|channel| {
+                            match channel.display_name.is_empty() {
+                                true => channel.name,
+                                false => channel.display_name,
+                            }
+                        })
                     })
                     .unwrap_or_else(|| "a conversation".to_string());
                 matterless_view::listing::Found {
