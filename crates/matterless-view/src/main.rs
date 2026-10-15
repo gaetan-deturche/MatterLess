@@ -5887,19 +5887,38 @@ impl App {
     /// replies, and the same planner the channel uses, so the thread's rows are
     /// the rows the app would draw rather than an approximation of them.
     fn open_thread(&mut self, root_id: &str) {
+        // The lists, the channel's details and search share the pane with a
+        // thread and win it while they are open, so a thread asked for now
+        // opened out of sight. It is the latest thing asked for, so it shows.
+        let hidden = self.aside_rect().is_some();
+        if self.listing.open() {
+            self.hide_the_list();
+        }
+        if self.members_showing() {
+            self.hide_members();
+        }
+        if self.search.open() {
+            let mut input = std::mem::take(&mut self.input);
+            self.search.hide(&mut input);
+            self.input = input;
+        }
+        let same = self
+            .thread
+            .as_ref()
+            .is_some_and(|open| open.name == thread_name(root_id));
+        // Clicking the open thread again closes it, which is what the twisty
+        // in every other client does -- unless it was out of sight, when
+        // showing it is what was asked.
+        if same {
+            match hidden {
+                true => self.relayout(),
+                false => self.close_thread(),
+            }
+            return;
+        }
         let Some(store) = self.store.as_ref() else {
             return;
         };
-        // Clicking the open thread again closes it, which is what the twisty
-        // in every other client does.
-        if self
-            .thread
-            .as_ref()
-            .is_some_and(|open| open.name == thread_name(root_id))
-        {
-            self.close_thread();
-            return;
-        }
         let Ok(Some(root)) = store.post(root_id) else {
             eprintln!("thread {root_id}: no root in the local store");
             return;
