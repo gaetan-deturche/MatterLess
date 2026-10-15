@@ -11,6 +11,9 @@ use matterless_ui::Rect;
 /// The origin the player page is served from.
 const PAGE: &str = "https://matterless.player/watch";
 
+/// Where an HTML attachment is served from.
+const SHOWN: &str = "https://matterless.page/view";
+
 /// The player, while a video is being watched.
 pub struct Watching {
     view: wry::WebView,
@@ -108,6 +111,103 @@ impl Watching {
 
     /// When the window should draw again to show it: soon, until it is shown,
     /// since its page loading is nothing the window would otherwise wake for.
+    pub fn wakes(&self) -> Option<std::time::Instant> {
+        (!self.shown).then(|| std::time::Instant::now() + std::time::Duration::from_millis(50))
+    }
+}
+
+/// An HTML file somebody attached, shown as its page in the viewer.
+///
+/// In the system's web engine, scripts and all, as a browser would show it --
+/// in a profile of its own, so nothing it stores reaches the video player's.
+/// Its links go to the browser rather than turning the viewer into one.
+pub struct Page {
+    view: wry::WebView,
+    at: Rect,
+    _context: wry::WebContext,
+    pub id: String,
+    loaded: std::rc::Rc<std::cell::Cell<bool>>,
+    shown: bool,
+}
+
+impl Page {
+    /// Shows `html`, the file `id`, over `at` in the window's pixels.
+    pub fn open(
+        window: &impl wry::raw_window_handle::HasWindowHandle,
+        id: &str,
+        html: &str,
+        at: Rect,
+        profile: Option<std::path::PathBuf>,
+    ) -> Result<Self, String> {
+        let mut context = wry::WebContext::new(profile);
+        let loaded = std::rc::Rc::new(std::cell::Cell::new(false));
+        let heard = loaded.clone();
+        // Served from a local origin rather than handed over as a string:
+        // WebView2 takes a string of two megabytes at most, and a page with an
+        // origin is one its own scripts can keep things for.
+        let body = html.to_string();
+        let view = {
+            use wry::WebViewBuilderExtWindows;
+            wry::WebViewBuilder::new_with_web_context(&mut context)
+                .with_https_scheme(true)
+                .with_custom_protocol("matterless".to_string(), move |_, _| {
+                    wry::http::Response::builder()
+                        .header(wry::http::header::CONTENT_TYPE, "text/html; charset=utf-8")
+                        .body(std::borrow::Cow::Owned(body.clone().into_bytes()))
+                        .unwrap_or_default()
+                })
+                .with_url(SHOWN)
+                .with_bounds(bounds(at))
+                .with_visible(false)
+                .with_on_page_load_handler(move |event, _| {
+                    if matches!(event, wry::PageLoadEvent::Finished) {
+                        heard.set(true);
+                    }
+                })
+                .with_background_color((255, 255, 255, 255))
+                .with_devtools(false)
+                .with_navigation_handler(|url| {
+                    let ours = url.starts_with(SHOWN);
+                    if !ours {
+                        crate::open::link(&url);
+                    }
+                    ours
+                })
+                .with_new_window_req_handler(|url, _| {
+                    crate::open::link(&url);
+                    wry::NewWindowResponse::Deny
+                })
+                .build_as_child(window)
+                .map_err(|why| why.to_string())?
+        };
+        Ok(Self {
+            view,
+            at,
+            _context: context,
+            id: id.to_string(),
+            loaded,
+            shown: false,
+        })
+    }
+
+    /// Follows the viewer when it moves, and shows the page once painted.
+    pub fn place(&mut self, at: Rect) {
+        if at != self.at {
+            self.at = at;
+            let _ = self.view.set_bounds(bounds(at));
+        }
+        self.reveal();
+    }
+
+    /// Shows the page once it has loaded, and not before: until then it is a
+    /// hole in a window drawn through Direct3D.
+    pub fn reveal(&mut self) {
+        if !self.shown && self.loaded.get() {
+            self.shown = self.view.set_visible(true).is_ok();
+        }
+    }
+
+    /// When the window should draw again to show it.
     pub fn wakes(&self) -> Option<std::time::Instant> {
         (!self.shown).then(|| std::time::Instant::now() + std::time::Duration::from_millis(50))
     }

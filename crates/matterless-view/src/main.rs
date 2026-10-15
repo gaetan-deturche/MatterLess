@@ -750,6 +750,9 @@ struct App {
     /// video that would not open, so it is not tried again every frame.
     #[cfg(windows)]
     youtube_player: Option<matterless_view::watch::Watching>,
+    /// An HTML attachment shown as its page in the viewer.
+    #[cfg(windows)]
+    html_page: Option<matterless_view::watch::Page>,
     watch_failed: Option<String>,
     /// What the button under the pointer is for, once it has been rested on.
     tooltip: matterless_view::tooltip::Tooltip,
@@ -1050,6 +1053,8 @@ impl App {
             said_active: None,
             #[cfg(windows)]
             youtube_player: None,
+            #[cfg(windows)]
+            html_page: None,
             watch_failed: None,
         };
         app.sidebar.selected = Some(channel);
@@ -3804,6 +3809,32 @@ impl App {
         self.redraw();
     }
 
+    /// Keeps an HTML file's page where the viewer puts its text: opened when
+    /// one is shown, moved with the window, gone with the viewer or when the
+    /// reader asks for the source.
+    #[cfg(windows)]
+    fn follow_the_page(&mut self) {
+        match self.viewer.page(self.window_rect()) {
+            Some((id, html, at)) => match self.html_page.as_mut() {
+                Some(page) if page.id == id => page.place(at),
+                _ => {
+                    self.html_page = None;
+                    let Some(window) = self.window.as_ref() else {
+                        return;
+                    };
+                    let profile = matterless_view::feed::pictures_dir()
+                        .and_then(|pictures| pictures.parent().map(|dir| dir.join("pages")));
+                    match matterless_view::watch::Page::open(window, &id, &html, at, profile) {
+                        Ok(page) => self.html_page = Some(page),
+                        // The source stays on screen, which is still the file.
+                        Err(why) => eprintln!("showing {id} as a page: {why}"),
+                    }
+                }
+            },
+            None => self.html_page = None,
+        }
+    }
+
     /// Keeps YouTube's player where the viewer frames it: opened when a video
     /// is shown, moved when the window is, gone when the viewer is.
     #[cfg(windows)]
@@ -4682,6 +4713,8 @@ impl App {
     fn played(&mut self) {
         #[cfg(windows)]
         self.follow_the_video();
+        #[cfg(windows)]
+        self.follow_the_page();
         // The picture in the viewer: its next frame, as the texture it is drawn
         // from.
         if self.on_show() {
@@ -9668,10 +9701,19 @@ impl ApplicationHandler<Update> for App {
         // YouTube's player, shown the moment its page has painted: until then
         // it is a hole in the window. Nothing else wakes the loop for that.
         #[cfg(windows)]
-        let revealing = self.youtube_player.as_mut().and_then(|player| {
-            player.reveal();
-            player.wakes()
-        });
+        let revealing = self
+            .youtube_player
+            .as_mut()
+            .and_then(|player| {
+                player.reveal();
+                player.wakes()
+            })
+            .or_else(|| {
+                self.html_page.as_mut().and_then(|page| {
+                    page.reveal();
+                    page.wakes()
+                })
+            });
         #[cfg(not(windows))]
         let revealing = None;
         let next = [

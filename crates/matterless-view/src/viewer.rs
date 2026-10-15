@@ -276,6 +276,8 @@ pub struct Viewer {
     kept: std::collections::HashMap<String, std::path::PathBuf>,
     copying: std::collections::HashSet<String>,
     copied: std::collections::HashSet<String>,
+    /// An HTML file shown as its source rather than as its page.
+    source: bool,
 }
 
 impl Viewer {
@@ -353,7 +355,31 @@ impl Viewer {
         self.size = None;
         self.failed.clear();
         self.scroll = 0.0;
+        self.source = false;
         self.shown.get(at).cloned()
+    }
+
+    /// Whether the one showing is an HTML file, which can be shown as a page.
+    fn html(&self) -> bool {
+        self.current().is_some_and(|one| {
+            let name = one.name.to_ascii_lowercase();
+            one.text && (name.ends_with(".html") || name.ends_with(".htm"))
+        })
+    }
+
+    /// The HTML file showing, to be drawn as its page over the viewer: its
+    /// id, its text, and where. `None` once the reader asked for the source,
+    /// and until the text has arrived.
+    pub fn page(&self, window: Rect) -> Option<(String, String, Rect)> {
+        if !self.open() || !self.html() || self.source {
+            return None;
+        }
+        let text = self.reading()?;
+        Some((
+            text.file_id.clone(),
+            text.lines.join("\n"),
+            self.text_rect(window),
+        ))
     }
 
     pub fn hide(&mut self) {
@@ -532,7 +558,7 @@ impl Viewer {
             true => "browse",
             false => "save",
         };
-        for name in [keep, "copy", "next", "back"] {
+        for name in [keep, "copy", "html", "next", "back"] {
             // Only one picture, so there is nowhere to step: a button that
             // does nothing is a button that has to be pressed to find out.
             if (name == "next" || name == "back") && self.shown.len() < 2 {
@@ -541,9 +567,13 @@ impl Viewer {
             if name == "copy" && !self.copyable() {
                 continue;
             }
+            if name == "html" && !self.html() {
+                continue;
+            }
             let width = match name {
                 "save" => self.save_label().1,
                 "copy" => self.copy_label().1,
+                "html" => 80.0,
                 "browse" => 132.0,
                 _ => BUTTON,
             };
@@ -663,6 +693,12 @@ impl Viewer {
                     file_id: one.file_id.clone(),
                     name: one.name.clone(),
                 })
+            }
+            // Between the page and its source, here: nothing outside the
+            // viewer needs telling.
+            Some("html") => {
+                self.source = !self.source;
+                None
             }
             Some("copy") => {
                 let one = self.current()?;
@@ -922,6 +958,10 @@ impl Viewer {
             let said = match name {
                 "save" => self.save_label().0,
                 "copy" => self.copy_label().0,
+                "html" => match self.source {
+                    true => "Page",
+                    false => "Source",
+                },
                 "browse" => "Open in YouTube",
                 "back" => matterless_layout::marks::BACK,
                 _ => matterless_layout::marks::NEXT,
