@@ -635,6 +635,11 @@ struct App {
     clicked: Option<Arc<matterless_view::toast::Clicked>>,
     /// The team listed, when teams are listed one at a time.
     team: Option<String>,
+    /// Each thread marked read, and its newest reply then. Marked again only
+    /// once a newer reply is here: a server still counting it unread
+    /// answered every mark with "unread", which marked it again, and the
+    /// thread's dot blinked for as long as it was open.
+    thread_reads: std::cell::RefCell<std::collections::HashMap<String, i64>>,
     /// Jumping to a conversation by name, which is how a reader gets around a
     /// hundred and fourteen channels without hunting the sidebar.
     switcher: matterless_view::switcher::Switcher,
@@ -986,6 +991,7 @@ impl App {
             session: None,
             clicked: None,
             team: None,
+            thread_reads: Default::default(),
             switcher: matterless_view::switcher::Switcher::default(),
             search: matterless_view::search::Search::default(),
             picker: matterless_view::picker::Picker::default(),
@@ -5134,11 +5140,24 @@ impl App {
             .ok()
             .flatten()
             .is_some_and(|(replies, mentions)| replies > 0 || mentions > 0);
-        if waiting {
-            link.send(matterless_view::live::Ask::ReadThread {
-                root_id: root_id.to_string(),
-            });
+        if !waiting {
+            return;
         }
+        let newest = store
+            .thread_replies(root_id)
+            .unwrap_or_default()
+            .iter()
+            .map(|reply| reply.create_at)
+            .max()
+            .unwrap_or(0);
+        let mut sent = self.thread_reads.borrow_mut();
+        if sent.get(root_id) == Some(&newest) {
+            return;
+        }
+        sent.insert(root_id.to_string(), newest);
+        link.send(matterless_view::live::Ask::ReadThread {
+            root_id: root_id.to_string(),
+        });
     }
 
     /// Says the conversation on screen has been read, if anything in it has

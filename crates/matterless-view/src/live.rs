@@ -1545,14 +1545,22 @@ async fn run(
                                     .and_then(|teams| teams.first().map(|team| team.id.clone()))
                             })
                             .unwrap_or_default();
-                        // The server's clock, from the newest thing in the
-                        // thread: it is compared against post times.
+                        // Now, as the official client marks it, or the newest
+                        // thing held if this clock is behind the server's. The
+                        // newest held alone fell short whenever a reply had
+                        // not reached the store yet, and the server answered
+                        // with the thread still unread.
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|since| since.as_millis() as i64)
+                            .unwrap_or(0);
                         let read_to = store
                             .thread_replies(&root_id)
                             .unwrap_or_default()
                             .iter()
                             .map(|reply| reply.create_at)
                             .chain(store.post(&root_id).ok().flatten().map(|root| root.create_at))
+                            .chain(std::iter::once(now))
                             .max()
                             .unwrap_or(0);
                         if let Err(error) = rest.mark_thread_read(&me_id, &team, &root_id, read_to).await {
