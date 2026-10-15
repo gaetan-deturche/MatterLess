@@ -9863,9 +9863,11 @@ impl ApplicationHandler<Update> for App {
         let contrast = matterless_view::settings::Contrast::read(
             read(matterless_view::settings::Contrast::SETTING).as_deref(),
         );
-        let theme = matterless_view::settings::Theme::read(
-            read(matterless_view::settings::Theme::SETTING).as_deref(),
-        );
+        // Windows' own choice until one is made here.
+        let theme = match read(matterless_view::settings::Theme::SETTING) {
+            Some(said) => matterless_view::settings::Theme::read(Some(&said)),
+            None => matterless_view::settings::Theme::system(),
+        };
         let teams = matterless_view::settings::Teams::read(
             read(matterless_view::settings::Teams::SETTING).as_deref(),
         );

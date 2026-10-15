@@ -262,6 +262,35 @@ impl Theme {
             .unwrap_or_default()
     }
 
+    /// What Windows is set to for apps, for a first start with nothing chosen
+    /// here yet. Dark wherever there is no such setting to read.
+    pub fn system() -> Self {
+        #[cfg(windows)]
+        {
+            use windows::Win32::System::Registry::{
+                HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW,
+            };
+            use windows::core::w;
+            let mut light = 0u32;
+            let mut size = std::mem::size_of::<u32>() as u32;
+            let read = unsafe {
+                RegGetValueW(
+                    HKEY_CURRENT_USER,
+                    w!("Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize"),
+                    w!("AppsUseLightTheme"),
+                    RRF_RT_REG_DWORD,
+                    None,
+                    Some((&raw mut light).cast()),
+                    Some(&raw mut size),
+                )
+            };
+            if read.is_ok() && light != 0 {
+                return Theme::Light;
+            }
+        }
+        Theme::Dark
+    }
+
     /// The colours this theme draws in.
     pub fn palette(&self) -> matterless_paint::Palette {
         match self {
