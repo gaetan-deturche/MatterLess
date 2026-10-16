@@ -1431,12 +1431,24 @@ async fn run(
                                 Ok(deltas) => {
                                     // Who wrote them, before the window draws
                                     // them: a thread in a channel never opened
-                                    // is full of people never met.
-                                    learn(&rest, engine.store(), &wrote(engine.store(), &deltas))
-                                        .await;
+                                    // is full of people never met. All of
+                                    // them, not only the authors of what
+                                    // changed: a thread already stored changes
+                                    // nothing, and its strangers stayed ids.
+                                    let mut authors: Vec<String> = list
+                                        .posts
+                                        .values()
+                                        .map(|post| post.user_id.clone())
+                                        .filter(|id| !id.is_empty())
+                                        .collect();
+                                    authors.sort();
+                                    authors.dedup();
+                                    let met_some = learn(&rest, engine.store(), &authors).await;
                                     println!("thread {root_id}: {} posts", list.order.len());
                                     if !deltas.is_empty() {
                                         wake.wake(Update::Changed(deltas));
+                                    } else if met_some {
+                                        wake.wake(Update::Met);
                                     }
                                 }
                                 Err(error) => eprintln!("reading thread {root_id}: {error}"),

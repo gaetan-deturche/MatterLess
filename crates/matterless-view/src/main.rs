@@ -1864,6 +1864,10 @@ impl App {
                 if let Some(channel) = self.sidebar.selected.clone() {
                     self.reread_channel(&channel);
                 }
+                // And the thread beside it, which names its authors the same way.
+                if let Some(root) = self.open_root() {
+                    self.reread_thread(&root);
+                }
             }
             Update::Person { user_id } => {
                 // Refreshed in place, if the card is still open on them. Not
