@@ -762,6 +762,24 @@ fn followed_threads_round_trip_with_the_servers_own_counts() {
     assert_eq!(one.reply_count, 7);
 }
 
+/// Who took part comes from the server's own list, and a refresh that does
+/// not carry one leaves the list it already had.
+#[test]
+fn a_followed_thread_keeps_who_took_part() {
+    let store = store();
+    let mut thread = user_thread("r1", 0, 0);
+    thread.participants = Some(vec![
+        matterless_core::model::ThreadParticipant { id: "u1".into() },
+        matterless_core::model::ThreadParticipant { id: "u2".into() },
+    ]);
+    store.upsert_threads(&[thread]).unwrap();
+    store.upsert_threads(&[user_thread("r1", 0, 0)]).unwrap();
+
+    let followed = store.followed_threads(10).unwrap();
+    assert_eq!(followed.len(), 1);
+    assert_eq!(followed[0].participants, vec!["u1", "u2"]);
+}
+
 #[test]
 fn reading_a_thread_clears_its_unread_and_never_rewinds_the_watermark() {
     let store = store();

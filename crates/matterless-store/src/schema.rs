@@ -95,7 +95,13 @@ CREATE TABLE IF NOT EXISTS channel_about (
 );
 ";
 
-pub const TARGET_VERSION: i64 = 14;
+/// Who took part in each followed thread, as the server lists them: the
+/// Threads list shows their faces before any reply has been fetched.
+const MIGRATION_15: &str = "
+ALTER TABLE threads ADD COLUMN participants TEXT NOT NULL DEFAULT '';
+";
+
+pub const TARGET_VERSION: i64 = 15;
 
 // Migration 1 is frozen: the shell now keeps a real database with real history,
 // so every change gets its own step from here.
@@ -264,10 +270,11 @@ DROP TABLE IF EXISTS post_render;
 /// Columns added after their table, checked the same way tables are: a version
 /// number is a claim, and this is the evidence.
 fn missing_columns(connection: &Connection) -> rusqlite::Result<Vec<String>> {
-    const REQUIRED: [(&str, &str); 3] = [
+    const REQUIRED: [(&str, &str); 4] = [
         ("posts", "is_pinned"),
         ("drafts", "files"),
         ("users", "position"),
+        ("threads", "participants"),
     ];
     let mut absent = Vec::new();
     for (table, column) in REQUIRED {
@@ -527,6 +534,13 @@ fn migrate(connection: &Connection) -> rusqlite::Result<()> {
     }
     if version < 14 || missing.iter().any(|name| name == "channel_about") {
         connection.execute_batch(MIGRATION_14)?;
+    }
+    // On the column, not the version, for the reason migration 7 gives.
+    if absent_columns
+        .iter()
+        .any(|name| name == "threads.participants")
+    {
+        connection.execute_batch(MIGRATION_15)?;
     }
     connection.pragma_update(None, "user_version", TARGET_VERSION)?;
     tracing::info!(from = version, to = TARGET_VERSION, "store migrated");

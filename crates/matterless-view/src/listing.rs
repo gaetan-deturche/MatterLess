@@ -351,6 +351,11 @@ pub fn followed(store: &Store, me: &str, limit: u32) -> Vec<Found> {
         }
     }
     people.extend(answered.values().flatten().cloned());
+    people.extend(
+        threads
+            .iter()
+            .flat_map(|thread| thread.participants.iter().cloned()),
+    );
     people.sort();
     people.dedup();
     let known = store.users_by_ids(&people).unwrap_or_default();
@@ -374,7 +379,11 @@ pub fn followed(store: &Store, me: &str, limit: u32) -> Vec<Found> {
             card: Some(Card {
                 when: thread.last_reply_at,
                 replies: thread.reply_count,
+                // The server's list first: the replies themselves are only
+                // fetched when the thread is opened, so before then the local
+                // ones were often nobody.
                 faces: std::iter::once(thread.author_id.as_str())
+                    .chain(thread.participants.iter().map(String::as_str))
                     .chain(
                         answered
                             .get(&thread.root_id)

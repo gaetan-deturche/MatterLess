@@ -118,6 +118,8 @@ pub struct FollowedThread {
     pub message: String,
     /// Empty for the same reason.
     pub author_id: String,
+    /// Who took part, as the server last listed them. Empty until it has.
+    pub participants: Vec<String>,
 }
 
 /// What the taskbar badge should show. The two parts are kept apart so the log
@@ -1370,8 +1372,8 @@ impl Store {
             transaction.execute(
                 "INSERT INTO threads (root_id, channel_id, following, reply_count,
                                       last_reply_at, last_viewed_at, unread_replies,
-                                      unread_mentions, is_urgent, delete_at)
-                 VALUES (?1, ?2, 1, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                                      unread_mentions, is_urgent, delete_at, participants)
+                 VALUES (?1, ?2, 1, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
                  ON CONFLICT(root_id) DO UPDATE SET
                     channel_id = excluded.channel_id,
                     following = 1,
@@ -1381,7 +1383,10 @@ impl Store {
                     unread_replies = excluded.unread_replies,
                     unread_mentions = excluded.unread_mentions,
                     is_urgent = excluded.is_urgent,
-                    delete_at = excluded.delete_at",
+                    delete_at = excluded.delete_at,
+                    participants = CASE excluded.participants
+                        WHEN '' THEN threads.participants
+                        ELSE excluded.participants END",
                 params![
                     thread.id,
                     thread.post.channel_id,
@@ -1392,6 +1397,15 @@ impl Store {
                     thread.unread_mentions,
                     i64::from(thread.is_urgent),
                     thread.delete_at,
+                    // Kept when the server says nothing about them: a list
+                    // known once is better than none.
+                    thread
+                        .participants
+                        .iter()
+                        .flatten()
+                        .map(|one| one.id.as_str())
+                        .collect::<Vec<_>>()
+                        .join(","),
                 ],
             )?;
         }
@@ -1598,7 +1612,7 @@ impl Store {
         let mut statement = connection.prepare(
             "SELECT t.root_id, t.channel_id, t.reply_count, t.last_reply_at,
                     t.unread_replies, t.unread_mentions, t.is_urgent,
-                    COALESCE(p.message, ''), COALESCE(p.user_id, '')
+                    COALESCE(p.message, ''), COALESCE(p.user_id, ''), t.participants
              FROM threads t
              LEFT JOIN posts p ON p.id = t.root_id
              WHERE t.following = 1 AND t.delete_at = 0 AND t.last_reply_at > 0
@@ -1616,6 +1630,12 @@ impl Store {
                 is_urgent: row.get::<_, i64>(6)? != 0,
                 message: row.get(7)?,
                 author_id: row.get(8)?,
+                participants: row
+                    .get::<_, String>(9)?
+                    .split(',')
+                    .filter(|id| !id.is_empty())
+                    .map(str::to_owned)
+                    .collect(),
             })
         })?;
         let mut found = Vec::new();
