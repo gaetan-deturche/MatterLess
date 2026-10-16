@@ -8717,6 +8717,15 @@ impl App {
         // Read before the pane is: who is around is a fact about the window,
         // and drawing the thread holds the rest of it.
         let presence_of = self.presence.clone();
+        // Where the thread was said, under its title as the official client
+        // has it: the pane is beside whichever channel is open, which need
+        // not be this one.
+        let thread_in = self.thread_in.as_deref().and_then(|channel| {
+            self.sidebar.entries.iter().find_map(|entry| match entry {
+                Entry::Channel { id, label, .. } if id == channel => Some(label.clone()),
+                _ => None,
+            })
+        });
         if let (Some(pane), Some(thread)) = (self.thread_rect(), self.thread.as_mut()) {
             // The pane's own frame: `.pane { border-left: 1px solid var(--rule);
             // background: var(--ground) }`. Without the rule it ran into the
@@ -8728,7 +8737,21 @@ impl App {
             // Above the reply box, not the whole pane: replies drawn behind it
             // would show through the box's own margin.
             let rows = self.thread_composer.above(header::below(pane));
-            let mut title = Header::new(format!("Thread -- {} replies", thread.rows.len()));
+            // Its replies, not its rows: the root, the date lines and the
+            // divider are rows too, and counting them said 45 for 43.
+            let replies = thread
+                .rows
+                .iter()
+                .filter(|row| matches!(row, Row::Post { .. } | Row::Continuation { .. }))
+                .count()
+                .saturating_sub(1);
+            let mut title = Header::new(match replies {
+                1 => "Thread \u{2014} 1 reply".to_string(),
+                _ => format!("Thread \u{2014} {replies} replies"),
+            });
+            if let Some(channel) = thread_in {
+                title.topic = vec![(channel, None)];
+            }
             // Whether its replies keep interrupting the reader, and a way out.
             // Nothing on the channel's strip applies to one thread.
             title.offered = header::for_thread();
