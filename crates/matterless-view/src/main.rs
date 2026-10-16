@@ -4085,6 +4085,20 @@ impl App {
         if name == "sidebar/me" {
             return Some("Your status".to_string());
         }
+        // The viewer's bar, which says its keys: nothing else on screen does.
+        if let Some(slug) = name
+            .strip_prefix(matterless_view::viewer::NAME)
+            .and_then(|rest| rest.strip_prefix('/'))
+        {
+            let playing = self.viewer.playback.is_some_and(|played| played.playing);
+            return match slug {
+                "frame-back" => Some("Previous frame  ( , )".to_string()),
+                "frame-on" => Some("Next frame  ( . )".to_string()),
+                "play" if playing => Some("Pause  (Space)".to_string()),
+                "play" => Some("Play  (Space)".to_string()),
+                _ => None,
+            };
+        }
         self.explains_in(&self.stream, name).or_else(|| {
             self.thread
                 .as_ref()
@@ -4738,9 +4752,26 @@ impl App {
         // from.
         if self.on_show() {
             let viewed = self.viewer.current().map(|one| one.file_id.clone());
-            let due = self.looked_moving.due(std::time::Instant::now(), |key| {
-                viewed.as_deref() == Some(key)
-            });
+            let now = std::time::Instant::now();
+            // A GIF that moves gets the bar a video has, from where it is in
+            // its loop; anything else that is not a video has none.
+            let filmed = self
+                .film
+                .as_ref()
+                .is_some_and(|(file_id, _)| viewed.as_deref() == Some(file_id.as_str()));
+            if !filmed {
+                self.viewer.playback = viewed
+                    .as_deref()
+                    .and_then(|key| self.looked_moving.reel(key))
+                    .map(|reel| matterless_view::viewer::Playback {
+                        playing: reel.playing(),
+                        position: reel.position(now).as_secs_f64(),
+                        duration: reel.length().as_secs_f64(),
+                    });
+            }
+            let due = self
+                .looked_moving
+                .due(now, |key| viewed.as_deref() == Some(key));
             if let Some(view) = self.view.as_mut() {
                 for (_, width, height, rgba) in due {
                     view.show(width, height, &rgba);
@@ -7349,14 +7380,37 @@ impl App {
                     matterless_view::open::link(&url);
                 }
                 Some(matterless_view::viewer::Did::Toggle) => {
-                    if let Some((_, player)) = self.film.as_ref() {
+                    if let Some((_, player)) = self.playing_film() {
                         player.toggle();
+                    } else if let Some(reel) = self.viewed_reel() {
+                        reel.toggle(std::time::Instant::now());
                     }
+                    self.redraw();
+                }
+                Some(matterless_view::viewer::Did::Step(by)) => {
+                    if let Some((_, player)) = self.playing_film() {
+                        player.step(by);
+                    } else if let Some(reel) = self.viewed_reel() {
+                        reel.step(by, std::time::Instant::now());
+                    }
+                    self.redraw();
                 }
                 Some(matterless_view::viewer::Did::Seek(fraction)) => {
-                    if let Some((_, player)) = self.film.as_ref() {
+                    if let Some((_, player)) = self.playing_film() {
                         player.seek(fraction * player.duration());
+                    } else if let Some(reel) = self.viewed_reel() {
+                        reel.seek(fraction, std::time::Instant::now());
                     }
+                    self.redraw();
+                }
+                // A GIF has every frame in hand, so dragging is seeking.
+                Some(matterless_view::viewer::Did::Scrub(fraction))
+                    if self.playing_film().is_none() =>
+                {
+                    if let Some(reel) = self.viewed_reel() {
+                        reel.seek(fraction, std::time::Instant::now());
+                    }
+                    self.redraw();
                 }
                 Some(matterless_view::viewer::Did::Scrub(fraction)) => {
                     // A picture decoded ahead, when there is one near: drawn
@@ -9158,6 +9212,20 @@ impl App {
         if self.input.hovered() != was.as_deref() {
             self.watch_pointer();
         }
+    }
+
+    /// The video playing in the viewer, if what is showing is one.
+    fn playing_film(&self) -> Option<&(String, matterless_media::Player)> {
+        let viewed = self.viewer.current()?;
+        self.film
+            .as_ref()
+            .filter(|(file_id, _)| *file_id == viewed.file_id)
+    }
+
+    /// The moving picture showing in the viewer, to be played or stepped.
+    fn viewed_reel(&mut self) -> Option<&mut matterless_view::moving::Reel> {
+        let viewed = self.viewer.current()?.file_id.clone();
+        self.looked_moving.reel_mut(&viewed)
     }
 
     /// Points the tooltip at whatever the pointer is now on.

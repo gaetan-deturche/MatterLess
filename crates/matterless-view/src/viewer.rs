@@ -36,6 +36,13 @@ const MARGIN: f32 = 48.0;
 /// The bar along the bottom: the name on the left, the buttons on the right.
 const BAR: f32 = 44.0;
 const BUTTON: f32 = 30.0;
+/// Between play and the frame steps either side of it, which are one control
+/// and sit closer together than the bar's other buttons.
+const STEP_GAP: f32 = 4.0;
+/// The line a 16-pixel mark's ink is centred on, measured on the bar: on the
+/// 18 of a label's line every icon sat two pixels low, on its own line box of
+/// 22.4 one pixel high, on 20 one pixel low, and centred on this.
+const MARK_LINE: f32 = 21.0;
 const GAP: f32 = 8.0;
 const PADDING: f32 = 12.0;
 
@@ -160,6 +167,8 @@ pub enum Did {
     Reveal(std::path::PathBuf),
     /// Play the video, or pause it.
     Toggle,
+    /// One frame on, or back, and paused there.
+    Step(i32),
     /// Go to this far through the video, from nothing to one.
     Seek(f64),
     /// Open this link in the browser: a YouTube video, on YouTube.
@@ -430,9 +439,17 @@ impl Viewer {
     }
 
     /// The play button, at the start of the bar, for a video.
-    fn play_rect(&self, window: Rect) -> Option<Rect> {
+    /// Whether what is showing plays: a video, or a GIF that moves -- which
+    /// the window says by reporting where it is, as it does for a video.
+    fn plays(&self) -> bool {
+        self.current()
+            .is_some_and(|one| one.video || self.playback.is_some())
+    }
+
+    /// The button a frame back, first along the bar.
+    fn back_rect(&self, window: Rect) -> Option<Rect> {
         let bar = self.bar_rect(window);
-        self.current()?.video.then(|| {
+        self.plays().then(|| {
             Rect::new(
                 bar.x + PADDING,
                 bar.y + (bar.height - BUTTON) / 2.0,
@@ -442,10 +459,22 @@ impl Viewer {
         })
     }
 
+    /// Play, between a frame back and a frame on.
+    fn play_rect(&self, window: Rect) -> Option<Rect> {
+        let back = self.back_rect(window)?;
+        Some(Rect::new(back.right() + STEP_GAP, back.y, BUTTON, BUTTON))
+    }
+
+    /// The button a frame on, after play.
+    fn on_rect(&self, window: Rect) -> Option<Rect> {
+        let play = self.play_rect(window)?;
+        Some(Rect::new(play.right() + STEP_GAP, play.y, BUTTON, BUTTON))
+    }
+
     /// The track a video's position runs along, from the play button to the
     /// time, and tall enough to hit.
     fn track_rect(&self, window: Rect) -> Option<Rect> {
-        let play = self.play_rect(window)?;
+        let play = self.on_rect(window)?;
         let bar = self.bar_rect(window);
         let end = self
             .button_rects(window)
@@ -603,8 +632,15 @@ impl Viewer {
         for (name, rect) in self.button_rects(window) {
             placed.push(named.at(name, rect, 31));
         }
-        if let (Some(play), Some(track)) = (self.play_rect(window), self.track_rect(window)) {
+        if let (Some(back), Some(play), Some(on), Some(track)) = (
+            self.back_rect(window),
+            self.play_rect(window),
+            self.on_rect(window),
+            self.track_rect(window),
+        ) {
+            placed.push(named.at("frame-back", back, 31));
             placed.push(named.at("play", play, 31));
+            placed.push(named.at("frame-on", on, 31));
             placed.push(named.at("seek", track, 31));
         }
         // The picture itself catches its own press, so clicking what you are
@@ -626,9 +662,18 @@ impl Viewer {
         if input.struck(Key::Escape) {
             return Some(Did::Close);
         }
-        let video = self.current().is_some_and(|one| one.video);
+        // A GIF plays as a video does, so the same keys and the same bar.
+        let video = self.plays();
         if video && input.struck(Key::Char(' ')) {
             return Some(Did::Toggle);
+        }
+        // A frame at a time with the keys a video site uses for it: the
+        // arrows already go from one picture to the next.
+        if video && input.struck(Key::Char(',')) {
+            return Some(Did::Step(-1));
+        }
+        if video && input.struck(Key::Char('.')) {
+            return Some(Did::Step(1));
         }
         // Held on the track: wherever the pointer is along it, as it moves.
         let seeking = named().of("seek");
@@ -714,6 +759,8 @@ impl Viewer {
                 .and_then(|one| one.youtube.as_ref())
                 .map(|video| Did::Browse(video.url.clone())),
             Some("play") => Some(Did::Toggle),
+            Some("frame-back") => Some(Did::Step(-1)),
+            Some("frame-on") => Some(Did::Step(1)),
             // A video plays or pauses under a click, as every player does. A
             // picture: nothing, which keeps a click on what you are reading
             // from closing it.
@@ -851,7 +898,26 @@ impl Viewer {
         }
 
         // A video's bar: play, where it is along the track, and the time.
-        if let (Some(play), Some(track)) = (self.play_rect(window), self.track_rect(window)) {
+        if let (Some(back), Some(play), Some(on), Some(track)) = (
+            self.back_rect(window),
+            self.play_rect(window),
+            self.on_rect(window),
+            self.track_rect(window),
+        ) {
+            for (rect, mark) in [
+                (back, matterless_layout::marks::STEP_BACK),
+                (on, matterless_layout::marks::STEP_FORWARD),
+            ] {
+                scene.rounded(rect.x, rect.y, rect.width, rect.height, palette.raised, 6.0);
+                let glyphs = painter.run(
+                    fonts,
+                    mark,
+                    rect.x + (rect.width - 15.0) / 2.0,
+                    rect.y + (rect.height - MARK_LINE) / 2.0,
+                    Run::mark(16.0),
+                );
+                scene.glyphs(glyphs, palette.ink, palette.faint);
+            }
             let playback = self.playback.unwrap_or(Playback {
                 playing: false,
                 position: 0.0,
@@ -865,7 +931,7 @@ impl Viewer {
                     false => matterless_layout::marks::PLAY,
                 },
                 play.x + (play.width - 15.0) / 2.0,
-                play.y + (play.height - 18.0) / 2.0,
+                play.y + (play.height - MARK_LINE) / 2.0,
                 Run::mark(16.0),
             );
             scene.glyphs(glyphs, palette.ink, palette.faint);
@@ -907,7 +973,7 @@ impl Viewer {
 
         // What it is called, and which of them this is. A video's bar is its
         // controls instead.
-        if let Some(one) = self.current().filter(|one| !one.video) {
+        if let Some(one) = self.current().filter(|_| !self.plays()) {
             let said = if self.shown.len() > 1 {
                 format!("{} ({} of {})", one.name, self.at + 1, self.shown.len())
             } else {
@@ -991,7 +1057,7 @@ impl Viewer {
                 fonts,
                 said,
                 rect.x + (rect.width - wide) / 2.0,
-                rect.y + (rect.height - 18.0) / 2.0,
+                rect.y + (rect.height - if mark { MARK_LINE } else { 18.0 }) / 2.0,
                 if mark {
                     Run::mark(16.0)
                 } else {

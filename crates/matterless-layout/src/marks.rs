@@ -60,6 +60,10 @@ pub const REPLY: &str = "\u{e0a7}";
 pub const PLAY: &str = "\u{e13c}";
 /// A video playing.  `pause`
 pub const PAUSE: &str = "\u{e12e}";
+/// One frame back, beside play.  `step-back`
+pub const STEP_BACK: &str = "\u{e3e9}";
+/// One frame on.  `step-forward`
+pub const STEP_FORWARD: &str = "\u{e3ea}";
 /// Everything else that can be done to a message.  `ellipsis`
 pub const MORE: &str = "\u{e0b6}";
 /// Mark a conversation unread.  `mail`

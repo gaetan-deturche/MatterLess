@@ -51,6 +51,9 @@ pub struct Reel {
     shown: usize,
     /// When it was last drawn, for deciding what to drop.
     seen: Instant,
+    /// How far into the loop it was stopped, while it is: the viewer plays a
+    /// GIF the way it plays a video, and a paused one holds its frame.
+    paused: Option<Duration>,
 }
 
 impl Reel {
@@ -76,6 +79,67 @@ impl Reel {
             // the first one.
             shown: usize::MAX,
             seen: now,
+            paused: None,
+        }
+    }
+
+    /// How long the whole loop takes.
+    pub fn length(&self) -> Duration {
+        self.round()
+    }
+
+    /// How far into the loop it is.
+    pub fn position(&self, now: Instant) -> Duration {
+        let round = self.round();
+        if round.is_zero() {
+            return Duration::ZERO;
+        }
+        if let Some(held) = self.paused {
+            return held;
+        }
+        let into = now.saturating_duration_since(self.began).as_nanos() % round.as_nanos();
+        Duration::from_nanos(into.min(u128::from(u64::MAX)) as u64)
+    }
+
+    pub fn playing(&self) -> bool {
+        self.paused.is_none()
+    }
+
+    /// Stops it where it is, or starts it again from there.
+    pub fn toggle(&mut self, now: Instant) {
+        match self.paused.take() {
+            // Carried on from the frame it was held on.
+            Some(held) => self.began = now.checked_sub(held).unwrap_or(now),
+            None => self.paused = Some(self.position(now)),
+        }
+    }
+
+    /// Goes to this far through the loop, from nothing to one, playing or
+    /// paused as it was.
+    pub fn seek(&mut self, fraction: f64, now: Instant) {
+        let to = self.round().mul_f64(fraction.clamp(0.0, 1.0));
+        // Never the very end, which is the start of the next time round.
+        let to = to.min(self.round().saturating_sub(Duration::from_nanos(1)));
+        self.go_to(to, now);
+    }
+
+    /// One frame on, or back, and paused there: at the start of that frame,
+    /// going round the loop at either end.
+    pub fn step(&mut self, by: i32, now: Instant) {
+        if self.frames.is_empty() {
+            return;
+        }
+        let count = self.frames.len() as i64;
+        let from = self.at(now) as i64;
+        let to = (from + i64::from(by)).rem_euclid(count) as usize;
+        let start = self.delays[..to].iter().sum();
+        self.paused = Some(start);
+    }
+
+    fn go_to(&mut self, to: Duration, now: Instant) {
+        match self.paused {
+            Some(_) => self.paused = Some(to),
+            None => self.began = now.checked_sub(to).unwrap_or(now),
         }
     }
 
@@ -92,7 +156,7 @@ impl Reel {
         }
         // Modulo the loop, so a picture that has been on screen for an hour
         // is on the same frame as one that arrived a moment ago.
-        let mut into = now.saturating_duration_since(self.began).as_nanos() % round.as_nanos();
+        let mut into = self.position(now).as_nanos();
         for (at, delay) in self.delays.iter().enumerate() {
             let delay = delay.as_nanos();
             if into < delay {
@@ -106,7 +170,8 @@ impl Reel {
     /// When the frame after the one showing is due.
     fn next(&self, now: Instant) -> Option<Instant> {
         let round = self.round();
-        if round.is_zero() || self.frames.len() < 2 {
+        // A paused one has no next frame until somebody asks for one.
+        if round.is_zero() || self.frames.len() < 2 || self.paused.is_some() {
             return None;
         }
         let round = round.as_nanos();
@@ -156,6 +221,15 @@ impl Moving {
 
     pub fn holds(&self, key: &str) -> bool {
         self.reels.contains_key(key)
+    }
+
+    /// One of them, to be played, paused or moved through.
+    pub fn reel(&self, key: &str) -> Option<&Reel> {
+        self.reels.get(key)
+    }
+
+    pub fn reel_mut(&mut self, key: &str) -> Option<&mut Reel> {
+        self.reels.get_mut(key)
     }
 
     pub fn len(&self) -> usize {
@@ -223,6 +297,63 @@ impl Moving {
             .filter(|(key, _)| drawn(key))
             .filter_map(|(_, reel)| reel.next(now))
             .min()
+    }
+}
+
+#[cfg(test)]
+mod controls {
+    use super::*;
+
+    fn three(now: Instant) -> Reel {
+        Reel::new(
+            4,
+            4,
+            [100u64, 100, 100]
+                .into_iter()
+                .map(|ms| (vec![0u8; 64], Duration::from_millis(ms)))
+                .collect(),
+            now,
+        )
+    }
+
+    /// Paused, it holds its frame however long it is left.
+    #[test]
+    fn a_paused_reel_holds_its_frame() {
+        let start = Instant::now();
+        let mut reel = three(start);
+        reel.toggle(start + Duration::from_millis(150));
+        assert!(!reel.playing());
+        let held = reel.at(start + Duration::from_millis(150));
+        assert_eq!(reel.at(start + Duration::from_secs(10)), held);
+        assert_eq!(reel.next(start + Duration::from_secs(10)), None);
+        // And carries on from that frame.
+        reel.toggle(start + Duration::from_secs(10));
+        assert_eq!(reel.at(start + Duration::from_secs(10)), held);
+    }
+
+    /// A step goes one frame, pauses there, and wraps at either end.
+    #[test]
+    fn a_step_moves_one_frame_and_wraps() {
+        let start = Instant::now();
+        let mut reel = three(start);
+        reel.step(1, start);
+        assert!(!reel.playing());
+        assert_eq!(reel.at(start), 1);
+        reel.step(-1, start);
+        reel.step(-1, start);
+        assert_eq!(reel.at(start), 2, "back from the first is the last");
+    }
+
+    /// Seeking goes through the whole loop, from nothing to one.
+    #[test]
+    fn seeking_lands_where_it_was_sent() {
+        let start = Instant::now();
+        let mut reel = three(start);
+        reel.toggle(start);
+        reel.seek(0.5, start);
+        assert_eq!(reel.at(start), 1);
+        reel.seek(1.0, start);
+        assert_eq!(reel.at(start), 2, "the end is the last frame");
     }
 }
 
