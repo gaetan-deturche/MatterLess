@@ -5359,6 +5359,8 @@ impl App {
         wanted.extend(self.sidebar.wants());
         wanted.extend(self.switcher.wants());
         wanted.extend(self.members.wants());
+        // Who answered each followed thread, along the foot of its card.
+        wanted.extend(self.followed.wants());
         // The tray shows a picture rather than naming it, so it needs the same
         // thumbnail the conversation would.
         wanted.extend(self.composer.wants());
@@ -7939,6 +7941,7 @@ impl App {
                     })
                     .unwrap_or_else(|| "a conversation".to_string());
                 matterless_view::listing::Found {
+                    card: None,
                     post_id: String::new(),
                     channel_id,
                     channel,

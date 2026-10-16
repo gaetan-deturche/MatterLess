@@ -2011,6 +2011,26 @@ fn clock(at: i64, offset_minutes: i32) -> String {
     format!("{:02}:{:02}", day / 3600, (day % 3600) / 60)
 }
 
+/// When something happened, as a list of conversations says it: the time
+/// today, "Yesterday", the weekday within the week, and the date before that.
+pub fn when(at: i64, now: i64, offset_minutes: i32) -> String {
+    let day = |ms: i64| (ms / 1000 + i64::from(offset_minutes) * 60).div_euclid(86_400);
+    let (then, today) = (day(at), day(now));
+    match today - then {
+        ..=0 => clock(at, offset_minutes),
+        1 => "Yesterday".to_string(),
+        2..=6 => WEEKDAYS[(then + 4).rem_euclid(7) as usize].to_string(),
+        _ => {
+            let (year, month, date) = civil_from_days(then);
+            let month = &MONTHS[(month - 1) as usize][..3];
+            match civil_from_days(today).0 == year {
+                true => format!("{date} {month}"),
+                false => format!("{date} {month} {year}"),
+            }
+        }
+    }
+}
+
 /// The side of the face on a quoted message's card.
 pub const PREVIEW_FACE: f32 = 20.0;
 

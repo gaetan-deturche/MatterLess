@@ -37,6 +37,31 @@ pub enum Did {
 /// The cross at the end of a row that can be thrown away.
 const CROSS: f32 = 28.0;
 
+/// A followed thread's row: who and where, two lines of the root, and who
+/// answered.
+const CARD: f32 = 112.0;
+/// The faces along its foot.
+const CARD_FACE: f32 = 20.0;
+/// How far one face sits over the one before it.
+const CARD_FACE_STEP: f32 = 15.0;
+/// The most faces along it; past this the count says the rest.
+const CARD_FACES: usize = 4;
+/// Wider than this a line of a card is harder to read, not easier: the
+/// Threads list fills a whole column, which on a wide window is a thousand
+/// pixels and more.
+const CARD_WIDTH: f32 = 860.0;
+
+/// What a followed thread's row shows beyond the plain two lines.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Card {
+    /// The newest reply, in milliseconds.
+    pub when: i64,
+    pub replies: i64,
+    /// The root's author and then whoever answered, each with when they last
+    /// changed their picture.
+    pub faces: Vec<(String, i64)>,
+}
+
 /// One message in a list, resolved to what a row needs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Found {
@@ -57,6 +82,8 @@ pub struct Found {
     /// For a thread: its replies not yet read, and the mentions among them.
     /// `None` for anything without a read state -- a search result, a draft.
     pub read: Option<(i64, i64)>,
+    /// For a followed thread, which is drawn as a card.
+    pub card: Option<Card>,
 }
 
 /// Resolves posts into rows, naming their authors and conversations.
@@ -257,6 +284,7 @@ pub fn found_for(
             root_id: post.root_id,
             note: String::new(),
             read: None,
+            card: None,
             post_id: post.id,
             channel_id: post.channel_id,
         })
@@ -303,6 +331,26 @@ pub fn followed(store: &Store, me: &str, limit: u32) -> Vec<Found> {
     // of it: it is a list of who is in the conversation, and reading your own
     // name there says nothing.
     people.push(me.to_string());
+    // Who answered each, per conversation, as a thread's footer asks.
+    let mut answered: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
+    let mut by_channel: std::collections::HashMap<&str, Vec<String>> =
+        std::collections::HashMap::new();
+    for thread in &threads {
+        by_channel
+            .entry(thread.channel_id.as_str())
+            .or_default()
+            .push(thread.root_id.clone());
+    }
+    for (channel_id, roots) in by_channel {
+        for (root_id, (_, _, who)) in store
+            .thread_summaries_for(channel_id, &roots)
+            .unwrap_or_default()
+        {
+            answered.insert(root_id, who);
+        }
+    }
+    people.extend(answered.values().flatten().cloned());
     people.sort();
     people.dedup();
     let known = store.users_by_ids(&people).unwrap_or_default();
@@ -310,10 +358,38 @@ pub fn followed(store: &Store, me: &str, limit: u32) -> Vec<Found> {
         .iter()
         .map(|(id, user)| (id.clone(), user.username.clone()))
         .collect();
+    let face = |user_id: &str| {
+        (
+            user_id.to_string(),
+            known
+                .get(user_id)
+                .map(|user| user.last_picture_update)
+                .unwrap_or(0),
+        )
+    };
 
     threads
         .into_iter()
         .map(|thread| Found {
+            card: Some(Card {
+                when: thread.last_reply_at,
+                replies: thread.reply_count,
+                faces: std::iter::once(thread.author_id.as_str())
+                    .chain(
+                        answered
+                            .get(&thread.root_id)
+                            .into_iter()
+                            .flatten()
+                            .map(String::as_str),
+                    )
+                    .filter(|id| !id.is_empty())
+                    .fold(Vec::new(), |mut faces: Vec<(String, i64)>, id| {
+                        if !faces.iter().any(|(had, _)| had == id) {
+                            faces.push(face(id));
+                        }
+                        faces
+                    }),
+            }),
             channel: match channels.get(&thread.channel_id) {
                 Some(channel) => matterless_sidebar::label(channel, me, &names),
                 None => thread.channel_id.clone(),
@@ -322,7 +398,11 @@ pub fn followed(store: &Store, me: &str, limit: u32) -> Vec<Found> {
                 .get(&thread.author_id)
                 .cloned()
                 .unwrap_or(thread.author_id),
-            preview: matterless_sync::notify::preview_of(&thread.message),
+            preview: match card_preview(&thread.message) {
+                // A root that is only an attachment still says what it is.
+                said if said.is_empty() => attached(store, &thread.root_id),
+                said => said,
+            },
             note: note_for(thread.reply_count, thread.unread_replies),
             read: Some((thread.unread_replies, thread.unread_mentions)),
             // The root is the thread, so choosing the row opens it.
@@ -331,6 +411,35 @@ pub fn followed(store: &Store, me: &str, limit: u32) -> Vec<Found> {
             channel_id: thread.channel_id,
         })
         .collect()
+}
+
+/// A root as a card reads it: its words on one line, enough of them for the
+/// two lines a card gives it. The notification's preview stops at 140
+/// characters, which is one line of a card and left the second empty.
+fn card_preview(message: &str) -> String {
+    let read =
+        matterless_render::markdown::plain_text(&matterless_render::markdown::parse(message));
+    read.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(400)
+        .collect()
+}
+
+/// What a message with no words carries, for the line its words would fill.
+fn attached(store: &Store, post_id: &str) -> String {
+    let Some(post) = store.post(post_id).ok().flatten() else {
+        return String::new();
+    };
+    match (post.metadata.files.as_slice(), post.file_ids.len()) {
+        ([one], _) => format!("\u{1f4ce} {}", one.name),
+        ([first, rest @ ..], _) => format!("\u{1f4ce} {} and {} more", first.name, rest.len()),
+        // Named nowhere the store kept, but there all the same.
+        ([], 0) => String::new(),
+        ([], 1) => "\u{1f4ce} An attachment".to_string(),
+        ([], many) => format!("\u{1f4ce} {many} attachments"),
+    }
 }
 
 /// What a thread row says about itself, in as few words as it can.
@@ -424,8 +533,36 @@ impl Listing {
     }
 
     /// How far the list can travel: what it would occupy, less the room it has.
+    /// How tall each row is: a card when the list is of followed threads.
+    fn row_height(&self) -> f32 {
+        match self.found.first().is_some_and(|one| one.card.is_some()) {
+            true => CARD,
+            false => ROW,
+        }
+    }
+
+    /// The pictures the rows show, to be fetched.
+    pub fn wants(&self) -> Vec<(String, u32, u32)> {
+        if !self.open() {
+            return Vec::new();
+        }
+        let mut wanted: Vec<(String, u32, u32)> = self
+            .found
+            .iter()
+            .filter_map(|one| one.card.as_ref())
+            .flat_map(|card| card.faces.iter().take(CARD_FACES))
+            .map(|(user_id, at)| {
+                let side = crate::stream::AVATAR as u32;
+                (crate::stream::avatar_key(user_id, *at), side, side)
+            })
+            .collect();
+        wanted.sort();
+        wanted.dedup();
+        wanted
+    }
+
     fn reach(&self, body: Rect) -> f32 {
-        let wanted = self.found.len() as f32 * ROW + PADDING * 2.0;
+        let wanted = self.found.len() as f32 * self.row_height() + PADDING * 2.0;
         (wanted - body.height).max(0.0)
     }
 
@@ -444,9 +581,9 @@ impl Listing {
     fn row_rect(&self, body: Rect, at: usize) -> Rect {
         Rect::new(
             body.x,
-            body.y + PADDING + at as f32 * ROW - self.scroll,
+            body.y + PADDING + at as f32 * self.row_height() - self.scroll,
             body.width,
-            ROW,
+            self.row_height(),
         )
     }
 
@@ -651,6 +788,24 @@ impl Listing {
             if row.bottom() <= body.y || row.y >= body.bottom() {
                 continue;
             }
+            if let Some(card) = &found.card {
+                let hovered = input.hovered() == Some(format!("{}/{at}", self.name).as_str());
+                let mut canvas = Canvas {
+                    scene,
+                    painter,
+                    fonts,
+                    palette,
+                };
+                draw_card(
+                    &mut canvas,
+                    found,
+                    card,
+                    row,
+                    room.min(CARD_WIDTH),
+                    at == self.chosen || hovered,
+                );
+                continue;
+            }
             if at == self.chosen {
                 scene.fill(row.x, row.y, row.width, row.height, palette.ground);
             }
@@ -771,6 +926,204 @@ impl Listing {
     }
 }
 
+/// One followed thread, drawn as the official client draws one: the author
+/// and where above two lines of what they said, who answered and how much is
+/// new below, the time of the newest reply at the right.
+fn draw_card(into: &mut Canvas<'_>, found: &Found, card: &Card, row: Rect, room: f32, lit: bool) {
+    let Canvas {
+        scene,
+        painter,
+        fonts,
+        palette,
+    } = into;
+    let (fresh, mentions) = found.read.unwrap_or((0, 0));
+    let new = fresh > 0;
+    let inner = Rect::new(row.x + PADDING, row.y, room, row.height);
+    if lit {
+        scene.fill(
+            row.x,
+            row.y + 1.0,
+            row.width,
+            row.height - 2.0,
+            palette.hover,
+        );
+    }
+    // A hairline between threads, short of the edges: the rows are tall,
+    // and without it two previews ran together into one paragraph.
+    let [rule_red, rule_green, rule_blue, rule_alpha] = palette.rule_soft;
+    scene.fill(
+        inner.x,
+        row.bottom() - 1.0,
+        room,
+        1.0,
+        [rule_red, rule_green, rule_blue, rule_alpha],
+    );
+    let left = inner.x + UNREAD_DOT + 8.0;
+    let wide = (inner.right() - left).max(10.0);
+    let top = row.y + 12.0;
+
+    // The time at the right, measured first so the names stop short of it.
+    let when = matterless_layout::row::when(
+        card.when,
+        crate::clock::now() * 1_000,
+        crate::clock::utc_offset_minutes(),
+    );
+    let when_width = matterless_layout::extent_of(fonts, &when, f32::MAX, label(false)).width;
+    let glyphs = painter.run(
+        fonts,
+        &when,
+        inner.right() - when_width,
+        top,
+        Run::label(f32::MAX),
+    );
+    scene.glyphs(glyphs, palette.faint, palette.faint);
+
+    // Who, in bold, and where, quieter.
+    let names = (wide - when_width - 12.0).max(10.0);
+    let author = matterless_layout::elided(fonts, &found.author, names * 0.6, label(true));
+    let author_width = matterless_layout::extent_of(fonts, &author, f32::MAX, label(true)).width;
+    let glyphs = painter.run(fonts, &author, left, top, Run::label(f32::MAX).bold());
+    scene.glyphs(glyphs, palette.ink, palette.faint);
+    let place = matterless_layout::elided(
+        fonts,
+        &format!("in {}", found.channel),
+        (names - author_width - 8.0).max(10.0),
+        label(false),
+    );
+    let glyphs = painter.run(
+        fonts,
+        &place,
+        left + author_width + 8.0,
+        top,
+        Run::label(f32::MAX),
+    );
+    scene.glyphs(glyphs, palette.faint, palette.faint);
+
+    // What was said, over two lines.
+    for (line, words) in two_lines(fonts, &found.preview, wide).iter().enumerate() {
+        let glyphs = painter.run(
+            fonts,
+            words,
+            left,
+            top + 22.0 + line as f32 * 18.0,
+            Run::label(f32::MAX),
+        );
+        scene.glyphs(
+            glyphs,
+            if new { palette.ink } else { palette.soft },
+            palette.faint,
+        );
+    }
+
+    // Who answered, and how much of it is new.
+    let foot = top + 69.0;
+    let mut x = left;
+    for (user_id, at) in card.faces.iter().take(CARD_FACES) {
+        // A ring of the row's own colour, so overlapping faces stay apart.
+        let ring = if lit { palette.hover } else { palette.ground };
+        scene.rounded(
+            x - 1.5,
+            foot - 1.5,
+            CARD_FACE + 3.0,
+            CARD_FACE + 3.0,
+            ring,
+            (CARD_FACE + 3.0) / 2.0,
+        );
+        scene.extend([matterless_paint::Piece::Image {
+            x,
+            y: foot,
+            width: CARD_FACE,
+            height: CARD_FACE,
+            key: crate::stream::avatar_key(user_id, *at),
+            radius: CARD_FACE / 2.0,
+        }]);
+        x += CARD_FACE_STEP;
+    }
+    x += CARD_FACE - CARD_FACE_STEP + 10.0;
+    let replies = match card.replies {
+        1 => "1 reply".to_string(),
+        count => format!("{count} replies"),
+    };
+    let glyphs = painter.run(fonts, &replies, x, foot + 1.0, Run::label(f32::MAX));
+    scene.glyphs(glyphs, palette.soft, palette.faint);
+    x += matterless_layout::extent_of(fonts, &replies, f32::MAX, label(false)).width + 10.0;
+    if new {
+        let said = format!("{fresh} new");
+        let glyphs = painter.run(fonts, &said, x, foot + 1.0, Run::label(f32::MAX).bold());
+        scene.glyphs(glyphs, palette.signal, palette.faint);
+        x += matterless_layout::extent_of(fonts, &said, f32::MAX, label(true)).width + 10.0;
+    }
+    if mentions > 0 {
+        let said = format!("@{mentions}");
+        let width = matterless_layout::extent_of(fonts, &said, f32::MAX, label(true)).width + 12.0;
+        let [red, green, blue] = palette.signal;
+        scene.rounded(x, foot + 1.0, width, 18.0, [red, green, blue, 255], 9.0);
+        let [ground_red, ground_green, ground_blue, _] = palette.ground;
+        let glyphs = painter.run(
+            fonts,
+            &said,
+            x + 6.0,
+            foot + 1.0,
+            Run::label(f32::MAX).bold(),
+        );
+        scene.glyphs(
+            glyphs,
+            [ground_red, ground_green, ground_blue],
+            palette.faint,
+        );
+    }
+
+    // Something new to read, in the gutter, as the sidebar marks a channel.
+    if new {
+        let [red, green, blue] = palette.signal;
+        scene.rounded(
+            inner.x,
+            top + (18.0 - UNREAD_DOT) / 2.0,
+            UNREAD_DOT,
+            UNREAD_DOT,
+            [red, green, blue, 255],
+            UNREAD_DOT / 2.0,
+        );
+    }
+}
+
+/// `text` over at most two lines of `width`, broken between words, the
+/// second cut short with an ellipsis when there is more.
+fn two_lines(fonts: &mut matterless_layout::Fonts, text: &str, width: f32) -> Vec<String> {
+    let fits = |fonts: &mut matterless_layout::Fonts, line: &str| {
+        matterless_layout::extent_of(fonts, line, f32::MAX, label(false)).width <= width
+    };
+    let mut first = String::new();
+    let mut rest = text.split_whitespace().peekable();
+    while let Some(word) = rest.peek() {
+        let tried = match first.is_empty() {
+            true => (*word).to_string(),
+            false => format!("{first} {word}"),
+        };
+        if !fits(fonts, &tried) && !first.is_empty() {
+            break;
+        }
+        first = tried;
+        rest.next();
+    }
+    let second: Vec<&str> = rest.collect();
+    let mut lines = vec![matterless_layout::elided(
+        fonts,
+        &first,
+        width,
+        label(false),
+    )];
+    if !second.is_empty() {
+        lines.push(matterless_layout::elided(
+            fonts,
+            &second.join(" "),
+            width,
+            label(false),
+        ));
+    }
+    lines
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -786,6 +1139,7 @@ mod tests {
                 root_id: String::new(),
                 note: String::new(),
                 read: None,
+                card: None,
             })
             .collect()
     }
