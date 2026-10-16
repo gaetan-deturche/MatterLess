@@ -1024,7 +1024,12 @@ impl Sidebar {
                     );
                     scene.glyphs(glyph, ink, palette.faint);
                     let left = row.rect.x + GUTTER;
-                    let said = format!("Drafts  {count}");
+                    // The word alone with nothing kept: a nought would be one
+                    // more number in a list where numbers mean news.
+                    let said = match count {
+                        0 => "Drafts".to_string(),
+                        _ => format!("Drafts  {count}"),
+                    };
                     let named = matterless_layout::elided(
                         fonts,
                         &said,

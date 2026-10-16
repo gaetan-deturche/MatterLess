@@ -1411,15 +1411,15 @@ impl App {
                 .and_then(|store| store.thread_unread_totals().ok())
                 .unwrap_or((0, 0));
             entries.push(Entry::Threads { unread, mentions });
-            // Under it, and only when there are any. A row saying nought
-            // takes a line of the list to say nothing.
+            // Under it, and always, with nothing kept as well: a row that came
+            // and went moved every row below it by a line, and the first draft
+            // is kept at the first pause in typing -- so the list jumped while
+            // somebody wrote, and the eye read it as something arriving.
             let drafts = store
                 .and_then(|store| store.drafts(me).ok())
                 .map(|kept| kept.len())
                 .unwrap_or(0);
-            if drafts > 0 {
-                entries.push(Entry::Drafts { count: drafts });
-            }
+            entries.push(Entry::Drafts { count: drafts });
         }
         let row = |channel: matterless_sidebar::ChannelSummary| Entry::Channel {
             counterpart_avatar_at: channel
