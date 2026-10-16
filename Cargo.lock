@@ -1835,7 +1835,7 @@ dependencies = [
 
 [[package]]
 name = "matterless-view"
-version = "0.4.60"
+version = "0.4.61"
 dependencies = [
  "base64 0.23.1",
  "cosmic-text",
