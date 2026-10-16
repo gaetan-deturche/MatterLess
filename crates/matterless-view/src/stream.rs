@@ -2931,43 +2931,6 @@ impl Stream {
                     .into_iter()
                     .map(|piece| shift(piece, inner.x))
                     .partition(|piece| matches!(piece, matterless_paint::Piece::Letters { .. }));
-                // Where the words landed, kept for the next press on them; and
-                // the chosen ones lit before they are drawn over.
-                let post_id = match self.rows.get(index) {
-                    Some(Row::Post { post } | Row::Continuation { post }) => Some(&post.post_id),
-                    _ => None,
-                };
-                for piece in letters {
-                    let (matterless_paint::Piece::Letters { block, letters }, Some(post_id)) =
-                        (piece, post_id)
-                    else {
-                        continue;
-                    };
-                    if let Some((from, to)) = chosen
-                        && (from.0, from.1) <= (index, block)
-                        && (index, block) <= (to.0, to.1)
-                    {
-                        let lo = if (index, block) == (from.0, from.1) {
-                            from.2
-                        } else {
-                            0
-                        };
-                        let hi = if (index, block) == (to.0, to.1) {
-                            to.2
-                        } else {
-                            usize::MAX
-                        };
-                        let light = [palette.signal[0], palette.signal[1], palette.signal[2], 90];
-                        for lit in crate::selecting::lit(&letters, lo, hi) {
-                            scene.fill(lit.x, lit.y, lit.width, lit.height, light);
-                        }
-                    }
-                    seen.push(crate::selecting::Seen {
-                        post: post_id.clone(),
-                        block,
-                        letters,
-                    });
-                }
                 for piece in &pieces {
                     if let matterless_paint::Piece::Press {
                         x,
@@ -3007,6 +2970,50 @@ impl Stream {
                         }
                         presses.push((press.clone(), box_of));
                     }
+                }
+                // The grounds of code first, then the chosen words, then the
+                // rest: a selection lit before the code's opaque ground was
+                // painted over by it, and chosen code was all but invisible.
+                let (grounds, pieces): (Vec<_>, Vec<_>) = pieces.into_iter().partition(|piece| {
+                    matches!(piece, matterless_paint::Piece::Fill { colour, .. } if *colour == palette.raised)
+                });
+                scene.extend(grounds);
+                // Where the words landed, kept for the next press on them; and
+                // the chosen ones lit before they are drawn over.
+                let post_id = match self.rows.get(index) {
+                    Some(Row::Post { post } | Row::Continuation { post }) => Some(&post.post_id),
+                    _ => None,
+                };
+                for piece in letters {
+                    let (matterless_paint::Piece::Letters { block, letters }, Some(post_id)) =
+                        (piece, post_id)
+                    else {
+                        continue;
+                    };
+                    if let Some((from, to)) = chosen
+                        && (from.0, from.1) <= (index, block)
+                        && (index, block) <= (to.0, to.1)
+                    {
+                        let lo = if (index, block) == (from.0, from.1) {
+                            from.2
+                        } else {
+                            0
+                        };
+                        let hi = if (index, block) == (to.0, to.1) {
+                            to.2
+                        } else {
+                            usize::MAX
+                        };
+                        let light = [palette.signal[0], palette.signal[1], palette.signal[2], 90];
+                        for lit in crate::selecting::lit(&letters, lo, hi) {
+                            scene.fill(lit.x, lit.y, lit.width, lit.height, light);
+                        }
+                    }
+                    seen.push(crate::selecting::Seen {
+                        post: post_id.clone(),
+                        block,
+                        letters,
+                    });
                 }
                 scene.extend(pieces);
                 // An underline, because this palette has no second ink to
