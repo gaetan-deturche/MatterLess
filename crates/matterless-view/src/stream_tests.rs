@@ -2308,3 +2308,42 @@ fn the_unread_line_is_not_covered_by_the_light_under_the_message() {
         "the light ({light}) is drawn over the line ({mark})"
     );
 }
+
+/// A page of older history arriving keeps the reader on the message they
+/// were reading, moved down by exactly what arrived above it.
+///
+/// The window asked where the reader was only after the new rows were in,
+/// against the old layout: the place it found was a message a page older,
+/// and holding that and then adding the page's height threw the reader
+/// somewhere else on every page -- the jitter of scrolling up a channel.
+#[test]
+fn older_history_arriving_keeps_the_reader_in_place() {
+    let mut fonts = Fonts::new();
+    let posts: Vec<Row> = (0..60)
+        .map(|at| Row::Post {
+            post: post(&format!("p{at}"), ""),
+        })
+        .collect();
+    let mut stream = Stream::new("stream");
+    stream.plan(posts[30..].to_vec(), false);
+    stream.lay_out(&mut fonts, panel().width);
+    stream.scroll = 200.0;
+    let was = stream.holding(panel()).expect("nobody reading");
+    let before = stream.total();
+
+    stream.plan(posts.clone(), false);
+    // Asked too late, the place names somebody else.
+    let late = stream.holding(panel()).expect("nothing held");
+    assert_ne!(late.0, was.0, "the late place happened to be right");
+    stream.lay_out(&mut fonts, panel().width);
+    stream.anchored(Anchor::Row(None), panel());
+    let grew = stream.total() - before;
+    stream.scroll = (stream.scroll + grew).clamp(0.0, stream.reach(panel()));
+
+    let now = stream.holding(panel()).expect("nobody reading");
+    assert_eq!(now.0, was.0, "the reader was moved to another message");
+    assert!(
+        (now.1 - was.1).abs() < 0.5,
+        "moved within it: {was:?} then {now:?}"
+    );
+}

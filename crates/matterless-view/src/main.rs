@@ -5450,6 +5450,9 @@ impl App {
             return;
         };
         let before = self.stream.total();
+        // The thread's place, before anything changes; the channel's is held
+        // by the height that arrives, below.
+        let (_, thread_held) = self.anchors();
         let outstanding = self.outstanding.for_channel(&channel);
         match matterless_view::feed::rows_of(
             &store,
@@ -5466,7 +5469,15 @@ impl App {
                 // reading the top of the channel, and what is under their eye
                 // is the oldest end rather than the newest.
                 self.stream.plan(rows, false);
-                self.relayout();
+                // Not anchored on a row as well. Asked after the plan, the
+                // anchor paired the new rows with the old layout and named a
+                // message a page older than the one being read; holding that
+                // and then adding the page's height threw the reader somewhere
+                // else on every page, which is the jitter of scrolling up.
+                self.shape(
+                    Shaping::Everything,
+                    (matterless_view::stream::Anchor::Row(None), thread_held),
+                );
                 let grew = self.stream.total() - before;
                 let within = self.stream_rect();
                 self.stream.scroll =
