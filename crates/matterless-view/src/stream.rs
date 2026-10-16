@@ -2288,11 +2288,14 @@ impl Stream {
                         // Not a video: it is not a picture, and asking for one
                         // downloaded the whole film to fail to decode it.
                         if file.image || file.video {
-                            // The box the layout reserved, worked out the
-                            // same way, so the picture is scaled once on the
-                            // way in rather than every frame on the way out --
-                            // and so the decoded size is the reserved one.
-                            let (width, height) = file.drawn_in(self.theme.text_width());
+                            // The largest box the layout ever gives it, not
+                            // the one this column has room for: a picture is
+                            // decoded once, at the size it is first asked
+                            // for, and one first seen in the narrow thread
+                            // pane was then stretched across the channel --
+                            // which blurred a GIF beyond reading. Drawn
+                            // smaller, the sampler takes it down cleanly.
+                            let (width, height) = file.drawn_in(f32::MAX);
                             wanted.push((
                                 match file.video {
                                     true => poster_key(&file.id),

@@ -2183,6 +2183,22 @@ pub fn renames_emoji(deltas: &[Delta]) -> bool {
 }
 
 #[cfg(test)]
+mod shrinking {
+    use super::{MAX_SIDE, shrunk_to};
+
+    /// A box over the ceiling keeps its shape, and a picture is never made
+    /// larger than it is.
+    #[test]
+    fn a_picture_keeps_its_shape_under_the_ceiling() {
+        let (width, height) = shrunk_to(1280, 720, 1920, 1080);
+        assert_eq!(width, MAX_SIDE);
+        assert_eq!(height, 360, "squashed to {width}x{height}");
+        assert_eq!(shrunk_to(400, 300, 200, 150), (200, 150));
+        assert_eq!(shrunk_to(400, 300, 1600, 1200), (400, 300));
+    }
+}
+
+#[cfg(test)]
 mod tests {
 
     /// Windows answers how long the session has been idle, which is what keeps
@@ -2690,10 +2706,7 @@ fn frames_of(bytes: &[u8], width: u32, height: u32) -> Option<Vec<(Vec<u8>, std:
             (u64::from(numerator) * 1000) / u64::from(denominator.max(1)).max(1),
         );
         let mut rgba = frame.into_buffer();
-        let wanted = (
-            width.clamp(1, MAX_SIDE).min(rgba.width()),
-            height.clamp(1, MAX_SIDE).min(rgba.height()),
-        );
+        let wanted = shrunk_to(width, height, rgba.width(), rgba.height());
         if (rgba.width(), rgba.height()) != wanted {
             // The method, not `imageops::thumbnail`, for the reason `decode`
             // gives -- and here it is paid once a frame.
@@ -3145,10 +3158,7 @@ fn decode(bytes: &[u8], width: u32, height: u32) -> Option<(u32, u32, Vec<u8>)> 
     let mut decoded = image::load_from_memory(bytes).ok()?;
     // Never enlarged: a picture smaller than its box stays its own size and the
     // sampler stretches it, which costs nothing and keeps the atlas small.
-    let wanted = (
-        width.clamp(1, MAX_SIDE).min(decoded.width()),
-        height.clamp(1, MAX_SIDE).min(decoded.height()),
-    );
+    let wanted = shrunk_to(width, height, decoded.width(), decoded.height());
     if (decoded.width(), decoded.height()) != wanted {
         // A box filter on the way in, which is a better downscale than the
         // bilinear one the sampler would do on the way out -- and it is done
@@ -3286,6 +3296,22 @@ fn kind_of(bytes: &[u8]) -> &'static str {
         [b'{', ..] => "json, not a picture",
         _ => "something unrecognised",
     }
+}
+
+/// The size to decode a picture to: the box asked for, held under `MAX_SIDE`
+/// by one factor for both sides -- each clamped on its own, a wide box came
+/// back narrower and was stretched out of shape -- and never past the
+/// picture's own size.
+fn shrunk_to(width: u32, height: u32, own_width: u32, own_height: u32) -> (u32, u32) {
+    let (width, height) = (width.max(1), height.max(1));
+    let fit = (MAX_SIDE as f32 / width as f32)
+        .min(MAX_SIDE as f32 / height as f32)
+        .min(1.0);
+    let scaled = |side: u32| ((side as f32 * fit).round() as u32).max(1);
+    (
+        scaled(width).min(own_width.max(1)),
+        scaled(height).min(own_height.max(1)),
+    )
 }
 
 /// The largest picture worth putting in a shared atlas.
