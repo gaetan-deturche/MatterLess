@@ -10586,6 +10586,10 @@ fn main() {
         return;
     }
 
+    if matterless_view::single::claim() == matterless_view::single::Launch::Handed {
+        return;
+    }
+
     // A loop that carries its own message type, so the socket thread can hand
     // work to the thread that owns the window rather than touching it.
     let events = EventLoop::<Update>::with_user_event()

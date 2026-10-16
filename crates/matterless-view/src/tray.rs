@@ -165,10 +165,12 @@ mod platform {
             let _ = RegisterClassW(&raw const class);
             // Message-only: it has no place on screen and never paints, it
             // exists to be somewhere the shell can deliver a click.
+            // Titled for this executable: a second launch finds it by that.
+            let title = HSTRING::from(crate::single::tray_title());
             let window = CreateWindowExW(
                 WINDOW_EX_STYLE(0),
                 w!("MatterLessTray"),
-                w!("MatterLess"),
+                &title,
                 WINDOW_STYLE(0),
                 0,
                 0,
@@ -268,6 +270,11 @@ mod platform {
                 WM_RBUTTONUP => menu(window),
                 _ => {}
             }
+            return LRESULT(0);
+        }
+        // Launched again while running: the same as a click on the icon.
+        if message == crate::single::HANDED {
+            tell(Act::Open);
             return LRESULT(0);
         }
         if message == WM_DESTROY {
