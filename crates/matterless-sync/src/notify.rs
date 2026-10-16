@@ -40,6 +40,9 @@ pub enum NotifyReason {
     LevelNone,
     NoMentionAtMentionLevel,
     UnfollowedThread,
+    /// A reply in a thread the reader follows, with "notify me about threads
+    /// I'm following" on.
+    FollowedThread,
     Mentioned,
     AllMessages,
 }
@@ -203,6 +206,26 @@ fn desktop_level(context: &NotifyContext<'_>) -> String {
         .unwrap_or_else(|| "mention".to_string())
 }
 
+/// Whether replies in followed threads notify: the channel's own choice
+/// unless it defers, then the reader's, and on when neither says, which is the
+/// official client's default.
+fn threads_level(context: &NotifyContext<'_>) -> String {
+    let channel_level = context
+        .channel_notify_props
+        .get("desktop_threads")
+        .map(String::as_str)
+        .unwrap_or("default");
+    if channel_level != "default" {
+        return channel_level.to_string();
+    }
+    context
+        .me
+        .notify_props
+        .get("desktop_threads")
+        .cloned()
+        .unwrap_or_else(|| "all".to_string())
+}
+
 fn is_muted(context: &NotifyContext<'_>) -> bool {
     context
         .channel_notify_props
@@ -249,7 +272,21 @@ pub fn decide(post: &Post, context: &NotifyContext<'_>) -> NotifyDecision {
         return decision(false, NotifyReason::ChannelMuted);
     }
 
-    match desktop_level(context).as_str() {
+    let level = desktop_level(context);
+    // A followed thread is its own setting, beside the channel's level: with
+    // the level at mentions, which is most people's, a reply in a thread
+    // the reader follows was dropped, where the official client notifies.
+    if context.thread_mode == ThreadMode::Collapsed
+        && post.is_reply()
+        && context.following_thread
+        && level != "none"
+        && !mention.is_mention()
+        && threads_level(context) == "all"
+    {
+        return decision(true, NotifyReason::FollowedThread);
+    }
+
+    match level.as_str() {
         "none" => decision(false, NotifyReason::LevelNone),
         "mention" => {
             if mention.is_mention() {
@@ -525,6 +562,34 @@ mod tests {
         named.root_id = "root1".into();
         ctx.following_thread = false;
         assert!(decide(&named, &ctx).notify);
+    }
+
+    /// A followed thread notifies at the mentions-only level too, as long as
+    /// "threads I'm following" is on -- which it is unless turned off.
+    #[test]
+    fn a_followed_thread_notifies_at_the_mention_level() {
+        let mut user = me();
+        user.notify_props.insert("desktop".into(), "mention".into());
+        let props = HashMap::new();
+        let mut reply = post_from("other", "more on this");
+        reply.root_id = "root1".into();
+
+        let mut ctx = context(&user, &props);
+        ctx.thread_mode = ThreadMode::Collapsed;
+        ctx.following_thread = true;
+        assert_eq!(decide(&reply, &ctx).reason, NotifyReason::FollowedThread);
+
+        user.notify_props
+            .insert("desktop_threads".into(), "mention".into());
+        let ctx = NotifyContext {
+            thread_mode: ThreadMode::Collapsed,
+            following_thread: true,
+            ..context(&user, &props)
+        };
+        assert_eq!(
+            decide(&reply, &ctx).reason,
+            NotifyReason::NoMentionAtMentionLevel
+        );
     }
 }
 
