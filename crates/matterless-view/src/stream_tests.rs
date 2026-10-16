@@ -1323,6 +1323,32 @@ fn a_most_used_face_reacts_in_one_press() {
     );
 }
 
+/// The strip is over everything in the message it floats on.
+///
+/// The box hit is the last one placed that holds the pointer, and the strip
+/// was placed with its row: a link, a picture or a card placed after it, under
+/// a face, took the press meant for the reaction.
+#[test]
+fn nothing_is_placed_over_the_strip() {
+    let mut fonts = Fonts::new();
+    let mut stream = conversation(&mut fonts);
+    stream.favourites = vec![("+1".to_string(), "\u{1f44d}".to_string())];
+    let placed = stream.boxes(panel(), Some(1));
+    let strip = |name: &str| name.contains("/quick/") || name.contains("/tool/");
+    let first = placed
+        .iter()
+        .position(|one| strip(&one.name))
+        .expect("no strip on the hovered row");
+    assert!(
+        placed[first..].iter().all(|one| strip(&one.name)),
+        "something is placed after the strip: {:?}",
+        placed[first..]
+            .iter()
+            .map(|one| one.name.as_str())
+            .collect::<Vec<_>>()
+    );
+}
+
 /// A row keeps its toolbar while something it opened is still up.
 ///
 /// The row of quick faces and the emoji grid both hang off a button on that

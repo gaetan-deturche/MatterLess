@@ -1152,6 +1152,7 @@ impl Stream {
             depth: 1,
         }];
         let mut top = self.first_row_at(within);
+        let mut strip = Vec::new();
         for (index, row) in self.laid.iter().enumerate() {
             let bottom = top + row.height;
             if bottom >= within.y && top <= within.bottom() {
@@ -1173,14 +1174,14 @@ impl Stream {
                 // Only the hovered row has a toolbar, so only it has buttons.
                 if hovered == Some(index) {
                     for (at, rect) in self.favourites(index, top, within) {
-                        placed.push(Placed {
+                        strip.push(Placed {
                             name: self.favourite_name(index, at),
                             rect,
                             depth: 3,
                         });
                     }
                     for (tool, rect) in self.tools(index, top, within) {
-                        placed.push(Placed {
+                        strip.push(Placed {
                             name: self.tool_name(index, tool),
                             rect,
                             depth: 3,
@@ -1284,6 +1285,10 @@ impl Stream {
                 depth: 3,
             });
         }
+        // The toolbar last, as the last box holding the pointer is the one hit:
+        // pushed with its row, the next message took the half of the strip that
+        // hangs over it on a one-line message, and a link under it took the press.
+        placed.extend(strip);
         // Everything held to the panel: a picture scrolled half under the box
         // below is only something to press where it can be seen, or a click on
         // the reply field lands on the picture behind it.
