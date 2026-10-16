@@ -116,6 +116,9 @@ struct State {
     duration: f64,
     /// The picture's own size, once the decoder is open.
     size: Option<(u32, u32)>,
+    /// How long one picture lasts, from the stream's own rate: what one step
+    /// on or back moves by.
+    frame_time: f64,
 }
 
 struct Shared {
@@ -182,6 +185,8 @@ impl Player {
                 failed: None,
                 duration: 0.0,
                 size: None,
+                // Until the stream says, the commonest rate there is.
+                frame_time: 1.0 / 30.0,
             }),
             stir: Condvar::new(),
             sound,
@@ -308,6 +313,25 @@ impl Player {
     /// or, after a drag, as it was when the drag began.
     pub fn seek(&self, seconds: f64) {
         self.aim_at(seconds, true);
+    }
+
+    /// One picture on, or back, and paused there.
+    ///
+    /// A landing stops on the newest picture at or before where it was sent,
+    /// so on is sent half a picture past the next one and back half a picture
+    /// short of the one showing: a rate that does not divide evenly into the
+    /// stream's clock never lands a step on the picture it started from.
+    pub fn step(&self, by: i32) {
+        self.pause();
+        let (shown, frame) = {
+            let state = lock_state(&self.shared);
+            let shown = match state.shown.is_finite() {
+                true => state.shown,
+                false => position(&state),
+            };
+            (shown, state.frame_time)
+        };
+        self.seek((shown + (f64::from(by) + 0.5) * frame).max(0.0));
     }
 
     /// Follows the pointer along the track: paused, silent, showing the
@@ -720,6 +744,10 @@ fn decode(
         }
         let video_stream = *(*owned.format).streams.add(video as usize);
         let video_base = (*video_stream).time_base;
+        let rate = (*video_stream).avg_frame_rate;
+        if rate.num > 0 && rate.den > 0 {
+            lock_state(shared).frame_time = f64::from(rate.den) / f64::from(rate.num);
+        }
         owned.video = (api.avcodec_alloc_context3)(codec);
         check(
             api,
