@@ -4445,6 +4445,8 @@ impl App {
         self.sidebar.selected = open;
         self.sidebar.scroll = scroll;
         self.sidebar.only = only;
+        self.sidebar.mentions_only =
+            self.settings.counts == matterless_view::settings::Counts::Mentions;
     }
 
     /// Folds a sidebar category, or unfolds it: here at once, and on the
@@ -7223,6 +7225,13 @@ impl App {
                         );
                         self.rebuild_sidebar();
                     }
+                    matterless_view::settings::Did::Counts(counts) => {
+                        self.keep_setting(
+                            matterless_view::settings::Counts::SETTING,
+                            counts.stored(),
+                        );
+                        self.rebuild_sidebar();
+                    }
                     matterless_view::settings::Did::Unreads(on) => {
                         // Here at once, and on the server for every other
                         // client, which echoes it back unchanged.
@@ -9914,6 +9923,9 @@ impl ApplicationHandler<Update> for App {
             read(matterless_view::settings::Teams::SETTING).as_deref(),
         );
         let team = read(TEAM_SHOWN).filter(|team| !team.is_empty());
+        self.settings.counts = matterless_view::settings::Counts::read(
+            read(matterless_view::settings::Counts::SETTING).as_deref(),
+        );
         self.settings.teams = teams;
         self.team = team;
         self.settings.contrast = contrast;

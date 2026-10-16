@@ -238,6 +238,52 @@ impl Teams {
     }
 }
 
+/// Which unread channels carry a count in the sidebar: every one, or only
+/// those that mention the reader -- the official client's way, where an
+/// unread channel is only bold, and a list of pills reads as notifications
+/// everywhere.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Counts {
+    #[default]
+    All,
+    Mentions,
+}
+
+impl Counts {
+    /// What this is called in the settings table.
+    pub const SETTING: &'static str = "unread-counts";
+
+    pub fn stored(&self) -> &'static str {
+        self.slug()
+    }
+
+    /// Reads one back; anything else is the default.
+    pub fn read(said: Option<&str>) -> Self {
+        Self::all()
+            .into_iter()
+            .find(|one| Some(one.slug()) == said)
+            .unwrap_or_default()
+    }
+
+    fn title(&self) -> &'static str {
+        match self {
+            Counts::All => "All",
+            Counts::Mentions => "Mentions",
+        }
+    }
+
+    fn slug(&self) -> &'static str {
+        match self {
+            Counts::All => "counts-all",
+            Counts::Mentions => "counts-mentions",
+        }
+    }
+
+    fn all() -> [Counts; 2] {
+        [Counts::All, Counts::Mentions]
+    }
+}
+
 /// Light text on a dark ground, or dark on light.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Theme {
@@ -418,6 +464,9 @@ struct Card {
     /// The heading over gathering unread channels, and its two buttons.
     unreads: Rect,
     groupings: Laid,
+    /// Beside it, the heading over which unread channels carry a count.
+    counts: Rect,
+    countings: Laid,
     /// The heading over how teams are listed, and its two buttons.
     teams: Rect,
     showings: Laid,
@@ -441,10 +490,11 @@ struct Card {
 impl Card {
     /// Every row of buttons, in one place: what is drawn and what answers a
     /// press come from the same list, so a row cannot be one without the other.
-    fn rows(&self) -> [&Laid; 7] {
+    fn rows(&self) -> [&Laid; 8] {
         [
             &self.themes,
             &self.groupings,
+            &self.countings,
             &self.showings,
             &self.sizes,
             &self.starts,
@@ -469,6 +519,7 @@ pub struct Settings {
     /// Mattermost's own setting, kept on the server and shared with the
     /// reader's other clients: the window reads it in as the panel opens.
     pub unreads: bool,
+    pub counts: Counts,
     pub teams: Teams,
     /// Whether a look for a newer build is out, so it is not asked for twice
     /// and the button can say what it is doing.
@@ -499,6 +550,8 @@ pub enum Did {
     /// Gather unread channels at the top of the sidebar, or leave them where
     /// they are.
     Unreads(bool),
+    /// Count these unread channels in the sidebar from now on.
+    Counts(Counts),
     /// List the teams this way from now on.
     Teams(Teams),
     /// Start with Windows, or stop.
@@ -693,7 +746,36 @@ impl Settings {
             .measure(fonts);
         let y = theme.bottom() + ROW_GAP + BUTTON_HEIGHT + ROW_GAP;
 
-        let unreads = Rect::new(rect.x + PAD, y - ROW_GAP + GAP, inner, unreads);
+        // Two questions about unread channels side by side, each in half the
+        // card: a row of its own for the second would push the card past
+        // the foot of a short window.
+        let half = inner / 2.0;
+        let unreads = Rect::new(rect.x + PAD, y - ROW_GAP + GAP, half - GAP, unreads);
+        let counts = Rect::new(rect.x + PAD + half, unreads.y, half, unreads.height);
+        let counted = self.counts;
+        let countings = Counts::all()
+            .into_iter()
+            .fold(
+                Row::new(
+                    NAME,
+                    Rect::new(
+                        counts.x - PAD,
+                        unreads.bottom() + ROW_GAP,
+                        half + PAD,
+                        BUTTON_HEIGHT,
+                    ),
+                )
+                .against(matterless_widgets::Against::Left)
+                .pad(PAD)
+                .depth(63),
+                |row, one| {
+                    row.button(match one == counted {
+                        true => Button::primary(one.slug(), one.title()),
+                        false => Button::plain(one.slug(), one.title()),
+                    })
+                },
+            )
+            .measure(fonts);
         let groupings = [(true, "unreads-on", "On"), (false, "unreads-off", "Off")]
             .into_iter()
             .fold(
@@ -702,7 +784,7 @@ impl Settings {
                     Rect::new(
                         rect.x,
                         unreads.bottom() + ROW_GAP,
-                        rect.width,
+                        half + PAD,
                         BUTTON_HEIGHT,
                     ),
                 )
@@ -842,6 +924,8 @@ impl Settings {
             themes,
             unreads,
             groupings,
+            counts,
+            countings,
             teams,
             showings,
             kept,
@@ -1012,6 +1096,13 @@ impl Settings {
             self.unreads = on;
             self.placed = None;
             return Some(Did::Unreads(on));
+        }
+        if let Some(slug) = self.laid().and_then(|card| card.countings.clicked(input))
+            && let Some(one) = Counts::all().into_iter().find(|one| one.slug() == slug)
+        {
+            self.counts = one;
+            self.placed = None;
+            return Some(Did::Counts(one));
         }
         if let Some(slug) = self.laid().and_then(|card| card.showings.clicked(input))
             && let Some(one) = Teams::all().into_iter().find(|one| one.slug() == slug)
@@ -1223,6 +1314,14 @@ impl Settings {
                 Run::label(card.unreads.width).sized(GROUP_SIZE),
             );
             scene.glyphs(glyphs, palette.faint, palette.faint);
+            let glyphs = painter.run(
+                fonts,
+                COUNTS_HEADING,
+                card.counts.x,
+                card.counts.y,
+                Run::label(card.counts.width).sized(GROUP_SIZE),
+            );
+            scene.glyphs(glyphs, palette.faint, palette.faint);
 
             let glyphs = painter.run(
                 fonts,
@@ -1309,7 +1408,8 @@ const THEME_HEADING: &str = "Theme";
 const KEPT_HEADING: &str = "Opened pictures kept on disk";
 
 /// The heading over gathering unread channels, in Mattermost's own words.
-const UNREADS_HEADING: &str = "Group unread channels separately";
+const UNREADS_HEADING: &str = "Group unread channels";
+const COUNTS_HEADING: &str = "Unread counts";
 
 /// The heading over how teams are listed.
 const TEAMS_HEADING: &str = "Teams in the sidebar";
@@ -1436,10 +1536,10 @@ mod tests {
         // A box for each, plus the card, the window behind it, the sizes, On
         // and Off for starting with Windows, the two buttons -- the one that
         // looks for a build and the one that shuts it -- the contrast slider,
-        // the two themes, On and Off for grouping unread channels, and the two
-        // ways of listing teams.
+        // the two themes, On and Off for grouping unread channels, the two
+        // ways of counting them, and the two ways of listing teams.
         let boxes = settings.boxes(window());
-        assert_eq!(boxes.len(), 6 + card.choices.len() + sizes.len() + 7);
+        assert_eq!(boxes.len(), 6 + card.choices.len() + sizes.len() + 9);
         // Every button drawn is a button that can be pressed.
         for slug in ["theme-dark", "theme-light"] {
             assert!(

@@ -129,6 +129,9 @@ pub struct Sidebar {
     /// stay in `entries` -- the switcher and the rail's counts read every
     /// channel from there -- and are only left out of the list.
     pub only: Option<String>,
+    /// Counts only where the reader is mentioned: every other unread
+    /// channel is bold and says no number.
+    pub mentions_only: bool,
 }
 
 /// What the threads row is selected as.
@@ -167,7 +170,13 @@ impl Sidebar {
             scroll: 0.0,
             bar: crate::scrollbar::Scrollbar::default(),
             only: None,
+            mentions_only: false,
         }
+    }
+
+    /// Whether a row with this many mentions carries its count.
+    fn counted(&self, mentions: i64) -> bool {
+        !self.mentions_only || mentions > 0
     }
 
     /// The name a row answers to when it is hit.
@@ -912,7 +921,10 @@ impl Sidebar {
                     // The count first, because it decides how much room the
                     // name has. Muted channels keep theirs: muting is "do not
                     // interrupt me", not "hide this from me".
-                    let pill = pill_for(fonts, *unread, *mentions, row.rect, within);
+                    let pill = self
+                        .counted(*mentions)
+                        .then(|| pill_for(fonts, *unread, *mentions, row.rect, within))
+                        .flatten();
 
                     // Cut to what is left, with an ellipsis where it was cut.
                     // A clipped name ends mid-letter and says nothing about
@@ -972,7 +984,10 @@ impl Sidebar {
                         Run::mark(13.0),
                     );
                     scene.glyphs(glyph, ink, palette.faint);
-                    let pill = pill_for(fonts, *unread, *mentions, row.rect, within);
+                    let pill = self
+                        .counted(*mentions)
+                        .then(|| pill_for(fonts, *unread, *mentions, row.rect, within))
+                        .flatten();
                     let left = row.rect.x + GUTTER;
                     let room = pill
                         .as_ref()
@@ -1548,6 +1563,17 @@ mod tests {
         ]);
         sidebar.selected = Some(selected.into());
         sidebar
+    }
+
+    /// With counts for mentions only, a channel with nothing but unread
+    /// messages says no number; one that names the reader still does.
+    #[test]
+    fn mentions_only_counts_only_mentions() {
+        let mut sidebar = Sidebar::new(Vec::new());
+        assert!(sidebar.counted(0), "every count shows by default");
+        sidebar.mentions_only = true;
+        assert!(!sidebar.counted(0), "a plain unread count still shows");
+        assert!(sidebar.counted(2), "a mention lost its count");
     }
 
     /// The drafts row is a place to go, and not a place to be walked to.
