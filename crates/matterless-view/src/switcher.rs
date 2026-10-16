@@ -96,7 +96,7 @@ impl Asking {
             Asking::Jump => "Jump to…",
             Asking::Forward(_) => "Forward to…",
             Asking::Add(_) => "Add who…",
-            Asking::Start => "Talk to who…",
+            Asking::Start => "Pick who to talk to, then Go…",
         }
     }
 
@@ -130,6 +130,14 @@ pub enum Chose {
 /// nothing behind the switcher takes a press or a hover meant for it.
 const BACKDROP: &str = "switcher/backdrop";
 const PANEL_BOX: &str = "switcher/panel";
+/// What opens the conversation with everybody picked so far, as the official
+/// client's own button does: a click on a person only adds them, and Return
+/// on an empty field was the one other way to say "that is everyone".
+const GO: &str = "switcher/go";
+const GO_WIDTH: f32 = 56.0;
+const GO_HEIGHT: f32 = 24.0;
+/// The face inside a picked person's chip.
+const CHIP_FACE: f32 = 16.0;
 
 /// What a result row's box is called, and back.
 fn row_name(at: usize) -> String {
@@ -240,6 +248,16 @@ impl Switcher {
     pub fn instead(&mut self, asking: Asking) {
         self.query.placeholder = asking.placeholder().to_string();
         self.asking = asking;
+    }
+
+    /// What the field says, which changes once somebody has been picked: a
+    /// name taken off the list into a line above it read as nothing having
+    /// happened, so the field says the list is there to add to.
+    fn prompt(&mut self) {
+        self.query.placeholder = match self.asking.wants_several() && !self.picked.is_empty() {
+            true => "Add someone else, or Go\u{2026}".to_string(),
+            false => self.asking.placeholder().to_string(),
+        };
     }
 
     pub fn hide(&mut self, input: &mut Input) {
@@ -416,6 +434,7 @@ impl Switcher {
             && self.query.text().is_empty()
         {
             self.picked.pop();
+            self.prompt();
         }
         // Moving the highlight before the field sees the keys: on one line a
         // caret has nowhere to go up or down to, so nothing is taken away.
@@ -435,6 +454,9 @@ impl Switcher {
         let clicked = input.clicked();
         if clicked == Some(BACKDROP) {
             return Some(Chose::Dismissed);
+        }
+        if clicked == Some(GO) && !self.picked.is_empty() {
+            return Some(Chose::These(self.picked.clone()));
         }
         let clicked_row = clicked.and_then(row_of).filter(|at| *at < self.found.len());
         if let Some(at) = clicked_row {
@@ -474,6 +496,7 @@ impl Switcher {
                 if !self.picked.iter().any(|held| held.id == one.id) {
                     self.picked.push(one);
                 }
+                self.prompt();
                 self.query.clear(fonts);
                 self.asked.clear();
                 self.offered.clear();
@@ -546,20 +569,82 @@ impl Switcher {
             .draw(scene);
         // Who is already in it, above the list they were picked from, so the
         // reader can see what Return will open.
-        if !self.picked.is_empty() {
-            let names: Vec<&str> = self.picked.iter().map(|one| one.label.as_str()).collect();
-            let said = format!(
-                "{} \u{2014} return to open, backspace to take one off",
-                names.join(", ")
+        if let Some(go) = self.go_rect(panel) {
+            // Each person picked as a chip of their own, after a word saying
+            // what the chips are: a plain list of names in the accent colour
+            // did not read as a list somebody had been added to.
+            let style = matterless_layout::Style {
+                size: 13.0,
+                line_height: 18.0,
+                bold: false,
+                italic: false,
+                mono: false,
+            };
+            let text_y = go.y + (GO_HEIGHT - 18.0) / 2.0;
+            let mut x = panel.x + PADDING + 4.0;
+            let glyphs = painter.run(fonts, "With", x, text_y, Run::label(f32::MAX));
+            scene.glyphs(glyphs, palette.faint, palette.faint);
+            x += matterless_layout::extent_of(fonts, "With", f32::MAX, style).width + 8.0;
+            let room = go.x - 8.0;
+            for (at, one) in self.picked.iter().enumerate() {
+                // The person, not the row's offer to message them.
+                let label = one
+                    .label
+                    .trim_start_matches('@')
+                    .trim_end_matches(" -- message");
+                let label_width = matterless_layout::extent_of(fonts, label, f32::MAX, style).width;
+                let width = CHIP_FACE + 6.0 + label_width + 10.0 + 4.0;
+                let left = self.picked.len() - at;
+                // The rest as a count when they no longer fit.
+                if x + width > room - if left > 1 { 30.0 } else { 0.0 } {
+                    let more = format!("+{left}");
+                    let glyphs = painter.run(fonts, &more, x, text_y, Run::label(f32::MAX));
+                    scene.glyphs(glyphs, palette.soft, palette.faint);
+                    break;
+                }
+                scene.rounded(x, go.y, width, GO_HEIGHT, palette.raised, GO_HEIGHT / 2.0);
+                if let Some(face) = &one.face {
+                    scene.extend([matterless_paint::Piece::Image {
+                        x: x + 4.0,
+                        y: go.y + (GO_HEIGHT - CHIP_FACE) / 2.0,
+                        width: CHIP_FACE,
+                        height: CHIP_FACE,
+                        key: crate::stream::avatar_key(&face.user_id, face.avatar_at),
+                        radius: CHIP_FACE / 2.0,
+                    }]);
+                }
+                let glyphs = painter.run(
+                    fonts,
+                    label,
+                    x + 4.0 + CHIP_FACE + 6.0,
+                    text_y,
+                    Run::label(f32::MAX),
+                );
+                scene.glyphs(glyphs, palette.ink, palette.faint);
+                x += width + 6.0;
+            }
+            let [red, green, blue] = palette.signal;
+            scene.rounded(
+                go.x,
+                go.y,
+                go.width,
+                go.height,
+                [red, green, blue, 255],
+                6.0,
             );
+            let [ground_red, ground_green, ground_blue, _] = palette.ground;
             let glyphs = painter.run(
                 fonts,
-                &said,
-                panel.x + PADDING + 4.0,
-                panel.y + self.query.height() + 4.0,
-                Run::label(panel.width - PADDING * 2.0),
+                "Go",
+                go.x + (go.width - 18.0) / 2.0,
+                go.y + (GO_HEIGHT - 18.0) / 2.0,
+                Run::label(f32::MAX).bold(),
             );
-            scene.glyphs(glyphs, palette.signal, palette.faint);
+            scene.glyphs(
+                glyphs,
+                [ground_red, ground_green, ground_blue],
+                palette.faint,
+            );
         }
         for (at, one) in self.found.iter().enumerate() {
             let y = self.row_rect(panel, at).y;
@@ -654,6 +739,13 @@ impl Switcher {
                 depth: 52,
             });
         }
+        if let Some(go) = self.go_rect(panel) {
+            placed.push(Placed {
+                name: GO.to_string(),
+                rect: go,
+                depth: 53,
+            });
+        }
         placed.extend(
             self.query
                 .boxes(self.field(within))
@@ -667,6 +759,20 @@ impl Switcher {
     }
 
     /// Where one result is drawn, inside the panel.
+    /// The Go button, at the end of the line naming who has been picked.
+    fn go_rect(&self, panel: Rect) -> Option<Rect> {
+        if self.picked.is_empty() {
+            return None;
+        }
+        let line = panel.y + self.query.height();
+        Some(Rect::new(
+            panel.right() - PADDING - GO_WIDTH,
+            line + (PADDING + ROW - GO_HEIGHT) / 2.0,
+            GO_WIDTH,
+            GO_HEIGHT,
+        ))
+    }
+
     fn row_rect(&self, panel: Rect, at: usize) -> Rect {
         let y = panel.y + PADDING + self.query.height() + self.picked_height() + at as f32 * ROW;
         Rect::new(panel.x, y, panel.width, ROW)
@@ -1235,6 +1341,47 @@ mod starting {
             Some(Chose::These(these)) => assert_eq!(these.len(), 2),
             other => panic!("return on an empty field answered {other:?}"),
         }
+    }
+
+    /// Go opens the conversation with whoever has been picked: a click on a
+    /// person only adds them, and the empty-field Return was hard to find.
+    #[test]
+    fn go_opens_the_conversation_with_everybody_picked() {
+        let mut fonts = Fonts::new();
+        let mut switcher = Switcher::new();
+        switcher.show(&mut fonts, &mut Input::default());
+        switcher.instead(Asking::Start);
+        assert!(switcher.go_rect(switcher.rect(panel())).is_none());
+        let asking = switcher.query.placeholder.clone();
+        returned(&mut switcher, &mut fonts, "person");
+        assert_eq!(switcher.picked().len(), 1);
+        assert_ne!(
+            switcher.query.placeholder, asking,
+            "nothing says the list can be added to"
+        );
+
+        let placed = switcher.boxes(panel());
+        let go = placed
+            .iter()
+            .find(|one| one.name == GO)
+            .expect("no Go with somebody picked")
+            .rect;
+        let mut input = Input::default();
+        input.focus_on(NAME);
+        input.apply(
+            Event::PointerMoved {
+                x: go.x + 4.0,
+                y: go.y + 4.0,
+            },
+            &placed,
+        );
+        input.apply(Event::PointerPressed, &placed);
+        input.apply(Event::PointerReleased, &placed);
+        let done = switcher.react(&mut fonts, &input, panel(), &mut String::new(), &[]);
+        assert!(
+            matches!(done, Some(Chose::These(ref these)) if these.len() == 1),
+            "Go answered {done:?}"
+        );
     }
 
     /// Mattermost holds a group to eight including the reader, and the ceiling
