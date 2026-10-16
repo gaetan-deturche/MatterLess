@@ -46,11 +46,6 @@ const CARD_FACE: f32 = 20.0;
 const CARD_FACE_STEP: f32 = 15.0;
 /// The most faces along it; past this the count says the rest.
 const CARD_FACES: usize = 4;
-/// Wider than this a line of a card is harder to read, not easier: the
-/// Threads list fills a whole column, which on a wide window is a thousand
-/// pixels and more.
-const CARD_WIDTH: f32 = 860.0;
-
 /// What a followed thread's row shows beyond the plain two lines.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Card {
@@ -810,7 +805,7 @@ impl Listing {
                     found,
                     card,
                     row,
-                    room.min(CARD_WIDTH),
+                    room,
                     at == self.chosen || hovered,
                 );
                 continue;
