@@ -1080,3 +1080,74 @@ fn a_name_being_typed_begins_at_its_sigil() {
         "the name began at {from}, with the caret at {caret}"
     );
 }
+
+/// The wheel scrolls a long message, and it stays scrolled.
+///
+/// Every frame followed the caret, typed in or not, so the next frame after
+/// the wheel -- the pointer moving, the window redrawing -- put the box back
+/// at the caret, and the two fought for as long as the wheel turned.
+#[test]
+fn the_wheel_scrolls_a_long_message_away_from_the_caret() {
+    let mut fonts = Fonts::new();
+    let (mut composer, mut input) = ready(&mut fonts);
+    for _ in 0..(MAX_LINES * 2) {
+        type_text(&mut composer, &mut fonts, &mut input, "a line");
+        holding(&mut input, shift());
+        press(&mut input, Key::Enter);
+        frame(&mut composer, &mut fonts, &mut input);
+        holding(&mut input, Mods::default());
+    }
+    let at_the_end = composer.caret(panel()).expect("a caret").1;
+
+    // The box itself is placed by the window; its parts by the box.
+    let over = Rect::new(
+        panel().x,
+        panel().bottom() - composer.height(),
+        panel().width,
+        composer.height(),
+    );
+    let mut placed = vec![matterless_ui::Placed {
+        name: NAME.to_string(),
+        rect: over,
+        depth: 2,
+    }];
+    placed.extend(composer.boxes_in(panel()));
+    input.apply(
+        Event::PointerMoved {
+            x: over.x + over.width / 2.0,
+            y: over.y + over.height / 2.0,
+        },
+        &placed,
+    );
+    input.apply(
+        Event::Wheel {
+            x: 0.0,
+            y: LINE * 3.0,
+        },
+        &placed,
+    );
+    composer.wheeled(&input, &placed, panel());
+    let scrolled = composer.caret(panel()).expect("a caret").1;
+    assert!(
+        scrolled > at_the_end + LINE,
+        "the wheel did not scroll: {at_the_end} then {scrolled}"
+    );
+
+    // A frame with nothing typed: the pointer moved, the window redrew.
+    input.settle();
+    input.apply(
+        Event::PointerMoved {
+            x: over.x + over.width / 2.0 + 1.0,
+            y: over.y + over.height / 2.0,
+        },
+        &placed,
+    );
+    frame(&mut composer, &mut fonts, &mut input);
+    let after = composer.caret(panel()).expect("a caret").1;
+    assert_eq!(after, scrolled, "the box went back to the caret");
+
+    // And typing brings the caret back into view.
+    type_text(&mut composer, &mut fonts, &mut input, "x");
+    let typed = composer.caret(panel()).expect("a caret").1;
+    assert!(typed < scrolled, "typing left the caret out of sight");
+}

@@ -50,6 +50,12 @@ pub struct Composer {
     /// all -- the text ran on past the bottom edge and was drawn over whatever
     /// happened to be under the box.
     scroll: f32,
+    /// The width the text was last wrapped at, so a layout at the same width
+    /// leaves the window where the wheel put it.
+    wrapped_at: f32,
+    /// The caret moved since the last layout, which is when the window has to
+    /// follow it -- once the text is shaped, so the caret's line is known.
+    caret_moved: bool,
     /// The bar down the side of the text, and what drags it.
     ///
     /// The same one the conversation and the lists use: a box holding more
@@ -507,6 +513,8 @@ impl Composer {
             spinning: 0.0,
             touched: false,
             scroll: 0.0,
+            wrapped_at: 0.0,
+            caret_moved: false,
             bar: crate::scrollbar::Scrollbar::default(),
             done: Vec::new(),
             undone: Vec::new(),
@@ -610,6 +618,8 @@ impl Composer {
             self.act(fonts, Action::Insert(character));
         }
         self.touched = true;
+        self.editor.shape_as_needed(fonts.system_mut(), false);
+        self.follow_caret();
     }
 
     /// Types `text` in at the caret, through the editor so it can be undone.
@@ -618,6 +628,8 @@ impl Composer {
             self.act(fonts, Action::Insert(character));
         }
         self.touched = true;
+        self.editor.shape_as_needed(fonts.system_mut(), false);
+        self.follow_caret();
     }
 
     /// The text as it stands.
@@ -660,8 +672,16 @@ impl Composer {
         self.editor.shape_as_needed(fonts.system_mut(), false);
         // The width just changed, which re-wraps: a caret that was on the last
         // line of the window can be two lines below it now, with nobody having
-        // touched the keyboard.
-        self.follow_caret();
+        // touched the keyboard. Only then: this runs after every event, and
+        // following the caret on each one pulled the box back from wherever
+        // the wheel had scrolled it.
+        if inner != self.wrapped_at || self.caret_moved {
+            self.wrapped_at = inner;
+            self.caret_moved = false;
+            self.follow_caret();
+        } else {
+            self.scroll = self.scroll.clamp(0.0, self.reach());
+        }
     }
 
     /// The placeholder, cut to the room there is.
@@ -1511,6 +1531,7 @@ impl Composer {
     ) -> Option<String> {
         let inner = self.inner(within);
         let focused = input.focus() == Some(self.name.as_str());
+        let caret_was = (self.editor.cursor(), self.editor.selection());
 
         // The pointer puts the caret where it was clicked, and dragging from
         // there selects. Coordinates are the buffer's own, so the box's origin
@@ -1651,8 +1672,15 @@ impl Composer {
         }
         // Last, after every way the text or the caret can have moved this
         // frame: typing, deleting, pasting, undoing, or walking with the
-        // arrows.
-        self.follow_caret();
+        // arrows. And only when it did: a frame of the pointer moving over a
+        // box scrolled by the wheel snapped it back to the caret, and the two
+        // fought for as long as the wheel turned.
+        if (self.editor.cursor(), self.editor.selection()) != caret_was {
+            self.caret_moved = true;
+            self.follow_caret();
+        } else {
+            self.scroll = self.scroll.clamp(0.0, self.reach());
+        }
         sent
     }
 
