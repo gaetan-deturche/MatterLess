@@ -873,6 +873,12 @@ pub enum Row {
     /// Positioned from `last_viewed_at`. A row, not an overlay, so it survives
     /// virtualisation and takes part in height.
     UnreadDivider,
+    /// Under a thread's root, how many replies follow: the root is what the
+    /// thread is about and the rest answer it, which the official client
+    /// marks with this line and a pane of equal rows did not.
+    Replies {
+        count: usize,
+    },
     Post {
         post: PostRow,
     },
@@ -1699,7 +1705,30 @@ pub fn plan_thread(root: &Post, replies: &[Post], options: &PlanOptions) -> Vec<
     let mut posts: Vec<Post> = Vec::with_capacity(replies.len() + 1);
     posts.push(root.clone());
     posts.extend_from_slice(replies);
-    plan_channel(&posts, &HashMap::new(), &flat)
+    let mut rows = plan_channel(&posts, &HashMap::new(), &flat);
+    if replies.is_empty() {
+        return rows;
+    }
+    let Some(at) = rows.iter().position(|row| match row {
+        Row::Post { post } | Row::Continuation { post } => post.post_id == root.id,
+        _ => false,
+    }) else {
+        return rows;
+    };
+    rows.insert(
+        at + 1,
+        Row::Replies {
+            count: replies.len(),
+        },
+    );
+    // The first reply under its own name, though its author wrote the root a
+    // minute before: across the line it is an answer, not more of the root.
+    if let Some(row) = rows.get_mut(at + 2)
+        && let Row::Continuation { post } = row
+    {
+        *row = Row::Post { post: post.clone() };
+    }
+    rows
 }
 
 #[cfg(test)]

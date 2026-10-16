@@ -1301,6 +1301,26 @@ pub fn lay_out_opened(fonts: &mut Fonts, row: &Row, theme: &Theme, opened: bool)
                 }],
             };
         }
+        // Drawn as a day's line is, with the count for words.
+        Row::Replies { count } => {
+            let said = match count {
+                1 => "1 reply".to_string(),
+                _ => format!("{count} replies"),
+            };
+            return RowLayout {
+                height: theme.separator_height,
+                blocks: vec![Block {
+                    y: 0.0,
+                    x: 0.0,
+                    height: theme.separator_height,
+                    lines: 1,
+                    kind: Kind::Separator,
+                    spans: vec![plain(spaced(&said))],
+                    size: theme.small_size,
+                    wrap: theme.text_width(),
+                }],
+            };
+        }
         Row::UnreadDivider => {
             // No height of its own, and a block lifted half its own depth so
             // the rule lands exactly on the join between the two messages.

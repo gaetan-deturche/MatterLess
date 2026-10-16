@@ -375,6 +375,7 @@ fn key_of(row: &Row) -> String {
         Row::ThreadFooter { root_id, .. } => format!("footer/{root_id}"),
         Row::DateSeparator { epoch_day } => format!("day/{epoch_day}"),
         Row::UnreadDivider => DIVIDER.to_string(),
+        Row::Replies { count } => format!("replies/{count}"),
     }
 }
 

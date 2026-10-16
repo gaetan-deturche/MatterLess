@@ -37,6 +37,7 @@ fn kinds(rows: &[Row]) -> Vec<&'static str> {
             Row::System { .. } => "system",
             Row::DeletedRoot { .. } => "deleted_root",
             Row::ThreadFooter { .. } => "footer",
+            Row::Replies { .. } => "replies",
         })
         .collect()
 }
@@ -183,9 +184,28 @@ fn a_thread_pane_is_always_flat_even_when_the_channel_collapses() {
     let rows = plan_thread(&root, &[reply], &options(ThreadMode::Collapsed));
     assert_eq!(
         kinds(&rows),
-        vec!["sep", "post", "post"],
+        vec!["sep", "post", "replies", "post"],
         "the pane must show the reply it exists to show"
     );
+}
+
+/// The root stands apart from its answers, and the first answer is under its
+/// own name though its author wrote the root a moment before.
+#[test]
+fn a_thread_marks_where_the_replies_begin() {
+    let root = post("root", "amy", 1_000);
+    let mut first = post("first", "amy", 2_000);
+    first.root_id = "root".into();
+    let mut second = post("second", "amy", 3_000);
+    second.root_id = "root".into();
+
+    let rows = plan_thread(&root, &[first, second], &options(ThreadMode::Collapsed));
+    assert_eq!(kinds(&rows), vec!["sep", "post", "replies", "post", "cont"]);
+    assert!(matches!(rows[2], Row::Replies { count: 2 }));
+
+    // And a root with nothing under it has nothing to mark.
+    let alone = plan_thread(&root, &[], &options(ThreadMode::Collapsed));
+    assert_eq!(kinds(&alone), vec!["sep", "post"]);
 }
 
 #[test]
