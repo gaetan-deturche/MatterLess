@@ -1428,6 +1428,9 @@ impl Painter {
         // the same way an emoji's room is.
         let mut presses: Presses = Vec::new();
         let mut code: Vec<CodeBox> = Vec::new();
+        // Which span the last box of code belongs to: two runs of `code` on
+        // one line are two boxes, not one reaching across the words between.
+        let mut code_span: Option<usize> = None;
         let mut letters: Vec<Letter> = Vec::new();
         // Where each of the buffer's lines starts in the block's text: a glyph
         // counts from the start of its own line, and a `\n` in the spans is
@@ -1490,11 +1493,12 @@ impl Painter {
                 if marks(glyph.metadata, MONO) && block.kind != Kind::Code {
                     let top = y + run.line_top;
                     match code.last_mut() {
-                        Some(last) if (last.1 - top).abs() < 0.5 => {
+                        Some(last) if (last.1 - top).abs() < 0.5 && code_span == Some(at) => {
                             last.2 = (glyph.x + x + glyph.w - last.0).max(last.2);
                         }
                         _ => code.push((glyph.x + x, top, glyph.w, line_height)),
                     }
+                    code_span = Some(at);
                 }
                 let physical = glyph.physical((x, y + run.line_y), 1.0);
                 placed.push(PlacedGlyph {
@@ -1712,6 +1716,50 @@ mod tests {
             &mut fonts,
         );
         assert_eq!(grounds, 0, "the day separator got a plate it does not need");
+    }
+
+    /// Two runs of `code` on one line are two grounds. They were one box
+    /// reaching from the first to the second, so the words between them were
+    /// drawn as code too.
+    #[test]
+    fn two_runs_of_code_on_a_line_are_two_grounds() {
+        use matterless_render::markdown::Node;
+        let mut fonts = Fonts::new();
+        let mut painter = Painter::new();
+        let theme = Theme::default();
+        let palette = Palette::default();
+        let mut row = post(Vec::new());
+        row.nodes = Arc::new(vec![Node::Paragraph {
+            children: vec![
+                Node::Text {
+                    value: "use ".into(),
+                },
+                Node::InlineCode {
+                    value: "rvtinspect drawbounds".into(),
+                },
+                Node::Text {
+                    value: ", then ".into(),
+                },
+                Node::InlineCode {
+                    value: "rvtinspect".into(),
+                },
+                Node::Text {
+                    value: " alone".into(),
+                },
+            ],
+        }]);
+        let laid = lay_out(&mut fonts, &Row::Post { post: row }, &theme);
+        let pieces = painter.pieces_of(&mut fonts, &laid, 0.0, &theme, &palette, &HashMap::new());
+        let grounds: Vec<(f32, f32)> = pieces
+            .iter()
+            .filter_map(|piece| match piece {
+                Piece::Fill {
+                    x, width, colour, ..
+                } if *colour == palette.raised => Some((*x, *width)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(grounds.len(), 2, "the grounds were {grounds:?}");
     }
 
     fn same(left: &[PlacedGlyph], right: &[PlacedGlyph]) -> bool {
