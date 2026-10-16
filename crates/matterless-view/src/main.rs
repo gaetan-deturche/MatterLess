@@ -1439,7 +1439,17 @@ impl App {
             id: channel.id,
             label: channel.display_name,
             unread: if counted { channel.unread } else { 0 },
-            mentions: if counted { channel.mentions } else { 0 },
+            // A message to the reader alone, or to a few people, asks them as
+            // a mention does, and Mattermost counts it as one: its badge is
+            // the loud one, and stays when only mentions carry a count.
+            mentions: match (
+                counted,
+                channel.channel_type == "D" || channel.channel_type == "G",
+            ) {
+                (false, _) => 0,
+                (true, true) => channel.mentions.max(channel.unread),
+                (true, false) => channel.mentions,
+            },
             muted: channel.muted,
         };
 
