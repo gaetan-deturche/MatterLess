@@ -312,6 +312,9 @@ impl Act {
 /// measurement, never by the reader.
 const DRIVER_TYPES: &str = "mesure ";
 
+/// How long a thread just said to be read is not said to be read again.
+const THREAD_READ_HELD: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// Draws frames on its own, so a measurement does not need a hand on a wheel.
 ///
 /// The window renders on demand: it waits, and a frame happens because
@@ -635,11 +638,11 @@ struct App {
     clicked: Option<Arc<matterless_view::toast::Clicked>>,
     /// The team listed, when teams are listed one at a time.
     team: Option<String>,
-    /// Each thread marked read, and its newest reply then. Marked again only
-    /// once a newer reply is here: a server still counting it unread
-    /// answered every mark with "unread", which marked it again, and the
-    /// thread's dot blinked for as long as it was open.
-    thread_reads: std::cell::RefCell<std::collections::HashMap<String, i64>>,
+    /// Each thread marked read, its newest reply then, and when. Not marked
+    /// again for the same reply until `THREAD_READ_HELD` has passed: a server
+    /// still counting it unread answered every mark with "unread", which
+    /// marked it again, and the thread's dot blinked for as long as it was open.
+    thread_reads: std::cell::RefCell<std::collections::HashMap<String, (i64, std::time::Instant)>>,
     /// Jumping to a conversation by name, which is how a reader gets around a
     /// hundred and fourteen channels without hunting the sidebar.
     switcher: matterless_view::switcher::Switcher,
@@ -5199,11 +5202,18 @@ impl App {
             .map(|reply| reply.create_at)
             .max()
             .unwrap_or(0);
+        // Held for a few seconds, not for good: long enough that the window
+        // does not ask again before the server has answered the first time,
+        // and no longer -- a thread marked unread from another client after
+        // it was read here has the same newest reply, and was never read again.
         let mut sent = self.thread_reads.borrow_mut();
-        if sent.get(root_id) == Some(&newest) {
+        if sent
+            .get(root_id)
+            .is_some_and(|(was, at)| *was == newest && at.elapsed() < THREAD_READ_HELD)
+        {
             return;
         }
-        sent.insert(root_id.to_string(), newest);
+        sent.insert(root_id.to_string(), (newest, std::time::Instant::now()));
         link.send(matterless_view::live::Ask::ReadThread {
             root_id: root_id.to_string(),
         });
