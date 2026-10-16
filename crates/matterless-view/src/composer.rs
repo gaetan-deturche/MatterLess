@@ -573,6 +573,27 @@ impl Composer {
         Some((sigil, before[at + sigil.len_utf8()..].to_string()))
     }
 
+    /// Where the run `being_named` answered about begins, across the window:
+    /// the left of its sigil, which is where the list of what it could mean
+    /// hangs. The caret when the sigil's glyph cannot be found.
+    pub fn named_from(&self, within: Rect, sigil: char, said: &str) -> Option<f32> {
+        let cursor = self.editor.cursor();
+        let start = cursor.index.checked_sub(said.len() + sigil.len_utf8())?;
+        let inner = self.inner(within);
+        let found = self.editor.with_buffer(|buffer| {
+            buffer
+                .layout_runs()
+                .filter(|run| run.line_i == cursor.line)
+                .flat_map(|run| run.glyphs.iter())
+                .find(|glyph| glyph.start == start)
+                .map(|glyph| glyph.x)
+        });
+        match found {
+            Some(x) => Some(inner.x + x),
+            None => self.caret(within).map(|(x, _)| x),
+        }
+    }
+
     /// Puts `name` in place of the run `being_named` answered about.
     ///
     /// The whole run including its sigil, and a space after, because a name

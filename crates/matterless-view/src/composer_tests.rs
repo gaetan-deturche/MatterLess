@@ -1061,3 +1061,22 @@ fn a_suggestion_replaces_the_word_under_the_pointer() {
         "and it is right now"
     );
 }
+
+/// The list of what a half-typed name could mean hangs from its sigil, which
+/// is after the words before it and before the caret at its end.
+#[test]
+fn a_name_being_typed_begins_at_its_sigil() {
+    let mut fonts = Fonts::new();
+    let mut field = Composer::new("query").plain();
+    field.fill("a few words first :tes", &mut fonts);
+    field.lay_out(&mut fonts, panel().width);
+    let (sigil, said) = field.being_named(&[':']).expect("no name being typed");
+    let from = field
+        .named_from(panel(), sigil, &said)
+        .expect("nowhere for the name to begin");
+    let caret = field.caret(panel()).expect("no caret").0;
+    assert!(
+        from > panel().x + 60.0 && from < caret - 10.0,
+        "the name began at {from}, with the caret at {caret}"
+    );
+}

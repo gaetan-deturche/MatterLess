@@ -6823,7 +6823,7 @@ impl App {
     /// has been typed, and a reader who has to wait for it will have finished
     /// the name by hand.
     fn offer_names(&mut self) {
-        let Some((which, _, _)) = self.naming_in() else {
+        let Some((which, typed_in, _)) = self.naming_in() else {
             self.naming.hide();
             return;
         };
@@ -6929,6 +6929,7 @@ impl App {
                 .collect(),
         };
         self.naming.show(sigil, &said, found);
+        self.naming.from = box_of.named_from(typed_in, sigil, &said);
     }
 
     /// Answers the offer, and takes the keys it used off the box.

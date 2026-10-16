@@ -67,6 +67,10 @@ pub struct Offer {
     pub found: Vec<Suggestion>,
     /// Which row Return would take. Always a real row while the list is up.
     pub chosen: usize,
+    /// Where the half-typed name begins across the window, which is where the
+    /// list hangs from: at the box's left edge it was a list for a word typed
+    /// at the far end of the line.
+    pub from: Option<f32>,
     open: bool,
 }
 
@@ -114,7 +118,8 @@ impl Offer {
         self.found.len().min(ROWS)
     }
 
-    /// Where it hangs: above the box, against its left edge.
+    /// Where it hangs: above the box, from where the name being typed begins,
+    /// held inside the box.
     ///
     /// Clamped to the top of the panel rather than allowed to run off it. A
     /// list whose first rows are off the screen is a list whose best answer
@@ -127,10 +132,18 @@ impl Offer {
         // box it is offering names to.
         let room = (box_of.y - LIFT - within.y).max(0.0);
         let height = wanted.min(room);
+        let width = WIDTH.min(box_of.width.max(120.0));
+        // Half a row's padding back, so the first row's words line up with the
+        // name under them rather than the list's edge.
+        let left = self
+            .from
+            .map_or(box_of.x, |from| from - PADDING)
+            .min(box_of.right() - width)
+            .max(box_of.x);
         Rect::new(
-            box_of.x,
+            left,
             (box_of.y - LIFT - height).max(within.y),
-            WIDTH.min(box_of.width.max(120.0)),
+            width,
             height,
         )
     }
@@ -312,6 +325,20 @@ mod tests {
             face: None,
             picture: None,
         }))
+    }
+
+    /// The list hangs from where the name begins, and never past the box.
+    #[test]
+    fn the_list_hangs_from_the_name_being_typed() {
+        let box_of = Rect::new(100.0, 500.0, 900.0, 60.0);
+        let within = Rect::new(100.0, 40.0, 900.0, 520.0);
+        let mut offer = Offer::default();
+        offer.show(EMOJI, "test", some(&["test_tube"]));
+        assert_eq!(offer.rect(box_of, within).x, box_of.x);
+        offer.from = Some(600.0);
+        assert_eq!(offer.rect(box_of, within).x, 600.0 - PADDING);
+        offer.from = Some(990.0);
+        assert_eq!(offer.rect(box_of, within).right(), box_of.right());
     }
 
     fn struck(key: Key) -> Input {
