@@ -5200,8 +5200,9 @@ impl App {
         if arrived {
             self.read_what_is_open();
         }
-        // A reply landing in the thread open beside it is read too.
-        if let Some(root) = self.open_root()
+        // A reply landing in the thread open beside it is read too -- when it
+        // is on screen to be read.
+        if let Some(root) = self.seen_root()
             && matterless_view::live::touches_thread(deltas, &root)
         {
             self.read_thread(&root);
@@ -5657,6 +5658,17 @@ impl App {
     fn open_root(&self) -> Option<String> {
         let name = &self.thread.as_ref()?.name;
         name.strip_prefix("thread/").map(str::to_string)
+    }
+
+    /// The open thread, when it is on screen: not hidden behind a list in
+    /// the side pane, nor under the viewer. Open is not the same as read --
+    /// a thread put behind the drafts or a search was marked read whenever a
+    /// reply landed in it, and the reader never saw the reply.
+    fn seen_root(&self) -> Option<String> {
+        if self.thread_rect().is_none() || self.viewer.open() {
+            return None;
+        }
+        self.open_root()
     }
 
     /// Re-reads the open channel, keeping the reader where they were.
@@ -10173,7 +10185,7 @@ impl ApplicationHandler<Update> for App {
                     // and alt-tabbing away and back is the commonest way to
                     // be handed messages you then sit and read.
                     self.read_what_is_open();
-                    if let Some(root) = self.open_root() {
+                    if let Some(root) = self.seen_root() {
                         self.read_thread(&root);
                     }
                 }
