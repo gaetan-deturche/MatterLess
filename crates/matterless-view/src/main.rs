@@ -541,6 +541,11 @@ struct App {
     /// answers -- which for anything large was several seconds of a window
     /// that had visibly done nothing with what was dropped on it.
     attaching: std::collections::HashMap<String, Vec<std::path::PathBuf>>,
+    /// Messages sent while a file for them was still uploading, by the
+    /// conversation they wait on: sent with their files once the last upload
+    /// is done. On screen meanwhile when they say something; one with no
+    /// words is the uploading card in the box until then, not an empty row.
+    held: Vec<(String, matterless_render::pending::PendingPost)>,
     /// Where each box is writing to, so its text can be put away under the
     /// right name when the reader moves.
     ///
@@ -969,6 +974,7 @@ impl App {
             drafts: std::collections::HashMap::new(),
             attached: std::collections::HashMap::new(),
             attaching: std::collections::HashMap::new(),
+            held: Vec::new(),
             began: std::time::Instant::now(),
             laid_against: (0.0, 0.0),
             writing_to: None,
@@ -1815,7 +1821,8 @@ impl App {
                 };
                 println!("{} is attached and waiting", file.name);
                 self.no_longer_on_its_way(&under, &path);
-                self.attached.entry(under).or_default().push(*file);
+                self.attached.entry(under.clone()).or_default().push(*file);
+                self.release_held(&under);
                 self.relayout();
                 self.redraw();
             }
@@ -1831,6 +1838,7 @@ impl App {
                 };
                 eprintln!("{why}");
                 self.no_longer_on_its_way(&under, &path);
+                self.release_held(&under);
                 self.relayout();
                 self.redraw();
             }
@@ -5106,11 +5114,21 @@ impl App {
             true => channel_id.to_string(),
             false => thread_name(root_id),
         };
-        let files = self.attached.remove(&under).unwrap_or_default();
-        let Some(link) = self.link.as_ref() else {
+        // Still uploading something for it: held until that is done, rather
+        // than sent without it -- which, with nothing typed, was a message of
+        // nothing at all.
+        let waiting = self
+            .attaching
+            .get(&under)
+            .is_some_and(|going| !going.is_empty());
+        let files = match waiting {
+            true => Vec::new(),
+            false => self.attached.remove(&under).unwrap_or_default(),
+        };
+        if self.link.is_none() {
             eprintln!("offline, so nothing was sent");
             return;
-        };
+        }
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|since| since.as_millis() as i64)
@@ -5122,23 +5140,35 @@ impl App {
             message.chars().count(),
             !root_id.is_empty()
         );
-        self.outstanding
-            .insert(matterless_render::pending::PendingPost {
-                pending_post_id: pending_post_id.clone(),
-                channel_id: channel_id.to_string(),
-                root_id: root_id.to_string(),
-                message: message.clone(),
-                create_at: now,
-                failed: false,
-                files: files.clone(),
-            });
-        link.send(matterless_view::live::Ask::Send {
-            pending_post_id,
+        let pending = matterless_render::pending::PendingPost {
+            pending_post_id: pending_post_id.clone(),
             channel_id: channel_id.to_string(),
             root_id: root_id.to_string(),
-            message,
-            file_ids: files.iter().map(|file| file.id.clone()).collect(),
-        });
+            message: message.clone(),
+            create_at: now,
+            failed: false,
+            files: files.clone(),
+        };
+        if !waiting || !message.trim().is_empty() {
+            self.outstanding.insert(pending.clone());
+        }
+        match waiting {
+            true => {
+                println!("held until its attachments are uploaded");
+                self.held.push((under, pending));
+            }
+            false => {
+                if let Some(link) = self.link.as_ref() {
+                    link.send(matterless_view::live::Ask::Send {
+                        pending_post_id,
+                        channel_id: channel_id.to_string(),
+                        root_id: root_id.to_string(),
+                        message,
+                        file_ids: files.iter().map(|file| file.id.clone()).collect(),
+                    });
+                }
+            }
+        }
         // Painted immediately, and pinned to the bottom: sending is the one
         // case where the reader definitely wants to be looking at the newest
         // message, because they just wrote it.
@@ -5147,6 +5177,48 @@ impl App {
         self.stream.to_bottom(within);
         if let Some(root) = self.open_root() {
             self.reread_thread(&root);
+        }
+    }
+
+    /// Sends whatever was held for `under`, now nothing is uploading for it,
+    /// with every file that made it.
+    fn release_held(&mut self, under: &str) {
+        if self
+            .attaching
+            .get(under)
+            .is_some_and(|going| !going.is_empty())
+        {
+            return;
+        }
+        let (ready, still): (Vec<_>, Vec<_>) = std::mem::take(&mut self.held)
+            .into_iter()
+            .partition(|(waiting, _)| waiting == under);
+        self.held = still;
+        for (_, mut post) in ready {
+            let pending_post_id = post.pending_post_id.clone();
+            // The files go with the first message waiting, as they would
+            // have had it been sent once they were done.
+            post.files = self.attached.remove(under).unwrap_or_default();
+            if post.message.trim().is_empty() && post.files.is_empty() {
+                // Every upload failed and nothing was typed: nothing to send.
+                self.outstanding.discard(&pending_post_id);
+                continue;
+            }
+            self.outstanding.insert(post.clone());
+            println!("sending what was held, with {} file(s)", post.files.len());
+            if let Some(link) = self.link.as_ref() {
+                link.send(matterless_view::live::Ask::Send {
+                    pending_post_id,
+                    channel_id: post.channel_id.clone(),
+                    root_id: post.root_id.clone(),
+                    message: post.message.clone(),
+                    file_ids: post.files.iter().map(|file| file.id.clone()).collect(),
+                });
+            }
+            self.reread_channel(&post.channel_id);
+            if let Some(root) = self.open_root() {
+                self.reread_thread(&root);
+            }
         }
     }
 
