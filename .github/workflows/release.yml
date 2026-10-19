@@ -73,7 +73,9 @@ jobs:
         run: cargo build --release -p matterless-view --bin matterless-view
 
       # Retried, and checked: a feed timeout leaves choco "installing 0/0" with
-      # a success code, and the failure only surfaced at makensis.
+      # a success code, and the failure only surfaced at makensis. And from
+      # NSIS's own release when the feed stays down, which it did for every
+      # retry of two releases.
       - name: Install NSIS
         run: |
           $makensis = "C:\Program Files (x86)\NSIS\makensis.exe"
@@ -81,6 +83,12 @@ jobs:
             if (Test-Path $makensis) { break }
             choco install nsis -y --no-progress
             if (-not (Test-Path $makensis)) { Start-Sleep -Seconds (20 * $try) }
+          }
+          if (-not (Test-Path $makensis)) {
+            $setup = Join-Path $env:RUNNER_TEMP "nsis-setup.exe"
+            Invoke-WebRequest -UserAgent "Wget" -MaximumRedirection 10 -OutFile $setup `
+              -Uri "https://downloads.sourceforge.net/project/nsis/NSIS%203/3.11/nsis-3.11-setup.exe"
+            Start-Process -FilePath $setup -ArgumentList "/S" -Wait
           }
           if (-not (Test-Path $makensis)) { throw "NSIS did not install" }
 
