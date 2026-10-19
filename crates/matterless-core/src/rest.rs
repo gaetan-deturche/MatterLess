@@ -458,7 +458,14 @@ impl RestClient {
     pub async fn view_channel(&self, user_id: &str, channel_id: &str) -> Result<serde_json::Value> {
         self.post_json(
             &format!("/channels/members/{user_id}/view"),
-            &serde_json::json!({ "channel_id": channel_id }),
+            // Said, as the webapp says it: a client that does not is taken to
+            // have no collapsed threads, and the server marks every thread in
+            // the channel read along with it -- so reading a channel cleared
+            // its threads' replies, which nobody had looked at.
+            &serde_json::json!({
+                "channel_id": channel_id,
+                "collapsed_threads_supported": true,
+            }),
         )
         .await
     }
