@@ -482,6 +482,9 @@ struct App {
     /// is on screen; the whole conversation is shaped once, when the edge
     /// stops, to settle the heights of everything that is not.
     resizing: Option<std::time::Instant>,
+    /// When to try building the view again, after the GPU was lost and the
+    /// first try found the driver still resetting.
+    lost_gpu: Option<std::time::Instant>,
     /// A size that has arrived and not been built for yet.
     ///
     /// Held rather than applied, and applied only where the surface is rebuilt
@@ -929,6 +932,7 @@ impl App {
             driver: Driver::asked(),
             home: None,
             resizing: None,
+            lost_gpu: None,
             parked: None,
             sized: None,
             window: None,
@@ -4789,8 +4793,15 @@ impl App {
             if let Some((file_id, player)) = self.film.as_ref()
                 && viewed.as_deref() == Some(file_id.as_str())
             {
+                // Failed with the device, it is opened again with the view.
+                let lost = self
+                    .view
+                    .as_ref()
+                    .is_some_and(|view| view.gpu.lost().is_some());
                 if let Some(why) = player.failed() {
-                    self.viewer.gave_up(file_id, &why);
+                    if !lost {
+                        self.viewer.gave_up(file_id, &why);
+                    }
                 } else {
                     if let Some(frame) = player.due()
                         && let Some(view) = self.view.as_mut()
@@ -4809,6 +4820,7 @@ impl App {
                         };
                         match shown {
                             Ok(()) => self.viewer.arrived(file_id, (frame.width, frame.height)),
+                            Err(_) if lost => {}
                             Err(why) => self.viewer.gave_up(file_id, &why),
                         }
                     }
@@ -8690,9 +8702,61 @@ impl App {
         let Some(view) = self.view.as_mut() else {
             return;
         };
-        view.draw_scene(&mut self.fonts, &scene, size, ground, waiting);
+        if let Err(why) = view.draw_scene(&mut self.fonts, &scene, size, ground, waiting) {
+            eprintln!("the GPU was lost ({why}): building the view again");
+            self.rebuild_the_view();
+        }
         // A frame's worth of input has been acted on.
         self.input.settle();
+    }
+
+    /// A new device, swapchain and atlas, after the old device was lost.
+    ///
+    /// A GPU crash resets the driver and kills every resource made on the
+    /// device, and a window that went on drawing with them never showed
+    /// another frame.
+    fn rebuild_the_view(&mut self) {
+        // The player decodes on the old device, so it goes with it.
+        let film = self
+            .film
+            .take()
+            .map(|(file_id, player)| (file_id, player.position(), player.playing()));
+        // Before the new one: a window holds one swapchain at a time.
+        if let Some(old) = self.view.take() {
+            for key in old.atlas.held() {
+                self.asked.remove(&key);
+            }
+        }
+        let window = windows::Win32::Foundation::HWND(raw_window(self.window.as_ref()) as *mut _);
+        let mut view = match matterless_view::View::new(window, self.size) {
+            Ok(view) => view,
+            Err(why) => {
+                eprintln!("could not open Direct3D again: {why}");
+                self.lost_gpu = Some(std::time::Instant::now() + GPU_RETRY);
+                return;
+            }
+        };
+        self.lost_gpu = None;
+        view.atlas
+            .rasterise_subpixel(self.settings.text == matterless_view::settings::Text::Subpixel);
+        view.contrast = self.settings.contrast.amount();
+        let [red, green, blue, _] = self.palette.ground;
+        view.ground = [red, green, blue];
+        self.view = Some(view);
+        // Whatever the viewer had open, put back where it was.
+        if let Some(one) = self.viewer.current().cloned() {
+            self.fetch_looked(&one);
+        }
+        if let (Some((was, position, playing)), Some((file_id, player))) =
+            (film, self.film.as_ref())
+            && was == *file_id
+        {
+            player.seek(position);
+            if !playing {
+                player.pause();
+            }
+        }
+        self.redraw();
     }
 
     /// The sign-in screen, and nothing behind it.
@@ -9874,6 +9938,12 @@ impl ApplicationHandler<Update> for App {
             self.relayout();
             self.redraw();
         }
+        if self
+            .lost_gpu
+            .is_some_and(|at| std::time::Instant::now() >= at)
+        {
+            self.rebuild_the_view();
+        }
         let (expired, next) = self.typing.forget_stale();
         // Only when a line actually went: asking for a frame whenever one is
         // merely live would redraw every frame for as long as anybody types.
@@ -9947,6 +10017,7 @@ impl ApplicationHandler<Update> for App {
             spinning,
             self.tooltip.wakes(),
             self.rest.wakes(),
+            self.lost_gpu,
             // So the window wakes to finish shaping even when the drag ends
             // with nothing else to wake it.
             self.resizing.map(|since| since + SETTLE),
@@ -10949,6 +11020,10 @@ impl Shaping {
 /// How long after the last size before the rest of the conversation is
 /// shaped. Short enough to feel like part of letting go of the edge.
 const SETTLE: std::time::Duration = std::time::Duration::from_millis(120);
+
+/// How long to wait before opening Direct3D again when a driver reset is
+/// still under way.
+const GPU_RETRY: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// How long one turn of a loading spinner takes.
 ///

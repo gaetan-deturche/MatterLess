@@ -325,7 +325,7 @@ struct Surface {
 }
 
 impl Surface {
-    fn new(gpu: &Gpu, size: (u32, u32)) -> Self {
+    fn new(gpu: &Gpu, size: (u32, u32)) -> Result<Self, String> {
         // Colour and coverage, not coverage alone. A letter is stored as white
         // with the coverage in its alpha, so the vertex tints it; an emoji is
         // stored as it is, and its vertex is white so nothing tints it. One
@@ -348,19 +348,20 @@ impl Surface {
             ..Default::default()
         };
         let mut texture: Option<ID3D11Texture2D> = None;
-        unsafe { gpu.device.CreateTexture2D(&how, None, Some(&mut texture)) }.expect("a sheet");
-        let texture = texture.expect("a sheet");
+        unsafe { gpu.device.CreateTexture2D(&how, None, Some(&mut texture)) }
+            .map_err(|why| why.to_string())?;
+        let texture = texture.ok_or("no sheet")?;
         let mut view: Option<ID3D11ShaderResourceView> = None;
         unsafe {
             gpu.device
                 .CreateShaderResourceView(&texture, None, Some(&mut view))
         }
-        .expect("a view of the sheet");
-        Self {
+        .map_err(|why| why.to_string())?;
+        Ok(Self {
             texture,
-            view: view.expect("a view of the sheet"),
+            view: view.ok_or("no view of the sheet")?,
             pen: Pen::new(size),
-        }
+        })
     }
 
     /// Copies a rectangle of pixels in.
@@ -408,13 +409,13 @@ struct Store {
 }
 
 impl Store {
-    fn new(gpu: &Gpu, what: &'static str, size: (u32, u32)) -> Self {
-        Self {
-            surface: Surface::new(gpu, size),
+    fn new(gpu: &Gpu, what: &'static str, size: (u32, u32)) -> Result<Self, String> {
+        Ok(Self {
+            surface: Surface::new(gpu, size)?,
             images: HashMap::new(),
             forgotten: Vec::new(),
             what,
-        }
+        })
     }
 
     /// The slot a picture was written to, marking it as drawn.
@@ -601,21 +602,21 @@ pub struct Atlas {
 }
 
 impl Atlas {
-    pub fn new(gpu: &Gpu) -> Self {
+    pub fn new(gpu: &Gpu) -> Result<Self, String> {
         let atlas = Self {
-            letters: Surface::new(gpu, LETTERS),
+            letters: Surface::new(gpu, LETTERS)?,
             slots: HashMap::new(),
             scaler: swash::scale::ScaleContext::new(),
             subpixel: false,
-            faces: Store::new(gpu, "faces", FACES),
-            pictures: Store::new(gpu, "pictures", PICTURES),
+            faces: Store::new(gpu, "faces", FACES)?,
+            pictures: Store::new(gpu, "pictures", PICTURES)?,
             now: 0,
         };
         // One opaque white texel at the origin of the letters sheet, so a solid
         // rectangle is the same pipeline as a glyph: it samples this and
         // multiplies by its colour.
         atlas.letters.write(gpu, 0, 0, 1, 1, &[255, 255, 255, 255]);
-        atlas
+        Ok(atlas)
     }
 
     /// Changes how letters are rasterised, and forgets the ones already done.
@@ -727,6 +728,17 @@ impl Atlas {
     pub fn pictures_held(&self) -> usize {
         self.faces.images.values().flatten().count()
             + self.pictures.images.values().flatten().count()
+    }
+
+    /// Every picture in the sheets: what a view built again has to ask for.
+    pub fn held(&self) -> Vec<String> {
+        self.faces
+            .images
+            .iter()
+            .chain(&self.pictures.images)
+            .filter(|(_, held)| held.is_some())
+            .map(|(key, _)| key.clone())
+            .collect()
     }
 
     /// The pictures thrown away since this was last asked.

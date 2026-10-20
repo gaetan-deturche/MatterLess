@@ -546,7 +546,7 @@ impl View {
     pub fn new(window: HWND, size: (u32, u32)) -> Result<Self, String> {
         let gpu = Gpu::new(window, size)?;
         let bound = Bound::new(&gpu)?;
-        let atlas = Atlas::new(&gpu);
+        let atlas = Atlas::new(&gpu)?;
         let nothing = one_texel(&gpu)?;
         Ok(Self {
             gpu,
@@ -731,6 +731,9 @@ impl View {
     /// where the window itself is waiting on this to come back and a
     /// sixtieth of a second spent watching for the vertical blank is a
     /// sixtieth the edge spends behind the pointer.
+    ///
+    /// Answers why, when the device has been lost and the view has to be built
+    /// again.
     pub fn draw_scene(
         &mut self,
         fonts: &mut Fonts,
@@ -738,9 +741,10 @@ impl View {
         size: (u32, u32),
         ground: [u8; 4],
         waiting: bool,
-    ) {
+    ) -> Result<(), String> {
         let Some(target) = self.gpu.target.clone() else {
-            return;
+            // What a resize on a lost device leaves behind.
+            return self.gpu.lost().map_or(Ok(()), Err);
         };
         // One buffer for the frame, with each layer's span remembered.
         let mut quads: Vec<Vertex> = Vec::new();
@@ -880,11 +884,15 @@ impl View {
         // than the screen shows it -- except while it is being resized, when
         // what it has to gain is the frame arriving before the compositor
         // shows the window at its new size.
-        let _ = unsafe { self.gpu.chain.Present(u32::from(waiting), DXGI_PRESENT(0)) };
+        let presented = unsafe { self.gpu.chain.Present(u32::from(waiting), DXGI_PRESENT(0)) };
         // A frame has been drawn, which is what the atlas ages its pictures
         // by: everything on screen was just asked for, so anything that was
         // not is a frame older than the things it competes with for room.
         self.atlas.drew();
+        match presented.is_err() {
+            true => self.gpu.lost().map_or(Ok(()), Err),
+            false => Ok(()),
+        }
     }
 
     /// Grows the vertex buffer if the frame has outgrown it.

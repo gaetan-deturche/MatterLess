@@ -203,6 +203,15 @@ impl Gpu {
         self.retarget()
     }
 
+    /// Why the device stopped, when it has: a driver reset after a GPU crash,
+    /// a driver update, or the adapter going away. Everything made on it went
+    /// with it, so the only way on is a new device.
+    pub fn lost(&self) -> Option<String> {
+        unsafe { self.device.GetDeviceRemovedReason() }
+            .err()
+            .map(|why| why.to_string())
+    }
+
     /// The whole window, for the one viewport everything is drawn under.
     pub fn viewport(&self) -> D3D11_VIEWPORT {
         D3D11_VIEWPORT {
