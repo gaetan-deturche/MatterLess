@@ -93,6 +93,8 @@ pub const BACK: &str = "\u{e06e}";
 pub const NEXT: &str = "\u{e06f}";
 /// A sidebar category that is unfolded.  `chevron-down`
 pub const CHEVRON_DOWN: &str = "\u{e06d}";
+/// Down to the newest message.  `arrow-down`
+pub const ARROW_DOWN: &str = "\u{e042}";
 /// Keep a file next to the reader’s other downloads.  `download`
 pub const SAVE_FILE: &str = "\u{e0b2}";
 /// Delete a message.  `trash-2`

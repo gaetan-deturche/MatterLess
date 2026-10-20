@@ -3186,11 +3186,38 @@ impl Stream {
                 if lit { palette.raised } else { palette.surface },
                 rect.height / 2.0,
             );
+            // The arrow and the words centred together, measured: the words
+            // were set in from the left for an arrow that was never drawn.
+            const SAID: &str = "Jump to newest";
+            const ARROW: f32 = 14.0;
+            const SPACE: f32 = 6.0;
+            let wide = matterless_layout::extent_of(
+                fonts,
+                SAID,
+                f32::MAX,
+                matterless_layout::Style {
+                    size: 13.0,
+                    line_height: 18.0,
+                    bold: false,
+                    italic: false,
+                    mono: false,
+                },
+            )
+            .width;
+            let left = rect.x + (rect.width - ARROW - SPACE - wide) / 2.0;
+            let arrow = painter.run(
+                fonts,
+                matterless_layout::marks::ARROW_DOWN,
+                left,
+                rect.y + (rect.height - ARROW_LINE) / 2.0,
+                Run::mark(ARROW),
+            );
+            scene.glyphs(arrow, palette.signal, palette.faint);
             let glyphs = painter.run(
                 fonts,
-                "Jump to newest",
-                rect.x + 22.0,
-                rect.y + 5.0,
+                SAID,
+                left + ARROW + SPACE,
+                rect.y + (rect.height - 18.0) / 2.0,
                 Run::label(f32::MAX),
             );
             scene.glyphs(glyphs, palette.signal, palette.faint);
@@ -3281,6 +3308,9 @@ const MENTION: f32 = 3.0;
 const MENTION_PAD: f32 = 3.0;
 /// How wide the "jump to newest" button is.
 const JUMP: f32 = 150.0;
+/// The line a 14-pixel mark's ink centres on, by the same measure the viewer's
+/// buttons take for a 16-pixel one.
+const ARROW_LINE: f32 = 14.0 * 21.0 / 16.0;
 /// How wide the button that keeps a file is.
 const SAVE: f32 = 46.0;
 /// The disc a play mark sits on.
