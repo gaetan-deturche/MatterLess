@@ -74,6 +74,13 @@ pub enum Node {
         everyone: bool,
     },
     /// `~channel-name`.
+    /// One of the reader's own mention words written without an `@` -- the
+    /// bare name a build bot signs a commit with. Drawn as a mention of them,
+    /// and kept as it was written.
+    Named {
+        text: String,
+        username: String,
+    },
     ChannelLink {
         name: String,
     },
@@ -360,6 +367,124 @@ fn scan_math(text: &str, from: usize) -> Option<Found> {
     None
 }
 
+/// The reader's mention words turned into `Named` wherever they are written
+/// as words, outside code and links. `None` when they are nowhere: a parse is
+/// cached and shared, and copying every message to change nothing is a cost
+/// paid on every plan.
+pub fn name_the_reader(nodes: &[Node], words: &[String], username: &str) -> Option<Vec<Node>> {
+    if words.is_empty() || !named_anywhere(nodes, words) {
+        return None;
+    }
+    Some(named_in(nodes, words, username))
+}
+
+fn named_anywhere(nodes: &[Node], words: &[String]) -> bool {
+    nodes.iter().any(|node| match node {
+        Node::Text { value } => next_named(value, 0, words).is_some(),
+        Node::Emphasis { children }
+        | Node::Strong { children }
+        | Node::Strike { children }
+        | Node::Paragraph { children }
+        | Node::Heading { children, .. }
+        | Node::Blockquote { children } => named_anywhere(children, words),
+        Node::List { items, .. } => items.iter().any(|item| named_anywhere(item, words)),
+        Node::Table { head, rows } => head
+            .iter()
+            .chain(rows.iter().flatten())
+            .any(|cell| named_anywhere(cell, words)),
+        _ => false,
+    })
+}
+
+fn named_in(nodes: &[Node], words: &[String], username: &str) -> Vec<Node> {
+    let within = |children: &[Node]| named_in(children, words, username);
+    let mut out = Vec::with_capacity(nodes.len());
+    for node in nodes {
+        match node {
+            Node::Text { value } => {
+                let mut from = 0;
+                while let Some((start, end)) = next_named(value, from, words) {
+                    if start > from {
+                        out.push(Node::Text {
+                            value: value[from..start].to_string(),
+                        });
+                    }
+                    out.push(Node::Named {
+                        text: value[start..end].to_string(),
+                        username: username.to_string(),
+                    });
+                    from = end;
+                }
+                if from < value.len() {
+                    out.push(Node::Text {
+                        value: value[from..].to_string(),
+                    });
+                }
+            }
+            Node::Emphasis { children } => out.push(Node::Emphasis {
+                children: within(children),
+            }),
+            Node::Strong { children } => out.push(Node::Strong {
+                children: within(children),
+            }),
+            Node::Strike { children } => out.push(Node::Strike {
+                children: within(children),
+            }),
+            Node::Paragraph { children } => out.push(Node::Paragraph {
+                children: within(children),
+            }),
+            Node::Heading { level, children } => out.push(Node::Heading {
+                level: *level,
+                children: within(children),
+            }),
+            Node::Blockquote { children } => out.push(Node::Blockquote {
+                children: within(children),
+            }),
+            Node::List { ordered, items } => out.push(Node::List {
+                ordered: *ordered,
+                items: items.iter().map(|item| within(item)).collect(),
+            }),
+            Node::Table { head, rows } => out.push(Node::Table {
+                head: head.iter().map(|cell| within(cell)).collect(),
+                rows: rows
+                    .iter()
+                    .map(|row| row.iter().map(|cell| within(cell)).collect())
+                    .collect(),
+            }),
+            other => out.push(other.clone()),
+        }
+    }
+    out
+}
+
+/// The first of the words at or after `from`, case aside, with nothing
+/// alphanumeric touching it either side. ASCII-lowered so a byte offset in
+/// the lowered text is one in the text.
+fn next_named(text: &str, from: usize, words: &[String]) -> Option<(usize, usize)> {
+    let lowered = text.to_ascii_lowercase();
+    let mut best: Option<(usize, usize)> = None;
+    for word in words {
+        let word = word.to_ascii_lowercase();
+        let mut at = from;
+        while let Some(found) = lowered.get(at..).and_then(|rest| rest.find(&word)) {
+            let start = at + found;
+            let end = start + word.len();
+            let clear = |edge: Option<char>| !edge.is_some_and(char::is_alphanumeric);
+            if clear(lowered[..start].chars().next_back()) && clear(lowered[end..].chars().next()) {
+                if best.is_none_or(|(was, _)| start < was) {
+                    best = Some((start, end));
+                }
+                break;
+            }
+            at = start + 1;
+            while !lowered.is_char_boundary(at) {
+                at += 1;
+            }
+        }
+    }
+    best
+}
+
 /// Splits one text run into text and extension nodes.
 fn expand_text(text: &str) -> Vec<Node> {
     let mut nodes = Vec::new();
@@ -500,6 +625,7 @@ fn flatten(nodes: &[Node], between: &str) -> String {
                     out.push('@');
                     out.push_str(username);
                 }
+                Node::Named { text, .. } => out.push_str(text),
                 Node::ChannelLink { name } => {
                     out.push('~');
                     out.push_str(name);
@@ -1292,5 +1418,32 @@ mod tests {
             vec![("tada", Some("\u{1F389}")), ("bongo", None)],
             "a standard name resolves at parse time; a custom one is the payload's job"
         );
+    }
+
+    /// A bot signs a commit with the bare name: that is the reader being
+    /// named, and it is drawn as a mention of them. Inside a word, code or a
+    /// link it is not.
+    #[test]
+    fn the_reader_is_named_where_their_words_are_written() {
+        let words = vec!["ada.lovelace".to_string()];
+        let nodes = parse("On commit 217114 by Ada.Lovelace, see `ada.lovelace` and xada.lovelace");
+        let named = name_the_reader(&nodes, &words, "ada.lovelace").expect("named");
+        let Node::Paragraph { children } = &named[0] else {
+            panic!("a paragraph");
+        };
+        let found: Vec<&str> = children
+            .iter()
+            .filter_map(|node| match node {
+                Node::Named { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(found, ["Ada.Lovelace"], "once, as written");
+        assert_eq!(
+            plain_text(&named),
+            plain_text(&nodes),
+            "the words are unchanged"
+        );
+        assert!(name_the_reader(&parse("nobody here"), &words, "ada.lovelace").is_none());
     }
 }

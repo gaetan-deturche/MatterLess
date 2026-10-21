@@ -6191,6 +6191,8 @@ impl App {
         options.utc_offset_minutes = matterless_view::clock::utc_offset_minutes();
         options.channel_names = store.channel_names().unwrap_or_default();
         options.not_emoji = store.not_custom_emoji().unwrap_or_default();
+        (options.reader_name, options.reader_words) =
+            matterless_view::feed::reader_words(store, &self.me);
         options.author_names = known
             .iter()
             .map(|(id, user)| (id.clone(), user.username.clone()))

@@ -1007,6 +1007,10 @@ pub struct PlanOptions {
     /// The `:name:`s the server says are no emoji of its own, and which have no
     /// character either: written out as typed rather than left a blank.
     pub not_emoji: HashSet<String>,
+    /// The reader's username and the words that mention them written without
+    /// an `@`, which are drawn as mentions. Empty when the caller cannot say.
+    pub reader_name: String,
+    pub reader_words: Vec<String>,
 }
 
 impl PlanOptions {
@@ -1030,6 +1034,8 @@ impl PlanOptions {
             pixel_ratio: 1.0,
             channel_names: HashSet::new(),
             not_emoji: HashSet::new(),
+            reader_name: String::new(),
+            reader_words: Vec::new(),
         }
     }
 }
@@ -1428,6 +1434,27 @@ fn build_post_row(post: &Post, options: &PlanOptions) -> PostRow {
         true => Arc::new(only_known(&nodes, &typed)),
         false => nodes,
     };
+    let name = |nodes: &[Node]| {
+        markdown::name_the_reader(nodes, &options.reader_words, &options.reader_name)
+    };
+    let nodes = name(&nodes).map_or(nodes, Arc::new);
+    let attachments: Vec<Attachment> = attachments
+        .into_iter()
+        .map(|mut attachment| {
+            if let Some(named) = name(&attachment.pretext) {
+                attachment.pretext = named;
+            }
+            if let Some(named) = name(&attachment.text) {
+                attachment.text = named;
+            }
+            for field in &mut attachment.fields {
+                if let Some(named) = name(&field.value) {
+                    field.value = named;
+                }
+            }
+            attachment
+        })
+        .collect();
     let (author_name, bot) = author_of(post, options);
     PostRow {
         post_id: post.id.clone(),
@@ -1696,6 +1723,8 @@ pub fn plan_thread(root: &Post, replies: &[Post], options: &PlanOptions) -> Vec<
         full_res: options.full_res,
         allow_svg: options.allow_svg,
         pixel_ratio: options.pixel_ratio,
+        reader_name: options.reader_name.clone(),
+        reader_words: options.reader_words.clone(),
     };
     // The divider belongs here now: `threads.last_viewed_at` is a real
     // per-thread watermark from the server, where in Phase 3 there was nothing

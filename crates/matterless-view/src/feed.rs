@@ -19,6 +19,20 @@ use std::path::Path;
 /// has somewhere to go, and far short of the whole history, which is unbounded.
 pub const PAGE: u32 = 400;
 
+/// The reader's username, and the words that name them without an `@`: drawn
+/// as mentions of them, so a bot's "by gaetan.deturche" is seen.
+pub fn reader_words(store: &Store, me_id: &str) -> (String, Vec<String>) {
+    store
+        .users_by_ids(&[me_id.to_string()])
+        .ok()
+        .and_then(|mut people| people.remove(me_id))
+        .map(|me| {
+            let words = matterless_sync::notify::mention_words(&me);
+            (me.username, words)
+        })
+        .unwrap_or_default()
+}
+
 /// Where the installed program keeps its database.
 ///
 /// The folder is called `.dev` and that is a misnomer kept on purpose: every
@@ -174,6 +188,7 @@ pub fn rows_of(
     options.utc_offset_minutes = crate::clock::utc_offset_minutes();
     options.channel_names = store.channel_names().unwrap_or_default();
     options.not_emoji = store.not_custom_emoji().unwrap_or_default();
+    (options.reader_name, options.reader_words) = reader_words(store, me_id);
     options.author_names = people
         .iter()
         .map(|(id, user)| (id.clone(), user.username.clone()))
@@ -297,6 +312,7 @@ pub fn rows_from(
     options.utc_offset_minutes = crate::clock::utc_offset_minutes();
     options.channel_names = store.channel_names().unwrap_or_default();
     options.not_emoji = store.not_custom_emoji().unwrap_or_default();
+    (options.reader_name, options.reader_words) = reader_words(&store, me_id);
     options.author_names = people
         .iter()
         .map(|(id, user)| (id.clone(), user.username.clone()))

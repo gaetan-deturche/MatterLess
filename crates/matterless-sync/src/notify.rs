@@ -172,30 +172,8 @@ fn read_mention(post: &Post, context: &NotifyContext<'_>) -> MentionVerdict {
         return MentionVerdict::ChannelWide;
     }
 
-    for keyword in context
-        .me
-        .notify_props
-        .get("mention_keys")
-        .map(String::as_str)
-        .unwrap_or("")
-        .split(',')
-        .map(str::trim)
-        .filter(|keyword| !keyword.is_empty())
-    {
+    for keyword in mention_words(context.me) {
         if contains_word(&message_lower, &keyword.to_lowercase()) {
-            return MentionVerdict::Keyword;
-        }
-    }
-
-    let first_name_enabled = context
-        .me
-        .notify_props
-        .get("first_name")
-        .map(String::as_str)
-        == Some("true");
-    if first_name_enabled && !context.me.first_name.is_empty() {
-        let first_name_lower = context.me.first_name.to_lowercase();
-        if contains_word(&message_lower, &first_name_lower) {
             return MentionVerdict::Keyword;
         }
     }
@@ -239,6 +217,27 @@ fn threads_level(context: &NotifyContext<'_>) -> String {
         .get("desktop_threads")
         .cloned()
         .unwrap_or_else(|| "all".to_string())
+}
+
+/// The words that mention this reader without an `@`: their mention keys,
+/// and their first name when they asked for it.
+pub fn mention_words(me: &User) -> Vec<String> {
+    let mut words: Vec<String> = me
+        .notify_props
+        .get("mention_keys")
+        .map(String::as_str)
+        .unwrap_or("")
+        .split(',')
+        .map(str::trim)
+        .filter(|keyword| !keyword.is_empty())
+        .map(str::to_string)
+        .collect();
+    if me.notify_props.get("first_name").map(String::as_str) == Some("true")
+        && !me.first_name.is_empty()
+    {
+        words.push(me.first_name.clone());
+    }
+    words
 }
 
 /// The words a mention can be in: the message, and what a bot put in its

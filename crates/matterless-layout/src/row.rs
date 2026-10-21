@@ -1156,6 +1156,18 @@ fn inline(
                 },
                 into,
             ),
+            Node::Named { text, username } => tagged(
+                TextSpan {
+                    text: text.clone(),
+                    bold,
+                    italic,
+                    mono,
+                    press: Some(Press::Person(username.clone())),
+                    faint: false,
+                    emoji: None,
+                },
+                into,
+            ),
             Node::ChannelLink { name } => tagged(
                 TextSpan {
                     text: format!("~{name}"),
