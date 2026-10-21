@@ -41,16 +41,25 @@ pub fn selectable(block: &Block) -> bool {
 /// when it is between two -- so a drag across the gap between messages, or
 /// over a name, carries on selecting rather than stopping.
 pub fn spot_at(seen: &[Seen], x: f32, y: f32) -> Option<Spot> {
-    let mut nearest: Option<(f32, &Seen, f32)> = None;
+    let apart = |at: f32, from: f32, size: f32| {
+        if at < from {
+            from - at
+        } else if at > from + size {
+            at - from - size
+        } else {
+            0.0
+        }
+    };
+    // Across, when two blocks share the line: a list item's bullet is a block
+    // of its own beside the item, and taking whichever came first put every
+    // press on the line at the end of the dot.
+    let mut nearest: Option<((f32, f32), &Seen, f32)> = None;
     for one in seen {
         for letter in &one.letters {
-            let away = if y < letter.y {
-                letter.y - y
-            } else if y > letter.y + letter.height {
-                y - letter.y - letter.height
-            } else {
-                0.0
-            };
+            let away = (
+                apart(y, letter.y, letter.height),
+                apart(x, letter.x, letter.width),
+            );
             if nearest.is_none_or(|(best, _, _)| away < best) {
                 nearest = Some((away, one, letter.y));
             }
@@ -187,6 +196,24 @@ mod tests {
         assert_eq!(at(1.0, 25.0), Some(3), "the second line");
         assert_eq!(at(1.0, 400.0), Some(3), "below everything: the last line");
         assert_eq!(spot_at(&[], 1.0, 1.0), None);
+    }
+
+    /// A list item's line holds two blocks, the bullet and the item: the place
+    /// is in the one the pointer is over, not the one that came first.
+    #[test]
+    fn a_bullet_beside_the_line_does_not_take_the_place() {
+        let bullet = Seen {
+            post: "p".into(),
+            block: 0,
+            letters: vec![letter(0.0, 0.0, 0)],
+        };
+        let item = Seen {
+            post: "p".into(),
+            block: 1,
+            letters: vec![letter(20.0, 0.0, 0), letter(30.0, 0.0, 1)],
+        };
+        let spot = spot_at(&[bullet, item], 32.0, 5.0).expect("a place");
+        assert_eq!((spot.block, spot.at), (1, 1), "in the item, before its b");
     }
 
     /// A double click takes the word, or the one character when there is none.
