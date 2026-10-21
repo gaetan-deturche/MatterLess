@@ -138,8 +138,9 @@ fn at_mentions(message: &str) -> Vec<String> {
 
 /// Resolves the strongest mention the post contains for this user.
 pub fn resolve_mention(post: &Post, context: &NotifyContext<'_>) -> MentionVerdict {
-    let message_lower = post.message.to_lowercase();
-    let mentions = at_mentions(&post.message);
+    let said = mentionable(post);
+    let message_lower = said.to_lowercase();
+    let mentions = at_mentions(&said);
     let username_lower = context.me.username.to_lowercase();
 
     if !username_lower.is_empty() && mentions.iter().any(|token| token == &username_lower) {
@@ -224,6 +225,34 @@ fn threads_level(context: &NotifyContext<'_>) -> String {
         .get("desktop_threads")
         .cloned()
         .unwrap_or_else(|| "all".to_string())
+}
+
+/// The words a mention can be in: the message, and what a bot put in its
+/// attachments -- a build failure names whoever broke it in the card, with an
+/// `@`, and the message above it never does.
+fn mentionable(post: &Post) -> String {
+    let mut said = post.message.clone();
+    let attachments = post
+        .props
+        .get("attachments")
+        .and_then(|value| value.as_array());
+    for attachment in attachments.into_iter().flatten() {
+        let fields = attachment
+            .get("fields")
+            .and_then(|value| value.as_array())
+            .into_iter()
+            .flatten()
+            .flat_map(|field| [field.get("title"), field.get("value")]);
+        let parts = ["pretext", "title", "text"]
+            .into_iter()
+            .map(|key| attachment.get(key))
+            .chain(fields);
+        for part in parts.flatten().filter_map(|value| value.as_str()) {
+            said.push('\n');
+            said.push_str(part);
+        }
+    }
+    said
 }
 
 fn is_muted(context: &NotifyContext<'_>) -> bool {
@@ -563,6 +592,22 @@ mod tests {
         named.root_id = "root1".into();
         ctx.following_thread = false;
         assert!(decide(&named, &ctx).notify);
+    }
+
+    /// A bot's card names people in its attachment, not its message: the
+    /// failed build says who broke it there, and that is a mention.
+    #[test]
+    fn a_name_in_an_attachment_is_a_mention() {
+        let user = me();
+        let props: HashMap<String, String> =
+            [("mark_unread".to_string(), "mention".to_string())].into();
+        let mut card = post_from("bot", "### Client Build Failed");
+        card.props = serde_json::json!({
+            "attachments": [{"text": "Previous changes:\n- 216211 by @ada"}]
+        });
+        let decided = decide(&card, &context(&user, &props));
+        assert_eq!(decided.mention, MentionVerdict::Direct);
+        assert!(decided.notify, "{:?}", decided.reason);
     }
 
     /// A keyword is a mention as much as `@name` is: through a muted channel
