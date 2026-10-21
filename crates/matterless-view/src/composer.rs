@@ -112,6 +112,7 @@ pub enum Format {
     Italic,
     Strike,
     Code,
+    Link,
     Quote,
     Bullets,
     Numbers,
@@ -119,11 +120,12 @@ pub enum Format {
 
 impl Format {
     /// Every one, in the order the official client puts them.
-    pub const EVERY: [Format; 7] = [
+    pub const EVERY: [Format; 8] = [
         Format::Bold,
         Format::Italic,
         Format::Strike,
         Format::Code,
+        Format::Link,
         Format::Quote,
         Format::Bullets,
         Format::Numbers,
@@ -140,7 +142,9 @@ impl Format {
             Format::Italic => Some(("*", "*")),
             Format::Strike => Some(("~~", "~~")),
             Format::Code => Some(("`", "`")),
-            Format::Quote | Format::Bullets | Format::Numbers => None,
+            // Its own case in `mark_up`: what goes after the words is a
+            // place for an address, not a closing mark.
+            Format::Link | Format::Quote | Format::Bullets | Format::Numbers => None,
         }
     }
 
@@ -186,6 +190,7 @@ impl Format {
             Format::Italic => marks::ITALIC,
             Format::Strike => marks::STRIKE,
             Format::Code => marks::CODE,
+            Format::Link => marks::LINK,
             Format::Quote => marks::QUOTE,
             Format::Bullets => marks::BULLETS,
             Format::Numbers => marks::NUMBERS,
@@ -195,10 +200,11 @@ impl Format {
     /// What it is called, for the tooltip.
     pub fn said(self) -> &'static str {
         match self {
-            Format::Bold => "Bold",
-            Format::Italic => "Italic",
+            Format::Bold => "Bold  (Ctrl+B)",
+            Format::Italic => "Italic  (Ctrl+I)",
             Format::Strike => "Strikethrough",
-            Format::Code => "Code",
+            Format::Code => "Code  (Ctrl+K)",
+            Format::Link => "Link  (Ctrl+Alt+K)",
             Format::Quote => "Quote",
             Format::Bullets => "Bulleted list",
             Format::Numbers => "Numbered list",
@@ -212,6 +218,7 @@ impl Format {
             Format::Italic => "italic",
             Format::Strike => "strike",
             Format::Code => "code",
+            Format::Link => "link",
             Format::Quote => "quote",
             Format::Bullets => "bullets",
             Format::Numbers => "numbers",
@@ -220,6 +227,12 @@ impl Format {
 
     fn from_slug(slug: &str) -> Option<Format> {
         Format::EVERY.into_iter().find(|one| one.slug() == slug)
+    }
+
+    /// The tooltip for a formatting button's hit box, in whichever box.
+    pub fn explains(name: &str) -> Option<&'static str> {
+        let (_, slug) = name.split_once("/mark/")?;
+        Format::from_slug(slug).map(Format::said)
     }
 }
 
@@ -1647,6 +1660,10 @@ impl Composer {
                 self.mark_up(how, fonts);
             }
         }
+        // The official client's chord for a link.
+        if !self.plain && mods.command && mods.alt && !mods.shift && input.struck(Key::Char('k')) {
+            self.mark_up(Format::Link, fonts);
+        }
         if input.chord(Key::Char('v')) && !clipboard.is_empty() {
             let pasted = clipboard.clone();
             self.editor.insert_string(&pasted, None);
@@ -1695,6 +1712,13 @@ impl Composer {
     /// range that something has to keep track of.
     pub fn mark_up(&mut self, how: Format, fonts: &mut Fonts) {
         self.editor.start_change();
+        if how == Format::Link {
+            self.link(fonts);
+            self.remember();
+            self.touched = true;
+            self.follow_caret();
+            return;
+        }
         match how.around() {
             Some((before, after)) => match self.editor.copy_selection() {
                 Some(chosen) => {
@@ -1752,6 +1776,37 @@ impl Composer {
         self.remember();
         self.touched = true;
         self.follow_caret();
+    }
+
+    /// `[words](url)` around the selection, as the official client writes it,
+    /// with `url` chosen so the address is typed or pasted over it. A chosen
+    /// address becomes the target instead, and with nothing chosen the caret
+    /// waits between the brackets for the words.
+    fn link(&mut self, fonts: &mut Fonts) {
+        let chosen = self.editor.copy_selection().unwrap_or_default();
+        self.editor.delete_selection();
+        let back = |editor: &mut Editor<'static>, fonts: &mut Fonts, by: usize| {
+            for _ in 0..by {
+                let system = fonts.system_mut();
+                editor.action(system, Action::Motion(Motion::Previous));
+            }
+        };
+        let address = chosen.starts_with("https://") || chosen.starts_with("http://");
+        if address && !chosen.contains(char::is_whitespace) {
+            self.editor.insert_string(&format!("[]({chosen})"), None);
+            back(&mut self.editor, fonts, chosen.chars().count() + 3);
+            return;
+        }
+        if chosen.is_empty() {
+            self.editor.insert_string("[](url)", None);
+            back(&mut self.editor, fonts, "](url)".len());
+            return;
+        }
+        self.editor.insert_string(&format!("[{chosen}](url)"), None);
+        back(&mut self.editor, fonts, 1);
+        let end = self.editor.cursor();
+        back(&mut self.editor, fonts, "url".len());
+        self.editor.set_selection(Selection::Normal(end));
     }
 
     /// Puts the caret at the start of one line, for a test that has to press
@@ -2682,6 +2737,47 @@ mod tests {
         fresh.fill("already written", &mut fonts);
         fresh.mark_up(super::Format::Quote, &mut fonts);
         assert_eq!(fresh.text(), "> already written");
+    }
+
+    /// A link puts the chosen words in brackets and leaves `url` chosen for
+    /// the address; a chosen address goes the other way round.
+    #[test]
+    fn a_link_wraps_the_words_and_waits_for_the_address() {
+        use cosmic_text::{Cursor, Edit, Selection};
+        let mut fonts = Fonts::new();
+        let type_in = |composer: &mut Composer, fonts: &mut Fonts, said: &str| {
+            for character in said.chars() {
+                composer.act(fonts, super::Action::Insert(character));
+            }
+        };
+        let choose_all = |composer: &mut Composer| {
+            composer
+                .editor
+                .set_selection(Selection::Normal(Cursor::new(0, 0)));
+        };
+
+        let mut empty = Composer::new("composer");
+        empty.mark_up(super::Format::Link, &mut fonts);
+        type_in(&mut empty, &mut fonts, "see");
+        assert_eq!(empty.text(), "[see](url)", "the words first");
+
+        let mut words = Composer::new("composer");
+        words.fill("see", &mut fonts);
+        choose_all(&mut words);
+        words.mark_up(super::Format::Link, &mut fonts);
+        type_in(&mut words, &mut fonts, "https://x.y");
+        assert_eq!(words.text(), "[see](https://x.y)", "typed over url");
+
+        let mut address = Composer::new("composer");
+        address.fill("https://x.y", &mut fonts);
+        choose_all(&mut address);
+        address.mark_up(super::Format::Link, &mut fonts);
+        type_in(&mut address, &mut fonts, "see");
+        assert_eq!(
+            address.text(),
+            "[see](https://x.y)",
+            "an address is the target"
+        );
     }
 
     /// The row is not there at all when the strip cannot hold it.

@@ -4103,6 +4103,9 @@ impl App {
         if name == "sidebar/me" {
             return Some("Your status".to_string());
         }
+        if let Some(said) = composer::Format::explains(name) {
+            return Some(said.to_string());
+        }
         // The viewer's bar, which says its keys: nothing else on screen does.
         if let Some(slug) = name
             .strip_prefix(matterless_view::viewer::NAME)
