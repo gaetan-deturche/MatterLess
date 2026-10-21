@@ -912,6 +912,7 @@ async fn run(
                                 let event = matterless_core::Event::Posted {
                                     channel_id: post.channel_id.clone(),
                                     post: Box::new(post),
+                                    mentioned: None,
                                 };
                                 if let Err(error) = engine.apply_event(&event, &context) {
                                     eprintln!("storing a confirmed send: {error}");
@@ -4037,6 +4038,7 @@ pub async fn upload(
             let event = matterless_core::Event::Posted {
                 channel_id: post.channel_id.clone(),
                 post: Box::new(post),
+                mentioned: None,
             };
             if let Err(error) = engine.apply_event(&event, context) {
                 eprintln!("storing the message that carries {name}: {error}");

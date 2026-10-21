@@ -537,7 +537,7 @@ pub async fn run(client: &RestClient, me: &User, config: SoakConfig) -> Result<b
                     Signal::Event { event, .. } => {
                         if recorder.is_recording() {
                             recorder.write(match &event {
-                                Event::Posted { post, channel_id } => Record::Posted {
+                                Event::Posted { post, channel_id, .. } => Record::Posted {
                                     post: (**post).clone(), channel_id: channel_id.clone() },
                                 Event::PostEdited(post) => Record::Edited {
                                     post: (**post).clone() },
@@ -572,7 +572,9 @@ pub async fn run(client: &RestClient, me: &User, config: SoakConfig) -> Result<b
         match tokio::time::timeout(Duration::from_secs(1), signals.recv()).await {
             Ok(Some(Signal::Event { event, .. })) => {
                 if recorder.is_recording()
-                    && let Event::Posted { post, channel_id } = &event
+                    && let Event::Posted {
+                        post, channel_id, ..
+                    } = &event
                 {
                     recorder.write(Record::Posted {
                         post: (**post).clone(),
@@ -638,6 +640,7 @@ pub fn replay(path: &str) -> Result<bool> {
             Record::Posted { post, channel_id } => session.on_event(&Event::Posted {
                 post: Box::new(post.clone()),
                 channel_id: channel_id.clone(),
+                mentioned: None,
             })?,
             Record::Edited { post } => {
                 session.on_event(&Event::PostEdited(Box::new(post.clone())))?

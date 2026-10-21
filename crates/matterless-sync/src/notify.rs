@@ -66,6 +66,10 @@ pub struct NotifyContext<'a> {
     pub thread_mode: ThreadMode,
     /// Only consulted for replies under collapsed threads.
     pub following_thread: bool,
+    /// Whether the server's own list of who a live post mentions has this
+    /// reader on it. The answer when there is one: the text is only read to
+    /// say what kind of mention, and to guess when nothing was said.
+    pub named_by_server: Option<bool>,
 }
 
 /// True when `needle` appears in `haystack` on word boundaries, case-insensitive.
@@ -138,6 +142,16 @@ fn at_mentions(message: &str) -> Vec<String> {
 
 /// Resolves the strongest mention the post contains for this user.
 pub fn resolve_mention(post: &Post, context: &NotifyContext<'_>) -> MentionVerdict {
+    let read = read_mention(post, context);
+    match context.named_by_server {
+        Some(false) => MentionVerdict::None,
+        Some(true) if read == MentionVerdict::None => MentionVerdict::Direct,
+        _ => read,
+    }
+}
+
+/// What the words say, which is a guess at what the server decided.
+fn read_mention(post: &Post, context: &NotifyContext<'_>) -> MentionVerdict {
     let said = mentionable(post);
     let message_lower = said.to_lowercase();
     let mentions = at_mentions(&said);
@@ -392,7 +406,31 @@ mod tests {
             window_focused: false,
             thread_mode: ThreadMode::Flat,
             following_thread: false,
+            named_by_server: None,
         }
+    }
+
+    /// What the server says a live post mentions outranks what the words
+    /// seem to: a name in a bot's list of recent changes is not a mention
+    /// when the server does not count it, and a mention the words do not
+    /// show -- a group the reader is in -- is one when it does.
+    #[test]
+    fn the_server_decides_who_a_live_post_mentions() {
+        let user = me();
+        let props = HashMap::new();
+        let mut card = post_from("bot", "Failed");
+        card.props = serde_json::json!({
+            "attachments": [{"text": "Previous changes:\n- 216211 by @ada"}]
+        });
+        let mut ctx = context(&user, &props);
+        ctx.named_by_server = Some(false);
+        assert_eq!(decide(&card, &ctx).mention, MentionVerdict::None);
+
+        let grouped = post_from("other", "@rendering can someone look?");
+        ctx.named_by_server = Some(true);
+        let decided = decide(&grouped, &ctx);
+        assert_eq!(decided.mention, MentionVerdict::Direct);
+        assert!(decided.notify, "{:?}", decided.reason);
     }
 
     #[test]

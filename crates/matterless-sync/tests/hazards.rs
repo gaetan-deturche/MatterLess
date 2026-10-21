@@ -126,6 +126,7 @@ fn live(engine: &SyncEngine, context: &SyncContext, post: Post) -> Vec<Delta> {
             &Event::Posted {
                 post: Box::new(post),
                 channel_id: "c1".into(),
+                mentioned: None,
             },
             context,
         )

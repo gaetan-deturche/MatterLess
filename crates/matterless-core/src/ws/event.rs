@@ -49,6 +49,10 @@ pub enum Event {
     Posted {
         post: Box<Post>,
         channel_id: String,
+        /// Who the server says the post mentions, which is what the official
+        /// client notifies and counts by. `None` when nothing said: a post
+        /// this client built from a REST reply rather than heard live.
+        mentioned: Option<Vec<String>>,
     },
     PostEdited(Box<Post>),
     PostDeleted(Box<Post>),
@@ -234,6 +238,19 @@ fn bool_field(data: Option<&serde_json::Value>, key: &str) -> bool {
     }
 }
 
+/// The user ids a `posted` event says were mentioned: a JSON array encoded
+/// as a string on the wire, or an array.
+fn mentions_in(data: Option<&serde_json::Value>) -> Vec<String> {
+    match data.and_then(|data| data.get("mentions")) {
+        Some(serde_json::Value::String(said)) => serde_json::from_str(said).unwrap_or_default(),
+        Some(serde_json::Value::Array(ids)) => ids
+            .iter()
+            .filter_map(|id| id.as_str().map(str::to_string))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
 fn string_field(data: Option<&serde_json::Value>, key: &str) -> String {
     data.and_then(|value| value.get(key))
         .and_then(|value| value.as_str())
@@ -293,7 +310,13 @@ pub fn parse(envelope: &Envelope) -> Result<Option<Event>> {
             } else {
                 broadcast_channel
             };
-            Event::Posted { post, channel_id }
+            // Left out when nobody is mentioned, so absent is an answer.
+            let mentioned = (name == "posted").then(|| mentions_in(data));
+            Event::Posted {
+                post,
+                channel_id,
+                mentioned,
+            }
         }
         "post_edited" => match decode_nested_post(data, "post")? {
             Some(post) => Event::PostEdited(post),
@@ -449,7 +472,9 @@ mod tests {
         let envelope: Envelope = serde_json::from_str(frame).unwrap();
         let event = parse(&envelope).unwrap().unwrap();
         match event {
-            Event::Posted { post, channel_id } => {
+            Event::Posted {
+                post, channel_id, ..
+            } => {
                 assert_eq!(post.id, "abc");
                 assert_eq!(post.message, "hi");
                 assert!(post.is_reply(), "root_id must survive the inner decode");
@@ -457,6 +482,31 @@ mod tests {
             }
             other => panic!("expected Posted, got {other:?}"),
         }
+    }
+
+    /// Who the server says a post mentions comes as a JSON array in a string,
+    /// and is left out when it mentions nobody -- which is an answer too.
+    #[test]
+    fn posted_says_who_it_mentions() {
+        let mentioned = |data: &str| {
+            let frame = format!(
+                r#"{{"event":"posted","data":{{{data}"post":"{{\"id\":\"abc\",\"channel_id\":\"c\"}}"}},"seq":1}}"#
+            );
+            let envelope: Envelope = serde_json::from_str(&frame).unwrap();
+            match parse(&envelope).unwrap().unwrap() {
+                Event::Posted { mentioned, .. } => mentioned,
+                other => panic!("expected Posted, got {other:?}"),
+            }
+        };
+        assert_eq!(
+            mentioned(r#""mentions":"[\"me\",\"you\"]","#),
+            Some(vec!["me".to_string(), "you".to_string()])
+        );
+        assert_eq!(
+            mentioned(""),
+            Some(Vec::new()),
+            "nobody, said by leaving it out"
+        );
     }
 
     #[test]

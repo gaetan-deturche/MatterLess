@@ -149,6 +149,7 @@ fn a_replayed_live_event_produces_no_delta() {
     let event = Event::Posted {
         post: Box::new(post("p1", 100, "")),
         channel_id: "c1".into(),
+        mentioned: None,
     };
 
     let first = engine.apply_event(&event, &context).unwrap();
@@ -210,6 +211,7 @@ fn an_edit_is_never_a_notification() {
             &Event::Posted {
                 post: Box::new(original.clone()),
                 channel_id: "c1".into(),
+                mentioned: None,
             },
             &context,
         )
@@ -248,6 +250,7 @@ fn deletion_emits_a_tombstone_delta() {
             &Event::Posted {
                 post: Box::new(post("p1", 100, "")),
                 channel_id: "c1".into(),
+                mentioned: None,
             },
             &context,
         )
@@ -279,6 +282,7 @@ fn a_deleted_post_is_gone_from_the_store_and_not_merely_announced() {
             &Event::Posted {
                 post: Box::new(post("p1", 100, "")),
                 channel_id: "c1".into(),
+                mentioned: None,
             },
             &context,
         )
@@ -456,6 +460,7 @@ fn a_muted_channel_does_not_notify_from_the_store_alone() {
             &Event::Posted {
                 post: Box::new(post("p1", 100, "")),
                 channel_id: "c1".into(),
+                mentioned: None,
             },
             &context,
         )
@@ -508,6 +513,7 @@ fn unread_delta_follows_a_live_post() {
             &Event::Posted {
                 post: Box::new(post("p1", 100, "")),
                 channel_id: "c1".into(),
+                mentioned: None,
             },
             &context,
         )
@@ -666,6 +672,7 @@ fn a_live_post_moves_the_unread_count() {
             &Event::Posted {
                 post: Box::new(post("from-someone", 200, "")),
                 channel_id: "c1".into(),
+                mentioned: None,
             },
             &context,
         )
@@ -728,6 +735,7 @@ fn a_join_is_not_an_unread_message() {
             &Event::Posted {
                 post: Box::new(joined),
                 channel_id: "c1".into(),
+                mentioned: None,
             },
             &context,
         )
@@ -795,6 +803,7 @@ fn my_own_post_does_not_count_as_unread() {
             &Event::Posted {
                 post: Box::new(mine),
                 channel_id: "c1".into(),
+                mentioned: None,
             },
             &context,
         )

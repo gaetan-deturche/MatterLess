@@ -166,6 +166,7 @@ impl SyncContext {
             window_focused: self.window_focused,
             thread_mode: self.thread_mode,
             following_thread: !root_id.is_empty() && self.followed_threads.contains(root_id),
+            named_by_server: None,
         }
     }
 }
@@ -229,7 +230,7 @@ impl SyncEngine {
                 continue;
             }
             let in_stream = list.order.iter().any(|id| id == &post.id);
-            deltas.push(self.post_delta(post, outcome.change, arrival, in_stream, context));
+            deltas.push(self.post_delta(post, outcome.change, arrival, in_stream, None, context));
         }
 
         self.record_sync_state(channel_id, list, now)?;
@@ -246,7 +247,11 @@ impl SyncEngine {
     /// no table.
     pub fn apply_event(&self, event: &Event, context: &SyncContext) -> Result<Vec<Delta>> {
         match event {
-            Event::Posted { post, channel_id } => {
+            Event::Posted {
+                post,
+                channel_id,
+                mentioned,
+            } => {
                 let outcomes = self
                     .store
                     .upsert_posts(std::slice::from_ref(post.as_ref()))?;
@@ -258,7 +263,14 @@ impl SyncEngine {
                     // Already held: a replay after a reconnect, not a new post.
                     return Ok(Vec::new());
                 }
-                let delta = self.post_delta(post, change, Arrival::Live, true, context);
+                let delta = self.post_delta(
+                    post,
+                    change,
+                    Arrival::Live,
+                    true,
+                    mentioned.as_deref(),
+                    context,
+                );
                 // A join, a leave, a changed header: something happened in the
                 // channel, and nobody said anything. The server does not count
                 // one towards the channel's total either, so counting it here
@@ -555,6 +567,7 @@ impl SyncEngine {
         change: PostChange,
         arrival: Arrival,
         in_stream: bool,
+        mentioned: Option<&[String]>,
         context: &SyncContext,
     ) -> Delta {
         let channel_props = self
@@ -566,7 +579,8 @@ impl SyncEngine {
                 tracing::warn!(%error, "could not read a channel's notification settings");
                 HashMap::new()
             });
-        let notify_context = context.notify_context(&post.root_id, &channel_props);
+        let mut notify_context = context.notify_context(&post.root_id, &channel_props);
+        notify_context.named_by_server = mentioned.map(|ids| ids.contains(&context.me.id));
         let decision: NotifyDecision = notify::decide(post, &notify_context);
         Delta::PostUpserted {
             post_id: post.id.clone(),
