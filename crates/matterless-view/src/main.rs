@@ -1485,7 +1485,7 @@ impl App {
                     continue;
                 }
                 group.channels.retain(|channel| {
-                    let asking = channel.unread > 0 && !channel.muted;
+                    let asking = channel.mentions > 0 || (channel.unread > 0 && !channel.muted);
                     if asking {
                         waiting.push(channel.clone());
                     }
@@ -4404,7 +4404,8 @@ impl App {
                 else {
                     continue;
                 };
-                if *muted {
+                // A muted channel brings its mentions and nothing else.
+                if *muted && *mentions == 0 {
                     continue;
                 }
                 let into = if *direct {
@@ -4420,7 +4421,7 @@ impl App {
                         .map(|at| &mut teams[at])
                 };
                 if let Some(tile) = into {
-                    tile.unread += unread;
+                    tile.unread += if *muted { 0 } else { *unread };
                     tile.mentions += mentions;
                 }
             }

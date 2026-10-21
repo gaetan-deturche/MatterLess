@@ -259,11 +259,12 @@ pub fn decide(post: &Post, context: &NotifyContext<'_>) -> NotifyDecision {
     }
 
     // Under collapsed threads a reply only notifies if the thread is followed,
-    // unless it names you outright.
+    // unless it mentions you: a keyword or @here is a mention too, and the
+    // server follows the thread for you on any of them.
     if context.thread_mode == ThreadMode::Collapsed
         && post.is_reply()
         && !context.following_thread
-        && mention != MentionVerdict::Direct
+        && !mention.is_mention()
     {
         return decision(false, NotifyReason::UnfollowedThread);
     }
@@ -562,6 +563,27 @@ mod tests {
         named.root_id = "root1".into();
         ctx.following_thread = false;
         assert!(decide(&named, &ctx).notify);
+    }
+
+    /// A keyword is a mention as much as `@name` is: through a muted channel
+    /// and an unfollowed thread both, the way a bot's "by ada" asks the
+    /// person it names.
+    #[test]
+    fn a_keyword_reaches_through_a_muted_channel_and_an_unfollowed_thread() {
+        let mut user = me();
+        user.notify_props
+            .insert("mention_keys".into(), "ada.lovelace".into());
+        let props: HashMap<String, String> =
+            [("mark_unread".to_string(), "mention".to_string())].into();
+        let mut reply = post_from("bot", "Cook failed on commit 216324 by ada.lovelace");
+        reply.root_id = "root1".into();
+
+        let mut ctx = context(&user, &props);
+        ctx.thread_mode = ThreadMode::Collapsed;
+        ctx.following_thread = false;
+        let decided = decide(&reply, &ctx);
+        assert_eq!(decided.mention, MentionVerdict::Keyword);
+        assert!(decided.notify, "{:?}", decided.reason);
     }
 
     /// A followed thread notifies at the mentions-only level too, as long as

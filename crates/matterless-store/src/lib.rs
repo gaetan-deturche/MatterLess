@@ -1100,7 +1100,9 @@ impl Store {
             let (total, seen, mentions, notify_props, channel_type) = row?;
             let props: HashMap<String, String> =
                 serde_json::from_str(&notify_props).unwrap_or_default();
+            // Muting quietens a channel's messages, not a mention in it.
             if props.get("mark_unread").map(String::as_str) == Some("mention") {
+                state.mentions += mentions;
                 continue;
             }
             let unread = (total - seen).max(0);

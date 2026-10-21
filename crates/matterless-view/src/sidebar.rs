@@ -287,11 +287,9 @@ impl Sidebar {
     /// Three decisions, and each of them has a reason rather than a
     /// preference behind it:
     ///
-    /// **Muted rows are passed over.** Muted is the reader saying this
-    /// conversation should not interrupt them, and a key that walks them to
-    /// it is an interruption they asked not to have. The rail's dots already
-    /// leave them out, so counting them here would make the badge and the key
-    /// disagree about what is waiting.
+    /// **Muted rows are passed over**, unless they hold a mention. Muted is
+    /// the reader saying this conversation should not interrupt them; being
+    /// asked something in it still does, and the rail counts it the same way.
     ///
     /// **It wraps.** Without it the last unread row is a dead end where the
     /// key stops working, and nothing on screen says why.
@@ -345,7 +343,7 @@ impl Sidebar {
                 mentions,
                 muted,
                 ..
-            } if !muted && (*unread > 0 || *mentions > 0) => Some(id.as_str()),
+            } if asking(*unread, *mentions, *muted) => Some(id.as_str()),
             Entry::Threads { unread, mentions } if *unread > 0 || *mentions > 0 => Some(THREADS),
             // Never walked to. A draft is this reader's own unfinished
             // business rather than something somebody else is waiting on, and
@@ -460,7 +458,7 @@ impl Sidebar {
                 } => {
                     !elsewhere
                         && (!folded
-                            || (!muted && (*unread > 0 || *mentions > 0))
+                            || asking(*unread, *mentions, *muted)
                             || self.selected.as_deref() == Some(id.as_str()))
                 }
                 _ => {
@@ -1136,8 +1134,8 @@ fn label_style() -> matterless_layout::Style {
 /// The count itself.
 ///
 /// A mention is the one count worth colouring: it is the difference between
-/// "there is more here" and "you are being asked". Not in a muted channel,
-/// where it was still asked for quietly.
+/// "there is more here" and "you are being asked" -- in a muted channel too,
+/// where everything but a mention is quiet.
 #[allow(clippy::too_many_arguments)]
 fn draw_pill(
     scene: &mut matterless_paint::Scene,
@@ -1151,7 +1149,7 @@ fn draw_pill(
     loud: bool,
     ink: [u8; 3],
 ) {
-    let (behind, over) = if mentions > 0 && !muted {
+    let (behind, over) = if mentions > 0 {
         (
             [palette.signal[0], palette.signal[1], palette.signal[2], 255],
             [palette.surface[0], palette.surface[1], palette.surface[2]],
@@ -1375,8 +1373,9 @@ fn ink_of(palette: &matterless_paint::Palette, chosen: bool, loud: bool, muted: 
 ///
 /// It still shows how much is there. Muting is "do not interrupt me", not
 /// "hide this from me".
+/// A mention asks even in a muted channel; muting quietens the rest.
 fn asking(unread: i64, mentions: i64, muted: bool) -> bool {
-    (unread > 0 || mentions > 0) && !muted
+    mentions > 0 || (unread > 0 && !muted)
 }
 
 /// How the count is measured, which has to match how it is drawn -- the pill
@@ -1841,22 +1840,30 @@ mod tests {
         assert!(at.y >= heading.rect.y && at.bottom() <= heading.rect.bottom());
     }
 
-    /// A muted channel never reads as unread, however much arrives in it.
+    /// A muted channel never reads as unread however many messages arrive in
+    /// it, and does the moment one of them mentions the reader.
     ///
     /// Twice now this has drifted: first to looking identical to a read
     /// channel, then to going bold on every message. Both are the same
     /// mistake -- deciding how loud a row is from its count alone, when the
-    /// reader has already said they do not want to be interrupted by it.
+    /// reader has already said they do not want to be interrupted by it. A
+    /// mention is the exception they did not mute.
     #[test]
-    fn a_muted_channel_is_never_loud() {
-        for (unread, mentions) in [(1, 0), (0, 1), (40, 12)] {
+    fn a_muted_channel_is_loud_only_for_a_mention() {
+        for unread in [1, 40] {
             assert!(
-                !asking(unread, mentions, true),
-                "{unread} unread and {mentions} mentions went loud while muted"
+                !asking(unread, 0, true),
+                "{unread} unread went loud while muted"
             );
             assert!(
-                asking(unread, mentions, false),
-                "{unread} unread and {mentions} mentions stayed quiet unmuted"
+                asking(unread, 0, false),
+                "{unread} unread stayed quiet unmuted"
+            );
+        }
+        for (unread, mentions) in [(0, 1), (40, 12)] {
+            assert!(
+                asking(unread, mentions, true),
+                "{mentions} mentions stayed quiet while muted"
             );
         }
         // And an empty channel is quiet either way.

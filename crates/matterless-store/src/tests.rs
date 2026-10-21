@@ -515,7 +515,7 @@ fn a_roots_only_page_skips_replies_in_sql() {
 }
 
 #[test]
-fn the_badge_counts_mentions_and_followed_channels_but_not_muted_ones() {
+fn the_badge_counts_mentions_and_followed_channels_and_only_mentions_when_muted() {
     let store = store();
     let channel = |id: &str, total: i64| Channel {
         id: id.into(),
@@ -547,7 +547,7 @@ fn the_badge_counts_mentions_and_followed_channels_but_not_muted_ones() {
             channel("quiet", 10),    // unread, no mentions -> dot only
             channel("tagged", 10),   // 2 mentions
             channel("followed", 10), // desktop=all, 5 unread
-            channel("muted", 10),    // muted, ignored entirely
+            channel("muted", 10),    // muted: its 4 mentions, not its 10 unread
         ])
         .unwrap();
     store
@@ -564,12 +564,12 @@ fn the_badge_counts_mentions_and_followed_channels_but_not_muted_ones() {
         state.any_unread,
         "quiet has unread, so the dot is warranted"
     );
-    assert_eq!(state.mentions, 2, "the muted channel's 4 are excluded");
+    assert_eq!(state.mentions, 6, "a mention reaches through muting");
     assert_eq!(state.followed_unread, 5);
     assert_eq!(
         state.attention(),
-        7,
-        "2 mentions + 5 unread in the followed channel; the muted channel's          4 mentions are deliberately excluded"
+        11,
+        "6 mentions + 5 unread in the followed channel; the muted channel's 10 unread stay quiet"
     );
 }
 
