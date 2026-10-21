@@ -447,6 +447,10 @@ struct App {
     /// The same surface read without its sRGB encoding, which is what the
     /// pipeline writes through.
     size: (u32, u32),
+    /// The display's scale, and the window in device pixels: `size` is in
+    /// logical ones, which is what the layout and the pointer are measured in.
+    dpi: f64,
+    pixels: (u32, u32),
     /// The window's placement as last kept, so a move that ends where it
     /// began writes nothing.
     kept_placement: Option<String>,
@@ -938,6 +942,8 @@ impl App {
             window: None,
             view: None,
             size: (1000, 760),
+            dpi: 1.0,
+            pixels: (1000, 760),
             kept_placement: None,
             fonts: {
                 // Building this scans the system's font directories.
@@ -1745,7 +1751,7 @@ impl App {
                 if held.as_ref().is_some_and(|held| held.holds(key))
                     && self.asked.insert(key.clone())
                 {
-                    shelf.want(key.clone(), side, side);
+                    shelf.want(key.clone(), self.device(side), self.device(side));
                     preloaded += 1;
                 }
             }
@@ -3933,7 +3939,7 @@ impl App {
         if self.preloading.is_some() || !self.viewer.open() || !self.viewer.arrived_yet() {
             return;
         }
-        let size = self.size;
+        let size = self.pixels;
         let Some(next) = self.viewer.neighbours().into_iter().find(|one| {
             !one.video
                 && !one.text
@@ -3982,7 +3988,7 @@ impl App {
             }
             return;
         }
-        if let Some((width, height, rgba)) = self.remembered.get(&one.file_id, self.size)
+        if let Some((width, height, rgba)) = self.remembered.get(&one.file_id, self.pixels)
             && let Some(view) = self.view.as_mut()
         {
             view.show(width, height, rgba);
@@ -3995,7 +4001,7 @@ impl App {
             return;
         }
         if let Some(shelf) = self.shelf.as_ref()
-            && shelf.look(one.file_id.clone(), one.original, one.linked, self.size)
+            && shelf.look(one.file_id.clone(), one.original, one.linked, self.pixels)
         {
             return;
         }
@@ -4006,7 +4012,7 @@ impl App {
             file_id: one.file_id.clone(),
             original: one.original,
             linked: one.linked,
-            within: self.size,
+            within: self.pixels,
         });
     }
 
@@ -5504,6 +5510,7 @@ impl App {
         wanted.extend(self.composer.wants());
         wanted.extend(self.thread_composer.wants());
         for (key, width, height) in wanted {
+            let (width, height) = (self.device(width), self.device(height));
             if self.asked.insert(key.clone()) {
                 match self.shelf.as_ref() {
                     // The disk first, always: a face that is already here
@@ -8550,10 +8557,8 @@ impl App {
                 };
                 let wide = 900 + by * 4;
                 if let Some(window) = self.window.as_ref() {
-                    let asked = window.request_inner_size(winit::dpi::PhysicalSize::new(
-                        wide as u32,
-                        self.size.1,
-                    ));
+                    let asked = window
+                        .request_inner_size(winit::dpi::LogicalSize::new(wide as u32, self.size.1));
                     // Some systems answer straight away rather than through an
                     // event; either way the window has been asked to change.
                     let _ = asked;
@@ -8572,10 +8577,8 @@ impl App {
                 };
                 let tall = 500 + by * 4;
                 if let Some(window) = self.window.as_ref() {
-                    let asked = window.request_inner_size(winit::dpi::PhysicalSize::new(
-                        self.size.0,
-                        tall as u32,
-                    ));
+                    let asked = window
+                        .request_inner_size(winit::dpi::LogicalSize::new(self.size.0, tall as u32));
                     let _ = asked;
                     did += 1;
                 }
@@ -8645,7 +8648,8 @@ impl App {
         // height changed -- which is the whole of why a vertical drag held the
         // rows against the top edge however the anchor itself was written.
         let held = self.anchors();
-        self.size = size;
+        self.pixels = size;
+        self.size = self.logical(size);
         {
             let _surfacing = matterless_view::timing::watch("  reconfiguring the surface", 0, "");
             if let Some(view) = self.view.as_mut()
@@ -8659,6 +8663,19 @@ impl App {
         // conversation. The rest is settled once the dragging ends.
         self.shape(Shaping::WhatShows, held);
         self.resizing = Some(std::time::Instant::now());
+    }
+
+    /// A size in device pixels, read back in logical ones. Rounded up, so the
+    /// layout covers the last column of the surface rather than stopping short.
+    fn logical(&self, pixels: (u32, u32)) -> (u32, u32) {
+        let back = |side: u32| ((f64::from(side) / self.dpi).ceil() as u32).max(1);
+        (back(pixels.0), back(pixels.1))
+    }
+
+    /// A logical length in device pixels, which is what a picture is fetched
+    /// at so it is not stretched on a scaled display.
+    fn device(&self, side: u32) -> u32 {
+        (f64::from(side) * self.dpi).round() as u32
     }
 
     /// Builds one frame and hands it to the GPU.
@@ -8697,12 +8714,11 @@ impl App {
         let scene = self.scene();
         drop(building);
         let _drawing = matterless_view::timing::watch("drawing the frame", 0, "");
-        let size = self.size;
         let ground = self.palette.ground;
         let Some(view) = self.view.as_mut() else {
             return;
         };
-        if let Err(why) = view.draw_scene(&mut self.fonts, &scene, size, ground, waiting) {
+        if let Err(why) = view.draw_scene(&mut self.fonts, &scene, ground, waiting) {
             eprintln!("the GPU was lost ({why}): building the view again");
             self.rebuild_the_view();
         }
@@ -8728,7 +8744,7 @@ impl App {
             }
         }
         let window = windows::Win32::Foundation::HWND(raw_window(self.window.as_ref()) as *mut _);
-        let mut view = match matterless_view::View::new(window, self.size) {
+        let mut view = match matterless_view::View::new(window, self.pixels) {
             Ok(view) => view,
             Err(why) => {
                 eprintln!("could not open Direct3D again: {why}");
@@ -8737,6 +8753,7 @@ impl App {
             }
         };
         self.lost_gpu = None;
+        view.dpi = self.dpi as f32;
         view.atlas
             .rasterise_subpixel(self.settings.text == matterless_view::settings::Text::Subpixel);
         view.contrast = self.settings.contrast.amount();
@@ -10081,9 +10098,11 @@ impl ApplicationHandler<Update> for App {
         let restored = kept.as_deref().and_then(Placement::read);
         if let Some(restored) = restored {
             placement::restore(raw_window(self.window.as_ref()), restored);
-            let inner = window.inner_size();
-            self.size = (inner.width.max(1), inner.height.max(1));
         }
+        self.dpi = window.scale_factor();
+        let inner = window.inner_size();
+        self.pixels = (inner.width.max(1), inner.height.max(1));
+        self.size = self.logical(self.pixels);
         self.kept_placement = kept;
         // Before anything else can want it: the close button means one thing
         // with a tray and another without, and the answer must not depend on
@@ -10104,8 +10123,11 @@ impl ApplicationHandler<Update> for App {
             }
             _ => return events.exit(),
         };
-        let view = match matterless_view::View::new(handle, self.size) {
-            Ok(view) => view,
+        let view = match matterless_view::View::new(handle, self.pixels) {
+            Ok(mut view) => {
+                view.dpi = self.dpi as f32;
+                view
+            }
             Err(why) => {
                 eprintln!("could not open Direct3D: {why}");
                 return events.exit();
@@ -10288,7 +10310,18 @@ impl ApplicationHandler<Update> for App {
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
-                self.point_at(position.x as f32, position.y as f32);
+                self.point_at(
+                    (position.x / self.dpi) as f32,
+                    (position.y / self.dpi) as f32,
+                );
+            }
+            // Moved to a screen of another scale. The pictures were fetched
+            // for the old one and the letters rasterised at it, so the view is
+            // built again; the size that follows lays the window out anew.
+            WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+                self.dpi = scale_factor;
+                self.sized = Some(self.pixels);
+                self.rebuild_the_view();
             }
             // A file dragged onto the window joins the message being written
             // in the conversation under the pointer -- the thread if one is
@@ -10676,7 +10709,7 @@ impl ApplicationHandler<Update> for App {
                     MouseScrollDelta::LineDelta(_, lines) => {
                         lines * self.stream.theme.line_height * 3.0
                     }
-                    MouseScrollDelta::PixelDelta(position) => position.y as f32,
+                    MouseScrollDelta::PixelDelta(position) => (position.y / self.dpi) as f32,
                 };
                 self.wheel_by(by);
             }

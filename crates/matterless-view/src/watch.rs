@@ -213,14 +213,11 @@ impl Page {
     }
 }
 
+/// In logical pixels, as the layout is: wry scales them by the window's DPI.
 fn bounds(at: Rect) -> wry::Rect {
     wry::Rect {
-        position: wry::dpi::PhysicalPosition::new(at.x.round() as i32, at.y.round() as i32).into(),
-        size: wry::dpi::PhysicalSize::new(
-            at.width.round().max(1.0) as u32,
-            at.height.round().max(1.0) as u32,
-        )
-        .into(),
+        position: wry::dpi::LogicalPosition::new(at.x, at.y).into(),
+        size: wry::dpi::LogicalSize::new(at.width.max(1.0), at.height.max(1.0)).into(),
     }
 }
 

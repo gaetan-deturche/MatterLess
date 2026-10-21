@@ -139,14 +139,27 @@ fn viewport_bytes(viewport: &Viewport) -> &[u8] {
 ///
 /// Two triangles per quad, and a solid fill points at the atlas's opaque corner
 /// texel so it goes through the same pipeline as a glyph.
+///
+/// Pieces are in the window's logical pixels and vertices in the device's:
+/// `dpi` is the display's scale, and glyphs are rasterised at it rather than
+/// stretched to it.
 pub fn vertices_of(
     pieces: &[Piece],
     gpu: &Gpu,
     fonts: &mut Fonts,
     cache: &mut SwashCache,
     atlas: &mut Atlas,
+    dpi: f32,
     into: &mut Vec<Vertex>,
 ) {
+    let scaled =
+        |[x, y, width, height]: [f32; 4]| [x * dpi, y * dpi, (x + width) * dpi, (y + height) * dpi];
+    // A one-pixel edge is anti-aliasing and stays one device pixel; anything
+    // wider is a shadow, which is a size.
+    let soft = |softness: f32| match softness <= 1.0 {
+        true => softness,
+        false => softness * dpi,
+    };
     let letters = Sheet::Letters.size();
     let (wide, tall) = (letters.0 as f32, letters.1 as f32);
     // Half a texel into the opaque corner, so no neighbour bleeds in.
@@ -185,7 +198,7 @@ pub fn vertices_of(
                 };
                 fading(
                     into,
-                    [*x, *y, *x + *width, *y + *height],
+                    scaled([*x, *y, *width, *height]),
                     [solid_uv[0], solid_uv[1], solid_uv[0], solid_uv[1]],
                     top,
                     bottom,
@@ -211,13 +224,13 @@ pub fn vertices_of(
                 ];
                 quad(
                     into,
-                    [*x, *y, *x + *width, *y + *height],
+                    scaled([*x, *y, *width, *height]),
                     [solid_uv[0], solid_uv[1], solid_uv[0], solid_uv[1]],
                     rgba,
                     // The white texel it samples is on the letters sheet.
                     Sheet::Letters as u32,
-                    *radius,
-                    *softness,
+                    *radius * dpi,
+                    soft(*softness),
                 );
             }
             Piece::Image {
@@ -241,7 +254,7 @@ pub fn vertices_of(
                 // so every picture would be drawn with a faded border.
                 quad(
                     into,
-                    [*x, *y, *x + *width, *y + *height],
+                    scaled([*x, *y, *width, *height]),
                     [
                         (slot.x as f32 + 0.5) / wide,
                         (slot.y as f32 + 0.5) / tall,
@@ -251,7 +264,7 @@ pub fn vertices_of(
                     // White, so the picture keeps its own colours.
                     [1.0, 1.0, 1.0, 1.0],
                     sheet as u32,
-                    *radius,
+                    *radius * dpi,
                     1.0,
                 );
             }
@@ -271,11 +284,12 @@ pub fn vertices_of(
                 };
                 let (loud, quiet, followed) = (shade(ink), shade(faint), shade(signal));
                 for glyph in glyphs {
+                    let (key, pen_x, pen_y) = at_scale(glyph, dpi);
                     // A mark is rasterised at twice the size it is drawn and
                     // filtered down, and a third of a pixel does not survive
                     // being halved -- so those stay flat whatever the setting.
                     let banded = atlas.subpixel && glyph.scale >= 1.0;
-                    let Some(slot) = atlas.slot(gpu, fonts, cache, glyph.key, banded) else {
+                    let Some(slot) = atlas.slot(gpu, fonts, cache, key, banded) else {
                         continue;
                     };
                     // White for a glyph that brought its own colour, so the
@@ -293,8 +307,8 @@ pub fn vertices_of(
                     // ignoring them puts every letter on its own baseline. They
                     // scale with it: a mark rasterised at twice has twice the
                     // bearing too.
-                    let x0 = glyph.x as f32 + slot.left as f32 * glyph.scale;
-                    let y0 = glyph.y as f32 - slot.top as f32 * glyph.scale;
+                    let x0 = pen_x + slot.left as f32 * glyph.scale;
+                    let y0 = pen_y - slot.top as f32 * glyph.scale;
                     let (drawn, tall_as) = (
                         slot.width as f32 * glyph.scale,
                         slot.height as f32 * glyph.scale,
@@ -326,6 +340,33 @@ pub fn vertices_of(
             }
         }
     }
+}
+
+/// A glyph's key and pen in device pixels: the size it was shaped at and the
+/// place it was put, both times the display's scale.
+fn at_scale(glyph: &matterless_paint::PlacedGlyph, dpi: f32) -> (cosmic_text::CacheKey, f32, f32) {
+    let key = glyph.key;
+    if dpi == 1.0 {
+        return (key, glyph.x as f32, glyph.y as f32);
+    }
+    // A letter's quarter-pixel is part of where it is; a mark's is a quarter of
+    // the larger size it was rasterised at, so it is placed on the pixel.
+    let (x, y) = match glyph.scale >= 1.0 {
+        true => (
+            glyph.x as f32 + key.x_bin.as_float(),
+            glyph.y as f32 + key.y_bin.as_float(),
+        ),
+        false => (glyph.x as f32, glyph.y as f32),
+    };
+    let (scaled, pen_x, pen_y) = cosmic_text::CacheKey::new(
+        key.font_id,
+        key.glyph_id,
+        f32::from_bits(key.font_size_bits) * dpi,
+        (x * dpi, y * dpi),
+        key.font_weight,
+        key.flags,
+    );
+    (scaled, pen_x as f32, pen_y as f32)
 }
 
 /// A quad sampled point-for-point, which is what a glyph and a fill want.
@@ -539,6 +580,8 @@ pub struct View {
     /// against: set by the window from the settings and the theme.
     pub contrast: f32,
     pub ground: [u8; 3],
+    /// The display's scale: logical pixels to device pixels.
+    pub dpi: f32,
 }
 
 impl View {
@@ -561,6 +604,7 @@ impl View {
             nothing,
             contrast: 0.5,
             ground: [12, 18, 24],
+            dpi: 1.0,
         })
     }
 
@@ -738,7 +782,6 @@ impl View {
         &mut self,
         fonts: &mut Fonts,
         scene: &matterless_paint::Scene,
-        size: (u32, u32),
         ground: [u8; 4],
         waiting: bool,
     ) -> Result<(), String> {
@@ -762,6 +805,7 @@ impl View {
                 fonts,
                 &mut self.cache,
                 &mut self.atlas,
+                self.dpi,
                 &mut quads,
             );
             let to = quads.len() as u32;
@@ -781,7 +825,12 @@ impl View {
                 let from = quads.len() as u32;
                 quad(
                     &mut quads,
-                    [*x, *y, *x + *width, *y + *height],
+                    [
+                        *x * self.dpi,
+                        *y * self.dpi,
+                        (*x + *width) * self.dpi,
+                        (*y + *height) * self.dpi,
+                    ],
                     [0.0, 0.0, 1.0, 1.0],
                     // White, so the picture keeps its own colours.
                     [1.0, 1.0, 1.0, 1.0],
@@ -824,7 +873,7 @@ impl View {
                 }),
             ];
             let viewport = Viewport {
-                size: [size.0 as f32, size.1 as f32],
+                size: [self.gpu.size.0 as f32, self.gpu.size.1 as f32],
                 // Scrolling is baked into the positions by whoever built the
                 // scene; a panel that scrolls is not the renderer's business.
                 scroll: 0.0,
@@ -870,7 +919,13 @@ impl View {
             // The opened picture last, over everything, for the same reason it
             // is built last.
             for (range, clip) in spans.into_iter().chain(shown) {
-                let Some(scissor) = fits(clip, size) else {
+                let clip = (
+                    clip.0 * self.dpi,
+                    clip.1 * self.dpi,
+                    clip.2 * self.dpi,
+                    clip.3 * self.dpi,
+                );
+                let Some(scissor) = fits(clip, self.gpu.size) else {
                     continue;
                 };
                 unsafe {
