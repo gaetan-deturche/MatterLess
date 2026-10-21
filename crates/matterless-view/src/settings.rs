@@ -437,6 +437,84 @@ impl Kept {
     }
 }
 
+/// Whether a mention this client reads in a post counts when the server's own
+/// list of who it mentions leaves the reader off: a bot signing a commit with
+/// the reader's bare name, or naming them in a card's attachment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Words(pub bool);
+
+impl Default for Words {
+    fn default() -> Self {
+        Words(true)
+    }
+}
+
+impl Words {
+    /// What this is called in the settings table.
+    pub const SETTING: &'static str = "mention-words";
+
+    pub fn stored(&self) -> &'static str {
+        match self.0 {
+            true => "on",
+            false => "off",
+        }
+    }
+
+    /// Reads one back; anything but "off" is on.
+    pub fn read(said: Option<&str>) -> Self {
+        Words(said != Some("off"))
+    }
+}
+
+/// Where a setting on another tab is: nowhere, so nothing is drawn there and
+/// nothing can be pressed.
+const NONE: Rect = Rect {
+    x: 0.0,
+    y: 0.0,
+    width: 0.0,
+    height: 0.0,
+};
+
+/// The panel's tabs, one subject each: everything on one card had become a
+/// list too long to find anything in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum Tab {
+    #[default]
+    Appearance,
+    Sidebar,
+    Notifications,
+    General,
+}
+
+impl Tab {
+    fn all() -> [Tab; 4] {
+        [
+            Tab::Appearance,
+            Tab::Sidebar,
+            Tab::Notifications,
+            Tab::General,
+        ]
+    }
+
+    fn title(self) -> &'static str {
+        match self {
+            Tab::Appearance => "Appearance",
+            Tab::Sidebar => "Sidebar",
+            Tab::Notifications => "Notifications",
+            Tab::General => "General",
+        }
+    }
+
+    fn slug(self) -> &'static str {
+        match self {
+            Tab::Appearance => "tab-appearance",
+            Tab::Sidebar => "tab-sidebar",
+            Tab::Notifications => "tab-notifications",
+            Tab::General => "tab-general",
+        }
+    }
+}
+
 /// One choice, measured: where it sits, and where the two lines in it do.
 #[derive(Debug, Clone, Copy)]
 struct Choice {
@@ -451,6 +529,10 @@ struct Choice {
 #[derive(Debug, Clone)]
 struct Card {
     rect: Rect,
+    /// The tab on show, and the row of them under the title. Everything that
+    /// belongs to another tab is laid out as nothing.
+    tab: Tab,
+    tabs: Vec<(Tab, Rect)>,
     /// The heading over the group of choices.
     group: Rect,
     choices: Vec<Choice>,
@@ -476,6 +558,11 @@ struct Card {
     /// The heading over starting with Windows, and its two buttons.
     starting: Rect,
     starts: Laid,
+    /// The heading over counting the mentions the words show, its two
+    /// buttons, and the line under them saying what it means.
+    words: Rect,
+    wordings: Laid,
+    words_said: Rect,
     /// The heading over the build this is, and the line under it naming it.
     about: Rect,
     build: Rect,
@@ -488,10 +575,20 @@ struct Card {
 }
 
 impl Card {
+    /// Where a tab's name is, which is what is pressed to show it.
+    #[cfg(test)]
+    fn tab_rect(&self, tab: Tab) -> Option<Rect> {
+        self.tabs
+            .iter()
+            .find(|(one, _)| *one == tab)
+            .map(|(_, at)| *at)
+    }
+
     /// Every row of buttons, in one place: what is drawn and what answers a
     /// press come from the same list, so a row cannot be one without the other.
-    fn rows(&self) -> [&Laid; 8] {
+    fn rows(&self) -> [&Laid; 9] {
         [
+            &self.wordings,
             &self.themes,
             &self.groupings,
             &self.countings,
@@ -521,6 +618,8 @@ pub struct Settings {
     pub unreads: bool,
     pub counts: Counts,
     pub teams: Teams,
+    pub words: Words,
+    tab: Tab,
     /// Whether a look for a newer build is out, so it is not asked for twice
     /// and the button can say what it is doing.
     looking: bool,
@@ -552,6 +651,10 @@ pub enum Did {
     Unreads(bool),
     /// Count these unread channels in the sidebar from now on.
     Counts(Counts),
+    /// Count a mention the words show and the server does not, or stop.
+    Words(Words),
+    /// Another tab is on show: nothing to do but measure the card again.
+    Tab,
     /// List the teams this way from now on.
     Teams(Teams),
     /// Start with Windows, or stop.
@@ -604,7 +707,7 @@ impl Settings {
         self.placed = self.shown.then(|| self.place(fonts, window));
     }
 
-    /// The card, grown to whatever its own words come out as.
+    /// The card, grown to whatever its own words come out as, showing one tab.
     ///
     /// Every height here is measured. A description is two lines on this
     /// window and one on a wider one, and a constant tall enough for the first
@@ -637,62 +740,50 @@ impl Settings {
             .sum::<f32>()
             + ROW_GAP * (sizes.len().saturating_sub(1) as f32);
 
-        let contrast = tall(fonts, CONTRAST_HEADING, inner, GROUP_SIZE);
-        let theme = tall(fonts, THEME_HEADING, inner, GROUP_SIZE);
-        let unreads = tall(fonts, UNREADS_HEADING, inner, GROUP_SIZE);
-        let teams = tall(fonts, TEAMS_HEADING, inner, GROUP_SIZE);
-        let kept = tall(fonts, KEPT_HEADING, inner, GROUP_SIZE);
-        let starting = tall(fonts, STARTUP_HEADING, inner, GROUP_SIZE);
+        let contrast_tall = tall(fonts, CONTRAST_HEADING, inner, GROUP_SIZE);
+        let theme_tall = tall(fonts, THEME_HEADING, inner, GROUP_SIZE);
+        let unreads_tall = tall(fonts, UNREADS_HEADING, inner, GROUP_SIZE);
+        let teams_tall = tall(fonts, TEAMS_HEADING, inner, GROUP_SIZE);
+        let kept_tall = tall(fonts, KEPT_HEADING, inner, GROUP_SIZE);
+        let starting_tall = tall(fonts, STARTUP_HEADING, inner, GROUP_SIZE);
+        let words_tall = tall(fonts, WORDS_HEADING, inner, GROUP_SIZE);
+        let words_said_tall = tall(fonts, WORDS_SAID, inner, SAID_SIZE);
 
         // The build this is, and what the last look for a newer one said. The
         // line is only measured into the card when there is something on it:
         // an empty row of air under a button reads as something missing.
-        let about = tall(fonts, "About", inner, GROUP_SIZE);
-        let build = tall(fonts, &self.build(), inner, LABEL_SIZE);
-        let band = BUTTON_HEIGHT.max(build);
-        let said = match self.said.is_empty() {
+        let about_tall = tall(fonts, "About", inner, GROUP_SIZE);
+        let build_tall = tall(fonts, &self.build(), inner, LABEL_SIZE);
+        let band_tall = BUTTON_HEIGHT.max(build_tall);
+        let said_tall = match self.said.is_empty() {
             true => 0.0,
             false => ROW_GAP + tall(fonts, &self.said, inner, SAID_SIZE),
         };
 
-        let height = PAD
-            + head
-            + GAP
-            + heading
-            + ROW_GAP
-            + rows
-            + GAP
-            + contrast
-            + ROW_GAP
-            + BUTTON_HEIGHT
-            + GAP
-            + theme
-            + ROW_GAP
-            + BUTTON_HEIGHT
-            + GAP
-            + unreads
-            + ROW_GAP
-            + BUTTON_HEIGHT
-            + GAP
-            + teams
-            + ROW_GAP
-            + BUTTON_HEIGHT
-            + GAP
-            + kept
-            + ROW_GAP
-            + BUTTON_HEIGHT
-            + GAP
-            + starting
-            + ROW_GAP
-            + BUTTON_HEIGHT
-            + GAP
-            + about
-            + ROW_GAP
-            + band
-            + said
-            + GAP
-            + BUTTON_HEIGHT
-            + PAD;
+        // A heading and the buttons under it.
+        let section = |heading: f32| heading + ROW_GAP + BUTTON_HEIGHT;
+        // Every tab measured and the card the height of the tallest: a card
+        // that changed height with its tab moved the tabs out from under the
+        // pointer that was choosing between them.
+        let content = |tab: Tab| match tab {
+            Tab::Appearance => {
+                heading + ROW_GAP + rows + GAP + section(contrast_tall) + GAP + section(theme_tall)
+            }
+            Tab::Sidebar => section(unreads_tall) + GAP + section(teams_tall),
+            Tab::Notifications => section(words_tall) + ROW_GAP + words_said_tall,
+            Tab::General => {
+                section(kept_tall)
+                    + GAP
+                    + section(starting_tall)
+                    + GAP
+                    + about_tall
+                    + ROW_GAP
+                    + band_tall
+                    + said_tall
+            }
+        };
+        let tallest = Tab::all().into_iter().map(content).fold(0.0, f32::max);
+        let height = PAD + head + GAP + TAB_HEIGHT + GAP + tallest + GAP + BUTTON_HEIGHT + PAD;
         let rect = Rect::new(
             window.x + (window.width - width) / 2.0,
             window.y + ((window.height - height) / 2.0).max(PAD),
@@ -700,205 +791,42 @@ impl Settings {
             height,
         );
 
-        let group = Rect::new(rect.x + PAD, rect.y + PAD + head + GAP, inner, heading);
-        let mut y = group.bottom() + ROW_GAP;
-        let mut choices = Vec::with_capacity(sizes.len());
-        for (which, title, said) in sizes {
-            let row = Rect::new(rect.x + PAD, y, inner, ROW_PAD_Y * 2.0 + title + said);
-            let text_x = row.x + ROW_PAD_X + DOT_COLUMN;
-            choices.push(Choice {
-                which,
-                rect: row,
-                title: Rect::new(text_x, row.y + ROW_PAD_Y, wrap, title),
-                said: Rect::new(text_x, row.y + ROW_PAD_Y + title, wrap, said),
-            });
-            y = row.bottom() + ROW_GAP;
+        let buttons =
+            |fonts: &mut Fonts, at: Rect, offered: &[(&'static str, &'static str, bool)]| {
+                offered
+                    .iter()
+                    .fold(
+                        Row::new(NAME, at)
+                            .against(matterless_widgets::Against::Left)
+                            .pad(PAD)
+                            .depth(63),
+                        |row, (slug, title, on)| {
+                            row.button(match on {
+                                true => Button::primary(slug, *title),
+                                false => Button::plain(slug, *title),
+                            })
+                        },
+                    )
+                    .measure(fonts)
+            };
+        let nothing = |fonts: &mut Fonts| Row::new(NAME, NONE).measure(fonts);
+        let heading_at = |y: f32, tall: f32| Rect::new(rect.x + PAD, y, inner, tall);
+        let under = |at: Rect| Rect::new(rect.x, at.bottom() + ROW_GAP, rect.width, BUTTON_HEIGHT);
+        let after = |at: Rect| at.bottom() + ROW_GAP + BUTTON_HEIGHT + GAP;
+
+        // Tabs drawn as tabs, their names along a hairline: as a row of
+        // buttons they read as one more setting.
+        let tab = self.tab;
+        let strip = rect.y + PAD + head + GAP;
+        let mut x = rect.x + PAD;
+        let mut tabs = Vec::with_capacity(Tab::all().len());
+        for one in Tab::all() {
+            let wide =
+                matterless_layout::extent_of(fonts, one.title(), f32::MAX, style(LABEL_SIZE)).width;
+            tabs.push((one, Rect::new(x, strip, wide, TAB_HEIGHT)));
+            x += wide + TAB_GAP;
         }
-
-        let contrast = Rect::new(rect.x + PAD, y - ROW_GAP + GAP, inner, contrast);
-        let slider = Rect::new(
-            rect.x + PAD,
-            contrast.bottom() + ROW_GAP,
-            inner,
-            BUTTON_HEIGHT,
-        );
-        let y = contrast.bottom() + ROW_GAP + BUTTON_HEIGHT + ROW_GAP;
-
-        let theme = Rect::new(rect.x + PAD, y - ROW_GAP + GAP, inner, theme);
-        let worn = self.theme;
-        let themes = Theme::all()
-            .into_iter()
-            .fold(
-                Row::new(
-                    NAME,
-                    Rect::new(rect.x, theme.bottom() + ROW_GAP, rect.width, BUTTON_HEIGHT),
-                )
-                .against(matterless_widgets::Against::Left)
-                .pad(PAD)
-                .depth(63),
-                |row, one| {
-                    row.button(match one == worn {
-                        true => Button::primary(one.slug(), one.title()),
-                        false => Button::plain(one.slug(), one.title()),
-                    })
-                },
-            )
-            .measure(fonts);
-        let y = theme.bottom() + ROW_GAP + BUTTON_HEIGHT + ROW_GAP;
-
-        // Two questions about unread channels side by side, each in half the
-        // card: a row of its own for the second would push the card past
-        // the foot of a short window.
-        let half = inner / 2.0;
-        let unreads = Rect::new(rect.x + PAD, y - ROW_GAP + GAP, half - GAP, unreads);
-        let counts = Rect::new(rect.x + PAD + half, unreads.y, half, unreads.height);
-        let counted = self.counts;
-        let countings = Counts::all()
-            .into_iter()
-            .fold(
-                Row::new(
-                    NAME,
-                    Rect::new(
-                        counts.x - PAD,
-                        unreads.bottom() + ROW_GAP,
-                        half + PAD,
-                        BUTTON_HEIGHT,
-                    ),
-                )
-                .against(matterless_widgets::Against::Left)
-                .pad(PAD)
-                .depth(63),
-                |row, one| {
-                    row.button(match one == counted {
-                        true => Button::primary(one.slug(), one.title()),
-                        false => Button::plain(one.slug(), one.title()),
-                    })
-                },
-            )
-            .measure(fonts);
-        let groupings = [(true, "unreads-on", "On"), (false, "unreads-off", "Off")]
-            .into_iter()
-            .fold(
-                Row::new(
-                    NAME,
-                    Rect::new(
-                        rect.x,
-                        unreads.bottom() + ROW_GAP,
-                        half + PAD,
-                        BUTTON_HEIGHT,
-                    ),
-                )
-                .against(matterless_widgets::Against::Left)
-                .pad(PAD)
-                .depth(63),
-                |row, (on, slug, title)| {
-                    row.button(match on == self.unreads {
-                        true => Button::primary(slug, title),
-                        false => Button::plain(slug, title),
-                    })
-                },
-            )
-            .measure(fonts);
-        let y = unreads.bottom() + ROW_GAP + BUTTON_HEIGHT + ROW_GAP;
-
-        let teams = Rect::new(rect.x + PAD, y - ROW_GAP + GAP, inner, teams);
-        let listed = self.teams;
-        let showings = Teams::all()
-            .into_iter()
-            .fold(
-                Row::new(
-                    NAME,
-                    Rect::new(rect.x, teams.bottom() + ROW_GAP, rect.width, BUTTON_HEIGHT),
-                )
-                .against(matterless_widgets::Against::Left)
-                .pad(PAD)
-                .depth(63),
-                |row, one| {
-                    row.button(match one == listed {
-                        true => Button::primary(one.slug(), one.title()),
-                        false => Button::plain(one.slug(), one.title()),
-                    })
-                },
-            )
-            .measure(fonts);
-        let y = teams.bottom() + ROW_GAP + BUTTON_HEIGHT + ROW_GAP;
-
-        let kept = Rect::new(rect.x + PAD, y - ROW_GAP + GAP, inner, kept);
-        let chosen = self.kept;
-        let sizes = Kept::all()
-            .into_iter()
-            .fold(
-                Row::new(
-                    NAME,
-                    Rect::new(rect.x, kept.bottom() + ROW_GAP, rect.width, BUTTON_HEIGHT),
-                )
-                .against(matterless_widgets::Against::Left)
-                .pad(PAD)
-                .depth(63),
-                |row, one| {
-                    row.button(match one == chosen {
-                        true => Button::primary(one.slug(), one.title()),
-                        false => Button::plain(one.slug(), one.title()),
-                    })
-                },
-            )
-            .measure(fonts);
-        let y = kept.bottom() + ROW_GAP + BUTTON_HEIGHT + ROW_GAP;
-
-        let starting = Rect::new(rect.x + PAD, y - ROW_GAP + GAP, inner, starting);
-        let starts = [(true, "startup-on", "On"), (false, "startup-off", "Off")]
-            .into_iter()
-            .fold(
-                Row::new(
-                    NAME,
-                    Rect::new(
-                        rect.x,
-                        starting.bottom() + ROW_GAP,
-                        rect.width,
-                        BUTTON_HEIGHT,
-                    ),
-                )
-                .against(matterless_widgets::Against::Left)
-                .pad(PAD)
-                .depth(63),
-                |row, (on, slug, title)| {
-                    row.button(match on == self.startup {
-                        true => Button::primary(slug, title),
-                        false => Button::plain(slug, title),
-                    })
-                },
-            )
-            .measure(fonts);
-        let y = starting.bottom() + ROW_GAP + BUTTON_HEIGHT + ROW_GAP;
-
-        let about = Rect::new(rect.x + PAD, y - ROW_GAP + GAP, inner, about);
-        let band = Rect::new(rect.x, about.bottom() + ROW_GAP, rect.width, band);
-        // The name of the build on the left, the button that goes looking on
-        // the right, on one line: they are the same subject, and a button
-        // under the sentence it belongs to reads as a second thing.
-        let look = Row::new(NAME, band)
-            .pad(PAD)
-            .depth(63)
-            .enabled(!self.looking && !self.installing)
-            .button(match self.ready.is_some() {
-                true => Button::primary("install", self.installing_label()),
-                false => Button::plain("look", self.looking_label()),
-            })
-            .measure(fonts);
-        let build = Rect::new(
-            band.x + PAD,
-            band.y + (band.height - build) / 2.0,
-            (look.spare() - PAD).max(0.0),
-            build,
-        );
-        let said = (!self.said.is_empty()).then(|| {
-            Rect::new(
-                rect.x + PAD,
-                band.bottom() + ROW_GAP,
-                inner,
-                tall(fonts, &self.said, inner, SAID_SIZE),
-            )
-        });
+        let top = strip + TAB_HEIGHT + GAP;
 
         let foot = Row::new(
             NAME,
@@ -914,30 +842,170 @@ impl Settings {
         .button(Button::primary("done", "Done"))
         .measure(fonts);
 
-        Card {
+        let mut card = Card {
             rect,
-            group,
-            choices,
-            contrast,
-            slider,
-            theme,
-            themes,
-            unreads,
-            groupings,
-            counts,
-            countings,
-            teams,
-            showings,
-            kept,
-            sizes,
-            starting,
-            starts,
-            about,
-            build,
-            said,
-            look,
+            tab,
+            tabs,
+            group: NONE,
+            choices: Vec::new(),
+            contrast: NONE,
+            slider: NONE,
+            theme: NONE,
+            themes: nothing(fonts),
+            unreads: NONE,
+            groupings: nothing(fonts),
+            counts: NONE,
+            countings: nothing(fonts),
+            teams: NONE,
+            showings: nothing(fonts),
+            kept: NONE,
+            sizes: nothing(fonts),
+            starting: NONE,
+            starts: nothing(fonts),
+            words: NONE,
+            wordings: nothing(fonts),
+            words_said: NONE,
+            about: NONE,
+            build: NONE,
+            said: None,
+            look: nothing(fonts),
             foot,
+        };
+
+        match tab {
+            Tab::Appearance => {
+                card.group = heading_at(top, heading);
+                let mut y = card.group.bottom() + ROW_GAP;
+                for (which, title, said) in sizes {
+                    let row = Rect::new(rect.x + PAD, y, inner, ROW_PAD_Y * 2.0 + title + said);
+                    let text_x = row.x + ROW_PAD_X + DOT_COLUMN;
+                    card.choices.push(Choice {
+                        which,
+                        rect: row,
+                        title: Rect::new(text_x, row.y + ROW_PAD_Y, wrap, title),
+                        said: Rect::new(text_x, row.y + ROW_PAD_Y + title, wrap, said),
+                    });
+                    y = row.bottom() + ROW_GAP;
+                }
+                card.contrast = heading_at(y - ROW_GAP + GAP, contrast_tall);
+                card.slider = Rect::new(
+                    rect.x + PAD,
+                    card.contrast.bottom() + ROW_GAP,
+                    inner,
+                    BUTTON_HEIGHT,
+                );
+                card.theme = heading_at(after(card.contrast), theme_tall);
+                let offered: Vec<_> = Theme::all()
+                    .into_iter()
+                    .map(|one| (one.slug(), one.title(), one == self.theme))
+                    .collect();
+                card.themes = buttons(fonts, under(card.theme), &offered);
+            }
+            // Two questions about unread channels side by side, each in half
+            // the card, and the teams under them.
+            Tab::Sidebar => {
+                let half = inner / 2.0;
+                card.unreads = Rect::new(rect.x + PAD, top, half - GAP, unreads_tall);
+                card.counts = Rect::new(rect.x + PAD + half, top, half, unreads_tall);
+                card.groupings = buttons(
+                    fonts,
+                    Rect::new(
+                        rect.x,
+                        card.unreads.bottom() + ROW_GAP,
+                        half + PAD,
+                        BUTTON_HEIGHT,
+                    ),
+                    &[
+                        ("unreads-on", "On", self.unreads),
+                        ("unreads-off", "Off", !self.unreads),
+                    ],
+                );
+                let offered: Vec<_> = Counts::all()
+                    .into_iter()
+                    .map(|one| (one.slug(), one.title(), one == self.counts))
+                    .collect();
+                card.countings = buttons(
+                    fonts,
+                    Rect::new(
+                        card.counts.x - PAD,
+                        card.unreads.bottom() + ROW_GAP,
+                        half + PAD,
+                        BUTTON_HEIGHT,
+                    ),
+                    &offered,
+                );
+                card.teams = heading_at(after(card.unreads), teams_tall);
+                let offered: Vec<_> = Teams::all()
+                    .into_iter()
+                    .map(|one| (one.slug(), one.title(), one == self.teams))
+                    .collect();
+                card.showings = buttons(fonts, under(card.teams), &offered);
+            }
+            Tab::Notifications => {
+                card.words = heading_at(top, words_tall);
+                card.wordings = buttons(
+                    fonts,
+                    under(card.words),
+                    &[
+                        ("words-on", "On", self.words.0),
+                        ("words-off", "Off", !self.words.0),
+                    ],
+                );
+                card.words_said = Rect::new(
+                    rect.x + PAD,
+                    card.words.bottom() + ROW_GAP + BUTTON_HEIGHT + ROW_GAP,
+                    inner,
+                    words_said_tall,
+                );
+            }
+            Tab::General => {
+                card.kept = heading_at(top, kept_tall);
+                let offered: Vec<_> = Kept::all()
+                    .into_iter()
+                    .map(|one| (one.slug(), one.title(), one == self.kept))
+                    .collect();
+                card.sizes = buttons(fonts, under(card.kept), &offered);
+                card.starting = heading_at(after(card.kept), starting_tall);
+                card.starts = buttons(
+                    fonts,
+                    under(card.starting),
+                    &[
+                        ("startup-on", "On", self.startup),
+                        ("startup-off", "Off", !self.startup),
+                    ],
+                );
+                card.about = heading_at(after(card.starting), about_tall);
+                let band = Rect::new(rect.x, card.about.bottom() + ROW_GAP, rect.width, band_tall);
+                // The name of the build on the left, the button that goes
+                // looking on the right, on one line: they are the same
+                // subject, and a button under the sentence it belongs to reads
+                // as a second thing.
+                card.look = Row::new(NAME, band)
+                    .pad(PAD)
+                    .depth(63)
+                    .enabled(!self.looking && !self.installing)
+                    .button(match self.ready.is_some() {
+                        true => Button::primary("install", self.installing_label()),
+                        false => Button::plain("look", self.looking_label()),
+                    })
+                    .measure(fonts);
+                card.build = Rect::new(
+                    band.x + PAD,
+                    band.y + (band.height - build_tall) / 2.0,
+                    (card.look.spare() - PAD).max(0.0),
+                    build_tall,
+                );
+                card.said = (!self.said.is_empty()).then(|| {
+                    Rect::new(
+                        rect.x + PAD,
+                        band.bottom() + ROW_GAP,
+                        inner,
+                        tall(fonts, &self.said, inner, SAID_SIZE),
+                    )
+                });
+            }
         }
+        card
     }
 
     /// Which build this is, which is the question the button beside it
@@ -1019,7 +1087,12 @@ impl Settings {
         for choice in &card.choices {
             placed.push(named().at(choice.which.slug(), choice.rect, 62));
         }
-        placed.push(named().at("contrast", card.slider, 63));
+        if card.tab == Tab::Appearance {
+            placed.push(named().at("contrast", card.slider, 63));
+        }
+        for (one, at) in &card.tabs {
+            placed.push(named().at(one.slug(), *at, 63));
+        }
         for row in card.rows() {
             placed.extend(row.boxes());
         }
@@ -1076,6 +1149,20 @@ impl Settings {
             _ => {}
         }
 
+        if let Some(one) = input
+            .clicked()
+            .and_then(|name| named().slug(name))
+            .and_then(|slug| Tab::all().into_iter().find(|one| one.slug() == slug))
+        {
+            self.tab = one;
+            self.placed = None;
+            return Some(Did::Tab);
+        }
+        if let Some(slug) = self.laid().and_then(|card| card.wordings.clicked(input)) {
+            self.words = Words(slug == "words-on");
+            self.placed = None;
+            return Some(Did::Words(self.words));
+        }
         if let Some(slug) = self.laid().and_then(|card| card.themes.clicked(input))
             && let Some(one) = Theme::all().into_iter().find(|one| one.slug() == slug)
         {
@@ -1185,14 +1272,75 @@ impl Settings {
             );
             scene.glyphs(glyphs, palette.ink, palette.faint);
 
-            let glyphs = painter.run(
-                fonts,
-                "Text",
-                card.group.x,
-                card.group.y,
-                Run::label(card.group.width).sized(GROUP_SIZE),
-            );
-            scene.glyphs(glyphs, palette.faint, palette.faint);
+            // The tabs: a hairline across the card, each name on it, and the
+            // one on show in full ink with the signal under it.
+            if let Some((_, first)) = card.tabs.first() {
+                scene.fill(
+                    card.rect.x + PAD,
+                    first.bottom() - 1.0,
+                    card.rect.width - PAD * 2.0,
+                    1.0,
+                    palette.rule,
+                );
+            }
+            for (one, at) in &card.tabs {
+                let shown = *one == card.tab;
+                let ink = match shown || named().under(input, one.slug()) {
+                    true => palette.ink,
+                    false => palette.soft,
+                };
+                let glyphs = painter.run(
+                    fonts,
+                    one.title(),
+                    at.x,
+                    at.y + (at.height - TAB_LINE - LABEL_SIZE * 1.4) / 2.0,
+                    Run::label(at.width + 1.0).sized(LABEL_SIZE),
+                );
+                scene.glyphs(glyphs, ink, palette.faint);
+                if shown {
+                    let [red, green, blue] = palette.signal;
+                    scene.rounded(
+                        at.x,
+                        at.bottom() - TAB_LINE,
+                        at.width,
+                        TAB_LINE,
+                        [red, green, blue, 255],
+                        TAB_LINE / 2.0,
+                    );
+                }
+            }
+
+            // The faint headings over each setting, for the tab on show.
+            let mut label = |text: &str, at: Rect, size: f32, ink: [u8; 3]| {
+                let glyphs = painter.run(fonts, text, at.x, at.y, Run::label(at.width).sized(size));
+                scene.glyphs(glyphs, ink, palette.faint);
+            };
+            match card.tab {
+                Tab::Appearance => {
+                    label("Text", card.group, GROUP_SIZE, palette.faint);
+                    let heading = format!("{CONTRAST_HEADING} \u{b7} {}", self.contrast.said());
+                    label(&heading, card.contrast, GROUP_SIZE, palette.faint);
+                    label(THEME_HEADING, card.theme, GROUP_SIZE, palette.faint);
+                }
+                Tab::Sidebar => {
+                    label(UNREADS_HEADING, card.unreads, GROUP_SIZE, palette.faint);
+                    label(COUNTS_HEADING, card.counts, GROUP_SIZE, palette.faint);
+                    label(TEAMS_HEADING, card.teams, GROUP_SIZE, palette.faint);
+                }
+                Tab::Notifications => {
+                    label(WORDS_HEADING, card.words, GROUP_SIZE, palette.faint);
+                    label(WORDS_SAID, card.words_said, SAID_SIZE, palette.faint);
+                }
+                Tab::General => {
+                    label(KEPT_HEADING, card.kept, GROUP_SIZE, palette.faint);
+                    label(STARTUP_HEADING, card.starting, GROUP_SIZE, palette.faint);
+                    label("About", card.about, GROUP_SIZE, palette.faint);
+                    label(&self.build(), card.build, LABEL_SIZE, palette.soft);
+                    if let Some(said) = card.said {
+                        label(&self.said, said, SAID_SIZE, palette.faint);
+                    }
+                }
+            }
 
             for choice in &card.choices {
                 let under = named().under(input, choice.which.slug());
@@ -1251,132 +1399,46 @@ impl Settings {
                 scene.glyphs(glyphs, palette.faint, palette.faint);
             }
 
-            let heading = format!("{CONTRAST_HEADING} \u{b7} {}", self.contrast.said());
-            for (heading, at) in [
-                (heading.as_str(), card.contrast),
-                (THEME_HEADING, card.theme),
-            ] {
-                let glyphs = painter.run(
-                    fonts,
-                    heading,
-                    at.x,
-                    at.y,
-                    Run::label(at.width).sized(GROUP_SIZE),
-                );
-                scene.glyphs(glyphs, palette.faint, palette.faint);
-            }
-
             // The slider: a groove, the part of it below the amount lit, a
             // tick at each quarter, and a knob where it stands.
-            let (from, to) = slider_ends(card.slider);
-            let middle = card.slider.y + card.slider.height / 2.0;
-            let at = from + (to - from) * self.contrast.amount();
-            let held = input.pressed() == Some(named().of("contrast").as_str());
-            let lit = held || input.hovered() == Some(named().of("contrast").as_str());
-            let groove = palette.raised;
-            let [red, green, blue] = palette.signal;
-            scene.rounded(from, middle - 2.0, to - from, 4.0, groove, 2.0);
-            scene.rounded(
-                from,
-                middle - 2.0,
-                at - from,
-                4.0,
-                [red, green, blue, 255],
-                2.0,
-            );
-            for quarter in 0..5 {
-                let x = from + (to - from) * quarter as f32 / 4.0;
-                scene.rounded(x - 1.0, middle + 6.0, 2.0, 4.0, palette.rule, 1.0);
-            }
-            let knob = if lit { SLIDER_KNOB + 2.0 } else { SLIDER_KNOB };
-            scene.rounded(
-                at - knob / 2.0 - 2.0,
-                middle - knob / 2.0 - 2.0,
-                knob + 4.0,
-                knob + 4.0,
-                palette.surface,
-                (knob + 4.0) / 2.0,
-            );
-            scene.rounded(
-                at - knob / 2.0,
-                middle - knob / 2.0,
-                knob,
-                knob,
-                [red, green, blue, 255],
-                knob / 2.0,
-            );
-
-            let glyphs = painter.run(
-                fonts,
-                UNREADS_HEADING,
-                card.unreads.x,
-                card.unreads.y,
-                Run::label(card.unreads.width).sized(GROUP_SIZE),
-            );
-            scene.glyphs(glyphs, palette.faint, palette.faint);
-            let glyphs = painter.run(
-                fonts,
-                COUNTS_HEADING,
-                card.counts.x,
-                card.counts.y,
-                Run::label(card.counts.width).sized(GROUP_SIZE),
-            );
-            scene.glyphs(glyphs, palette.faint, palette.faint);
-
-            let glyphs = painter.run(
-                fonts,
-                TEAMS_HEADING,
-                card.teams.x,
-                card.teams.y,
-                Run::label(card.teams.width).sized(GROUP_SIZE),
-            );
-            scene.glyphs(glyphs, palette.faint, palette.faint);
-
-            let glyphs = painter.run(
-                fonts,
-                KEPT_HEADING,
-                card.kept.x,
-                card.kept.y,
-                Run::label(card.kept.width).sized(GROUP_SIZE),
-            );
-            scene.glyphs(glyphs, palette.faint, palette.faint);
-
-            let glyphs = painter.run(
-                fonts,
-                STARTUP_HEADING,
-                card.starting.x,
-                card.starting.y,
-                Run::label(card.starting.width).sized(GROUP_SIZE),
-            );
-            scene.glyphs(glyphs, palette.faint, palette.faint);
-
-            let glyphs = painter.run(
-                fonts,
-                "About",
-                card.about.x,
-                card.about.y,
-                Run::label(card.about.width).sized(GROUP_SIZE),
-            );
-            scene.glyphs(glyphs, palette.faint, palette.faint);
-
-            let glyphs = painter.run(
-                fonts,
-                &self.build(),
-                card.build.x,
-                card.build.y,
-                Run::label(card.build.width).sized(LABEL_SIZE),
-            );
-            scene.glyphs(glyphs, palette.soft, palette.faint);
-
-            if let Some(said) = card.said {
-                let glyphs = painter.run(
-                    fonts,
-                    &self.said,
-                    said.x,
-                    said.y,
-                    Run::label(said.width).sized(SAID_SIZE),
+            if card.tab == Tab::Appearance {
+                let (from, to) = slider_ends(card.slider);
+                let middle = card.slider.y + card.slider.height / 2.0;
+                let at = from + (to - from) * self.contrast.amount();
+                let held = input.pressed() == Some(named().of("contrast").as_str());
+                let lit = held || input.hovered() == Some(named().of("contrast").as_str());
+                let groove = palette.raised;
+                let [red, green, blue] = palette.signal;
+                scene.rounded(from, middle - 2.0, to - from, 4.0, groove, 2.0);
+                scene.rounded(
+                    from,
+                    middle - 2.0,
+                    at - from,
+                    4.0,
+                    [red, green, blue, 255],
+                    2.0,
                 );
-                scene.glyphs(glyphs, palette.faint, palette.faint);
+                for quarter in 0..5 {
+                    let x = from + (to - from) * quarter as f32 / 4.0;
+                    scene.rounded(x - 1.0, middle + 6.0, 2.0, 4.0, palette.rule, 1.0);
+                }
+                let knob = if lit { SLIDER_KNOB + 2.0 } else { SLIDER_KNOB };
+                scene.rounded(
+                    at - knob / 2.0 - 2.0,
+                    middle - knob / 2.0 - 2.0,
+                    knob + 4.0,
+                    knob + 4.0,
+                    palette.surface,
+                    (knob + 4.0) / 2.0,
+                );
+                scene.rounded(
+                    at - knob / 2.0,
+                    middle - knob / 2.0,
+                    knob,
+                    knob,
+                    [red, green, blue, 255],
+                    knob / 2.0,
+                );
             }
         }
         for row in card.rows() {
@@ -1384,6 +1446,12 @@ impl Settings {
         }
     }
 }
+
+/// The strip of tabs: how tall, the room between two names, and the line
+/// under the one on show.
+const TAB_HEIGHT: f32 = 30.0;
+const TAB_GAP: f32 = 24.0;
+const TAB_LINE: f32 = 2.0;
 
 /// The heading over how firmly letters are drawn.
 const CONTRAST_HEADING: &str = "Text contrast";
@@ -1416,6 +1484,11 @@ const TEAMS_HEADING: &str = "Teams in the sidebar";
 
 /// The heading over starting when the reader signs in to Windows.
 const STARTUP_HEADING: &str = "Start with Windows";
+
+/// The heading over counting what the words say, and what it means.
+const WORDS_HEADING: &str = "Mentions the server does not count";
+const WORDS_SAID: &str = "Your mention keywords, or an @ in a bot's card, counted as mentions \
+even when the server leaves you out of the post's mentions.";
 
 /// The mark saying which choice is in use.
 ///
@@ -1473,6 +1546,14 @@ mod tests {
         (settings, fonts)
     }
 
+    /// The panel open on one tab.
+    fn opened_on(tab: Tab) -> (Settings, Fonts) {
+        let (mut settings, mut fonts) = shown();
+        settings.tab = tab;
+        settings.measure(&mut fonts, window());
+        (settings, fonts)
+    }
+
     #[test]
     fn contrast_and_theme_read_back_as_stored() {
         for step in 0..=20u8 {
@@ -1514,6 +1595,7 @@ mod tests {
     fn the_choices_tile_the_card() {
         let (settings, _fonts) = shown();
         let card = settings.laid().expect("measured");
+        assert_eq!(card.tab, Tab::Appearance, "it opens on the first tab");
         assert_eq!(card.choices.len(), 2);
         let mut floor = card.group.bottom();
         for choice in &card.choices {
@@ -1524,29 +1606,111 @@ mod tests {
             );
             floor = choice.rect.bottom();
         }
-        // The sizes for opened pictures, under the choices and over About.
-        let sizes = Kept::all().map(|one| card.sizes.rect(one.slug()).expect("a size button"));
-        for size in sizes {
-            assert!(size.y >= floor - 0.5, "a size button sits on the choices");
-            assert!(
-                size.bottom() <= card.about.y + 0.5,
-                "a size button runs into About"
-            );
-        }
-        // A box for each, plus the card, the window behind it, the sizes, On
-        // and Off for starting with Windows, the two buttons -- the one that
-        // looks for a build and the one that shuts it -- the contrast slider,
-        // the two themes, On and Off for grouping unread channels, the two
-        // ways of counting them, and the two ways of listing teams.
+        assert!(card.contrast.y >= floor, "the contrast sits on the choices");
+        // The window behind, the card, a box for each choice, the slider, the
+        // two themes, the tabs and the button that shuts it: nothing from
+        // another tab can be pressed.
         let boxes = settings.boxes(window());
-        assert_eq!(boxes.len(), 6 + card.choices.len() + sizes.len() + 9);
-        // Every button drawn is a button that can be pressed.
+        assert_eq!(
+            boxes.len(),
+            2 + card.choices.len() + 1 + 2 + Tab::all().len() + 1
+        );
         for slug in ["theme-dark", "theme-light"] {
             assert!(
                 boxes.iter().any(|placed| placed.name == named().of(slug)),
                 "{slug} is drawn but cannot be pressed"
             );
         }
+    }
+
+    /// A tab is chosen by its button, and the card is the same height on
+    /// every one, so the tabs do not move under the pointer choosing them.
+    #[test]
+    fn the_tabs_change_the_page_and_not_the_card() {
+        let (mut settings, mut fonts) = shown();
+        let card = settings.laid().expect("measured").clone();
+        for tab in Tab::all() {
+            let at = card.tab_rect(tab).expect("a tab");
+            let boxes = settings.boxes(window());
+            let mut input = Input::default();
+            press(&mut input, &boxes, at);
+            assert_eq!(settings.react(&mut input), Some(Did::Tab));
+            settings.measure(&mut fonts, window());
+            let now = settings.laid().expect("measured");
+            assert_eq!(now.tab, tab);
+            assert_eq!(now.rect, card.rect, "{tab:?} changed the card");
+            assert_eq!(now.tab_rect(tab), Some(at), "the tabs moved");
+        }
+    }
+
+    /// Whatever a tab holds sits between the tabs and the foot.
+    #[test]
+    fn nothing_runs_out_of_the_card() {
+        for tab in Tab::all() {
+            let (settings, _fonts) = opened_on(tab);
+            let card = settings.laid().expect("measured");
+            let done = card.foot.rect("done").expect("placed");
+            let top = card.tab_rect(Tab::Appearance).expect("a tab").bottom();
+            let mut held: Vec<Rect> = card.choices.iter().map(|choice| choice.rect).collect();
+            held.extend(
+                [
+                    card.group,
+                    card.contrast,
+                    card.slider,
+                    card.theme,
+                    card.unreads,
+                    card.counts,
+                    card.teams,
+                    card.kept,
+                    card.starting,
+                    card.words,
+                    card.words_said,
+                    card.about,
+                    card.build,
+                ]
+                .into_iter()
+                .filter(|rect| rect.height > 0.0),
+            );
+            held.extend(card.said);
+            for row in card.rows() {
+                held.extend(row.boxes().into_iter().map(|placed| placed.rect));
+            }
+            held.retain(|rect| *rect != done);
+            assert!(!held.is_empty(), "{tab:?} is empty");
+            for rect in held {
+                assert!(rect.y >= top, "{tab:?}: {rect:?} is over the tabs");
+                assert!(
+                    rect.bottom() <= done.y + 0.5,
+                    "{tab:?}: {rect:?} reaches the foot"
+                );
+            }
+            assert!(
+                done.bottom() <= card.rect.bottom() - PAD + 0.5,
+                "the button reaches past the foot of the card"
+            );
+            assert!(
+                card.rect.right() <= window().right() && card.rect.bottom() <= window().bottom()
+            );
+        }
+    }
+
+    /// Counting the mentions the words show is asked for by its buttons, and
+    /// reads back as it was kept; on unless turned off.
+    #[test]
+    fn counting_mention_words_is_asked_for_by_its_buttons() {
+        let (mut settings, _fonts) = opened_on(Tab::Notifications);
+        let off = settings
+            .laid()
+            .expect("measured")
+            .wordings
+            .rect("words-off")
+            .expect("placed");
+        let boxes = settings.boxes(window());
+        let mut input = Input::default();
+        press(&mut input, &boxes, off);
+        assert_eq!(settings.react(&mut input), Some(Did::Words(Words(false))));
+        assert_eq!(Words::read(Some(Words(false).stored())), Words(false));
+        assert_eq!(Words::read(None), Words(true));
     }
 
     /// What a choice says stays inside the choice.
@@ -1656,7 +1820,7 @@ mod tests {
     /// again rather than trusting the first placement.
     #[test]
     fn looking_for_a_build_is_said_on_the_card() {
-        let (mut settings, mut fonts) = shown();
+        let (mut settings, mut fonts) = opened_on(Tab::General);
         let before = settings.laid().expect("measured").rect.height;
         assert!(settings.laid().expect("measured").said.is_none());
 
@@ -1683,8 +1847,14 @@ mod tests {
 
         settings.measure(&mut fonts, window());
         let card = settings.laid().expect("measured");
-        assert!(card.said.is_some(), "nothing says a look went out");
-        assert!(card.rect.height > before, "the card did not make room");
+        let said = card.said.expect("nothing says a look went out");
+        // The card is the tallest tab's height, so the line has room inside
+        // it rather than the card growing round it.
+        assert!(card.rect.height >= before, "the card shrank");
+        assert!(
+            said.bottom() <= card.foot.rect("done").expect("placed").y,
+            "the answer runs into the foot"
+        );
         // And the button is spent while the answer is on its way: a disabled
         // row draws dimmed and registers nothing to press.
         assert!(card.look.boxes().is_empty(), "it can be asked twice");
@@ -1700,7 +1870,7 @@ mod tests {
     /// failed install can be tried again from the same button.
     #[test]
     fn a_ready_build_is_installed_from_here() {
-        let (mut settings, mut fonts) = shown();
+        let (mut settings, mut fonts) = opened_on(Tab::General);
         settings.ready(Some("9.9.9"));
         settings.measure(&mut fonts, window());
         let card = settings.laid().expect("measured");
@@ -1727,38 +1897,11 @@ mod tests {
         assert!(card.said.is_some(), "and it says why");
     }
 
-    /// And the card holds everything measured into it.
-    #[test]
-    fn nothing_runs_out_of_the_card() {
-        let (settings, _fonts) = shown();
-        let card = settings.laid().expect("measured");
-        let done = card.foot.rect("done").expect("placed");
-        let last = card.choices.last().expect("a choice").rect;
-        assert!(card.group.y > card.rect.y + PAD);
-        assert!(
-            last.bottom() <= card.about.y,
-            "the choices reach the heading"
-        );
-        assert!(
-            card.about.bottom() <= card.build.y,
-            "the heading reaches the build"
-        );
-        assert!(
-            card.build.bottom() <= done.y,
-            "the build reaches the button"
-        );
-        assert!(
-            done.bottom() <= card.rect.bottom() - PAD + 0.5,
-            "the button reaches past the foot of the card"
-        );
-        assert!(card.rect.right() <= window().right() && card.rect.bottom() <= window().bottom());
-    }
-
     /// Starting with Windows sits between the disk budget and About, and a
     /// press on either button asks for exactly that.
     #[test]
     fn starting_with_windows_is_asked_for_by_its_buttons() {
-        let (mut settings, _fonts) = shown();
+        let (mut settings, _fonts) = opened_on(Tab::General);
         let card = settings.laid().expect("measured");
         let on = card.starts.rect("startup-on").expect("placed");
         assert!(
@@ -1773,7 +1916,7 @@ mod tests {
         assert_eq!(settings.react(&mut input), Some(Did::Startup(true)));
         assert!(settings.startup);
 
-        let (mut settings, _fonts) = shown();
+        let (mut settings, _fonts) = opened_on(Tab::General);
         let off = settings
             .laid()
             .expect("measured")
@@ -1790,14 +1933,13 @@ mod tests {
     /// buttons ask for exactly what they say.
     #[test]
     fn listing_teams_is_asked_for_by_its_buttons() {
-        let (mut settings, _fonts) = shown();
+        let (mut settings, _fonts) = opened_on(Tab::Sidebar);
         let card = settings.laid().expect("measured");
         let one = card.showings.rect("teams-one").expect("placed");
         assert!(
             card.unreads.bottom() <= card.teams.y,
             "under grouping unreads"
         );
-        assert!(one.bottom() <= card.kept.y, "above the disk budget");
 
         let boxes = settings.boxes(window());
         let mut input = Input::default();
@@ -1808,15 +1950,14 @@ mod tests {
         assert_eq!(Teams::read(None), Teams::All);
     }
 
-    /// Grouping unread channels sits under the theme, and its buttons ask for
-    /// exactly what they say.
+    /// Grouping unread channels heads the sidebar's tab, and its buttons ask
+    /// for exactly what they say.
     #[test]
     fn grouping_unreads_is_asked_for_by_its_buttons() {
-        let (mut settings, _fonts) = shown();
+        let (mut settings, _fonts) = opened_on(Tab::Sidebar);
         let card = settings.laid().expect("measured");
         let on = card.groupings.rect("unreads-on").expect("placed");
-        assert!(card.theme.bottom() <= card.unreads.y, "under the theme");
-        assert!(on.bottom() <= card.kept.y, "above the disk budget");
+        assert!(on.bottom() <= card.teams.y, "above the teams");
 
         let boxes = settings.boxes(window());
         let mut input = Input::default();
@@ -1824,7 +1965,7 @@ mod tests {
         assert_eq!(settings.react(&mut input), Some(Did::Unreads(true)));
         assert!(settings.unreads);
 
-        let (mut settings, _fonts) = shown();
+        let (mut settings, _fonts) = opened_on(Tab::Sidebar);
         let off = settings
             .laid()
             .expect("measured")

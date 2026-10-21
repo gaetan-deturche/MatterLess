@@ -401,6 +401,8 @@ pub enum Ask {
     /// The notification rules ask: a message in the channel already on screen
     /// does not interrupt somebody who can see it.
     Looking { channel_id: String },
+    /// Count a mention the words show when the server's list does not.
+    Words { counted: bool },
     /// Tell the server this channel has been seen, and record the watermark.
     ///
     /// Without it a channel stays unread however long it is looked at, and the
@@ -1532,6 +1534,7 @@ async fn run(
                             wake.wake(Update::NotEmoji);
                         }
                     }
+                    Ask::Words { counted } => context.count_words = counted,
                     Ask::Looking { channel_id } => {
                         context.active_channel = Some(channel_id);
                         // A window with focus it cannot measure is better
@@ -3415,6 +3418,14 @@ mod pictures {
 fn reader_context(me: matterless_core::User, store: &Store) -> SyncContext {
     let mut context = SyncContext::new(me, ThreadMode::Collapsed);
     context.followed_threads = followed(store);
+    context.count_words = crate::settings::Words::read(
+        store
+            .setting(crate::settings::Words::SETTING)
+            .ok()
+            .flatten()
+            .as_deref(),
+    )
+    .0;
     context
 }
 

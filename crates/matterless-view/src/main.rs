@@ -7427,7 +7427,17 @@ impl App {
                         let notice = self.notice_rect();
                         self.offered.measure(&mut self.fonts, notice);
                     }
-                    matterless_view::settings::Did::Close => {}
+                    matterless_view::settings::Did::Words(words) => {
+                        self.keep_setting(
+                            matterless_view::settings::Words::SETTING,
+                            words.stored(),
+                        );
+                        if let Some(link) = self.link.as_ref() {
+                            link.send(matterless_view::live::Ask::Words { counted: words.0 });
+                        }
+                    }
+                    matterless_view::settings::Did::Tab | matterless_view::settings::Did::Close => {
+                    }
                 }
                 if !dragging {
                     self.input = Input::default();
@@ -10196,6 +10206,9 @@ impl ApplicationHandler<Update> for App {
         let team = read(TEAM_SHOWN).filter(|team| !team.is_empty());
         self.settings.counts = matterless_view::settings::Counts::read(
             read(matterless_view::settings::Counts::SETTING).as_deref(),
+        );
+        self.settings.words = matterless_view::settings::Words::read(
+            read(matterless_view::settings::Words::SETTING).as_deref(),
         );
         self.settings.teams = teams;
         self.team = team;

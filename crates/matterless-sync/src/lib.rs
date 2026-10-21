@@ -136,6 +136,9 @@ pub struct SyncContext {
 
     /// Thread roots the user follows, for the collapsed-threads rule.
     pub followed_threads: std::collections::HashSet<String>,
+    /// Count a mention the words show when the server's list leaves the
+    /// reader off. The reader's setting, on unless they turn it off.
+    pub count_words: bool,
 }
 
 impl SyncContext {
@@ -147,6 +150,7 @@ impl SyncContext {
             window_focused: true,
             status: "online".to_string(),
             followed_threads: std::collections::HashSet::new(),
+            count_words: true,
         }
     }
 
@@ -167,6 +171,7 @@ impl SyncContext {
             thread_mode: self.thread_mode,
             following_thread: !root_id.is_empty() && self.followed_threads.contains(root_id),
             named_by_server: None,
+            count_words: self.count_words,
         }
     }
 }

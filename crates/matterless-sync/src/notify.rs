@@ -70,6 +70,9 @@ pub struct NotifyContext<'a> {
     /// reader on it. The answer when there is one: the text is only read to
     /// say what kind of mention, and to guess when nothing was said.
     pub named_by_server: Option<bool>,
+    /// When the server leaves the reader off, whether a mention the words
+    /// show -- a keyword, an `@` in a bot's card -- still counts.
+    pub count_words: bool,
 }
 
 /// True when `needle` appears in `haystack` on word boundaries, case-insensitive.
@@ -144,7 +147,7 @@ fn at_mentions(message: &str) -> Vec<String> {
 pub fn resolve_mention(post: &Post, context: &NotifyContext<'_>) -> MentionVerdict {
     let read = read_mention(post, context);
     match context.named_by_server {
-        Some(false) => MentionVerdict::None,
+        Some(false) if !context.count_words => MentionVerdict::None,
         Some(true) if read == MentionVerdict::None => MentionVerdict::Direct,
         _ => read,
     }
@@ -406,6 +409,7 @@ mod tests {
             thread_mode: ThreadMode::Flat,
             following_thread: false,
             named_by_server: None,
+            count_words: false,
         }
     }
 
@@ -424,6 +428,10 @@ mod tests {
         let mut ctx = context(&user, &props);
         ctx.named_by_server = Some(false);
         assert_eq!(decide(&card, &ctx).mention, MentionVerdict::None);
+        // Unless the reader asked for what the words say to count too.
+        ctx.count_words = true;
+        assert_eq!(decide(&card, &ctx).mention, MentionVerdict::Direct);
+        ctx.count_words = false;
 
         let grouped = post_from("other", "@rendering can someone look?");
         ctx.named_by_server = Some(true);
