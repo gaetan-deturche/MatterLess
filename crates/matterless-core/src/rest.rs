@@ -830,6 +830,13 @@ impl RestClient {
         .await
     }
 
+    /// A channel by its team's name and its own, which is what a link to it
+    /// carries. Answers for a public channel the reader is not in.
+    pub async fn channel_by_names(&self, team: &str, name: &str) -> Result<Channel> {
+        self.get(&format!("/teams/name/{team}/channels/name/{name}"))
+            .await
+    }
+
     /// Joins a channel, by adding this reader to its members.
     pub async fn join_channel(&self, channel_id: &str, user_id: &str) -> Result<serde_json::Value> {
         #[derive(Serialize)]

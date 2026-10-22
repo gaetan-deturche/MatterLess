@@ -143,6 +143,14 @@ pub enum Update {
     },
     /// A conversation is ready to be opened, having been joined or created.
     Reached { channel_id: String },
+    /// A channel the reader is not in, with its recent messages in the store,
+    /// to be read before joining it.
+    Preview {
+        channel: Box<matterless_core::model::Channel>,
+    },
+    /// A link to a channel the server would not show: private, or gone. The
+    /// browser is all that is left.
+    NoPreview { href: String },
     /// The sidebar's channels and counts have been refreshed in the store,
     /// and here is how this reader reads threads.
     Membership(matterless_core::model::ThreadMode),
@@ -331,6 +339,13 @@ pub enum Ask {
     Thread { root_id: String, channel_id: String },
     /// Join a public channel, then open it.
     Join { channel_id: String },
+    /// A channel the reader is not in, named by a link to it: found, and its
+    /// recent messages fetched, without joining it.
+    Preview {
+        team: String,
+        name: String,
+        href: String,
+    },
     /// Find or create the conversation with one person, then open it.
     Direct { user_id: String },
     /// Open the conversation between these people, starting it if it is not
@@ -1266,6 +1281,46 @@ async fn run(
                         match rest.set_reminder(&me_id, &post_id, when).await {
                             Ok(()) => println!("reminder set on {post_id}"),
                             Err(error) => eprintln!("setting a reminder: {error}"),
+                        }
+                    }
+                    Ask::Preview { team, name, href } => {
+                        match rest.channel_by_names(&team, &name).await {
+                            Ok(channel) => {
+                                match rest.posts(&channel.id, RECENT).await {
+                                    Ok(list) => {
+                                        let quiet = SyncContext::new(
+                                            context.me.clone(),
+                                            ThreadMode::Collapsed,
+                                        );
+                                        if let Err(error) = engine.apply_post_list(
+                                            &channel.id,
+                                            &list,
+                                            Arrival::Backfill,
+                                            &quiet,
+                                            0,
+                                        ) {
+                                            eprintln!("keeping {name}'s messages: {error}");
+                                        }
+                                        let mut authors: Vec<String> = list
+                                            .posts
+                                            .values()
+                                            .map(|post| post.user_id.clone())
+                                            .filter(|id| !id.is_empty())
+                                            .collect();
+                                        authors.sort();
+                                        authors.dedup();
+                                        learn(&rest, engine.store(), &authors).await;
+                                    }
+                                    Err(error) => eprintln!("reading {name}: {error}"),
+                                }
+                                wake.wake(Update::Preview {
+                                    channel: Box::new(channel),
+                                });
+                            }
+                            Err(error) => {
+                                eprintln!("finding {team}/{name}: {error}");
+                                wake.wake(Update::NoPreview { href });
+                            }
                         }
                     }
                     Ask::Join { channel_id } => {

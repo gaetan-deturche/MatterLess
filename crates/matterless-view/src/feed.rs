@@ -409,10 +409,10 @@ pub fn permalinked(server: &str, href: &str) -> Option<String> {
     (!team.is_empty() && id_like).then(|| post_id.to_string())
 }
 
-/// The channel a link names, when it is one on this server:
+/// The team and channel a link names, when it is one on this server:
 /// `<server>/<team>/channels/<name>`, what the web client's address bar says
 /// and what people paste.
-pub fn channel_linked(server: &str, href: &str) -> Option<String> {
+pub fn channel_linked(server: &str, href: &str) -> Option<(String, String)> {
     let server = server.trim_end_matches('/');
     if server.is_empty() {
         return None;
@@ -425,7 +425,7 @@ pub fn channel_linked(server: &str, href: &str) -> Option<String> {
     else {
         return None;
     };
-    (!team.is_empty() && !name.is_empty()).then(|| name.to_string())
+    (!team.is_empty() && !name.is_empty()).then(|| (team.to_string(), name.to_string()))
 }
 
 /// The custom emoji a page of rows uses, by name to the id behind their image.
@@ -552,7 +552,7 @@ mod tests {
         ] {
             assert_eq!(
                 channel_linked(server, href),
-                Some(name.to_string()),
+                Some(("sloclap".to_string(), name.to_string())),
                 "{href}"
             );
         }

@@ -509,6 +509,12 @@ struct App {
     input: Input,
     placed: Vec<Placed>,
     composer: Composer,
+    /// A public channel the reader is not in, opened from a link to it: read
+    /// only, with a button to join where the box would be -- as the official
+    /// client does, rather than sending the reader to a browser.
+    preview: Option<matterless_core::model::Channel>,
+    /// That button, measured with the strip it sits in.
+    join_bar: Option<matterless_widgets::Laid>,
     /// Half-written messages, by the conversation they were being written to.
     ///
     /// A draft belongs to its conversation: what somebody began saying in one
@@ -975,6 +981,8 @@ impl App {
             connected: false,
             me: me.clone(),
             composer: Composer::new(composer::NAME),
+            preview: None,
+            join_bar: None,
             thread_composer: {
                 let mut reply = Composer::new(THREAD_COMPOSER);
                 reply.placeholder =
@@ -1342,6 +1350,9 @@ impl App {
         let Some(open) = self.sidebar.selected.as_deref() else {
             return String::new();
         };
+        if let Some(channel) = self.previewing() {
+            return channel.display_name.clone();
+        }
         self.sidebar
             .entries
             .iter()
@@ -1854,8 +1865,26 @@ impl App {
             }
             Update::Discovered { query, found } => self.switcher.offer(&query, found),
             Update::Reached { channel_id } => {
+                // Joined: a channel of the reader's now, and no longer a look.
+                if self
+                    .preview
+                    .as_ref()
+                    .is_some_and(|channel| channel.id == channel_id)
+                {
+                    self.preview = None;
+                }
                 self.sidebar.selected = Some(channel_id.clone());
                 self.open_channel(&channel_id);
+            }
+            Update::Preview { channel } => {
+                let id = channel.id.clone();
+                println!("looking at {} before joining it", channel.name);
+                self.preview = Some(*channel);
+                self.sidebar.selected = Some(id.clone());
+                self.open_channel(&id);
+            }
+            Update::NoPreview { href } => {
+                matterless_view::open::link(&href);
             }
             Update::Membership(mode) => {
                 // Only when it actually moved. This arrives once per sign-in
@@ -2424,14 +2453,32 @@ impl App {
             // quoted card is, when the message is in the store; and a link to
             // one of its channels opens the channel, when the reader is in it.
             Press::Link(href) => {
-                if let Some(name) = matterless_view::feed::channel_linked(&self.server, &href)
-                    && let Some(channel) = self
+                if let Some((team, name)) =
+                    matterless_view::feed::channel_linked(&self.server, &href)
+                {
+                    let held = self
                         .store
                         .as_ref()
                         .and_then(|store| store.channel_by_name(&name).ok().flatten())
-                {
-                    self.sidebar.selected = Some(channel.id.clone());
-                    self.open_channel(&channel.id);
+                        .filter(|channel| {
+                            self.store.as_ref().is_some_and(|store| {
+                                store.is_member(&channel.id, &self.me).unwrap_or(false)
+                            })
+                        });
+                    match (held, self.link.as_ref()) {
+                        (Some(channel), _) => {
+                            self.sidebar.selected = Some(channel.id.clone());
+                            self.open_channel(&channel.id);
+                        }
+                        // Not one of the reader's: found on the server and
+                        // shown to be read first, as the official client does.
+                        (None, Some(link)) => {
+                            link.send(matterless_view::live::Ask::Preview { team, name, href });
+                        }
+                        (None, None) => {
+                            matterless_view::open::link(&href);
+                        }
+                    }
                     return;
                 }
                 let held = matterless_view::feed::permalinked(&self.server, &href).and_then(|id| {
@@ -2615,7 +2662,18 @@ impl App {
             .as_ref()
             .and_then(|id| self.store.as_ref()?.channel(id).ok().flatten())
             .is_some_and(|channel| channel.channel_type == "D" || channel.channel_type == "G");
-        header::offered(direct)
+        let mut offered = header::offered(direct);
+        // A channel only being looked at has no membership to mute, leave or
+        // add people to: the server refuses all three.
+        if self.previewing().is_some() {
+            offered.retain(|act| {
+                !matches!(
+                    act,
+                    header::Act::Add | header::Act::Mute | header::Act::Leave
+                )
+            });
+        }
+        offered
     }
 
     /// Whether there is anywhere to write.
@@ -2629,7 +2687,37 @@ impl App {
     /// takes it, lights its own Send button, and then swallows the lot with a
     /// line in a console nobody is reading.
     fn can_write(&self) -> bool {
-        self.store.is_some() && !self.on_threads()
+        self.store.is_some() && !self.on_threads() && self.previewing().is_none()
+    }
+
+    /// The channel on screen, when it is one the reader is only looking at.
+    fn previewing(&self) -> Option<&matterless_core::model::Channel> {
+        self.preview
+            .as_ref()
+            .filter(|channel| self.sidebar.selected.as_deref() == Some(channel.id.as_str()))
+    }
+
+    /// The bar that stands where the box would, for a channel being looked
+    /// at before joining: what it is, and the button that joins it.
+    fn measure_join_bar(&mut self) {
+        if self.previewing().is_none() {
+            self.join_bar = None;
+            return;
+        }
+        let strip = self.composer_rect();
+        let row = Rect::new(
+            strip.x,
+            strip.y + (strip.height - JOIN_HEIGHT) / 2.0,
+            strip.width,
+            JOIN_HEIGHT,
+        );
+        self.join_bar = Some(
+            matterless_widgets::Row::new(JOIN_BAR, row)
+                .pad(JOIN_PAD)
+                .depth(4)
+                .button(matterless_widgets::Button::primary("join", "Join channel"))
+                .measure(&mut self.fonts),
+        );
     }
 
     /// Does what a button inside a composer says.
@@ -6041,6 +6129,12 @@ impl App {
             boxes.extend(self.followed.boxes_in(self.followed_rect(), 3));
         } else if self.can_write() {
             boxes.extend(self.composer.boxes_in(header::below(self.channel_rect())));
+        } else if let Some(bar) = self
+            .join_bar
+            .as_ref()
+            .filter(|_| self.previewing().is_some())
+        {
+            boxes.extend(bar.boxes());
         }
         if let Some(body) = self.thread_body() {
             boxes.extend(self.thread_composer.boxes_in(body));
@@ -8020,6 +8114,20 @@ impl App {
         {
             self.pressed_in_composer(button, "");
         }
+        // Joining a channel being looked at: the reader's own press, since it
+        // is what tells everybody in it that they have arrived.
+        if let Some(channel) = self.previewing()
+            && self
+                .join_bar
+                .as_ref()
+                .and_then(|bar| bar.clicked(&self.input))
+                == Some("join")
+            && let Some(link) = self.link.as_ref()
+        {
+            link.send(matterless_view::live::Ask::Join {
+                channel_id: channel.id.clone(),
+            });
+        }
         if self.thread_body().is_some()
             && let Some(button) = self.thread_composer.pressed(&self.input)
         {
@@ -8335,9 +8443,13 @@ impl App {
                 // Opening a channel is reading it, and a channel that stays
                 // unread however long it is looked at makes the sidebar a lie.
                 if let Some(link) = self.link.as_ref() {
-                    link.send(matterless_view::live::Ask::MarkRead {
-                        channel_id: channel.to_string(),
-                    });
+                    // Not for a channel only being looked at: there is no
+                    // membership on the server to mark.
+                    if self.previewing().is_none() {
+                        link.send(matterless_view::live::Ask::MarkRead {
+                            channel_id: channel.to_string(),
+                        });
+                    }
                     // And it is the channel on screen, which is what keeps a
                     // message the reader is watching arrive from interrupting
                     // them about itself.
@@ -9093,6 +9205,26 @@ impl App {
             };
             self.composer.draw(&mut canvas, within, focused);
             self.composer.draw_over(&mut canvas, &self.input, within);
+        } else if let (Some(channel), Some(bar)) = (self.previewing(), self.join_bar.clone()) {
+            let strip = self.composer_rect();
+            scene.clip_to(strip.x, strip.y, strip.width, strip.height);
+            let said = format!("You are viewing ~{}", channel.display_name);
+            let row = bar.rect("join").unwrap_or(strip);
+            let glyphs = self.painter.run(
+                &mut self.fonts,
+                &said,
+                strip.x + JOIN_PAD,
+                row.y + (row.height - 18.0) / 2.0,
+                matterless_paint::Run::label((bar.spare() - JOIN_PAD).max(0.0)),
+            );
+            scene.glyphs(glyphs, self.palette.soft, self.palette.faint);
+            let mut canvas = Canvas {
+                scene: &mut scene,
+                painter: &mut self.painter,
+                fonts: &mut self.fonts,
+                palette: &self.palette,
+            };
+            bar.draw(&mut canvas, &self.input);
         }
 
         // A pill over the foot of each conversation, and partly over the
@@ -9634,6 +9766,7 @@ impl App {
     fn relayout(&mut self) {
         let held = self.anchors();
         self.shape(Shaping::Everything, held);
+        self.measure_join_bar();
     }
 
     /// Where the reader is in each panel, for putting them back afterwards.
@@ -11083,6 +11216,12 @@ impl Shaping {
 /// How long after the last size before the rest of the conversation is
 /// shaped. Short enough to feel like part of letting go of the edge.
 const SETTLE: std::time::Duration = std::time::Duration::from_millis(120);
+
+/// The bar that stands for the box in a channel being looked at before
+/// joining: its name in hit boxes, its button's height, and its margins.
+const JOIN_BAR: &str = "join-bar";
+const JOIN_HEIGHT: f32 = 30.0;
+const JOIN_PAD: f32 = 16.0;
 
 /// How long to wait before opening Direct3D again when a driver reset is
 /// still under way.
