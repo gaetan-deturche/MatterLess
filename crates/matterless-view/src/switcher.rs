@@ -524,6 +524,14 @@ impl Switcher {
     /// Takes what the server suggested, if it is still the question being
     /// asked: a slow answer to an older query would reorder the list under a
     /// reader who has since typed more.
+    /// Whose faces the list is showing, for the caller to say who they are.
+    pub fn people(&self) -> Vec<String> {
+        self.found
+            .iter()
+            .filter_map(|one| one.face.as_ref().map(|face| face.user_id.clone()))
+            .collect()
+    }
+
     pub fn offer(&mut self, query: &str, offered: Vec<Match>) {
         if query == self.asked {
             self.offered = offered;
@@ -535,6 +543,7 @@ impl Switcher {
         into: &mut Canvas<'_>,
         within: Rect,
         presence: &std::collections::HashMap<String, String>,
+        positions: &std::collections::HashMap<String, String>,
     ) {
         if !self.open {
             return;
@@ -708,6 +717,30 @@ impl Switcher {
                 Run::label(f32::MAX),
             );
             scene.glyphs(glyphs, palette.ink, palette.faint);
+            // Who they are, faint after their name, in whatever room is left:
+            // the name alone does not say which of two people to pick.
+            let position = one
+                .face
+                .as_ref()
+                .and_then(|face| positions.get(&face.user_id))
+                .filter(|position| !position.trim().is_empty());
+            if let Some(position) = position {
+                let style = matterless_layout::Style {
+                    size: 13.0,
+                    line_height: 18.0,
+                    bold: false,
+                    italic: false,
+                    mono: false,
+                };
+                let x = left
+                    + GUTTER
+                    + matterless_layout::extent_of(fonts, &one.label, f32::MAX, style).width
+                    + 10.0;
+                let shown =
+                    matterless_layout::elided(fonts, position, panel.right() - PADDING - x, style);
+                let glyphs = painter.run(fonts, &shown, x, y + 6.0, Run::label(f32::MAX));
+                scene.glyphs(glyphs, palette.faint, palette.faint);
+            }
         }
     }
 
@@ -835,6 +868,7 @@ mod tests {
             },
             Rect::new(0.0, 0.0, 900.0, 700.0),
             &presence,
+            &std::collections::HashMap::new(),
         );
 
         let pieces: Vec<&Piece> = scene

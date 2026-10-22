@@ -685,6 +685,9 @@ struct App {
     /// Who is around, and everybody ever asked about -- so a face is asked
     /// about once, and the socket thread's beat keeps it current after that.
     presence: std::collections::HashMap<String, String>,
+    /// The positions of the people the switcher is listing, and whom they were
+    /// read for: asked of the store when the list changes, not every frame.
+    switcher_positions: (Vec<String>, std::collections::HashMap<String, String>),
     /// When each of them was last active, as the server said with their status.
     active_at: std::collections::HashMap<String, i64>,
     asked_about: Vec<String>,
@@ -1038,6 +1041,7 @@ impl App {
             visited: matterless_view::places::Places::default(),
             stepping: false,
             presence: std::collections::HashMap::new(),
+            switcher_positions: Default::default(),
             active_at: std::collections::HashMap::new(),
             asked_about: Vec::new(),
             listing: matterless_view::listing::Listing::default(),
@@ -2642,6 +2646,21 @@ impl App {
                 .map(|field| self.search.query.around(field))
                 .unwrap_or_else(|| self.search.in_pane(pane)),
         }
+    }
+
+    /// Who the open conversation is with, when it is a direct message: their
+    /// id and when their picture last changed, as the sidebar row has them.
+    fn counterpart(&self) -> Option<(String, i64)> {
+        let open = self.sidebar.selected.as_deref()?;
+        self.sidebar.entries.iter().find_map(|entry| match entry {
+            Entry::Channel {
+                id,
+                counterpart: Some(who),
+                counterpart_avatar_at,
+                ..
+            } if id == open => Some((who.clone(), *counterpart_avatar_at)),
+            _ => None,
+        })
     }
 
     fn header_offers(&self) -> Vec<header::Act> {
@@ -6516,6 +6535,22 @@ impl App {
             .as_ref()
             .map(|about| matterless_view::flow::segments(&about.header))
             .unwrap_or_default();
+        // A direct message rarely has a header of its own, and what the
+        // reader wants under the name is who that person is: their position.
+        if self.topic.is_empty()
+            && let Some((who, _)) = self
+                .counterpart()
+                .filter(|_| self.sidebar.selected.as_deref() == Some(channel))
+            && let Some(position) = self
+                .store
+                .as_ref()
+                .and_then(|store| store.users_by_ids(std::slice::from_ref(&who)).ok())
+                .and_then(|mut people| people.remove(&who))
+                .map(|person| person.position)
+                .filter(|position| !position.trim().is_empty())
+        {
+            (self.topic, self.topic_links) = matterless_view::flow::segments(&position);
+        }
         if let Some(about) = &about
             && self.members.channel() == about.id
         {
@@ -9043,6 +9078,9 @@ impl App {
             .map(|(_, href)| href.clone());
         header.offered = self.header_offers();
         header.muted = self.muted();
+        header.face = self
+            .counterpart()
+            .map(|(who, at)| matterless_view::stream::avatar_key(&who, at));
         if self.on_threads() {
             // The same mark the sidebar row carries, so the two read as the
             // same place rather than as a channel that happens to be called
@@ -9410,13 +9448,30 @@ impl App {
             let window = self.window_rect();
             let field = self.switcher.field(window);
             scene.clip_to(0.0, 0.0, self.size.0 as f32, self.size.1 as f32);
+            let people = self.switcher.people();
+            if people != self.switcher_positions.0 {
+                let positions = self
+                    .store
+                    .as_ref()
+                    .and_then(|store| store.users_by_ids(&people).ok())
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|(id, person)| (id, person.position))
+                    .collect();
+                self.switcher_positions = (people, positions);
+            }
             let mut canvas = Canvas {
                 scene: &mut scene,
                 painter: &mut self.painter,
                 fonts: &mut self.fonts,
                 palette: &self.palette,
             };
-            self.switcher.draw(&mut canvas, window, &self.presence);
+            self.switcher.draw(
+                &mut canvas,
+                window,
+                &self.presence,
+                &self.switcher_positions.1,
+            );
             self.switcher.query.draw(&mut canvas, field, true);
         }
         if self.settings.open() {

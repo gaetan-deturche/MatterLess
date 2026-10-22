@@ -37,6 +37,10 @@ pub struct Header {
     pub topic_links: Vec<String>,
     /// The address of the header link under the pointer, underlined.
     pub hovered_link: Option<String>,
+    /// The other person's face, by its picture key, where the sigil would
+    /// be: in a direct message it is who the conversation is with, and with
+    /// nothing said by them yet there was nowhere else to see it.
+    pub face: Option<String>,
 }
 
 /// What drawing the strip left for whoever hit-tests it next frame.
@@ -70,6 +74,8 @@ const MARK: f32 = 18.0;
 /// Where the sigil starts, and how far past it the name does.
 const LEFT: f32 = 14.0;
 const SIGIL: f32 = 14.0;
+/// The other person's face, in a direct message.
+const FACE: f32 = 28.0;
 /// A button in the strip, and the gap between two of them.
 const BUTTON: f32 = 30.0;
 const GAP: f32 = 4.0;
@@ -418,6 +424,7 @@ impl Header {
             topic: Vec::new(),
             topic_links: Vec::new(),
             hovered_link: None,
+            face: None,
         }
     }
 
@@ -453,9 +460,10 @@ impl Header {
         // lands on top of them.
         // A mark is set at fifteen pixels square and measured as that: read
         // as a hash it came out narrower, and the name sat against it.
-        let past = match self.sigil_is_mark {
-            true => 15.0 + 7.0,
-            false => {
+        let past = match (self.face.is_some(), self.sigil_is_mark) {
+            (true, _) => FACE + 8.0,
+            (false, true) => 15.0 + 7.0,
+            (false, false) => {
                 matterless_layout::extent_of(
                     fonts,
                     self.sigil,
@@ -532,14 +540,32 @@ impl Header {
                 smooth: false,
             }
         };
-        let sigil = painter.run(
-            fonts,
-            self.sigil,
-            within.x + LEFT,
-            within.y + if self.sigil_is_mark { 14.0 } else { 13.0 } - lift,
-            set_in,
-        );
-        scene.glyphs(sigil, palette.faint, palette.faint);
+        match &self.face {
+            // A round face, centred on the lines beside it, over a ground that
+            // holds its place until the picture arrives.
+            Some(key) => {
+                let (x, y) = (within.x + LEFT, within.y + (within.height - FACE) / 2.0);
+                scene.rounded(x, y, FACE, FACE, palette.raised, FACE / 2.0);
+                scene.extend([matterless_paint::Piece::Image {
+                    x,
+                    y,
+                    width: FACE,
+                    height: FACE,
+                    key: key.clone(),
+                    radius: FACE / 2.0,
+                }]);
+            }
+            None => {
+                let sigil = painter.run(
+                    fonts,
+                    self.sigil,
+                    within.x + LEFT,
+                    within.y + if self.sigil_is_mark { 14.0 } else { 13.0 } - lift,
+                    set_in,
+                );
+                scene.glyphs(sigil, palette.faint, palette.faint);
+            }
+        }
 
         let (from, room) = self.name_box(fonts, within);
         // Cut to that room rather than wrapped: the strip is one line tall,
