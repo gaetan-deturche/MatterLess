@@ -1562,6 +1562,9 @@ impl Composer {
             // line, which is what every other text box does.
             let action = match input.pressed_now() == Some(self.name.as_str()) {
                 true => match input.clicks() {
+                    // Shift reaches from where the caret already is: a drag
+                    // keeps the selection's anchor, or takes the caret as one.
+                    1 if input.mods().shift => Action::Drag { x: at.0, y: at.1 },
                     1 => Action::Click { x: at.0, y: at.1 },
                     2 => Action::DoubleClick { x: at.0, y: at.1 },
                     _ => Action::TripleClick { x: at.0, y: at.1 },

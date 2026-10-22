@@ -789,6 +789,47 @@ fn the_lines_around_a_selection_are_left_alone() {
     }
 }
 
+/// Shift and a press elsewhere selects from the caret to there, as every
+/// text box does.
+#[test]
+fn a_shift_press_selects_from_the_caret() {
+    let mut fonts = Fonts::new();
+    let (mut composer, placed, box_of) = holding_a_message(&mut fonts);
+    let at = |line: f32| {
+        (
+            box_of.x + MARGIN + PADDING + 40.0,
+            box_of.y + MARGIN + PADDING + LINE * line,
+        )
+    };
+
+    let (x, y) = at(1.5);
+    let mut input = Input::default();
+    input.focus_on(NAME);
+    input.apply(Event::PointerMoved { x, y }, &placed);
+    input.apply(Event::PointerPressed, &placed);
+    composer.react(&mut fonts, &input, panel(), &mut String::new());
+    assert!(
+        composer.bounds().is_none(),
+        "a plain press only places the caret"
+    );
+
+    let (x, y) = at(3.5);
+    let mut input = Input::default();
+    input.focus_on(NAME);
+    input.apply(
+        Event::Modifiers(matterless_ui::input::Mods {
+            shift: true,
+            ..Default::default()
+        }),
+        &placed,
+    );
+    input.apply(Event::PointerMoved { x, y }, &placed);
+    input.apply(Event::PointerPressed, &placed);
+    composer.react(&mut fonts, &input, panel(), &mut String::new());
+    let ((start, _), (end, _)) = composer.bounds().expect("the shift press selected");
+    assert!(end > start, "from the caret's line to the pressed one");
+}
+
 /// A message several lines long, in a box that holds it.
 fn holding_a_message(fonts: &mut Fonts) -> (Composer, Vec<matterless_ui::Placed>, Rect) {
     let mut composer = Composer::new(NAME);
