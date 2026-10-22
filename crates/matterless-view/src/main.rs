@@ -768,6 +768,11 @@ struct App {
     /// Whether this window has the keyboard, which decides both whether an
     /// arriving message interrupts and whether the button should be flashing.
     focused: bool,
+    /// Whether the window is minimised. Windows can leave a minimised window
+    /// active, so it goes on reporting focus while nobody can see it: a
+    /// message arriving then was read on arrival, and its divider gone before
+    /// the window was restored to show it.
+    minimized: bool,
     /// When the server was last told the reader is using the client.
     said_active: Option<std::time::Instant>,
     /// YouTube's player, while the viewer is showing a YouTube video, and the
@@ -1081,6 +1086,7 @@ impl App {
             // first focus event: a window that starts out believing it is
             // ignored would flash at the first message.
             focused: true,
+            minimized: false,
             said_active: None,
             #[cfg(windows)]
             youtube_player: None,
@@ -5968,6 +5974,43 @@ impl App {
         }
     }
 
+    /// The window has gained or lost the reader: what counts as read, the
+    /// divider's clock, the flashing button, and which conversation the
+    /// socket thread treats as being looked at all follow it.
+    fn focus_changed(&mut self, focused: bool) {
+        self.focused = focused;
+        // A channel left open behind an editor is not being read.
+        let looking = self.looking_at_divider();
+        self.rest.focus(std::time::Instant::now(), looking);
+        if focused {
+            // Looked at, so it has been answered: the flashing stops
+            // even though whatever caused it may still be unread. The
+            // badge is what carries that, and it stays.
+            self.taskbar.calm(raw_window(self.window.as_ref()));
+            // And what arrived behind the window has now been come
+            // back to. Without this the badge stayed lit for as long
+            // as somebody read, because nothing between opening a
+            // channel and leaving it ever said it had been read --
+            // and alt-tabbing away and back is the commonest way to
+            // be handed messages you then sit and read.
+            self.read_what_is_open();
+            if let Some(root) = self.seen_root() {
+                self.read_thread(&root);
+            }
+        }
+        // Which conversation counts as "being read" depends on this, so
+        // the socket thread has to hear about it.
+        if let Some(link) = self.link.as_ref() {
+            link.send(matterless_view::live::Ask::Looking {
+                channel_id: if focused {
+                    self.sidebar.selected.clone().unwrap_or_default()
+                } else {
+                    String::new()
+                },
+            });
+        }
+    }
+
     /// Whether the reader can see the divider: the window focused, and the
     /// divider on screen rather than above it, still to be scrolled up to.
     fn looking_at_divider(&self) -> bool {
@@ -10500,7 +10543,27 @@ impl ApplicationHandler<Update> for App {
                 // It also spent a slot of the three-width row cache on a
                 // width no reader will ever see.
                 if size.width == 0 || size.height == 0 {
+                    // Minimised, which is out of sight whatever the keyboard
+                    // says.
+                    if !self.minimized {
+                        self.minimized = true;
+                        if self.focused {
+                            self.focus_changed(false);
+                        }
+                    }
                     return;
+                }
+                // Restored: back in front of the reader if it has the keyboard.
+                // Otherwise the focus event that follows says so.
+                if self.minimized {
+                    self.minimized = false;
+                    if self
+                        .window
+                        .as_ref()
+                        .is_some_and(|window| window.has_focus())
+                    {
+                        self.focus_changed(true);
+                    }
                 }
                 self.sized = Some((size.width, size.height));
                 // Drawn here, before this handler comes back, rather than left
@@ -10562,39 +10625,9 @@ impl ApplicationHandler<Update> for App {
                 };
                 self.attach_file(path, &root_id);
             }
-            WindowEvent::Focused(focused) => {
-                self.focused = focused;
-                // A channel left open behind an editor is not being read.
-                let looking = self.looking_at_divider();
-                self.rest.focus(std::time::Instant::now(), looking);
-                if focused {
-                    // Looked at, so it has been answered: the flashing stops
-                    // even though whatever caused it may still be unread. The
-                    // badge is what carries that, and it stays.
-                    self.taskbar.calm(raw_window(self.window.as_ref()));
-                    // And what arrived behind the window has now been come
-                    // back to. Without this the badge stayed lit for as long
-                    // as somebody read, because nothing between opening a
-                    // channel and leaving it ever said it had been read --
-                    // and alt-tabbing away and back is the commonest way to
-                    // be handed messages you then sit and read.
-                    self.read_what_is_open();
-                    if let Some(root) = self.seen_root() {
-                        self.read_thread(&root);
-                    }
-                }
-                // Which conversation counts as "being read" depends on this, so
-                // the socket thread has to hear about it.
-                if let Some(link) = self.link.as_ref() {
-                    link.send(matterless_view::live::Ask::Looking {
-                        channel_id: if focused {
-                            self.sidebar.selected.clone().unwrap_or_default()
-                        } else {
-                            String::new()
-                        },
-                    });
-                }
-            }
+            // Not while minimised: Windows can leave a minimised window the
+            // active one, and then it reports the keyboard as still here.
+            WindowEvent::Focused(focused) => self.focus_changed(focused && !self.minimized),
             WindowEvent::CursorLeft { .. } => {
                 self.input.apply(UiEvent::PointerLeft, &[]);
                 self.watch_pointer();
