@@ -2421,8 +2421,19 @@ impl App {
             // that knows how tall the row becomes. It never reaches here.
             Press::Whole(_) => {}
             // A link to a message on this server is followed here, as its
-            // quoted card is, when the message is in the store.
+            // quoted card is, when the message is in the store; and a link to
+            // one of its channels opens the channel, when the reader is in it.
             Press::Link(href) => {
+                if let Some(name) = matterless_view::feed::channel_linked(&self.server, &href)
+                    && let Some(channel) = self
+                        .store
+                        .as_ref()
+                        .and_then(|store| store.channel_by_name(&name).ok().flatten())
+                {
+                    self.sidebar.selected = Some(channel.id.clone());
+                    self.open_channel(&channel.id);
+                    return;
+                }
                 let held = matterless_view::feed::permalinked(&self.server, &href).and_then(|id| {
                     self.store
                         .as_ref()

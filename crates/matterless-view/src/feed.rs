@@ -409,6 +409,25 @@ pub fn permalinked(server: &str, href: &str) -> Option<String> {
     (!team.is_empty() && id_like).then(|| post_id.to_string())
 }
 
+/// The channel a link names, when it is one on this server:
+/// `<server>/<team>/channels/<name>`, what the web client's address bar says
+/// and what people paste.
+pub fn channel_linked(server: &str, href: &str) -> Option<String> {
+    let server = server.trim_end_matches('/');
+    if server.is_empty() {
+        return None;
+    }
+    let path = href.strip_prefix(server)?.strip_prefix('/')?;
+    let path = path.split(['?', '#']).next().unwrap_or_default();
+    let mut parts = path.trim_end_matches('/').split('/');
+    let (Some(team), Some("channels"), Some(name), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return None;
+    };
+    (!team.is_empty() && !name.is_empty()).then(|| name.to_string())
+}
+
 /// The custom emoji a page of rows uses, by name to the id behind their image.
 ///
 /// A standard emoji is a character the parser already resolved. A custom one is
@@ -511,6 +530,40 @@ mod tests {
             assert_eq!(permalinked(server, &other), None, "{other}");
         }
         assert_eq!(permalinked("", &format!("/p4/pl/{id}")), None);
+    }
+
+    /// A pasted address of a channel on this server is that channel.
+    #[test]
+    fn a_link_to_a_channel_on_this_server_names_it() {
+        let server = "https://mattermost.sloclap.net";
+        for (href, name) in [
+            (
+                "https://mattermost.sloclap.net/sloclap/channels/perforce",
+                "perforce",
+            ),
+            (
+                "https://mattermost.sloclap.net/sloclap/channels/ask--ugs/",
+                "ask--ugs",
+            ),
+            (
+                "https://mattermost.sloclap.net/sloclap/channels/tools?x=1",
+                "tools",
+            ),
+        ] {
+            assert_eq!(
+                channel_linked(server, href),
+                Some(name.to_string()),
+                "{href}"
+            );
+        }
+        for other in [
+            "https://elsewhere.net/sloclap/channels/perforce",
+            "https://mattermost.sloclap.net/sloclap/pl/perforce",
+            "https://mattermost.sloclap.net/sloclap/channels/perforce/more",
+            "https://mattermost.sloclap.net/channels/perforce",
+        ] {
+            assert_eq!(channel_linked(server, other), None, "{other}");
+        }
     }
 
     fn reacted_with(names: &[&str]) -> Vec<Row> {
