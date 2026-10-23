@@ -172,6 +172,7 @@ impl SyncContext {
             following_thread: !root_id.is_empty() && self.followed_threads.contains(root_id),
             named_by_server: None,
             count_words: self.count_words,
+            direct: false,
         }
     }
 }
@@ -586,6 +587,12 @@ impl SyncEngine {
             });
         let mut notify_context = context.notify_context(&post.root_id, &channel_props);
         notify_context.named_by_server = mentioned.map(|ids| ids.contains(&context.me.id));
+        notify_context.direct = self
+            .store
+            .channel(&post.channel_id)
+            .ok()
+            .flatten()
+            .is_some_and(|channel| channel.channel_type == "D" || channel.channel_type == "G");
         let decision: NotifyDecision = notify::decide(post, &notify_context);
         Delta::PostUpserted {
             post_id: post.id.clone(),

@@ -73,6 +73,10 @@ pub struct NotifyContext<'a> {
     /// When the server leaves the reader off, whether a mention the words
     /// show -- a keyword, an `@` in a bot's card -- still counts.
     pub count_words: bool,
+    /// A direct or group message: addressed to the reader by their being in
+    /// it, which Mattermost counts as a mention -- so it notifies at the
+    /// mentions-only level, which is the default.
+    pub direct: bool,
 }
 
 /// True when `needle` appears in `haystack` on word boundaries, case-insensitive.
@@ -146,10 +150,14 @@ fn at_mentions(message: &str) -> Vec<String> {
 /// Resolves the strongest mention the post contains for this user.
 pub fn resolve_mention(post: &Post, context: &NotifyContext<'_>) -> MentionVerdict {
     let read = read_mention(post, context);
-    match context.named_by_server {
+    let verdict = match context.named_by_server {
         Some(false) if !context.count_words => MentionVerdict::None,
         Some(true) if read == MentionVerdict::None => MentionVerdict::Direct,
         _ => read,
+    };
+    match (verdict, context.direct) {
+        (MentionVerdict::None, true) => MentionVerdict::Direct,
+        (verdict, _) => verdict,
     }
 }
 
@@ -410,7 +418,28 @@ mod tests {
             following_thread: false,
             named_by_server: None,
             count_words: false,
+            direct: false,
         }
+    }
+
+    /// A direct message asks the reader whatever it says, so it notifies at
+    /// the mentions-only level that is most people's -- and the taskbar
+    /// button flashes for it, which it did not.
+    #[test]
+    fn a_direct_message_notifies_at_the_mention_level() {
+        let user = me();
+        let props = HashMap::new();
+        let hello = post_from("other", "salut, une question");
+        let mut ctx = context(&user, &props);
+        assert!(
+            !decide(&hello, &ctx).notify,
+            "a channel's plain message does not"
+        );
+        ctx.direct = true;
+        ctx.named_by_server = Some(false);
+        let decided = decide(&hello, &ctx);
+        assert_eq!(decided.mention, MentionVerdict::Direct);
+        assert!(decided.notify, "{:?}", decided.reason);
     }
 
     /// What the server says a live post mentions outranks what the words
