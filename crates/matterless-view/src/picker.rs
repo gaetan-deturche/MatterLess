@@ -571,11 +571,23 @@ impl Picker {
             let Some((_, mark)) = self.tabs.get(*which) else {
                 continue;
             };
-            // The one the grid is in, said with a ground rather than only by
-            // the tiles below it -- a row of marks with none of them lit says
-            // nothing about where the reader is.
-            if here == Some(*which) {
+            // The one the grid is in, said with a ground and the signal under
+            // it, as a tab says it -- the ground alone was too faint to read
+            // these as tabs at all. The others lighten under the pointer, so
+            // they read as something to press.
+            let shown = here == Some(*which);
+            if shown {
                 scene.fill(rect.x, rect.y, rect.width, rect.height, palette.ground);
+                let [red, green, blue] = palette.signal;
+                scene.fill(
+                    rect.x + 4.0,
+                    rect.bottom() - 2.0,
+                    rect.width - 8.0,
+                    2.0,
+                    [red, green, blue, 255],
+                );
+            } else if tabbed().under(input, &which.to_string()) {
+                scene.fill(rect.x, rect.y, rect.width, rect.height, palette.hover);
             }
             let Some(face) = mark.unicode.as_ref() else {
                 continue;
