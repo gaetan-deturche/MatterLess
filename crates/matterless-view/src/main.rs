@@ -9147,6 +9147,9 @@ impl App {
             .map(|(_, href)| href.clone());
         header.offered = self.header_offers();
         header.muted = self.muted();
+        header.status = self
+            .counterpart()
+            .and_then(|(who, _)| self.presence.get(&who).cloned());
         header.face = self
             .counterpart()
             .map(|(who, at)| matterless_view::stream::avatar_key(&who, at));

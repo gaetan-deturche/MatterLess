@@ -41,6 +41,8 @@ pub struct Header {
     /// be: in a direct message it is who the conversation is with, and with
     /// nothing said by them yet there was nowhere else to see it.
     pub face: Option<String>,
+    /// Whether they are around, as the sidebar says it: the dot on the face.
+    pub status: Option<String>,
 }
 
 /// What drawing the strip left for whoever hit-tests it next frame.
@@ -74,8 +76,11 @@ const MARK: f32 = 18.0;
 /// Where the sigil starts, and how far past it the name does.
 const LEFT: f32 = 14.0;
 const SIGIL: f32 = 14.0;
-/// The other person's face, in a direct message.
+/// The other person's face, in a direct message, and the dot on it saying
+/// whether they are around.
 const FACE: f32 = 28.0;
+const STATUS: f32 = 9.0;
+const STATUS_RING: f32 = 2.0;
 /// A button in the strip, and the gap between two of them.
 const BUTTON: f32 = 30.0;
 const GAP: f32 = 4.0;
@@ -425,6 +430,7 @@ impl Header {
             topic_links: Vec::new(),
             hovered_link: None,
             face: None,
+            status: None,
         }
     }
 
@@ -554,6 +560,24 @@ impl Header {
                     key: key.clone(),
                     radius: FACE / 2.0,
                 }]);
+                // After the face, or the picture lands on it: a dot in a ring
+                // of the strip's own ground, at the corner.
+                if let Some(lit) = self
+                    .status
+                    .as_deref()
+                    .and_then(|status| crate::sidebar::dot(status, palette))
+                {
+                    let (dot_x, dot_y) = (x + FACE - STATUS + 1.0, y + FACE - STATUS + 1.0);
+                    scene.rounded(
+                        dot_x - STATUS_RING,
+                        dot_y - STATUS_RING,
+                        STATUS + STATUS_RING * 2.0,
+                        STATUS + STATUS_RING * 2.0,
+                        palette.surface,
+                        (STATUS + STATUS_RING * 2.0) / 2.0,
+                    );
+                    scene.rounded(dot_x, dot_y, STATUS, STATUS, lit, STATUS / 2.0);
+                }
             }
             None => {
                 let sigil = painter.run(
