@@ -205,9 +205,18 @@ jobs:
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
+        # Not marked latest when a newer version is already out: the updater
+        # reads the latest release, and a tag whose build finished late took
+        # that from the newer one and offered everybody the older build.
         run: |
           $version = $env:TAG -replace '^v', ''
+          $newer = gh release list --limit 100 --json tagName -q '.[].tagName' |
+            ForEach-Object { $_ -replace '^v', '' } |
+            Where-Object { $_ -match '^\d+(\.\d+){1,3}$' -and [version]$_ -gt [version]$version }
+          $latest = if ($newer) { "--latest=false" } else { "--latest" }
+          if ($newer) { "$($newer -join ', ') already out: $env:TAG is not marked latest" }
           gh release create "$env:TAG" `
             "$env:SETUP" "$env:GITHUB_WORKSPACE\latest.json" "$env:FFMPEG_SOURCE" `
             --title "MatterLess $version" `
-            --notes-file "$env:NOTES"
+            --notes-file "$env:NOTES" `
+            $latest
