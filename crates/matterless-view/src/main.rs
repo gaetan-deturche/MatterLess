@@ -5974,6 +5974,32 @@ impl App {
         }
     }
 
+    /// Where the pointer is over the window, asked of the system: a file
+    /// dragged in from outside moves no pointer here, so the last position the
+    /// window heard is wherever it was before the drag -- and a file dropped
+    /// on the thread went to the channel's box.
+    #[cfg(windows)]
+    fn pointer_now(&self) -> Option<(f32, f32)> {
+        use windows::Win32::Foundation::{HWND, POINT};
+        use windows::Win32::Graphics::Gdi::ScreenToClient;
+        use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
+        let window = HWND(raw_window(self.window.as_ref()) as *mut _);
+        let mut at = POINT::default();
+        unsafe { GetCursorPos(&mut at) }.ok()?;
+        if !unsafe { ScreenToClient(window, &mut at) }.as_bool() {
+            return None;
+        }
+        Some((
+            (f64::from(at.x) / self.dpi) as f32,
+            (f64::from(at.y) / self.dpi) as f32,
+        ))
+    }
+
+    #[cfg(not(windows))]
+    fn pointer_now(&self) -> Option<(f32, f32)> {
+        None
+    }
+
     /// The window has gained or lost the reader: what counts as read, the
     /// divider's clock, the flashing button, and which conversation the
     /// socket thread treats as being looked at all follow it.
@@ -10613,11 +10639,13 @@ impl ApplicationHandler<Update> for App {
             // same thing now: here is a file for what I am writing. Sending is
             // still the reader's own gesture.
             WindowEvent::DroppedFile(path) => {
-                let over_thread = self.thread_rect().zip(self.input.pointer_at()).is_some_and(
-                    |(pane, (x, y))| {
+                let pointer = self.pointer_now().or(self.input.pointer_at());
+                let over_thread = self
+                    .thread_rect()
+                    .zip(pointer)
+                    .is_some_and(|(pane, (x, y))| {
                         x >= pane.x && x <= pane.right() && y >= pane.y && y <= pane.bottom()
-                    },
-                );
+                    });
                 let root_id = if over_thread {
                     self.open_root().unwrap_or_default()
                 } else {
