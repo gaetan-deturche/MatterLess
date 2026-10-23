@@ -426,6 +426,7 @@ fn carded(fonts: &mut Fonts) -> Stream {
                     value: "what they said".into(),
                 }],
             }],
+            files: Vec::new(),
         },
     ];
     stream.rows = vec![Row::Post { post: said }];

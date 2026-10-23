@@ -1512,20 +1512,26 @@ impl Stream {
         runs
     }
 
-    /// Where each link card's picture is drawn, with its address: the text-less
-    /// preview lines paired, in order, with the previews that have a picture.
+    /// Where each card's picture is drawn, by the key its picture is held
+    /// under: the text-less preview lines paired, in order, with a page's
+    /// picture or the pictures attached to a quoted message.
     fn preview_pictures(&self, index: usize, top: f32, left: f32) -> Vec<(Rect, String)> {
         let (Some(laid), Some(Row::Post { post } | Row::Continuation { post })) =
             (self.laid.get(index), self.rows.get(index))
         else {
             return Vec::new();
         };
-        let urls = post.previews.iter().filter_map(|preview| match preview {
+        let urls = post.previews.iter().flat_map(|preview| match preview {
             matterless_render::Preview::Page {
                 image: Some(picture),
                 ..
-            } if picture.width > 0 => Some(picture.url.clone()),
-            _ => None,
+            } if picture.width > 0 => vec![crate::live::linked_key(&picture.url)],
+            matterless_render::Preview::Permalink { files, .. } => files
+                .iter()
+                .filter(|file| file.image && file.box_width > 0)
+                .map(picture_key)
+                .collect(),
+            _ => Vec::new(),
         });
         laid.blocks
             .iter()
@@ -1552,13 +1558,18 @@ impl Stream {
         let Some(Row::Post { post } | Row::Continuation { post }) = self.rows.get(index) else {
             return Vec::new();
         };
-        let youtube = post.previews.iter().filter_map(|preview| match preview {
+        let youtube = post.previews.iter().flat_map(|preview| match preview {
             matterless_render::Preview::Page {
                 image: Some(picture),
                 url,
                 ..
-            } if picture.width > 0 => Some(crate::youtube::video_of(url).is_some()),
-            _ => None,
+            } if picture.width > 0 => vec![crate::youtube::video_of(url).is_some()],
+            matterless_render::Preview::Permalink { files, .. } => files
+                .iter()
+                .filter(|file| file.image && file.box_width > 0)
+                .map(|_| false)
+                .collect(),
+            _ => Vec::new(),
         });
         self.preview_pictures(index, top, left)
             .into_iter()
@@ -2308,12 +2319,8 @@ impl Stream {
                     }
                 }
                 // And the pictures on its link cards, at the size they are drawn.
-                for (at, url) in self.preview_pictures(index, top, 0.0) {
-                    wanted.push((
-                        crate::live::linked_key(&url),
-                        (at.width as u32).max(1),
-                        (at.height as u32).max(1),
-                    ));
+                for (at, key) in self.preview_pictures(index, top, 0.0) {
+                    wanted.push((key, (at.width as u32).max(1), (at.height as u32).max(1)));
                 }
             }
             top = bottom;
@@ -3099,13 +3106,13 @@ impl Stream {
                     }
                 }
                 scene.extend(self.pictures(index, top, inner.x, palette.raised));
-                for (at, url) in self.preview_pictures(index, top, inner.x) {
+                for (at, key) in self.preview_pictures(index, top, inner.x) {
                     scene.extend([matterless_paint::Piece::Image {
                         x: at.x,
                         y: at.y,
                         width: at.width,
                         height: at.height,
-                        key: crate::live::linked_key(&url),
+                        key,
                         radius: CARD,
                     }]);
                 }

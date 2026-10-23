@@ -1809,6 +1809,7 @@ pub fn lay_out_opened(fonts: &mut Fonts, row: &Row, theme: &Theme, opened: bool)
                 author_name,
                 create_at,
                 nodes,
+                files,
                 ..
             } => {
                 // Who said it, then where and when, quieter: the face goes in
@@ -1878,6 +1879,52 @@ pub fn lay_out_opened(fonts: &mut Fonts, row: &Row, theme: &Theme, opened: bool)
                         wrap,
                     });
                     y += count as f32 * theme.line_height;
+                }
+                // What was attached, under its words: a picture where a page's
+                // picture goes, a word-less line the card's ground runs through,
+                // and anything else by its name.
+                for file in files {
+                    if file.image && file.box_width > 0 {
+                        let (width, height) = preview_picture_size(
+                            &matterless_render::PreviewImage {
+                                url: String::new(),
+                                width: file.box_width,
+                                height: file.box_height,
+                            },
+                            wrap,
+                        );
+                        blocks.push(Block {
+                            y,
+                            x,
+                            height: theme.block_gap + height,
+                            lines: 0,
+                            kind: Kind::Preview,
+                            spans: Vec::new(),
+                            size: theme.body_size,
+                            wrap: width,
+                        });
+                        y += theme.block_gap + height;
+                    } else {
+                        blocks.push(Block {
+                            y,
+                            x,
+                            height: theme.line_height,
+                            lines: 1,
+                            kind: Kind::Preview,
+                            spans: vec![TextSpan {
+                                text: format!("\u{1f4ce} {}", file.name),
+                                bold: false,
+                                italic: false,
+                                mono: false,
+                                faint: true,
+                                press: None,
+                                emoji: None,
+                            }],
+                            size: theme.body_size,
+                            wrap,
+                        });
+                        y += theme.line_height;
+                    }
                 }
             }
         }
@@ -2581,6 +2628,7 @@ mod tests {
             author_avatar_at: 0,
             create_at: 0,
             nodes: matterless_render::markdown::parse(&"word ".repeat(400)),
+            files: Vec::new(),
         }];
         let laid = lay_out(&mut fonts, &Row::Post { post: carded }, &theme);
         let card: Vec<&Block> = laid
@@ -2597,6 +2645,44 @@ mod tests {
         assert!(body.lines > theme.preview_lines, "not cut to a summary");
         assert!(!body.spans[0].faint, "the words read as words");
         assert!(!body.spans[0].text.ends_with('…'));
+    }
+
+    /// What the quoted message had attached comes with it: a picture in a
+    /// word-less line the size it will be drawn, anything else by its name.
+    #[test]
+    fn a_quoted_message_brings_its_attachments() {
+        let mut fonts = Fonts::new();
+        let theme = Theme::default();
+        let mut document = picture("d1", 0, 0);
+        document.image = false;
+        document.name = "notes.pdf".into();
+        let mut carded = post(vec![text("look")]);
+        carded.previews = vec![matterless_render::Preview::Permalink {
+            post_id: "q1".into(),
+            channel_id: "c1".into(),
+            channel_label: "Dev".into(),
+            author_name: "ada".into(),
+            author_id: "u1".into(),
+            author_avatar_at: 0,
+            create_at: 0,
+            nodes: matterless_render::markdown::parse("see this"),
+            files: vec![picture("p1", 300, 100), document],
+        }];
+        let laid = lay_out(&mut fonts, &Row::Post { post: carded }, &theme);
+        let card: Vec<&Block> = laid
+            .blocks
+            .iter()
+            .filter(|block| block.kind == Kind::Preview)
+            .collect();
+        let shot = card
+            .iter()
+            .find(|block| block.lines == 0)
+            .expect("a line for the picture");
+        assert_eq!(shot.wrap, 300.0, "as wide as it is drawn");
+        assert_eq!(shot.height, theme.block_gap + 100.0);
+        let named = card.last().expect("the document");
+        assert!(named.spans[0].text.ends_with("notes.pdf"));
+        assert!(named.y > shot.y, "under the picture, in the order attached");
     }
 
     /// The whole point: a row's height is known, and it is different at two

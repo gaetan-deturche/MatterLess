@@ -122,6 +122,9 @@ pub enum Preview {
         create_at: Timestamp,
         /// The quoted message, parsed the same way any other body is.
         nodes: Vec<Node>,
+        /// What was attached to it: the card is the message, and a quote of a
+        /// screenshot with its words but not the screenshot is half of one.
+        files: Vec<FileRef>,
     },
 }
 
@@ -252,6 +255,7 @@ fn permalink_preview(
         // Parsed here rather than looked up in `options.parsed`: a quoted post
         // is not one of the page's own, so it was never in that map.
         nodes: markdown::parse(&quoted.message),
+        files: files_of(&quoted, options),
         post_id: quoted.id,
     })
 }
