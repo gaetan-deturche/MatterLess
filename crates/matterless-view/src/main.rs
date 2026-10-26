@@ -3451,6 +3451,60 @@ impl App {
         );
     }
 
+    /// Copy for what is selected, and Open and Copy for a link, under a
+    /// right-click: in a message, a thread or a box being written in.
+    ///
+    /// The menu is told the link and the words together, the link first and
+    /// on a line of its own: an address has no line break in it, and the words
+    /// may have several.
+    fn offer_text_menu(&mut self) {
+        use matterless_view::menu::{Item, Style};
+        let Some(name) = self.input.contexted().map(str::to_string) else {
+            return;
+        };
+        let Some((x, y)) = self.input.pointer_at() else {
+            return;
+        };
+        let href = self.stream.link_at(&name).or_else(|| {
+            self.thread
+                .as_ref()
+                .and_then(|thread| thread.link_at(&name))
+        });
+        let selected = if name.starts_with(&self.stream.name) {
+            self.stream.selected_text()
+        } else if name == composer::NAME {
+            self.composer.selected_text()
+        } else if name == THREAD_COMPOSER {
+            self.thread_composer.selected_text()
+        } else {
+            self.thread
+                .as_ref()
+                .filter(|thread| name.starts_with(&thread.name))
+                .and_then(|thread| thread.selected_text())
+        };
+        let mut items = Vec::new();
+        if selected.is_some() {
+            items.push(Item::new("text.copy", "Copy").marked(matterless_layout::marks::COPY));
+        }
+        if href.is_some() {
+            items.push(Item::new("link.open", "Open link").marked(matterless_layout::marks::LINK));
+            items.push(Item::new("link.copy", "Copy link").marked(matterless_layout::marks::COPY));
+        }
+        if items.is_empty() {
+            return;
+        }
+        self.menu.show(
+            &format!(
+                "{}\n{}",
+                href.unwrap_or_default(),
+                selected.unwrap_or_default()
+            ),
+            matterless_view::menu::Anchor::At(x, y),
+            Style::channel(),
+            items,
+        );
+    }
+
     /// Copy and Save for a picture under a right-click: in a message, in a
     /// thread, or open in the viewer.
     fn offer_picture_menu(&mut self) {
@@ -3685,6 +3739,16 @@ impl App {
         if let Some(rest) = chosen.strip_prefix("spell.") {
             self.act_on_spelling(about, rest);
             return;
+        }
+        // Opened as a press is, so a link to this server stays in the app.
+        let (href, selected) = about.split_once('\n').unwrap_or((about, ""));
+        match chosen {
+            "link.open" => {
+                return self.press(matterless_layout::row::Press::Link(href.to_string()), None);
+            }
+            "link.copy" => return self.copy(href.to_string()),
+            "text.copy" => return self.copy(selected.to_string()),
+            _ => {}
         }
         if let Some(rest) = chosen.strip_prefix("channel.") {
             self.act_on_channel_menu(about, rest);
@@ -10796,6 +10860,9 @@ impl ApplicationHandler<Update> for App {
                     self.input.apply(UiEvent::Contexted, &boxes);
                     self.offer_channel_menu();
                     self.offer_directs_menu();
+                    // Before the two below, which answer more particularly
+                    // where they apply: a misspelled word, a picture.
+                    self.offer_text_menu();
                     self.offer_spelling_menu();
                     self.offer_picture_menu();
                     self.react();

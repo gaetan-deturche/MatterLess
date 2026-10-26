@@ -800,6 +800,11 @@ impl Composer {
         })
     }
 
+    /// What is selected in the box, for a right-click to offer to copy.
+    pub fn selected_text(&self) -> Option<String> {
+        self.editor.copy_selection().filter(|said| !said.is_empty())
+    }
+
     /// The selection's own bounds, for a test that has to see them.
     #[cfg(test)]
     pub fn bounds(&self) -> Option<((usize, usize), (usize, usize))> {

@@ -1950,6 +1950,19 @@ impl Stream {
         ))
     }
 
+    /// The address of the link a hit box names, for the menu a right-click
+    /// on one opens.
+    pub fn link_at(&self, name: &str) -> Option<String> {
+        let at = name
+            .strip_prefix(&format!("{}/press/", self.name))?
+            .parse::<usize>()
+            .ok()?;
+        match &self.presses.get(at)?.0 {
+            matterless_layout::row::Press::Link(href) => Some(href.clone()),
+            _ => None,
+        }
+    }
+
     /// Whether the "New messages" divider is on screen.
     pub fn divider_in_view(&self, within: Rect) -> bool {
         let mut top = self.first_row_at(within);
