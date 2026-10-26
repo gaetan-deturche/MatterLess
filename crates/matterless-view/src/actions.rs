@@ -155,6 +155,9 @@ pub enum Action {
     Edit,
     /// Delete it. Only ever offered on the reader's own.
     Delete,
+    /// Take its link preview away, for everybody. Only on the reader's own,
+    /// and only when it has one.
+    RemovePreview,
 }
 
 impl Action {
@@ -173,6 +176,7 @@ impl Action {
             Action::Remind => "remind",
             Action::Edit => "edit",
             Action::Delete => "delete",
+            Action::RemovePreview => "nopreview",
         }
     }
 
@@ -190,6 +194,7 @@ impl Action {
             "remind" => Action::Remind,
             "edit" => Action::Edit,
             "delete" => Action::Delete,
+            "nopreview" => Action::RemovePreview,
             _ => return None,
         })
     }
@@ -216,6 +221,7 @@ impl Action {
             (Action::Remind, _) => "Remind me\u{2026}",
             (Action::Edit, _) => "Edit",
             (Action::Delete, _) => "Delete\u{2026}",
+            (Action::RemovePreview, _) => "Remove link preview",
         }
     }
 }
@@ -260,6 +266,7 @@ mod tests {
             Action::Remind,
             Action::Edit,
             Action::Delete,
+            Action::RemovePreview,
         ] {
             assert_eq!(Action::from_slug(action.slug()), Some(action));
         }

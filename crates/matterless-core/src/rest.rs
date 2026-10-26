@@ -1143,6 +1143,18 @@ impl RestClient {
         Self::decode(response).await
     }
 
+    /// Replaces a post's props, which is how the web client removes a link
+    /// preview: the whole object, so the caller merges into what was there.
+    pub async fn patch_post_props(&self, post_id: &str, props: &serde_json::Value) -> Result<Post> {
+        let response = self
+            .send(
+                self.builder(Method::PUT, &format!("/posts/{post_id}/patch"))?
+                    .json(&serde_json::json!({ "props": props })),
+            )
+            .await?;
+        Self::decode(response).await
+    }
+
     /// Deletes a post. Afterwards the server 404s it, so the local copy is a
     /// tombstone rather than a cache of something fetchable.
     pub async fn delete_post(&self, post_id: &str) -> Result<()> {

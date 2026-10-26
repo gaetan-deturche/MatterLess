@@ -971,6 +971,21 @@ async fn run(
                             Action::Save => rest.set_post_saved(&me_id, &post_id, on).await,
                             Action::Pin => rest.set_post_pinned(&post_id, on).await,
                             Action::Delete => rest.delete_post(&post_id).await,
+                            // Merged into what the post already carries: the
+                            // patch replaces the props whole.
+                            Action::RemovePreview => {
+                                let mut props = engine
+                                    .store()
+                                    .post(&post_id)
+                                    .ok()
+                                    .flatten()
+                                    .map(|post| post.props)
+                                    .filter(serde_json::Value::is_object)
+                                    .unwrap_or_else(|| serde_json::json!({}));
+                                props[matterless_render::REMOVE_LINK_PREVIEW] =
+                                    serde_json::json!("true");
+                                rest.patch_post_props(&post_id, &props).await.map(|_| ())
+                            }
                             // From this message down, which is what the app
                             // means by marking one unread: the channel goes
                             // back to being unread from here, not everywhere.

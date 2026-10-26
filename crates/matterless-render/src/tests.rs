@@ -1797,6 +1797,26 @@ fn a_page_preview_carries_what_the_card_shows() {
     }
 }
 
+/// A preview its author removed is gone, for everybody: the web client writes
+/// `remove_link_preview` on the post, and this client reads it the same way.
+#[test]
+fn a_removed_link_preview_is_not_drawn() {
+    let mut carrier = post("p1", "amy", 1_000);
+    carrier.metadata.embeds = vec![matterless_core::model::Embed {
+        embed_type: "opengraph".into(),
+        url: "https://github.com/example/repo".into(),
+        data: serde_json::json!({ "title": "example/repo" }),
+    }];
+    carrier.props = serde_json::json!({ "remove_link_preview": "true" });
+
+    let rows = plan_channel(&[carrier], &HashMap::new(), &options(ThreadMode::Flat));
+    let Some(Row::Post { post, .. }) = rows.iter().find(|row| matches!(row, Row::Post { .. }))
+    else {
+        panic!("no post row");
+    };
+    assert!(post.previews.is_empty(), "{:?}", post.previews);
+}
+
 #[test]
 fn a_bare_link_embed_draws_nothing() {
     // `{type, url}` with no data: the server fetched no metadata, so a card

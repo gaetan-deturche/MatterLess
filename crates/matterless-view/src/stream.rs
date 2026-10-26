@@ -1241,6 +1241,13 @@ impl Stream {
                             depth: 3,
                         });
                     }
+                    if let Some(closer) = self.preview_closer(index, rect) {
+                        placed.push(Placed {
+                            name: self.closer_name(index, ordinal),
+                            rect: closer,
+                            depth: 4,
+                        });
+                    }
                 }
                 for (ordinal, (block, _)) in self.pills(index).into_iter().enumerate() {
                     placed.push(Placed {
@@ -1619,6 +1626,21 @@ impl Stream {
         format!("{}/row/{index}/preview/{ordinal}", self.name)
     }
 
+    /// And the cross that takes it away.
+    fn closer_name(&self, index: usize, ordinal: usize) -> String {
+        format!("{}/row/{index}/nopreview/{ordinal}", self.name)
+    }
+
+    /// Where a card's cross sits, in its top corner: only on the reader's own
+    /// messages, which are the only ones the server lets them change.
+    fn preview_closer(&self, index: usize, card: Rect) -> Option<Rect> {
+        let (Row::Post { post } | Row::Continuation { post }) = self.rows.get(index)? else {
+            return None;
+        };
+        (post.author_id == self.me && !self.me.is_empty())
+            .then(|| Rect::new(card.right() - CLOSER - 6.0, card.y + 6.0, CLOSER, CLOSER))
+    }
+
     /// Draws each preview card: its own ground, and the bar down its left.
     /// Each quoted message's face, where its card left room for it: the header
     /// lines are the only preview lines set in from the card's edge, and they
@@ -1661,7 +1683,9 @@ impl Stream {
 
     fn quote_bars(&self, into: &mut Canvas<'_>, index: usize, top: f32, left: f32, input: &Input) {
         for (ordinal, rect) in self.preview_runs(index, top, left).into_iter().enumerate() {
-            let under = input.hovered() == Some(self.preview_name(index, ordinal).as_str());
+            let on_cross = input.hovered() == Some(self.closer_name(index, ordinal).as_str());
+            let under =
+                on_cross || input.hovered() == Some(self.preview_name(index, ordinal).as_str());
             // Corners cut on the right only: `border-radius: 0 5px 5px 0`.
             into.scene.rounded(
                 rect.x,
@@ -1689,6 +1713,27 @@ impl Stream {
                     into.palette.rule
                 },
             );
+            if let Some(cross) = self.preview_closer(index, rect).filter(|_| under) {
+                if on_cross {
+                    into.scene.rounded(
+                        cross.x,
+                        cross.y,
+                        cross.width,
+                        cross.height,
+                        into.palette.hover,
+                        4.0,
+                    );
+                }
+                matterless_widgets::centred(
+                    into.scene,
+                    into.painter,
+                    into.fonts,
+                    into.palette,
+                    matterless_layout::marks::CLOSE,
+                    cross,
+                    matterless_paint::Run::mark(14.0),
+                );
+            }
         }
         for (rect, key) in self.quoted_faces(index, top, left) {
             into.scene.extend([matterless_paint::Piece::Image {
@@ -2035,6 +2080,19 @@ impl Stream {
                 at: Some(*at),
             });
         }
+        // The cross on a card of the reader's own: the preview goes, for
+        // everybody, as it does from the official client's.
+        if let Some(rest) = clicked.strip_prefix(&format!("{}/row/", self.name))
+            && let Some((index, _)) = rest.split_once("/nopreview/")
+            && let Ok(index) = index.parse::<usize>()
+            && let Some(Row::Post { post } | Row::Continuation { post }) = self.rows.get(index)
+        {
+            return Some(Chose::Act {
+                action: crate::actions::Action::RemovePreview,
+                post_id: post.post_id.clone(),
+                on: false,
+            });
+        }
         // A preview card, which sits inside a row and is a link in its own
         // right: the whole card, not just the words in it.
         if let Some(rest) = clicked.strip_prefix(&format!("{}/row/", self.name))
@@ -2201,8 +2259,9 @@ impl Stream {
             .or_else(|| self.favourite_at(name).map(|(index, _)| index))
             .or_else(|| self.reaction_at(name).map(|(index, _)| index))
             .or_else(|| {
-                name.strip_prefix(&format!("{}/row/", self.name))?
-                    .split_once("/preview/")?
+                let rest = name.strip_prefix(&format!("{}/row/", self.name))?;
+                rest.split_once("/preview/")
+                    .or_else(|| rest.split_once("/nopreview/"))?
                     .0
                     .parse()
                     .ok()
@@ -3502,6 +3561,9 @@ pub fn mini_key(file_id: &str) -> String {
 pub fn poster_key(file_id: &str) -> String {
     format!("poster/{file_id}")
 }
+
+/// The cross on a preview card of the reader's own.
+const CLOSER: f32 = 22.0;
 
 /// What an attachment's picture is called.
 ///

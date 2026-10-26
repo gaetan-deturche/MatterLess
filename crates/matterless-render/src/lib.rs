@@ -140,11 +140,26 @@ pub struct PreviewImage {
     pub height: i32,
 }
 
+/// The prop that says a post's author removed its link preview, and the value
+/// that means it: what the web client writes, so either client's removal holds
+/// in the other.
+pub const REMOVE_LINK_PREVIEW: &str = "remove_link_preview";
+
 /// The largest a preview image is drawn.
 const PREVIEW_BOX: (i32, i32) = (400, 220);
 
 /// Previews for a post, in the order the server listed them.
 fn previews_of(post: &Post, options: &PlanOptions) -> Vec<Preview> {
+    // Its author took it away, which the web client records on the post itself
+    // so it is gone for everybody.
+    if post
+        .props
+        .get(REMOVE_LINK_PREVIEW)
+        .and_then(|value| value.as_str())
+        == Some("true")
+    {
+        return Vec::new();
+    }
     post.metadata
         .embeds
         .iter()
