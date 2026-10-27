@@ -8626,9 +8626,17 @@ impl App {
         // What was being written here goes with the channel being left, and
         // whatever was left in the one being opened comes back.
         let leaving = self.writing_to.take();
+        // Only on an actual switch: a reconnect reopens the same channel and
+        // must not pull focus out of a reply or a search being typed.
+        let switched = leaving.as_deref() != Some(channel);
         self.park(leaving, self.composer.text());
         self.writing_to = Some(channel.to_string());
         self.resume(Which::Channel, channel);
+        // Ready to type into, as the official client is: a click on the
+        // sidebar row had moved focus to the row.
+        if switched && self.can_write() {
+            self.input.focus_on(composer::NAME);
+        }
         self.followed.hide();
         // Before anything marks it read, which is what this is for.
         self.recall_watermark(channel, &store);
