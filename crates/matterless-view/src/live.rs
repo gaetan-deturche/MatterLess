@@ -30,6 +30,13 @@ pub enum Update {
     Changed(Vec<Delta>),
     /// The connection could not be made at all, with the reason.
     Failed(String),
+    /// The server could not be reached, and is tried again in `again_in`.
+    Unreachable {
+        again_in: std::time::Duration,
+        why: String,
+    },
+    /// Trying the server again after it could not be reached.
+    Trying,
     /// People the store had not met are in it now, so anything named from it
     /// is named differently: a direct message's row, an author over a message,
     /// a name taken back out of a group's label.
@@ -452,12 +459,19 @@ pub enum Ask {
 #[derive(Clone)]
 pub struct Link {
     asks: tokio::sync::mpsc::UnboundedSender<Ask>,
+    /// Cuts short the wait before the next try at an unreachable server.
+    poke: Arc<tokio::sync::Notify>,
 }
 
 impl Link {
     /// Queues a message to send. Fails only once the socket thread has gone.
     pub fn send(&self, ask: Ask) -> bool {
         self.asks.send(ask).is_ok()
+    }
+
+    /// Tries the server now rather than when the wait runs out.
+    pub fn retry_now(&self) {
+        self.poke.notify_one();
     }
 }
 
@@ -772,6 +786,8 @@ pub fn install_update(offer: crate::update::Offer, wake: impl Wake) {
 /// catches it up, rather than the reader waiting on a network round trip.
 pub fn start(store: Arc<Store>, server: String, token: String, wake: impl Wake) -> Link {
     let (asks, inbox) = tokio::sync::mpsc::unbounded_channel();
+    let poke = Arc::new(tokio::sync::Notify::new());
+    let poked = Arc::clone(&poke);
     std::thread::spawn(move || {
         let runtime = match tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -783,9 +799,9 @@ pub fn start(store: Arc<Store>, server: String, token: String, wake: impl Wake) 
                 return;
             }
         };
-        runtime.block_on(run(store, server, token, wake, inbox));
+        runtime.block_on(run(store, server, token, wake, inbox, poked));
     });
-    Link { asks }
+    Link { asks, poke }
 }
 
 async fn run(
@@ -794,6 +810,7 @@ async fn run(
     token: String,
     wake: impl Wake,
     mut inbox: tokio::sync::mpsc::UnboundedReceiver<Ask>,
+    poke: Arc<tokio::sync::Notify>,
 ) {
     let rest = match RestClient::new(&server).map(std::sync::Arc::new) {
         Ok(rest) => rest,
@@ -833,14 +850,51 @@ async fn run(
 
     // Who the reader is, which the notification and unread decisions need and
     // which also proves the token is still good before a socket is opened.
-    let me: User = match rest.me().await {
-        Ok(me) => me,
-        Err(error) => {
-            wake.wake(Update::Failed(format!(
-                "the session is not usable: {error}"
-            )));
-            return;
+    //
+    // Asked again until the server answers when it cannot be reached: a
+    // window started before the network was up gave up on the first refusal
+    // and stayed offline until it was restarted. Only a session the server
+    // turns down is final.
+    let mut wait = std::time::Duration::from_secs(2);
+    let me: User = loop {
+        use matterless_core::Error;
+        let (again, why) = match rest.me().await {
+            Ok(me) => break me,
+            Err(Error::Transport(error)) => {
+                eprintln!("the server is not reachable yet: {error}");
+                (wait, String::new())
+            }
+            Err(Error::Api(error, status)) if status >= 500 => {
+                eprintln!(
+                    "the server is not answering yet: {status} {}",
+                    error.message
+                );
+                (wait, format!("the server answered {status}"))
+            }
+            Err(Error::RateLimited { retry_after_secs }) => (
+                std::time::Duration::from_secs(retry_after_secs.max(1)),
+                "too many attempts".to_string(),
+            ),
+            Err(error) => {
+                wake.wake(Update::Failed(format!(
+                    "the session is not usable: {error}"
+                )));
+                return;
+            }
+        };
+        wake.wake(Update::Unreachable {
+            again_in: again,
+            why,
+        });
+        // A press on "Retry now" also tries at once, and starts the waits over:
+        // the reader has reason to think it is back.
+        tokio::select! {
+            _ = tokio::time::sleep(again) => {
+                wait = (wait * 2).min(std::time::Duration::from_secs(60));
+            }
+            _ = poke.notified() => wait = std::time::Duration::from_secs(2),
         }
+        wake.wake(Update::Trying);
     };
     let me_id = me.id.clone();
     println!("signed in as {}", me.username);

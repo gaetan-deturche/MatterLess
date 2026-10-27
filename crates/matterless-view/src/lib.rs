@@ -34,6 +34,7 @@ pub mod members;
 pub mod menu;
 pub mod moving;
 pub mod offer;
+pub mod offline;
 pub mod open;
 pub mod pack;
 pub mod picker;

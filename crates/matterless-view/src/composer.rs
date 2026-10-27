@@ -38,6 +38,9 @@ pub struct Composer {
     /// and offer to take one off -- a file waiting invisibly is worse than
     /// one sent by accident, because nobody can undo what they cannot see.
     pub waiting: Vec<Waiting>,
+    /// Set by the window while the server cannot be reached: Enter keeps what
+    /// is written rather than sending it into nothing.
+    pub held: bool,
     /// True once anything has been typed, so an empty buffer can be told from
     /// one the reader has emptied on purpose.
     pub touched: bool,
@@ -523,6 +526,7 @@ impl Composer {
                 .to_string(),
             tools_for: Tools::Writing,
             waiting: Vec::new(),
+            held: false,
             spinning: 0.0,
             touched: false,
             scroll: 0.0,
@@ -1594,6 +1598,7 @@ impl Composer {
                 // outside a list it is left alone rather than inserting one:
                 // a literal tab in a message means nothing to markdown.
                 Key::Tab if self.nesting(mods.shift, fonts) => {}
+                Key::Enter if self.held => {}
                 Key::Enter => {
                     let text = self.text();
                     // An empty box with a file waiting in it is still worth

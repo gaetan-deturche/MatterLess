@@ -755,6 +755,8 @@ struct App {
     more_history: bool,
     /// A newer build, once the release has said there is one.
     offered: matterless_view::updater_bar::Bar,
+    /// Saying the server cannot be reached, over the cached conversations.
+    unreachable: matterless_view::offline::Strip,
     /// What the offered release said about itself, while it is being read.
     whats_new: matterless_view::whats_new::WhatsNew,
     /// What it is offering, kept so accepting it needs no second look.
@@ -1077,6 +1079,7 @@ impl App {
             menu: matterless_view::menu::Menu::default(),
             tooltip: matterless_view::tooltip::Tooltip::default(),
             offered: matterless_view::updater_bar::Bar::default(),
+            unreachable: matterless_view::offline::Strip::default(),
             whats_new: matterless_view::whats_new::WhatsNew::default(),
             offer: None,
             tray: matterless_view::tray::Tray::default(),
@@ -1152,6 +1155,10 @@ impl App {
         let whole = Boxed::new("window", Size::Grow(1.0))
             .axis(Axis::Column)
             .with(Boxed::new(
+                matterless_view::offline::NAME,
+                Size::Fixed(self.unreachable.height()),
+            ))
+            .with(Boxed::new(
                 matterless_view::updater_bar::NAME,
                 Size::Fixed(self.offered.height()),
             ))
@@ -1162,15 +1169,39 @@ impl App {
         )
     }
 
+    /// The offline strip came, went or changed, which moves everything under
+    /// it and decides whether a message can be sent.
+    fn offline_changed(&mut self) {
+        let held = self.unreachable.open();
+        self.composer.held = held;
+        self.thread_composer.held = held;
+        let offline = self.offline_rect();
+        self.unreachable.measure(&mut self.fonts, offline);
+        // Its own height moves the update strip down too.
+        let notice = self.notice_rect();
+        self.offered.measure(&mut self.fonts, notice);
+        self.relayout();
+    }
+
+    /// The offline strip, above the update one.
+    fn offline_rect(&self) -> Rect {
+        Rect::new(0.0, 0.0, self.size.0 as f32, self.unreachable.height())
+    }
+
     /// The strip across the top, which is empty when nothing is offered.
     fn notice_rect(&self) -> Rect {
-        Rect::new(0.0, 0.0, self.size.0 as f32, self.offered.height())
+        Rect::new(
+            0.0,
+            self.unreachable.height(),
+            self.size.0 as f32,
+            self.offered.height(),
+        )
     }
 
     /// Everything under the notice, which is the whole window when there is
     /// none. What every pane measures itself against.
     fn below_notice(&self) -> Rect {
-        let taken = self.offered.height();
+        let taken = self.unreachable.height() + self.offered.height();
         Rect::new(
             0.0,
             taken,
@@ -1824,12 +1855,19 @@ impl App {
             Update::Connected(up) => {
                 self.connected = up;
                 println!("socket {}", if up { "connected" } else { "lost" });
+                match up {
+                    true => self.unreachable.reached(),
+                    false => self.unreachable.lost(),
+                }
+                self.offline_changed();
                 // The strip at the top of the sidebar says so, so it has to be
                 // rebuilt to stop saying the opposite.
                 self.rebuild_sidebar();
             }
             Update::SignedIn { id, username } => {
                 println!("reader is {username}");
+                self.unreachable.reached();
+                self.offline_changed();
                 self.signed_in(&id);
             }
             Update::Listed { title, found } => {
@@ -2147,6 +2185,14 @@ impl App {
             Update::Failed(why) => {
                 self.connected = false;
                 eprintln!("staying offline: {why}");
+            }
+            Update::Unreachable { again_in, why } => {
+                self.unreachable.unreachable(again_in, &why);
+                self.offline_changed();
+            }
+            Update::Trying => {
+                self.unreachable.trying();
+                self.offline_changed();
             }
             Update::SessionOpened {
                 token,
@@ -2757,6 +2803,8 @@ impl App {
             // about. Named rather than caught by a wildcard, so adding a
             // third button to a box is a compile error somebody has to read.
             composer::Button::Save | composer::Button::Cancel => {}
+            // Kept in the box until the server answers, as Enter keeps it.
+            composer::Button::Send if self.unreachable.open() => {}
             composer::Button::Send => {
                 let carrying = self.carrying(root_id);
                 let box_of = if root_id.is_empty() {
@@ -6218,6 +6266,7 @@ impl App {
             let mut boxes = self.signin.boxes(self.below_notice());
             // After, so the strip is the innermost match along the top: `at`
             // takes the last box holding the point, not the shallowest.
+            boxes.extend(self.unreachable.boxes(self.offline_rect()));
             boxes.extend(self.offered.boxes(self.notice_rect()));
             return boxes;
         }
@@ -6345,6 +6394,7 @@ impl App {
         // floating over anything, so it sits with the panes rather than above
         // them -- but its buttons still have to beat whatever the shell put
         // behind it.
+        boxes.extend(self.unreachable.boxes(self.offline_rect()));
         boxes.extend(self.offered.boxes(self.notice_rect()));
         // And the change list over all of it, including a menu: it covers the
         // window, and a press beside it shuts it.
@@ -7017,6 +7067,16 @@ impl App {
     /// sign-in screen -- which is the one that most needs it, being what a
     /// window shows when it cannot reach the server at all.
     fn answered_the_strip(&mut self) {
+        let offline = self.offline_rect();
+        self.unreachable.measure(&mut self.fonts, offline);
+        if self.unreachable.react(&self.input) == Some(matterless_view::offline::Chose::Retry) {
+            println!("trying the server now");
+            if let Some(link) = &self.link {
+                link.retry_now();
+            }
+            self.unreachable.measure(&mut self.fonts, offline);
+            self.redraw();
+        }
         if !self.offered.open() {
             return;
         }
@@ -9103,6 +9163,16 @@ impl App {
         // Over it, because a window that cannot sign in is exactly the one
         // that may be too old to. Drawn after, so the strip is not inside the
         // card's own background.
+        if self.unreachable.open() {
+            let offline = self.offline_rect();
+            let mut canvas = Canvas {
+                scene: &mut scene,
+                painter: &mut self.painter,
+                fonts: &mut self.fonts,
+                palette: &self.palette,
+            };
+            self.unreachable.draw(&mut canvas, &self.input, offline);
+        }
         if self.offered.open() {
             let notice = self.notice_rect();
             let mut canvas = Canvas {
@@ -9565,6 +9635,17 @@ impl App {
             self.picker.draw(&mut canvas, &self.input, near, within);
             self.picker.query.draw(&mut canvas, field, true);
         }
+        if self.unreachable.open() {
+            scene.clip_to(0.0, 0.0, self.size.0 as f32, self.size.1 as f32);
+            let offline = self.offline_rect();
+            let mut canvas = Canvas {
+                scene: &mut scene,
+                painter: &mut self.painter,
+                fonts: &mut self.fonts,
+                palette: &self.palette,
+            };
+            self.unreachable.draw(&mut canvas, &self.input, offline);
+        }
         if self.offered.open() {
             scene.clip_to(0.0, 0.0, self.size.0 as f32, self.size.1 as f32);
             let notice = self.notice_rect();
@@ -9838,7 +9919,8 @@ impl App {
         }
         // And the controls whose purpose is written on them, so they never
         // needed explaining: rows in a panel, and the buttons on a box.
-        const PANELS: [&str; 7] = [
+        const PANELS: [&str; 8] = [
+            matterless_view::offline::NAME,
             matterless_view::menu::NAME,
             matterless_view::picker::NAME,
             matterless_view::switcher::NAME,
@@ -10351,6 +10433,10 @@ impl ApplicationHandler<Update> for App {
             self.redraw();
         }
         let filling = self.shape_some();
+        // The countdown, redrawn only when the second it shows changes.
+        if self.unreachable.ticked(std::time::Instant::now()) {
+            self.redraw();
+        }
         // A spinner is the one thing on screen that moves with nothing
         // happening, so the window has to ask for its own frames -- and only
         // while something is actually going up.
@@ -10385,6 +10471,7 @@ impl ApplicationHandler<Update> for App {
             spinning,
             self.tooltip.wakes(),
             self.rest.wakes(),
+            self.unreachable.wakes(std::time::Instant::now()),
             self.lost_gpu,
             // So the window wakes to finish shaping even when the drag ends
             // with nothing else to wake it.
