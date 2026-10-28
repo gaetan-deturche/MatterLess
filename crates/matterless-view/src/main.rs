@@ -867,7 +867,8 @@ impl App {
     /// Falling back rather than refusing to start: the sample is what proves the
     /// renderer, and it should still be reachable on a machine with no database
     /// -- but the real rows are what prove the port, so they are tried first.
-    fn feed() -> (String, Vec<Row>) {
+    /// The database and the channel named on the command line, if any.
+    fn asked_for() -> (Option<std::path::PathBuf>, Option<String>) {
         // Positional arguments only, with flags and their values dropped:
         // taking `--snapshot` as a database path made `Store::open` create a
         // file by that name, which then had no messages in it.
@@ -881,16 +882,20 @@ impl App {
             }
         }
         let mut positional = positional.into_iter();
-        let path = positional
-            .next()
-            .map(std::path::PathBuf::from)
-            .or_else(matterless_view::feed::default_store);
-        let channel = positional.next();
-        let me = std::env::var("MATTERLESS_ME").unwrap_or_default();
-        match path
-            .as_deref()
-            .map(|path| matterless_view::feed::rows_from(path, channel.clone(), &me))
-        {
+        (
+            positional.next().map(std::path::PathBuf::from),
+            positional.next(),
+        )
+    }
+
+    /// The first channel's rows, or the sample conversation when there is
+    /// nothing to read them from.
+    fn feed(
+        store: Option<&matterless_store::Store>,
+        channel: Option<String>,
+        me: &str,
+    ) -> (String, Vec<Row>) {
+        match store.map(|store| matterless_view::feed::rows_in(store, channel, me)) {
             Some(Ok((channel, rows))) => {
                 println!("channel {channel}: {} rows from the store", rows.len());
                 (channel, rows)
@@ -908,15 +913,42 @@ impl App {
 
     fn new() -> Self {
         // The store is opened once and kept: switching channel is a read.
+        //
+        // The one named on the command line when there is one, for all of it
+        // and not only the first channel: `matterless-view <db>` read its
+        // first page from that file and everything after from the default
+        // store, so running against a store made for a test was not possible.
+        let (asked, channel) = Self::asked_for();
         let opening = matterless_view::timing::watch("opening the store", 0, "");
-        let store = matterless_view::feed::default_store()
-            .and_then(|path| matterless_view::feed::open(&path).ok())
+        let store = asked
+            .or_else(matterless_view::feed::default_store)
+            .and_then(|path| match matterless_view::feed::open(&path) {
+                Ok(store) => Some(store),
+                Err(why) => {
+                    println!("no store: {why}");
+                    None
+                }
+            })
             .map(Arc::new);
         drop(opening);
         // Without a reader there is no membership row, and the store answers
         // with each channel's *total* message count -- which looks like an
         // unread badge of four thousand. No reader, no counts.
         let me = std::env::var("MATTERLESS_ME").unwrap_or_default();
+        Self::over(store, me, channel)
+    }
+
+    /// The window over a store it is handed, as the reader `me`, opening on
+    /// `channel` or wherever the store says.
+    ///
+    /// Its own constructor so a test can build the whole window over a store
+    /// it filled itself: the editor taking a reply typed in another thread
+    /// was a bug of the window, and no widget's test could reach it.
+    fn over(
+        store: Option<Arc<matterless_store::Store>>,
+        me: String,
+        channel: Option<String>,
+    ) -> Self {
         if me.is_empty() {
             // Only until the socket signs in, which answers the same question
             // properly. Worth saying because the first paint happens before
@@ -946,7 +978,7 @@ impl App {
         let sidebar = Sidebar::new(entries);
         drop(listing);
         let reading = matterless_view::timing::watch("reading the first channel", 0, "");
-        let (channel, rows) = Self::feed();
+        let (channel, rows) = Self::feed(store.as_deref(), channel, &me);
         drop(reading);
         let mut app = Self {
             driver: Driver::asked(),
@@ -11276,7 +11308,12 @@ fn snapshot(path: &std::path::Path, width: u32) -> Result<(), String> {
         utc_offset_minutes: matterless_view::clock::utc_offset_minutes(),
         ..Theme::default()
     };
-    let (channel, rows) = App::feed();
+    let (asked, channel) = App::asked_for();
+    let store = asked
+        .or_else(matterless_view::feed::default_store)
+        .and_then(|path| matterless_view::feed::open(&path).ok());
+    let me = std::env::var("MATTERLESS_ME").unwrap_or_default();
+    let (channel, rows) = App::feed(store.as_ref(), channel, &me);
     let laid: Vec<RowLayout> = rows
         .iter()
         .map(|row| lay_out(&mut fonts, row, &theme))

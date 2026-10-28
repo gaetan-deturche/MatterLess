@@ -275,12 +275,21 @@ pub fn rows_from(
         return Err(format!("{} is not a database", path.display()));
     }
     let store = Store::open(path).map_err(|error| format!("open {}: {error}", path.display()))?;
+    rows_in(&store, channel_id, me_id)
+}
+
+/// The same, from a store already open: the window's own, or one a test made.
+pub fn rows_in(
+    store: &Store,
+    channel_id: Option<String>,
+    me_id: &str,
+) -> Result<(String, Vec<Row>), String> {
     // An id on the command line beats everything: it is somebody saying which
     // conversation to look at. Then where they left off, then the busiest
     // channel, which is all a first run has to go on.
     let channel_id = channel_id
-        .or_else(|| where_they_were(&store))
-        .or_else(|| busiest(&store))
+        .or_else(|| where_they_were(store))
+        .or_else(|| busiest(store))
         .ok_or_else(|| "no channel in the store; pass one as an argument".to_string())?;
 
     let posts = store
@@ -312,7 +321,7 @@ pub fn rows_from(
     options.utc_offset_minutes = crate::clock::utc_offset_minutes();
     options.channel_names = store.channel_names().unwrap_or_default();
     options.not_emoji = store.not_custom_emoji().unwrap_or_default();
-    (options.reader_name, options.reader_words) = reader_words(&store, me_id);
+    (options.reader_name, options.reader_words) = reader_words(store, me_id);
     options.author_names = people
         .iter()
         .map(|(id, user)| (id.clone(), user.username.clone()))
