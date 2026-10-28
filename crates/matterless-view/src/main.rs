@@ -3719,8 +3719,8 @@ impl App {
             self.thread_body()
                 .and_then(|body| self.thread_composer.misspelled_at(body, x, y))
         } else if name == matterless_view::edit::NAME {
-            self.edited_row().and_then(|row| {
-                let field = self.edit.field(row, self.stream_rect());
+            self.edited_row().and_then(|(row, within)| {
+                let field = self.edit.field(row, within);
                 self.edit.box_of.misspelled_at(field, x, y)
             })
         } else {
@@ -6410,8 +6410,8 @@ impl App {
         // opened from a name in the thread pane landed in the channel, far
         // from the name, which read as nothing having happened.
         boxes.extend(self.profile.boxes(self.window_rect()));
-        if let Some(row) = self.edited_row() {
-            boxes.extend(self.edit.boxes(row, self.stream_rect()));
+        if let Some((row, within)) = self.edited_row() {
+            boxes.extend(self.edit.boxes(row, within));
         }
         // Over everything, including a menu: it is the whole window.
         boxes.extend(self.viewer.boxes(self.window_rect()));
@@ -6434,18 +6434,28 @@ impl App {
         boxes
     }
 
-    /// Where the message being edited sits, if it is still on screen.
-    fn edited_row(&self) -> Option<matterless_ui::Rect> {
+    /// Where the message being edited sits, if it is still on screen, and the
+    /// pane it sits in.
+    ///
+    /// The pane as well as the row: a message edited in the thread was placed,
+    /// clipped and hit against the channel's column, which is not where it was.
+    fn edited_row(&self) -> Option<(matterless_ui::Rect, matterless_ui::Rect)> {
         let post_id = self.edit.for_post.as_ref()?;
         // The room the row made, under its name: the editor goes *in* the
         // conversation, so the header above it is the message's own.
+        let stream = self.stream_rect();
         self.stream
-            .editing_rect(post_id, self.stream_rect())
+            .editing_rect(post_id, stream)
+            .map(|row| (row, stream))
             .or_else(|| {
                 self.thread
                     .as_ref()
                     .zip(self.thread_stream_rect())
-                    .and_then(|(thread, within)| thread.editing_rect(post_id, within))
+                    .and_then(|(thread, within)| {
+                        thread
+                            .editing_rect(post_id, within)
+                            .map(|row| (row, within))
+                    })
             })
     }
 
@@ -7352,9 +7362,8 @@ impl App {
                 Some((Which::Thread, self.thread_composer.strip(body), body))
             }
             Some(matterless_view::edit::NAME) => {
-                let stream = self.stream_rect();
-                let row = self.edited_row()?;
-                Some((Which::Editing, self.edit.field(row, stream), stream))
+                let (row, within) = self.edited_row()?;
+                Some((Which::Editing, self.edit.field(row, within), within))
             }
             _ => None,
         }
@@ -7924,17 +7933,53 @@ impl App {
         // The editor first of all: it is the only panel that is part of a
         // message rather than in front of one, and while it is open the keys
         // belong to it rather than to the composer at the bottom.
-        if self.edit.open() {
+        // Only what is aimed at it, though: the keys while it has the caret,
+        // and a press on it. It used to take every frame while it was open,
+        // so nothing else in the window answered -- not the thread behind it,
+        // not the sidebar, not the reply box, which then could not be typed in.
+        let aimed = |name: &str| {
+            name == matterless_view::edit::NAME
+                || name.starts_with(&format!("{}/", matterless_view::edit::NAME))
+        };
+        // Left behind -- another thread, another channel -- it keeps its words
+        // but not the keyboard, which goes to the box of the conversation on
+        // screen: typing into a reply landed in a message being edited in a
+        // thread that was no longer open. Only scrolled out of view, it is
+        // still where the reader is and keeps it.
+        let on_screen = self.edit.for_post.as_ref().is_some_and(|post_id| {
+            self.stream.holds(post_id)
+                || self
+                    .thread
+                    .as_ref()
+                    .is_some_and(|thread| thread.holds(post_id))
+        });
+        if self.edit.open() && !on_screen && self.input.focus() == Some(matterless_view::edit::NAME)
+        {
+            match self.thread.is_some() {
+                true => self.input.focus_on(THREAD_COMPOSER),
+                false => self.input.focus_on(composer::NAME),
+            }
+        }
+        let editing = self.edit.open()
+            && on_screen
+            && ((self.input.focus() == Some(matterless_view::edit::NAME)
+                && (!self.input.keys().is_empty() || !self.input.typed().is_empty()))
+                || self.input.pressed().is_some_and(aimed)
+                || self.input.clicked().is_some_and(aimed));
+        if editing {
             let mut input = std::mem::take(&mut self.input);
             if input.struck(Key::Escape) {
                 self.shut_the_editor(&mut input);
                 self.input = input;
                 return;
             }
-            let within = self.stream_rect();
-            let row = self
-                .edited_row()
-                .unwrap_or_else(|| matterless_ui::Rect::new(within.x, within.y, within.width, 0.0));
+            let (row, within) = self.edited_row().unwrap_or_else(|| {
+                let within = self.stream_rect();
+                (
+                    matterless_ui::Rect::new(within.x, within.y, within.width, 0.0),
+                    within,
+                )
+            });
             // The buttons in the box, before the box reads the frame: Cancel
             // is a way out and must not also put a caret somewhere.
             match self.edit.pressed(&input) {
@@ -8841,6 +8886,16 @@ impl App {
             self.redraw();
             return;
         }
+        // The editor is a panel over a row, like the picker over the
+        // conversation: once it holds more than it shows, a turn over it is
+        // its own and the conversation under it stays put.
+        if let Some((row, within)) = self.edited_row() {
+            let field = self.edit.field(row, within);
+            if self.edit.box_of.wheeled(&self.input, &boxes, field) {
+                self.redraw();
+                return;
+            }
+        }
         let sidebar = self.sidebar_rect();
         self.sidebar.react(&self.input, &boxes, sidebar);
         // The list on the right, and the one filling the column, each
@@ -9638,16 +9693,16 @@ impl App {
         // In the row rather than over the window, so it is clipped to the
         // stream like the message it stands in place of.
         if self.edit.open()
-            && let Some(row) = self.edited_row()
+            && let Some((row, within)) = self.edited_row()
         {
-            scene.clip_to(stream.x, stream.y, stream.width, stream.height);
+            scene.clip_to(within.x, within.y, within.width, within.height);
             let mut canvas = Canvas {
                 scene: &mut scene,
                 painter: &mut self.painter,
                 fonts: &mut self.fonts,
                 palette: &self.palette,
             };
-            self.edit.draw(&mut canvas, &self.input, row, stream);
+            self.edit.draw(&mut canvas, &self.input, row, within);
         }
 
         // Over the conversation and under nothing: a card is the answer to a
@@ -10143,7 +10198,7 @@ impl App {
         if self.edit.open() {
             let width = self
                 .edited_row()
-                .map(|room| room.width)
+                .map(|(room, _)| room.width)
                 .unwrap_or_else(|| self.stream_rect().width);
             self.edit.box_of.lay_out(&mut self.fonts, width);
         }
@@ -11821,5 +11876,88 @@ mod tests {
             driver.drew();
         }
         assert!(driver.fresh(), "the next act did not start fresh");
+    }
+
+    /// A whole window over a store the test fills: one channel, two threads,
+    /// and a long reply of the reader's in the first.
+    fn window_with_two_threads() -> App {
+        let store = matterless_store::Store::open_in_memory().expect("a store");
+        let channel: matterless_core::model::Channel = serde_json::from_value(serde_json::json!({
+            "id": "c1", "team_id": "t1", "type": "O", "name": "town",
+            "display_name": "Town", "total_msg_count": 3, "total_msg_count_root": 2,
+            "last_post_at": 3000, "delete_at": 0
+        }))
+        .expect("a channel");
+        store.upsert_channels(&[channel]).expect("stored");
+        let post = |id: &str, root: &str, user: &str, at: i64, message: &str| {
+            serde_json::from_value::<matterless_core::model::Post>(serde_json::json!({
+                "id": id, "channel_id": "c1", "user_id": user, "root_id": root,
+                "create_at": at, "update_at": at, "message": message
+            }))
+            .expect("a post")
+        };
+        store
+            .upsert_posts(&[
+                post("root-a", "", "amy", 1000, "the first thread"),
+                post("mine", "root-a", "me", 1500, &"a long reply, ".repeat(60)),
+                post("root-b", "", "amy", 2000, "the second thread"),
+            ])
+            .expect("stored");
+        let mut app = App::over(
+            Some(std::sync::Arc::new(store)),
+            "me".to_string(),
+            Some("c1".to_string()),
+        );
+        app.relayout();
+        app
+    }
+
+    fn typed(app: &mut App, text: &str) {
+        app.input
+            .apply(super::UiEvent::Typed(text.to_string()), &[]);
+        app.react();
+        app.input.spent_keys();
+    }
+
+    /// The editor takes what is typed while it has the caret.
+    #[test]
+    fn the_editor_takes_what_is_typed_into_it() {
+        let mut app = window_with_two_threads();
+        app.open_thread("root-a");
+        app.open_the_editor("mine", "a reply");
+        assert_eq!(app.input.focus(), Some(matterless_view::edit::NAME));
+        typed(&mut app, "!");
+        assert_eq!(app.edit.box_of.text(), "a reply!");
+    }
+
+    /// Once the reader is in another thread, what they type is theirs to
+    /// write there: it went into the message still being edited in the
+    /// first, which was no longer even on screen.
+    #[test]
+    fn typing_in_another_thread_does_not_reach_the_editor() {
+        let mut app = window_with_two_threads();
+        app.open_thread("root-a");
+        app.open_the_editor("mine", "a reply");
+        app.open_thread("root-b");
+        // However the caret got back to it, the editor is not where the
+        // reader is.
+        app.input.focus_on(matterless_view::edit::NAME);
+        typed(&mut app, "hello");
+        assert_eq!(app.edit.box_of.text(), "a reply", "the editor took it");
+        assert_eq!(app.thread_composer.text(), "hello");
+        assert!(app.edit.open(), "and the edit is kept for coming back to");
+    }
+
+    /// With the editor open, the rest of the window still answers: a reply
+    /// typed in the same thread's box goes there.
+    #[test]
+    fn an_open_editor_leaves_the_reply_box_to_the_reader() {
+        let mut app = window_with_two_threads();
+        app.open_thread("root-a");
+        app.open_the_editor("mine", "a reply");
+        app.input.focus_on(super::THREAD_COMPOSER);
+        typed(&mut app, "ok");
+        assert_eq!(app.thread_composer.text(), "ok");
+        assert_eq!(app.edit.box_of.text(), "a reply");
     }
 }

@@ -1919,6 +1919,16 @@ impl Stream {
     ///
     /// `None` when it is scrolled out of view, which is the honest answer: a
     /// panel anchored to a row nobody can see would float over nothing.
+    /// Whether this conversation has the message, on screen or not.
+    pub fn holds(&self, post_id: &str) -> bool {
+        self.rows.iter().any(|row| {
+            matches!(
+                row,
+                Row::Post { post } | Row::Continuation { post } if post.post_id == post_id
+            )
+        })
+    }
+
     pub fn row_rect(&self, post_id: &str, within: Rect) -> Option<Rect> {
         let mut top = self.first_row_at(within);
         for (index, laid) in self.laid.iter().enumerate() {

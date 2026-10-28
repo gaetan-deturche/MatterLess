@@ -142,6 +142,9 @@ impl Edit {
             return None;
         }
         let field = self.field(row, within);
+        // Before it reacts, so a press on the bar does not also land in the
+        // words behind it -- as the message boxes do.
+        self.box_of.dragged(input, field);
         let saved = self.box_of.react(fonts, input, field, clipboard);
         self.box_of.lay_out(fonts, field.width);
         saved
@@ -153,7 +156,9 @@ impl Edit {
         }
         let panel = self.rect(row, within);
         let field = self.field(row, within);
-        self.box_of.draw(into, field, true);
+        // Lit only while it has the keyboard: drawn lit always, it said it
+        // would take what was typed when another box was taking it.
+        self.box_of.draw(into, field, input.focus() == Some(NAME));
         self.box_of.draw_over(into, input, field);
         let Canvas {
             scene,

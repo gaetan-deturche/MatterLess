@@ -983,10 +983,17 @@ impl Composer {
     /// The frame's boxes, because a wheel is answered by whichever panel the
     /// pointer is over and only they can say which that is -- the same
     /// question the conversation and the lists ask.
-    pub fn wheeled(&mut self, input: &Input, placed: &[Placed], within: Rect) {
+    /// Says whether it took the turn: over the box, with more in it than it
+    /// shows.
+    pub fn wheeled(&mut self, input: &Input, placed: &[Placed], within: Rect) -> bool {
         let _ = within;
-        if let Some((_, y)) = input.wheel_over(placed, |name| name == self.name) {
-            self.scroll = (self.scroll - y).clamp(0.0, self.reach());
+        let reach = self.reach();
+        match input.wheel_over(placed, |name| name == self.name) {
+            Some((_, y)) if reach > 0.0 => {
+                self.scroll = (self.scroll - y).clamp(0.0, reach);
+                true
+            }
+            _ => false,
         }
     }
 
