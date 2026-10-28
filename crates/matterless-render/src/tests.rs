@@ -437,7 +437,7 @@ fn a_channel_link_and_a_strikethrough_coexist() {
     assert!(
         nodes.iter().any(|node| matches!(
             node,
-            markdown::Node::ChannelLink { name } if name == "build-alerts"
+            markdown::Node::ChannelLink { name, .. } if name == "build-alerts"
         )),
         "the single-tilde link must survive: {nodes:?}"
     );
@@ -460,7 +460,8 @@ fn only_a_channel_that_exists_is_a_link() {
         "channel_mentions": { "town-square": { "display_name": "Town Square" } }
     });
     let mut plan = options(ThreadMode::Flat);
-    plan.channel_names.insert("secret-room".into());
+    plan.channel_names
+        .insert("secret-room".into(), "Secret Room".into());
     let rows = plan_channel(&[carrier], &HashMap::new(), &plan);
     let Some(Row::Post { post, .. }) = rows.iter().find(|row| matches!(row, Row::Post { .. }))
     else {
@@ -472,11 +473,21 @@ fn only_a_channel_that_exists_is_a_link() {
     let links: Vec<&str> = children
         .iter()
         .filter_map(|node| match node {
-            markdown::Node::ChannelLink { name } => Some(name.as_str()),
+            markdown::Node::ChannelLink { name, .. } => Some(name.as_str()),
             _ => None,
         })
         .collect();
     assert_eq!(links, ["town-square", "secret-room"]);
+    // Each reads as what its channel is called, as the official client shows
+    // it: from the post's own list, or from the channels the reader has.
+    let shown: Vec<&str> = children
+        .iter()
+        .filter_map(|node| match node {
+            markdown::Node::ChannelLink { shown, .. } => Some(shown.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(shown, ["Town Square", "Secret Room"]);
     let text: String = children
         .iter()
         .filter_map(|node| match node {

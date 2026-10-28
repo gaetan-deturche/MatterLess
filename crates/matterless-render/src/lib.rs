@@ -628,7 +628,7 @@ fn without_pictures(
 /// The channels a post may link to: those the server found for it (public
 /// ones) and the reader's own. `None` when there is nothing to judge by, and
 /// then every `~name` stays as it was written.
-fn known_channels(post: &Post, options: &PlanOptions) -> Option<HashSet<String>> {
+fn known_channels(post: &Post, options: &PlanOptions) -> Option<HashMap<String, String>> {
     let mentioned = post
         .props
         .get("channel_mentions")
@@ -637,18 +637,20 @@ fn known_channels(post: &Post, options: &PlanOptions) -> Option<HashSet<String>>
         return None;
     }
     let mut known = options.channel_names.clone();
-    known.extend(
-        mentioned
-            .into_iter()
-            .flatten()
-            .map(|(name, _)| name.to_lowercase()),
-    );
+    known.extend(mentioned.into_iter().flatten().map(|(name, about)| {
+        let shown = about
+            .get("display_name")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        (name.to_lowercase(), shown.to_string())
+    }));
     Some(known)
 }
 
-/// What a node that only looks like markup was typed as: a `~name` no channel
-/// answers to, or a `:name:` that is no emoji.
-type Typed<'a> = dyn Fn(&markdown::Node) -> Option<String> + 'a;
+/// What a node becomes once the channels and emoji are known: a `~name` no
+/// channel answers to, or a `:name:` that is no emoji, goes back to the text it
+/// was typed as, and a channel link takes the name its channel is called.
+type Typed<'a> = dyn Fn(&markdown::Node) -> Option<markdown::Node> + 'a;
 
 /// Whether the text holds any such node.
 fn names_unknown(nodes: &[markdown::Node], known: &Typed) -> bool {
@@ -678,7 +680,7 @@ fn only_known(nodes: &[markdown::Node], known: &Typed) -> Vec<markdown::Node> {
     nodes
         .iter()
         .map(|node| match node {
-            _ if let Some(value) = known(node) => Node::Text { value },
+            _ if let Some(node) = known(node) => node,
             Node::Emphasis { children } => Node::Emphasis {
                 children: within(children),
             },
@@ -1018,11 +1020,12 @@ pub struct PlanOptions {
     /// The viewer's `devicePixelRatio`, so a thumbnail is not asked to cover
     /// more device pixels than it has.
     pub pixel_ratio: f32,
-    /// The channels the reader has, by lowercased slug: with the ones the
-    /// server names in a post's `channel_mentions` (public ones only), what a
-    /// `~name` must be to be a link. Empty when the caller cannot say, and
-    /// then every `~name` is taken as written.
-    pub channel_names: HashSet<String>,
+    /// The channels the reader has, by lowercased slug, with what each is
+    /// called: with the ones the server names in a post's `channel_mentions`
+    /// (public ones only), what a `~name` must be to be a link, and what the
+    /// link reads as. Empty when the caller cannot say, and then every
+    /// `~name` is taken as written.
+    pub channel_names: HashMap<String, String>,
     /// The `:name:`s the server says are no emoji of its own, and which have no
     /// character either: written out as typed rather than left a blank.
     pub not_emoji: HashSet<String>,
@@ -1051,7 +1054,7 @@ impl PlanOptions {
             full_res: false,
             allow_svg: false,
             pixel_ratio: 1.0,
-            channel_names: HashSet::new(),
+            channel_names: HashMap::new(),
             not_emoji: HashSet::new(),
             reader_name: String::new(),
             reader_words: Vec::new(),
@@ -1439,14 +1442,27 @@ fn build_post_row(post: &Post, options: &PlanOptions) -> PostRow {
     // the server has no emoji for.
     let channels = known_channels(post, options);
     let typed = |node: &markdown::Node| match node {
-        markdown::Node::ChannelLink { name } => channels
-            .as_ref()
-            .filter(|known| !known.contains(&name.to_lowercase()))
-            .map(|_| format!("~{name}")),
+        markdown::Node::ChannelLink { name, shown } => {
+            let known = channels.as_ref()?;
+            match known.get(&name.to_lowercase()) {
+                None => Some(markdown::Node::Text {
+                    value: format!("~{name}"),
+                }),
+                Some(called) if !called.is_empty() && called != shown => {
+                    Some(markdown::Node::ChannelLink {
+                        name: name.clone(),
+                        shown: called.clone(),
+                    })
+                }
+                Some(_) => None,
+            }
+        }
         markdown::Node::Emoji {
             name,
             unicode: None,
-        } if options.not_emoji.contains(name) => Some(format!(":{name}:")),
+        } if options.not_emoji.contains(name) => Some(markdown::Node::Text {
+            value: format!(":{name}:"),
+        }),
         _ => None,
     };
     let nodes = match names_unknown(&nodes, &typed) {

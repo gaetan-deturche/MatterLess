@@ -1168,9 +1168,12 @@ fn inline(
                 },
                 into,
             ),
-            Node::ChannelLink { name } => tagged(
+            Node::ChannelLink { name, shown } => tagged(
                 TextSpan {
-                    text: format!("~{name}"),
+                    text: match shown.is_empty() {
+                        true => format!("~{name}"),
+                        false => format!("~{shown}"),
+                    },
                     bold,
                     italic,
                     mono,
@@ -2262,7 +2265,10 @@ mod tests {
             Some(Press::Person("ada".into()))
         );
         assert_eq!(
-            pressed(Node::ChannelLink { name: "dev".into() }),
+            pressed(Node::ChannelLink {
+                name: "dev".into(),
+                shown: String::new(),
+            }),
             Some(Press::Channel("dev".into()))
         );
         for refused in [

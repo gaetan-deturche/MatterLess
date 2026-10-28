@@ -32,7 +32,7 @@ fn show(node: &Node, depth: usize) {
                 if *everyone { " (everyone)" } else { "" }
             )
         }
-        Node::ChannelLink { name } => println!("{pad}ChannelLink ~{name}"),
+        Node::ChannelLink { name, .. } => println!("{pad}ChannelLink ~{name}"),
         Node::Emoji { name, unicode } => println!("{pad}Emoji :{name}: {unicode:?}"),
         Node::InlineCode { value } => println!("{pad}InlineCode {:?}", cut(value)),
         Node::CodeBlock { language, value } => {

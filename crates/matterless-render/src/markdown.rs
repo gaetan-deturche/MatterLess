@@ -83,6 +83,10 @@ pub enum Node {
     },
     ChannelLink {
         name: String,
+        /// What the channel is called, which is what a link to it reads as:
+        /// `~dev` is shown as "~Progs". Filled when the message is planned
+        /// against the channels known, empty until then.
+        shown: String,
     },
     /// `:shrug:`.
     ///
@@ -540,7 +544,14 @@ fn expand_text(text: &str) -> Vec<Node> {
                     },
                 )
             }
-            Found::Channel { start, end, name } => (start, end, Node::ChannelLink { name }),
+            Found::Channel { start, end, name } => (
+                start,
+                end,
+                Node::ChannelLink {
+                    name,
+                    shown: String::new(),
+                },
+            ),
             Found::Emoji { start, end, name } => {
                 let unicode = crate::emoji::character_for(&name);
                 (start, end, Node::Emoji { name, unicode })
@@ -626,7 +637,7 @@ fn flatten(nodes: &[Node], between: &str) -> String {
                     out.push_str(username);
                 }
                 Node::Named { text, .. } => out.push_str(text),
-                Node::ChannelLink { name } => {
+                Node::ChannelLink { name, .. } => {
                     out.push('~');
                     out.push_str(name);
                 }
@@ -1149,7 +1160,8 @@ mod tests {
                 },
                 text(" see "),
                 Node::ChannelLink {
-                    name: "build-alerts".into()
+                    name: "build-alerts".into(),
+                    shown: String::new(),
                 },
                 text(" "),
                 Node::Emoji {
