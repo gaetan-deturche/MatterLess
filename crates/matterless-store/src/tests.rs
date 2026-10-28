@@ -232,6 +232,91 @@ fn unread_is_derived_from_the_two_counters() {
     );
 }
 
+fn one_unread_channel(store: &Store) {
+    store
+        .upsert_channels(&[Channel {
+            id: "c1".into(),
+            team_id: "t1".into(),
+            channel_type: "O".into(),
+            name: "tools".into(),
+            display_name: "Tools".into(),
+            total_msg_count: 10,
+            total_msg_count_root: 8,
+            last_post_at: 500,
+            delete_at: 0,
+        }])
+        .unwrap();
+    store
+        .upsert_channel_members(&[ChannelMember {
+            channel_id: "c1".into(),
+            user_id: "me".into(),
+            last_viewed_at: 400,
+            msg_count: 9,
+            msg_count_root: 7,
+            mention_count: 1,
+            mention_count_root: 1,
+            notify_props: HashMap::new(),
+        }])
+        .unwrap();
+}
+
+/// A message deleted before it was read is taken back off the count, which
+/// the server never does, and never past what was there to read.
+#[test]
+fn a_deleted_unread_message_is_uncounted() {
+    let store = store();
+    one_unread_channel(&store);
+    store.uncount_deleted("c1", "me", true).unwrap();
+    let unread = store.unread("c1", "me").unwrap().unwrap();
+    assert_eq!((unread.messages, unread.messages_root), (0, 0));
+    store.uncount_deleted("c1", "me", true).unwrap();
+    let unread = store.unread("c1", "me").unwrap().unwrap();
+    assert_eq!(
+        (unread.messages, unread.messages_root),
+        (0, 0),
+        "not below nothing"
+    );
+}
+
+/// Recounted to what is still there: lowered, its mentions with it when
+/// nothing is left, and never raised.
+#[test]
+fn a_recount_only_ever_lowers_what_is_unread() {
+    let store = store();
+    one_unread_channel(&store);
+    store.recount_unread("c1", "me", 5, 5).unwrap();
+    let unread = store.unread("c1", "me").unwrap().unwrap();
+    assert_eq!(
+        (unread.messages, unread.messages_root, unread.mentions),
+        (1, 1, 1)
+    );
+    store.recount_unread("c1", "me", 0, 0).unwrap();
+    let unread = store.unread("c1", "me").unwrap().unwrap();
+    assert_eq!(
+        (unread.messages, unread.messages_root, unread.mentions),
+        (0, 0, 0)
+    );
+}
+
+/// Only somebody else's live, non-system messages after the mark explain a
+/// count: a join, a deleted message and the reader's own do not.
+#[test]
+fn only_real_messages_explain_an_unread_count() {
+    let store = store();
+    let mut join = post("join", "c1", 450, 450);
+    join.post_type = "system_join_channel".into();
+    let mut gone = post("gone", "c1", 460, 460);
+    gone.delete_at = 470;
+    let mut mine = post("mine", "c1", 480, 480);
+    mine.user_id = "me".into();
+    let before = post("before", "c1", 300, 300);
+    let real = post("real", "c1", 490, 490);
+    store.upsert_posts(&[join, gone, mine, before]).unwrap();
+    assert_eq!(store.held_unread_after("c1", "me", 400).unwrap(), 0);
+    store.upsert_posts(&[real]).unwrap();
+    assert_eq!(store.held_unread_after("c1", "me", 400).unwrap(), 1);
+}
+
 #[test]
 fn local_search_finds_a_post_and_skips_tombstones() {
     let store = store();

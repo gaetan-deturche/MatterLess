@@ -880,3 +880,73 @@ fn only_the_readers_own_membership_changes_count() {
         );
     }
 }
+
+/// A message deleted before it was read is no longer something to read. The
+/// server keeps counting it, so the channel stayed unread with nothing in it.
+#[test]
+fn a_message_deleted_unread_is_no_longer_unread() {
+    let engine = engine();
+    let context = SyncContext::new(me(), ThreadMode::Flat);
+    engine
+        .store()
+        .upsert_channels(&[Channel {
+            id: "c1".into(),
+            team_id: "t1".into(),
+            channel_type: "O".into(),
+            name: "c1".into(),
+            display_name: "c1".into(),
+            total_msg_count: 10,
+            total_msg_count_root: 10,
+            last_post_at: 100,
+            delete_at: 0,
+        }])
+        .unwrap();
+    engine
+        .store()
+        .upsert_channel_members(&[ChannelMember {
+            channel_id: "c1".into(),
+            user_id: "me".into(),
+            last_viewed_at: 100,
+            msg_count: 10,
+            msg_count_root: 10,
+            mention_count: 0,
+            mention_count_root: 0,
+            notify_props: HashMap::new(),
+        }])
+        .unwrap();
+    let said = post("said-then-gone", 200, "");
+    engine
+        .apply_event(
+            &Event::Posted {
+                post: Box::new(said.clone()),
+                channel_id: "c1".into(),
+                mentioned: None,
+            },
+            &context,
+        )
+        .unwrap();
+    assert_eq!(
+        engine.store().unread("c1", "me").unwrap().unwrap().messages,
+        1
+    );
+
+    let deltas = engine
+        .apply_event(&Event::PostDeleted(Box::new(said.clone())), &context)
+        .unwrap();
+    let reported = deltas
+        .iter()
+        .find_map(|delta| match delta {
+            Delta::UnreadChanged { unread, .. } => Some(*unread),
+            _ => None,
+        })
+        .expect("the delete must report unread");
+    assert_eq!(reported.messages, 0);
+    // The same delete again takes nothing more off.
+    engine
+        .apply_event(&Event::PostDeleted(Box::new(said)), &context)
+        .unwrap();
+    assert_eq!(
+        engine.store().unread("c1", "me").unwrap().unwrap().messages,
+        0
+    );
+}

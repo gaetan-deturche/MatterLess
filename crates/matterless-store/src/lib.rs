@@ -1020,6 +1020,65 @@ impl Store {
         Ok(())
     }
 
+    /// Takes a deleted message back off what is left to read.
+    ///
+    /// The server counts a message when it is posted and never uncounts it
+    /// when it is deleted, so a message deleted before it was read left a
+    /// badge with nothing behind it.
+    pub fn uncount_deleted(&self, channel_id: &str, user_id: &str, is_root: bool) -> Result<()> {
+        let connection = self.lock();
+        connection.execute(
+            "UPDATE channel_members SET
+                msg_count = MIN(msg_count + 1, COALESCE(
+                    (SELECT total_msg_count FROM channels WHERE id = ?1), msg_count + 1)),
+                msg_count_root = MIN(msg_count_root + ?3, COALESCE(
+                    (SELECT total_msg_count_root FROM channels WHERE id = ?1), msg_count_root + ?3))
+             WHERE channel_id = ?1 AND user_id = ?2",
+            params![channel_id, user_id, i64::from(is_root)],
+        )?;
+        Ok(())
+    }
+
+    /// Lowers what is left to read to what the server still has: `messages`
+    /// and `messages_root` worth reading after the last view. Never raises it.
+    ///
+    /// The other half of `uncount_deleted`, for a message posted and deleted
+    /// while this window was not there to see either.
+    pub fn recount_unread(
+        &self,
+        channel_id: &str,
+        user_id: &str,
+        messages: i64,
+        messages_root: i64,
+    ) -> Result<bool> {
+        let connection = self.lock();
+        let changed = connection.execute(
+            "UPDATE channel_members SET
+                msg_count = MAX(msg_count, COALESCE(
+                    (SELECT total_msg_count FROM channels WHERE id = ?1) - ?3, msg_count)),
+                msg_count_root = MAX(msg_count_root, COALESCE(
+                    (SELECT total_msg_count_root FROM channels WHERE id = ?1) - ?4, msg_count_root)),
+                mention_count = CASE WHEN ?3 = 0 THEN 0 ELSE mention_count END,
+                mention_count_root = CASE WHEN ?4 = 0 THEN 0 ELSE mention_count_root END
+             WHERE channel_id = ?1 AND user_id = ?2",
+            params![channel_id, user_id, messages, messages_root],
+        )?;
+        Ok(changed > 0)
+    }
+
+    /// How many messages worth reading the store holds after `at`: somebody
+    /// else's, not a system line, not deleted.
+    pub fn held_unread_after(&self, channel_id: &str, user_id: &str, at: Timestamp) -> Result<i64> {
+        let connection = self.lock();
+        Ok(connection.query_row(
+            "SELECT COUNT(*) FROM posts
+             WHERE channel_id = ?1 AND user_id != ?2 AND create_at > ?3
+               AND delete_at = 0 AND post_type NOT LIKE 'system\\_%' ESCAPE '\\'",
+            params![channel_id, user_id, at],
+            |row| row.get(0),
+        )?)
+    }
+
     /// Applies what "viewed" means server-side: the member's counters catch up
     /// to the channel's, and mentions clear. This is what makes a read on
     /// another device actually clear the badge here.

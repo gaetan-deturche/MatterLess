@@ -355,12 +355,36 @@ impl SyncEngine {
                         .unwrap_or(post.update_at.max(1)),
                     said => said,
                 };
-                self.store.tombstone_post(&post.id, at)?;
-                Ok(vec![Delta::PostTombstoned {
+                let was_there = self.store.tombstone_post(&post.id, at)?;
+                let mut deltas = vec![Delta::PostTombstoned {
                     post_id: post.id.clone(),
                     channel_id: post.channel_id.clone(),
                     root_id: post.root_id.clone(),
-                }])
+                }];
+                // Still unread when it went: the server keeps counting it, so
+                // it is taken off here or the badge outlives the message.
+                let unread_when_deleted = self
+                    .store
+                    .last_viewed_at(&post.channel_id, &context.me.id)?
+                    .is_some_and(|viewed| post.create_at > viewed);
+                if was_there
+                    && unread_when_deleted
+                    && post.user_id != context.me.id
+                    && !post.is_system()
+                {
+                    self.store.uncount_deleted(
+                        &post.channel_id,
+                        &context.me.id,
+                        !post.is_reply(),
+                    )?;
+                    if let Some(unread) = self.store.unread(&post.channel_id, &context.me.id)? {
+                        deltas.push(Delta::UnreadChanged {
+                            channel_id: post.channel_id.clone(),
+                            unread,
+                        });
+                    }
+                }
+                Ok(deltas)
             }
             // The store has to be patched, not just announced: reactions live
             // in the post's metadata, so a rebuild that skipped this read the

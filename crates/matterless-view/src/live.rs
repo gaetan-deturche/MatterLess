@@ -4005,6 +4005,7 @@ async fn membership(
     {
         eprintln!("storing the sidebar: {error}");
     }
+    recount_the_deleted(rest, store, me_id, &channels, &members).await;
     // Both halves, because neither answers it alone: the server said
     // `default_off` here while the account said `on`, and the account wins.
     // With `resolve`, a missing server setting means threads are off entirely
@@ -4025,6 +4026,75 @@ async fn membership(
         counted,
         matterless_core::resolve_thread_mode(&config, &preferences),
     ))
+}
+
+/// Past this many unread, a channel is not checked: a message deleted among
+/// that many is not a badge with nothing behind it.
+const RECOUNT_UP_TO: i64 = 20;
+
+/// Brings the unread counts down to the messages the server still has.
+///
+/// The server counts a message when it is posted and never takes it back when
+/// it is deleted, so one posted and deleted while this window was away showed
+/// as unread in a channel with nothing new in it. Only the channels whose
+/// count the store cannot already account for are asked about, so a channel
+/// that has been followed live costs nothing.
+async fn recount_the_deleted(
+    rest: &matterless_core::rest::RestClient,
+    store: &Store,
+    me_id: &str,
+    channels: &[matterless_core::model::Channel],
+    members: &[matterless_core::model::ChannelMember],
+) {
+    for member in members.iter().filter(|member| member.user_id == me_id) {
+        let Some(channel) = channels
+            .iter()
+            .find(|channel| channel.id == member.channel_id)
+        else {
+            continue;
+        };
+        let unread = channel.total_msg_count - member.msg_count;
+        // Never viewed: `since` zero would be the whole history.
+        if !(1..=RECOUNT_UP_TO).contains(&unread) || member.last_viewed_at == 0 {
+            continue;
+        }
+        let held = store
+            .held_unread_after(&channel.id, me_id, member.last_viewed_at)
+            .unwrap_or(0);
+        if held >= unread {
+            continue;
+        }
+        let since = match rest.posts_since(&channel.id, member.last_viewed_at).await {
+            Ok(since) => since,
+            Err(error) => {
+                eprintln!("recounting {}: {error}", channel.id);
+                continue;
+            }
+        };
+        // `since` is anything changed after it, so an old message edited or
+        // reacted to is in it too.
+        let there: Vec<&matterless_core::model::Post> = since
+            .posts
+            .values()
+            .filter(|post| {
+                post.create_at > member.last_viewed_at
+                    && !post.is_deleted()
+                    && !post.is_system()
+                    && post.user_id != me_id
+            })
+            .collect();
+        let roots = there.iter().filter(|post| !post.is_reply()).count() as i64;
+        let messages = there.len() as i64;
+        if messages < unread {
+            println!(
+                "{}: {unread} counted unread, {messages} still there",
+                channel.id
+            );
+            if let Err(error) = store.recount_unread(&channel.id, me_id, messages, roots) {
+                eprintln!("recounting {}: {error}", channel.id);
+            }
+        }
+    }
 }
 
 /// Percent-encodes a value for one query parameter.
