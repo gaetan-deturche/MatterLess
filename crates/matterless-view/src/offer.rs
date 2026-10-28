@@ -41,6 +41,9 @@ pub struct Suggestion {
     /// What the row says, which is not always what is inserted: a person is
     /// read by their real name and mentioned by their username.
     pub label: String,
+    /// Said after the label, faintly: what a channel is linked as, when that
+    /// is not what it is called.
+    pub aside: String,
     /// Whose face to show, for a person.
     pub face: Option<Face>,
     /// The picture to show, for a custom emoji: its id.
@@ -71,6 +74,9 @@ pub struct Offer {
     /// list hangs from: at the box's left edge it was a list for a word typed
     /// at the far end of the line.
     pub from: Option<f32>,
+    /// The row the pointer was over last frame, so moving onto another one
+    /// chooses it and a pointer left still does not undo the arrows.
+    pointed: Option<usize>,
     open: bool,
 }
 
@@ -111,6 +117,7 @@ impl Offer {
         self.found.clear();
         self.said.clear();
         self.chosen = 0;
+        self.pointed = None;
     }
 
     /// How many rows are on show.
@@ -200,6 +207,17 @@ impl Offer {
         if input.struck(Key::Escape) {
             return Some(Chose::Nothing);
         }
+        // The pointer chooses as the arrows do, as the switcher's does.
+        let pointed = input
+            .hovered()
+            .and_then(|name| self.row_at(name))
+            .filter(|at| *at < self.shown());
+        if let Some(at) = pointed
+            && self.pointed != pointed
+        {
+            self.chosen = at;
+        }
+        self.pointed = pointed;
         // Wrapping, because a list this short is one where walking off an end
         // and expecting the other is the natural thing to try.
         let shown = self.shown().max(1);
@@ -235,7 +253,7 @@ impl Offer {
         }
     }
 
-    pub fn draw(&self, into: &mut Canvas<'_>, box_of: Rect, within: Rect, input: &Input) {
+    pub fn draw(&self, into: &mut Canvas<'_>, box_of: Rect, within: Rect) {
         if !self.open() {
             return;
         }
@@ -253,16 +271,10 @@ impl Offer {
 
         for at in 0..self.shown() {
             let row = self.row(panel, at);
-            let under = input.hovered() == Some(named().of(&format!("row/{at}")).as_str());
-            // The chosen row is marked whether or not the pointer is near it:
-            // the arrows are the way this list is meant to be used, and the
-            // row Return takes has to say so.
-            if at == self.chosen || under {
-                let lit = match at == self.chosen {
-                    true => palette.hover,
-                    false => palette.raised,
-                };
-                scene.rounded(row.x, row.y, row.width, row.height, lit, 5.0);
+            // One mark, for the row Return takes, wherever the arrows or the
+            // pointer put it: in `ground`, as the switcher marks its own.
+            if at == self.chosen {
+                scene.rounded(row.x, row.y, row.width, row.height, palette.ground, 5.0);
             }
             let Some(one) = self.found.get(at) else {
                 continue;
@@ -290,14 +302,34 @@ impl Offer {
                 }]);
                 left += FACE + 8.0;
             }
+            let style = crate::listing::label(false);
+            // The aside keeps its room and the label is what gets cut: the
+            // link is the part that cannot be guessed.
+            let aside = match one.aside.is_empty() {
+                true => 0.0,
+                false => {
+                    matterless_layout::extent_of(fonts, &one.aside, f32::MAX, style).width + 8.0
+                }
+            };
             let said = matterless_layout::elided(
                 fonts,
                 &one.label,
-                (row.right() - left - 8.0).max(20.0),
-                crate::listing::label(false),
+                (row.right() - left - 8.0 - aside).max(20.0),
+                style,
             );
+            let width = matterless_layout::extent_of(fonts, &said, f32::MAX, style).width;
             let glyphs = painter.run(fonts, &said, left, row.y + 6.0, Run::label(f32::MAX));
             scene.glyphs(glyphs, palette.ink, palette.faint);
+            if aside > 0.0 {
+                let glyphs = painter.run(
+                    fonts,
+                    &one.aside,
+                    left + width + 8.0,
+                    row.y + 6.0,
+                    Run::label(f32::MAX),
+                );
+                scene.glyphs(glyphs, palette.faint, palette.faint);
+            }
         }
     }
 }
@@ -312,6 +344,7 @@ mod tests {
             .map(|name| Suggestion {
                 insert: (*name).to_string(),
                 label: (*name).to_string(),
+                aside: String::new(),
                 face: None,
                 picture: None,
             })
@@ -322,6 +355,7 @@ mod tests {
         Some(Chose::Name(Suggestion {
             insert: name.to_string(),
             label: name.to_string(),
+            aside: String::new(),
             face: None,
             picture: None,
         }))
@@ -362,6 +396,45 @@ mod tests {
         assert_eq!(offer.chosen, 2, "up from the first goes to the last");
         offer.react(&struck(Key::Down));
         assert_eq!(offer.chosen, 0, "and down from the last comes back");
+    }
+
+    /// Moving the pointer onto a row chooses it, as the arrows do; a pointer
+    /// left where it is does not take the choice back from the arrows.
+    #[test]
+    fn the_pointer_chooses_as_the_arrows_do() {
+        use matterless_ui::input::Event;
+        let box_of = Rect::new(100.0, 500.0, 900.0, 60.0);
+        let within = Rect::new(100.0, 40.0, 900.0, 520.0);
+        let mut offer = Offer::default();
+        offer.show('@', "a", some(&["amy", "ada", "alex"]));
+        let placed = offer.boxes(box_of, within);
+        let third = placed
+            .iter()
+            .find(|placed| placed.name.ends_with("row/2"))
+            .expect("the third row")
+            .rect;
+        let mut input = Input::default();
+        input.apply(
+            Event::PointerMoved {
+                x: third.x + 10.0,
+                y: third.y + third.height / 2.0,
+            },
+            &placed,
+        );
+        offer.react(&input);
+        assert_eq!(offer.chosen, 2);
+        input.apply(
+            Event::Key {
+                key: Key::Down,
+                down: true,
+            },
+            &placed,
+        );
+        offer.react(&input);
+        assert_eq!(
+            offer.chosen, 0,
+            "the arrow moved it, and the still pointer let it"
+        );
     }
 
     /// Return takes the chosen row, and Escape takes none.

@@ -7359,7 +7359,10 @@ impl App {
                 // A direct message has no name anybody can type, so it is not
                 // something a `~` could ever mean.
                 .filter(|channel| channel.channel_type == "O" || channel.channel_type == "P")
+                // The link it writes beside the name it is known by: "Progs"
+                // is linked as `~dev`, and choosing one wrote the other.
                 .map(|channel| matterless_view::offer::Suggestion {
+                    aside: format!("~{}", channel.name),
                     insert: channel.name,
                     label: channel.display_name,
                     face: None,
@@ -7383,6 +7386,7 @@ impl App {
                     .map(|(name, id)| matterless_view::offer::Suggestion {
                         insert: format!("{name}:"),
                         label: format!(":{name}:"),
+                        aside: String::new(),
                         face: None,
                         picture: Some(id),
                     })
@@ -7395,6 +7399,7 @@ impl App {
                             Some(matterless_view::offer::Suggestion {
                                 insert: format!("{name}:"),
                                 label: format!("{character}  :{name}:"),
+                                aside: String::new(),
                                 face: None,
                                 picture: None,
                             })
@@ -7427,6 +7432,7 @@ impl App {
                     let real = real.trim().to_string();
                     matterless_view::offer::Suggestion {
                         picture: None,
+                        aside: String::new(),
                         label: match real.is_empty() {
                             true => user.username.clone(),
                             false => format!("{real}  {}", user.username),
@@ -9553,7 +9559,7 @@ impl App {
                 fonts: &mut self.fonts,
                 palette: &self.palette,
             };
-            self.naming.draw(&mut canvas, box_of, within, &self.input);
+            self.naming.draw(&mut canvas, box_of, within);
         }
 
         drop(probe);
