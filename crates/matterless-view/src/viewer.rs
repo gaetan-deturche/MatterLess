@@ -814,12 +814,22 @@ impl Viewer {
             (Some(at), _) if youtube => {
                 scene.fill(at.x, at.y, at.width, at.height, [0, 0, 0, 255]);
             }
-            (Some(at), _) => scene.extend([matterless_paint::Piece::Shown {
-                x: at.x,
-                y: at.y,
-                width: at.width,
-                height: at.height,
-            }]),
+            (Some(at), _) => {
+                scene.extend([matterless_paint::Piece::Shown {
+                    x: at.x,
+                    y: at.y,
+                    width: at.width,
+                    height: at.height,
+                }]);
+                // A hairline just outside it, or a dark picture has no edge on
+                // the dimmed window. Four sides rather than a fill behind, which
+                // would show through a transparent one.
+                let rule = palette.rule;
+                scene.fill(at.x - 1.0, at.y - 1.0, at.width + 2.0, 1.0, rule);
+                scene.fill(at.x - 1.0, at.bottom(), at.width + 2.0, 1.0, rule);
+                scene.fill(at.x - 1.0, at.y, 1.0, at.height, rule);
+                scene.fill(at.right(), at.y, 1.0, at.height, rule);
+            }
             // A text file: numbered lines, cut to the width rather than run
             // off it, in the face code is set in.
             (None, Some(text)) => {
