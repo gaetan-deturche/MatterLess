@@ -279,6 +279,8 @@ pub struct Viewer {
     /// the last frame drew it.
     scroll: f32,
     reach: std::cell::Cell<f32>,
+    /// The bar down its side, which a hand can hold as well as read.
+    scrollbar: crate::scrollbar::Scrollbar,
     /// What Save and Copy have done, by file, so their buttons can say so:
     /// a press that answers nothing reads as a press that did nothing.
     saving: std::collections::HashSet<String>,
@@ -649,7 +651,12 @@ impl Viewer {
             placed.push(named.at("picture", picture, 31));
         }
         if self.reading().is_some() {
-            placed.push(named.at("text", self.text_rect(window), 31));
+            let room = self.text_rect(window);
+            placed.push(named.at("text", room, 31));
+            placed.extend(
+                self.scrollbar
+                    .boxes(&named.of("text"), room, self.reach.get()),
+            );
         }
         placed
     }
@@ -697,6 +704,13 @@ impl Viewer {
         if self.reading().is_some() {
             let page = (self.text_rect(window).height - LINE).max(LINE);
             let mut scroll = self.scroll;
+            let room = self.text_rect(window);
+            if let Some(held) =
+                self.scrollbar
+                    .react(&named().of("text"), input, room, scroll, self.reach.get())
+            {
+                scroll = held;
+            }
             if let Some((_, y)) =
                 input.wheel_over(&self.boxes(window), |name| name.starts_with(NAME))
             {
@@ -868,13 +882,17 @@ impl Viewer {
                         scene.glyphs(glyphs, colour, palette.faint);
                     }
                 }
-                // Where in it the reader is, down the right edge.
-                if reach > 0.0 {
-                    let tall = (room.height * room.height / (room.height + reach)).max(24.0);
-                    let y = room.y + (room.height - tall) * scroll / reach;
-                    scene.rounded(room.right() - 7.0, y, 4.0, tall, palette.raised, 2.0);
-                }
                 scene.clip_to(window.x, window.y, window.width, window.height);
+                // Where in it the reader is, down the right edge, and a handle
+                // to move it: the same bar as everywhere else in the window.
+                let mut canvas = Canvas {
+                    scene,
+                    painter,
+                    fonts,
+                    palette,
+                };
+                self.scrollbar
+                    .draw(&mut canvas, &named().of("text"), input, room, scroll, reach);
             }
             (None, None) => {
                 // Something to look at while it arrives, and something to read
@@ -1172,6 +1190,46 @@ mod tests {
         );
         viewer.react(&input, window());
         assert_eq!(viewer.scroll, 100.0, "no further than the end");
+    }
+
+    /// The bar beside a text file can be held and dragged, as every other bar
+    /// in the window can: down to the bottom is the end of the file.
+    #[test]
+    fn the_bar_beside_a_text_file_drags() {
+        use matterless_ui::input::Event;
+        let mut viewer = Viewer::default();
+        let mut log = three().remove(0);
+        log.text = true;
+        viewer.show(vec![log], "f0");
+        viewer.read("f0", lines_of("one\ntwo\nthree"));
+        viewer.reach.set(1000.0);
+        let placed = viewer.boxes(window());
+        let bar = placed
+            .iter()
+            .find(|placed| placed.name.ends_with("/scrollbar"))
+            .expect("a bar to hold")
+            .rect;
+        let mut input = Input::default();
+        let x = bar.x + bar.width / 2.0;
+        input.apply(Event::PointerMoved { x, y: bar.y + 2.0 }, &placed);
+        input.apply(Event::PointerPressed, &placed);
+        viewer.react(&input, window());
+        input.apply(
+            Event::PointerMoved {
+                x,
+                y: bar.bottom() + 50.0,
+            },
+            &placed,
+        );
+        viewer.react(&input, window());
+        assert_eq!(viewer.scroll, 1000.0);
+        input.apply(Event::PointerReleased, &placed);
+        assert_eq!(
+            viewer.react(&input, window()),
+            None,
+            "letting go shuts nothing"
+        );
+        assert!(viewer.open());
     }
 
     /// Opening lands on the one that was pressed, not on the first.
