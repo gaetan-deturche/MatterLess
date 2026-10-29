@@ -1075,9 +1075,11 @@ fn lines_of(nodes: &[Node], indent: f32, into: &mut Vec<Piece>) {
 /// The href, if it is one this window would follow.
 ///
 /// A message is text somebody else wrote, and a markdown link can name any
-/// scheme: `file:` reaching into the reader's disk, or anything the shell has
-/// been taught to run. Only the two the web uses are carried; everything else
-/// draws as words and does nothing when pressed.
+/// scheme: `file:` reaching into the reader's disk, or script run in place.
+/// Those draw as words and do nothing when pressed. Any other scheme is
+/// carried, as the official client carries it -- a studio's own
+/// `curiosity://` links open its editor -- and the window asks before it
+/// opens one that is not the web.
 /// The same question from outside this module: a preview card carries a URL
 /// the server fetched, and it deserves the scheme check a link in a message
 /// gets.
@@ -1085,10 +1087,28 @@ pub fn openable_link(href: &str) -> Option<Press> {
     openable(href)
 }
 
+/// What is never opened from a message, whatever the reader answers.
+pub const NEVER_OPENED: [&str; 4] = ["file", "javascript", "vbscript", "data"];
+
 fn openable(href: &str) -> Option<Press> {
-    let scheme = href.split_once("://")?.0;
-    matches!(scheme.to_ascii_lowercase().as_str(), "http" | "https")
-        .then(|| Press::Link(href.to_string()))
+    let scheme = link_scheme(href)?;
+    (!NEVER_OPENED.contains(&scheme.as_str())).then(|| Press::Link(href.to_string()))
+}
+
+/// A link's scheme, lowercased: a letter, then letters, digits, `+`, `-` or
+/// `.`, up to the colon.
+///
+/// One letter is not a scheme here but a drive, `C:\...`, which is a path on
+/// the reader's disk.
+pub fn link_scheme(href: &str) -> Option<String> {
+    let (scheme, _) = href.split_once(':')?;
+    let mut characters = scheme.chars();
+    let first = characters.next()?;
+    let valid = first.is_ascii_alphabetic()
+        && characters.all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '+' | '-' | '.')
+        });
+    (valid && scheme.len() > 1).then(|| scheme.to_ascii_lowercase())
 }
 
 /// Collects inline content into styled spans.
@@ -2271,10 +2291,23 @@ mod tests {
             }),
             Some(Press::Channel("dev".into()))
         );
+        // Outside the web, but somewhere the reader may agree to go: the
+        // window asks before it opens one.
+        assert_eq!(
+            pressed(Node::Link {
+                href: "curiosity://level_coords/Game/Zoo".into(),
+                children: words(),
+            }),
+            Some(Press::Link("curiosity://level_coords/Game/Zoo".into()))
+        );
         for refused in [
             "file:///c:/windows",
+            "FILE:///c:/windows",
             "javascript:alert(1)",
-            "ms-settings://x",
+            "vbscript:msgbox",
+            "data:text/html,x",
+            "C:\\Windows\\notepad.exe",
+            "no scheme at all",
         ] {
             assert_eq!(
                 pressed(Node::Link {

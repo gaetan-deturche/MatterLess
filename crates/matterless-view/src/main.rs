@@ -2530,6 +2530,45 @@ impl App {
         }
     }
 
+    /// A link out of the app: the web at once, and any other scheme once the
+    /// reader has agreed to it, for this link or for good -- the question the
+    /// desktop client asks before a `curiosity://` link opens the editor.
+    fn open_link(&mut self, href: &str, at: Option<Rect>) {
+        let Some(scheme) = matterless_view::open::outside_the_web(href) else {
+            matterless_view::open::link(href);
+            return;
+        };
+        if self.agreed_schemes().contains(&scheme) {
+            matterless_view::open::agreed_link(href);
+            return;
+        }
+        use matterless_view::menu::{Anchor, Item, Style};
+        let (x, y) = self
+            .input
+            .pointer_at()
+            .or(at.map(|rect| (rect.x, rect.bottom())))
+            .unwrap_or_default();
+        self.menu.show(
+            href,
+            Anchor::At(x, y),
+            Style::channel(),
+            vec![
+                Item::new("scheme.once", &format!("Open this {scheme}: link"))
+                    .marked(matterless_layout::marks::LINK),
+                Item::new("scheme.always", &format!("Always open {scheme}: links")),
+            ],
+        );
+    }
+
+    /// The schemes outside the web the reader has said to open without asking.
+    fn agreed_schemes(&self) -> Vec<String> {
+        self.store
+            .as_ref()
+            .and_then(|store| store.setting(AGREED_SCHEMES).ok().flatten())
+            .map(|saved| saved.lines().map(str::to_string).collect())
+            .unwrap_or_default()
+    }
+
     /// Follows something somebody wrote: a link, a person, a conversation.
     fn press(&mut self, press: matterless_layout::row::Press, at: Option<Rect>) {
         use matterless_layout::row::Press;
@@ -2582,9 +2621,7 @@ impl App {
                         },
                         at,
                     ),
-                    None => {
-                        matterless_view::open::link(&href);
-                    }
+                    None => self.open_link(&href, at),
                 }
             }
             // By name, because that is all a `~channel` in a message carries.
@@ -3758,6 +3795,20 @@ impl App {
         );
     }
 
+    /// Kept, so a scheme agreed to is not asked about again after a restart.
+    fn agree_to_scheme(&mut self, scheme: &str) {
+        let Some(store) = self.store.as_ref() else {
+            return;
+        };
+        let mut agreed = self.agreed_schemes();
+        if !agreed.iter().any(|one| one == scheme) {
+            agreed.push(scheme.to_string());
+        }
+        if let Err(error) = store.remember_setting(AGREED_SCHEMES, &agreed.join("\n")) {
+            eprintln!("keeping a link scheme: {error}");
+        }
+    }
+
     /// A spelling suggestion taken, or a word taught.
     fn act_on_spelling(&mut self, about: &str, chosen: &str) {
         let parts: Vec<&str> = about.split('\u{1f}').collect();
@@ -3818,6 +3869,16 @@ impl App {
         }
         if let Some(rest) = chosen.strip_prefix("spell.") {
             self.act_on_spelling(about, rest);
+            return;
+        }
+        if let Some(rest) = chosen.strip_prefix("scheme.") {
+            let Some(scheme) = matterless_view::open::outside_the_web(about) else {
+                return;
+            };
+            if rest == "always" {
+                self.agree_to_scheme(&scheme);
+            }
+            matterless_view::open::agreed_link(about);
             return;
         }
         // Opened as a press is, so a link to this server stays in the app.
@@ -11652,6 +11713,9 @@ fn worth_raising(put_off: Option<&str>, version: &str) -> bool {
 /// The teams folded in the sidebar, as this machine remembers them.
 const FOLDED_TEAMS: &str = "folded-teams";
 
+/// The link schemes outside the web opened without asking, one to a line.
+const AGREED_SCHEMES: &str = "agreed-link-schemes";
+
 /// The team listed when teams are listed one at a time.
 const TEAM_SHOWN: &str = "team-shown";
 
@@ -11959,5 +12023,30 @@ mod tests {
         typed(&mut app, "ok");
         assert_eq!(app.thread_composer.text(), "ok");
         assert_eq!(app.edit.box_of.text(), "a reply");
+    }
+
+    /// A link outside the web asks first, naming its scheme; the answer "for
+    /// good" is kept once; and what no answer opens is never asked about.
+    #[test]
+    fn a_link_outside_the_web_asks_before_it_opens() {
+        let mut app = window_with_two_threads();
+        let href = "curiosity://level_coords/Game/Zoo?lx=1";
+        app.press(matterless_layout::row::Press::Link(href.into()), None);
+        assert!(app.menu.open(), "it asked");
+        assert_eq!(app.menu.about, href);
+        let ids: Vec<&str> = app.menu.items.iter().map(|item| item.id.as_str()).collect();
+        assert_eq!(ids, ["scheme.once", "scheme.always"]);
+        assert!(app.menu.items[1].label.contains("curiosity:"));
+        app.menu.hide();
+
+        app.agree_to_scheme("curiosity");
+        app.agree_to_scheme("curiosity");
+        assert_eq!(app.agreed_schemes(), ["curiosity"]);
+
+        app.press(
+            matterless_layout::row::Press::Link("file:///c:/windows".into()),
+            None,
+        );
+        assert!(!app.menu.open(), "a file link is not a question");
     }
 }

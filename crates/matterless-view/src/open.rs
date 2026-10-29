@@ -22,6 +22,34 @@ pub fn link(href: &str) -> bool {
     show(href)
 }
 
+/// The scheme of a link outside the web that may be opened once the reader
+/// has agreed to it, as the desktop client asks: `None` for the web, and for
+/// what is never opened.
+pub fn outside_the_web(href: &str) -> Option<String> {
+    let scheme = matterless_layout::row::link_scheme(href)?;
+    (!matches!(scheme.as_str(), "http" | "https") && agreeable(href)).then_some(scheme)
+}
+
+/// Opens a link outside the web, which the caller has asked the reader about.
+pub fn agreed_link(href: &str) -> bool {
+    if !agreeable(href) {
+        eprintln!("not opening a {} link", scheme_of(href).unwrap_or("bare"));
+        return false;
+    }
+    println!("opening a link outside the web");
+    show(href)
+}
+
+/// Anything but what no answer opens. The list is the layout's again, kept
+/// here for the same reason the web check is.
+fn agreeable(href: &str) -> bool {
+    let Some(scheme) = matterless_layout::row::link_scheme(href) else {
+        return false;
+    };
+    !matches!(scheme.as_str(), "file" | "javascript" | "vbscript" | "data")
+        && !href.chars().any(|character| character.is_control())
+}
+
 /// Opens the folder a file was kept in, with the file chosen in it.
 ///
 /// Only ever a path this program wrote, never one out of a message.
@@ -247,6 +275,27 @@ mod tests {
         assert!(!worth_opening("mailto:someone@example.invalid"));
         assert!(!worth_opening("example.invalid"));
         assert!(!worth_opening(""));
+    }
+
+    /// Outside the web is asked about, scheme by scheme; what no answer
+    /// opens is never offered.
+    #[test]
+    fn a_link_outside_the_web_names_its_scheme() {
+        assert_eq!(
+            outside_the_web("curiosity://level_coords/Game/Zoo?lx=1&ly=2"),
+            Some("curiosity".to_string())
+        );
+        assert_eq!(
+            outside_the_web("Mailto:someone@example.invalid"),
+            Some("mailto".to_string())
+        );
+        assert_eq!(outside_the_web("https://example.invalid/"), None);
+        assert_eq!(outside_the_web("file:///c:/windows"), None);
+        assert_eq!(outside_the_web("JavaScript:alert(1)"), None);
+        assert_eq!(outside_the_web("data:text/html,x"), None);
+        assert_eq!(outside_the_web("C:\\Windows\\notepad.exe"), None);
+        assert_eq!(outside_the_web("curiosity://x\u{7}y"), None);
+        assert!(!agreed_link("file:///c:/windows"));
     }
 
     /// A name offered in the Save dialog is a file's name and nothing more:
