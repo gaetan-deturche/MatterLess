@@ -798,51 +798,68 @@ impl View {
         // in the pass: it is an overlay over the whole window, so there is
         // nothing it should be drawn under.
         let mut shown: Vec<Span> = Vec::new();
-        for layer in &scene.layers {
-            let from = quads.len() as u32;
-            vertices_of(
-                &layer.pieces,
-                &self.gpu,
-                fonts,
-                &mut self.cache,
-                &mut self.atlas,
-                self.dpi,
-                &mut quads,
-            );
-            let to = quads.len() as u32;
-            if to > from {
-                spans.push((from..to, layer.clip));
-            }
-            for piece in &layer.pieces {
-                let Piece::Shown {
-                    x,
-                    y,
-                    width,
-                    height,
-                } = piece
-                else {
-                    continue;
-                };
+        // Twice at most. The letters sheet is started again when it fills,
+        // which leaves every slot handed out so far pointing at nothing:
+        // the frame is built a second time, into the empty sheet.
+        for again in [false, true] {
+            quads.clear();
+            spans.clear();
+            shown.clear();
+            for layer in &scene.layers {
                 let from = quads.len() as u32;
-                quad(
+                vertices_of(
+                    &layer.pieces,
+                    &self.gpu,
+                    fonts,
+                    &mut self.cache,
+                    &mut self.atlas,
+                    self.dpi,
                     &mut quads,
-                    [
-                        *x * self.dpi,
-                        *y * self.dpi,
-                        (*x + *width) * self.dpi,
-                        (*y + *height) * self.dpi,
-                    ],
-                    [0.0, 0.0, 1.0, 1.0],
-                    // White, so the picture keeps its own colours.
-                    [1.0, 1.0, 1.0, 1.0],
-                    // Its own texture, after the three sheets: a picture
-                    // opened full size is far too large to share one.
-                    SHOWN,
-                    0.0,
-                    1.0,
                 );
-                shown.push((from..quads.len() as u32, layer.clip));
+                let to = quads.len() as u32;
+                if to > from {
+                    spans.push((from..to, layer.clip));
+                }
+                for piece in &layer.pieces {
+                    let Piece::Shown {
+                        x,
+                        y,
+                        width,
+                        height,
+                    } = piece
+                    else {
+                        continue;
+                    };
+                    let from = quads.len() as u32;
+                    quad(
+                        &mut quads,
+                        [
+                            *x * self.dpi,
+                            *y * self.dpi,
+                            (*x + *width) * self.dpi,
+                            (*y + *height) * self.dpi,
+                        ],
+                        [0.0, 0.0, 1.0, 1.0],
+                        // White, so the picture keeps its own colours.
+                        [1.0, 1.0, 1.0, 1.0],
+                        // Its own texture, after the three sheets: a picture
+                        // opened full size is far too large to share one.
+                        SHOWN,
+                        0.0,
+                        1.0,
+                    );
+                    shown.push((from..quads.len() as u32, layer.clip));
+                }
             }
+            if !self.atlas.take_letters_full() {
+                break;
+            }
+            if again {
+                eprintln!("letters: one frame needs more than the whole sheet");
+                break;
+            }
+            println!("letters: the sheet filled, starting it again");
+            self.atlas.start_letters_again();
         }
 
         // Cloned rather than borrowed: the context is a handle, and holding a

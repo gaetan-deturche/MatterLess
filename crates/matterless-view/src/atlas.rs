@@ -9,9 +9,11 @@
 //! **Three sheets, not one.** They are three textures rather than three bands
 //! of one because what they hold has nothing in common but its format:
 //!
-//! * **Letters.** A font at a handful of sizes. Bounded, long-lived, and
-//!   nothing reclaims: a letter that will not rasterise is a hole in a
-//!   sentence, so this sheet is sized never to need to.
+//! * **Letters.** A font at a handful of sizes. Long-lived, and started again
+//!   from empty when it fills -- in the middle of a frame, which is then built
+//!   a second time. Bounded it is not: every size, subpixel offset and
+//!   rasterising mode is a glyph of its own, and a window left open for days
+//!   filled it, after which each new letter was a hole in a sentence.
 //! * **Faces.** Avatars, team icons, custom emoji, and the mini previews that
 //!   stand in for a picture on its way. All small, all repeated, all wanted
 //!   again the moment a reader scrolls back.
@@ -60,8 +62,8 @@ pub enum Sheet {
 
 /// How big each sheet is, in texels.
 ///
-/// Letters get more room than the single band ever gave them, because nothing
-/// reclaims there. Faces are small and repeated, so a megapixel is hundreds of
+/// Letters get more room than the single band ever gave them, because
+/// starting them again costs a frame of rasterising. Faces are small and repeated, so a megapixel is hundreds of
 /// them. Pictures get the largest sheet and still reclaim, because no size is
 /// enough for an unbounded scroll.
 const LETTERS: (u32, u32) = (2048, 1024);
@@ -599,6 +601,8 @@ pub struct Atlas {
     pictures: Store,
     /// Frames drawn, which is what `used` counts in.
     now: u64,
+    /// Whether a glyph found no room since this was last asked.
+    letters_full: bool,
 }
 
 impl Atlas {
@@ -611,6 +615,7 @@ impl Atlas {
             faces: Store::new(gpu, "faces", FACES)?,
             pictures: Store::new(gpu, "pictures", PICTURES)?,
             now: 0,
+            letters_full: false,
         };
         // One opaque white texel at the origin of the letters sheet, so a solid
         // rectangle is the same pipeline as a glyph: it samples this and
@@ -625,10 +630,7 @@ impl Atlas {
     /// answer it already had. What is forgotten is only the record of where
     /// each glyph sits: the pixels stay in the sheet, because nothing reclaims
     /// there. One switch costs a second copy of whatever is on screen, which
-    /// this sheet has room for -- and a reader who toggles it all afternoon
-    /// gets a full sheet and glyphs that stop arriving, which is the trade the
-    /// note at the top of this file already makes for a sheet that is sized
-    /// never to need reclaiming.
+    /// this sheet has room for, and a full sheet is started again.
     pub fn rasterise_subpixel(&mut self, want: bool) -> bool {
         if self.subpixel == want {
             return false;
@@ -636,6 +638,19 @@ impl Atlas {
         self.subpixel = want;
         self.slots.clear();
         true
+    }
+
+    /// Whether a glyph found no room since this was last asked, forgetting it.
+    pub fn take_letters_full(&mut self) -> bool {
+        std::mem::take(&mut self.letters_full)
+    }
+
+    /// Empties the letters sheet: every glyph is rasterised again when it is
+    /// next asked for, and every slot handed out before this is stale.
+    /// The white texel at the origin stays: a pen never hands it out.
+    pub fn start_letters_again(&mut self) {
+        self.slots.clear();
+        self.letters.pen.reset();
     }
 
     /// What the pipeline binds, one per sheet.
@@ -858,11 +873,11 @@ impl Atlas {
         };
 
         let Some(slot) = self.letters.pen.reserve(width, height) else {
-            // Out of room. Cached as absent rather than retried every frame:
-            // a missing glyph is a visible gap, and a rasterise per frame is a
-            // stutter that would hide the cause. Nothing reclaims here -- see
-            // the note at the top on why this sheet is sized not to need to.
-            eprintln!("no room in letters for a {width}x{height} glyph");
+            // Out of room, which the frame being built answers by starting the
+            // sheet again and building itself a second time. Cached as absent
+            // meanwhile, so a frame that needs more than the whole sheet has
+            // gaps rather than a sheet started again on every frame.
+            self.letters_full = true;
             self.slots.insert(asked, None);
             return None;
         };
