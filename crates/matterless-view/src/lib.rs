@@ -37,6 +37,7 @@ pub mod offer;
 pub mod offline;
 pub mod open;
 pub mod pack;
+pub mod pdf;
 pub mod picker;
 pub mod placement;
 pub mod places;

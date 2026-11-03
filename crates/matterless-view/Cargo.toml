@@ -154,6 +154,11 @@ windows = { version = "0.61.3", features = [
     # The named mutex that keeps a second launch from being a second client.
     "Win32_System_Threading",
     "Win32_Security",
+    # Rendering a PDF's pages, with the renderer Windows carries for it.
+    "Foundation",
+    "Data_Pdf",
+    "Storage_Streams",
+    "Graphics_Imaging",
 ] }
 
 [build-dependencies]

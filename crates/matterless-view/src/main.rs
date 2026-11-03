@@ -2172,6 +2172,32 @@ impl App {
                 }
                 self.preload_gallery();
             }
+            // A PDF's page: remembered, and shown if it is still the page
+            // wanted -- a reader turning fast outruns the renderer.
+            Update::Page {
+                file_id,
+                page,
+                pages,
+                within,
+                width,
+                height,
+                rgba,
+            } => {
+                self.viewer.paged(&file_id, pages);
+                let wanted = self
+                    .viewer
+                    .current()
+                    .is_some_and(|one| one.file_id == file_id && self.viewer.sheet() == page);
+                if wanted && let Some(view) = self.view.as_mut() {
+                    view.show(width, height, &rgba);
+                    self.viewer.arrived(&file_id, (width, height));
+                }
+                let key = matterless_view::viewer::sheet_key(&file_id, page);
+                self.remembered.keep(&key, within, width, height, rgba);
+                if wanted {
+                    self.sheet_ahead(&file_id, page);
+                }
+            }
             Update::Film { file_id, path } => self.open_film(&file_id, &path),
             Update::Text { file_id, lines } => self.viewer.read(&file_id, lines),
             Update::Colours { file_id, colours } => self.viewer.colour(&file_id, colours),
@@ -4163,6 +4189,7 @@ impl App {
             linked: false,
             video: false,
             text: false,
+            pdf: false,
             youtube: Some(video),
         };
         if self.viewer.show(vec![one.clone()], &one.file_id).is_some() {
@@ -4272,6 +4299,7 @@ impl App {
         let Some(next) = self.viewer.neighbours().into_iter().find(|one| {
             !one.video
                 && !one.text
+                && !one.pdf
                 && one.youtube.is_none()
                 && !self.remembered.holds(&one.file_id, size)
                 && !self.preload_tried.contains(&one.file_id)
@@ -4305,6 +4333,9 @@ impl App {
         self.film = None;
         if one.video {
             return self.fetch_film(one);
+        }
+        if one.pdf {
+            return self.fetch_sheet(&one.file_id, self.viewer.sheet());
         }
         if one.text {
             if !self.viewer.holds_text(&one.file_id)
@@ -4343,6 +4374,45 @@ impl App {
             linked: one.linked,
             within: self.pixels,
         });
+    }
+
+    /// A page of a PDF, at the size this window can draw: from memory when it
+    /// was shown before, rendered when it was not.
+    fn fetch_sheet(&mut self, file_id: &str, page: usize) {
+        let key = matterless_view::viewer::sheet_key(file_id, page);
+        if let Some((width, height, rgba)) = self.remembered.get(&key, self.pixels)
+            && let Some(view) = self.view.as_mut()
+        {
+            view.show(width, height, rgba);
+            self.viewer.arrived(file_id, (width, height));
+            return self.sheet_ahead(file_id, page);
+        }
+        self.render_sheet(file_id, page);
+    }
+
+    /// Renders the page after this one before it is asked for, so turning to
+    /// it is a texture upload.
+    fn sheet_ahead(&mut self, file_id: &str, page: usize) {
+        let next = page + 1;
+        let key = matterless_view::viewer::sheet_key(file_id, next);
+        if self
+            .viewer
+            .sheets(file_id)
+            .is_some_and(|pages| next < pages)
+            && !self.remembered.holds(&key, self.pixels)
+        {
+            self.render_sheet(file_id, next);
+        }
+    }
+
+    fn render_sheet(&self, file_id: &str, page: usize) {
+        if let Some(link) = self.link.as_ref() {
+            link.send(matterless_view::live::Ask::Page {
+                file_id: file_id.to_string(),
+                page,
+                within: self.pixels,
+            });
+        }
     }
 
     /// A video for the viewer: from the disk when it was played before, and
@@ -7927,6 +7997,7 @@ impl App {
                     }
                     self.fetch_looked(&one);
                 }
+                Some(matterless_view::viewer::Did::Turn(one)) => self.fetch_looked(&one),
                 Some(matterless_view::viewer::Did::Save { file_id, name }) => {
                     self.save_file(file_id, name);
                 }

@@ -91,8 +91,10 @@ pub const NEW: &str = "\u{e13d}";
 pub const BACK: &str = "\u{e06e}";
 /// The next picture, and a submenu.  `chevron-right`
 pub const NEXT: &str = "\u{e06f}";
-/// A sidebar category that is unfolded.  `chevron-down`
+/// A sidebar category that is unfolded, and a PDF's next page.  `chevron-down`
 pub const CHEVRON_DOWN: &str = "\u{e06d}";
+/// A PDF's page before.  `chevron-up`
+pub const CHEVRON_UP: &str = "\u{e070}";
 /// Down to the newest message.  `arrow-down`
 pub const ARROW_DOWN: &str = "\u{e042}";
 /// Keep a file next to the reader’s other downloads.  `download`

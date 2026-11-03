@@ -1203,10 +1203,10 @@ impl Stream {
                 }
                 for (ordinal, (_, file)) in self.filed(index).into_iter().enumerate() {
                     let card = self.card_rect(index, ordinal, top, inner.x);
-                    // Under the Save button: the rest of a text file's card
-                    // opens it to read.
+                    // Under the Save button: the rest of a text file's or a
+                    // PDF's card opens it to read.
                     if let Some(card) = card
-                        && readable(file)
+                        && (readable(file) || paged(file))
                     {
                         placed.push(Placed {
                             name: format!("{}/row/{index}/read/{ordinal}", self.name),
@@ -3541,15 +3541,24 @@ pub fn readable(file: &matterless_render::FileRef) -> bool {
             || mime == "application/xml")
 }
 
-/// Every picture, video and text file on one message, in the order they were
-/// attached.
+/// Whether a file card is a PDF, which the viewer shows a page at a time.
+pub fn paged(file: &matterless_render::FileRef) -> bool {
+    !file.archived
+        && (file.extension.eq_ignore_ascii_case("pdf")
+            || file.mime_type.eq_ignore_ascii_case("application/pdf"))
+}
+
+/// Every picture, video, text file and PDF on one message, in the order they
+/// were attached.
 ///
 /// Any other file card is not among them: there is nothing to show of one, so
 /// stepping never lands on it. The same rule the app follows.
 pub fn looking_at(post: &matterless_render::PostRow) -> Vec<crate::viewer::Looking> {
     post.files
         .iter()
-        .filter(|file| ((file.image || file.video) && !file.archived) || readable(file))
+        .filter(|file| {
+            ((file.image || file.video) && !file.archived) || readable(file) || paged(file)
+        })
         .map(|file| crate::viewer::Looking {
             file_id: file.id.clone(),
             // A linked picture's name is its alt text, which is not a file
@@ -3561,6 +3570,7 @@ pub fn looking_at(post: &matterless_render::PostRow) -> Vec<crate::viewer::Looki
             linked: file.variant == matterless_render::ImageVariant::Linked,
             video: file.video,
             text: readable(file),
+            pdf: paged(file),
             youtube: None,
             // The original for anything the server does not re-encode -- a
             // GIF, an SVG, a video -- and its preview for a photograph, which
@@ -3866,7 +3876,7 @@ mod sizes {
 
 #[cfg(test)]
 mod readable_files {
-    use super::readable;
+    use super::{paged, readable};
     use matterless_render::{FileRef, ImageVariant};
 
     fn file(name: &str, extension: &str, mime_type: &str, size: i64) -> FileRef {
@@ -3905,6 +3915,16 @@ mod readable_files {
         let mut picture = file("shot.png", "png", "image/png", 9_000);
         picture.image = true;
         assert!(!readable(&picture));
+    }
+
+    /// A PDF is known by its extension or its type, and is not text.
+    #[test]
+    fn a_pdf_is_paged_rather_than_read() {
+        let report = file("Rapport.PDF", "PDF", "", 900_000);
+        assert!(paged(&report));
+        assert!(!readable(&report));
+        assert!(paged(&file("scan", "", "application/pdf", 90)));
+        assert!(!paged(&file("notes.txt", "txt", "text/plain", 90)));
     }
 }
 

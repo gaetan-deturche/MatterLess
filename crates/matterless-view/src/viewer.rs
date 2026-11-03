@@ -60,6 +60,8 @@ pub struct Looking {
     pub video: bool,
     /// A text file, read rather than looked at.
     pub text: bool,
+    /// A PDF, shown a page at a time.
+    pub pdf: bool,
     /// A YouTube video a message links to, played by YouTube's own player
     /// over where a picture would be.
     pub youtube: Option<crate::youtube::Video>,
@@ -152,6 +154,11 @@ pub struct Playback {
     pub duration: f64,
 }
 
+/// What a page of a PDF is remembered under, beside the pictures.
+pub fn sheet_key(file_id: &str, page: usize) -> String {
+    format!("{file_id}#{page}")
+}
+
 /// What a press on the viewer meant.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Did {
@@ -171,6 +178,9 @@ pub enum Did {
     Step(i32),
     /// Go to this far through the video, from nothing to one.
     Seek(f64),
+    /// The same PDF at another page; the caller fetches it. The page showing
+    /// stays until the next has arrived, where `Show` drops it at once.
+    Turn(Looking),
     /// Open this link in the browser: a YouTube video, on YouTube.
     Browse(String),
     /// Near there, while the track is being dragged: `Seek` follows on release.
@@ -289,6 +299,12 @@ pub struct Viewer {
     copied: std::collections::HashSet<String>,
     /// An HTML file shown as its source rather than as its page.
     source: bool,
+    /// The page of a PDF showing, and how many each PDF has once one of its
+    /// pages has arrived.
+    sheet: usize,
+    sheets: std::collections::HashMap<String, usize>,
+    /// The wheel's turn not yet spent on turning a page.
+    wheeled: f32,
 }
 
 impl Viewer {
@@ -351,7 +367,7 @@ impl Viewer {
     /// Whether the one showing is a picture, which is what can be copied.
     fn copyable(&self) -> bool {
         self.current()
-            .is_some_and(|one| !one.video && !one.text && one.youtube.is_none())
+            .is_some_and(|one| !one.video && !one.text && !one.pdf && one.youtube.is_none())
     }
 
     pub fn open(&self) -> bool {
@@ -367,7 +383,48 @@ impl Viewer {
         self.failed.clear();
         self.scroll = 0.0;
         self.source = false;
+        self.sheet = 0;
         self.shown.get(at).cloned()
+    }
+
+    /// Which page of the PDF showing is wanted, from the first at nothing.
+    pub fn sheet(&self) -> usize {
+        self.sheet
+    }
+
+    /// A page of a PDF arrived, and this is how many it has.
+    pub fn paged(&mut self, file_id: &str, pages: usize) {
+        self.sheets.insert(file_id.to_string(), pages);
+    }
+
+    /// How many pages a PDF has, once one of them has arrived.
+    pub fn sheets(&self, file_id: &str) -> Option<usize> {
+        self.sheets.get(file_id).copied()
+    }
+
+    /// Whether the one showing is a PDF of more than one page.
+    fn turnable(&self) -> bool {
+        self.current().is_some_and(|one| {
+            one.pdf
+                && self
+                    .sheets
+                    .get(&one.file_id)
+                    .is_some_and(|&pages| pages > 1)
+        })
+    }
+
+    /// Turns the PDF showing to page `to`, kept within it. Answers nothing
+    /// when that is the page already showing.
+    fn turn(&mut self, to: isize) -> Option<Did> {
+        let one = self.current().filter(|one| one.pdf)?.clone();
+        let last = self.sheets.get(&one.file_id).copied().unwrap_or(1).max(1) - 1;
+        let to = to.clamp(0, last as isize) as usize;
+        if to == self.sheet {
+            return None;
+        }
+        self.sheet = to;
+        self.failed.clear();
+        Some(Did::Turn(one))
     }
 
     /// Whether the one showing is an HTML file, which can be shown as a page.
@@ -541,6 +598,7 @@ impl Viewer {
         self.size = None;
         self.failed.clear();
         self.scroll = 0.0;
+        self.sheet = 0;
         self.current().cloned()
     }
 
@@ -589,7 +647,7 @@ impl Viewer {
             true => "browse",
             false => "save",
         };
-        for name in [keep, "copy", "html", "next", "back"] {
+        for name in [keep, "copy", "html", "next", "back", "page-on", "page-back"] {
             // Only one picture, so there is nowhere to step: a button that
             // does nothing is a button that has to be pressed to find out.
             if (name == "next" || name == "back") && self.shown.len() < 2 {
@@ -599,6 +657,9 @@ impl Viewer {
                 continue;
             }
             if name == "html" && !self.html() {
+                continue;
+            }
+            if (name == "page-on" || name == "page-back") && !self.turnable() {
                 continue;
             }
             let width = match name {
@@ -730,6 +791,32 @@ impl Viewer {
             }
             self.scroll = scroll.clamp(0.0, self.reach.get());
         }
+        // A PDF turns a page under the keys a text file scrolls with, and a
+        // page for each turn of the wheel: what is left of one when the wheel
+        // stops is dropped, so a turn is never two pages.
+        if self.current().is_some_and(|one| one.pdf) {
+            match input.wheel_over(&self.boxes(window), |name| name.starts_with(NAME)) {
+                Some((_, y)) => self.wheeled -= y,
+                None => self.wheeled = 0.0,
+            }
+            if self.wheeled.abs() >= WHEELED {
+                let by = self.wheeled.signum() as isize;
+                self.wheeled = 0.0;
+                return self.turn(self.sheet as isize + by);
+            }
+            for (key, to) in [
+                (Key::Up, self.sheet as isize - 1),
+                (Key::PageUp, self.sheet as isize - 1),
+                (Key::Down, self.sheet as isize + 1),
+                (Key::PageDown, self.sheet as isize + 1),
+                (Key::Home, 0),
+                (Key::End, isize::MAX),
+            ] {
+                if input.struck(key) {
+                    return self.turn(to);
+                }
+            }
+        }
         if input.struck(Key::Left) {
             return self.step(-1).map(Did::Show);
         }
@@ -740,6 +827,8 @@ impl Viewer {
         match named().slug(clicked) {
             Some("back") => self.step(-1).map(Did::Show),
             Some("next") => self.step(1).map(Did::Show),
+            Some("page-back") => self.turn(self.sheet as isize - 1),
+            Some("page-on") => self.turn(self.sheet as isize + 1),
             Some("save") => {
                 let one = self.current()?;
                 if let Some(path) = self.kept.get(&one.file_id) {
@@ -909,7 +998,7 @@ impl Viewer {
                 // if it never does.
                 let said = if self.failed.is_empty() {
                     "opening\u{2026}".to_string()
-                } else if self.current().is_some_and(|one| one.text) {
+                } else if self.current().is_some_and(|one| one.text || one.pdf) {
                     format!("this file could not be opened: {}", self.failed)
                 } else {
                     format!("this picture could not be opened: {}", self.failed)
@@ -1002,11 +1091,14 @@ impl Viewer {
         // What it is called, and which of them this is. A video's bar is its
         // controls instead.
         if let Some(one) = self.current().filter(|_| !self.plays()) {
-            let said = if self.shown.len() > 1 {
+            let mut said = if self.shown.len() > 1 {
                 format!("{} ({} of {})", one.name, self.at + 1, self.shown.len())
             } else {
                 one.name.clone()
             };
+            if let Some(pages) = self.sheets.get(&one.file_id).filter(|_| one.pdf) {
+                said = format!("{said}  \u{b7}  page {} of {pages}", self.sheet + 1);
+            }
             let room = buttons
                 .iter()
                 .map(|(_, rect)| rect.x)
@@ -1058,12 +1150,14 @@ impl Viewer {
                 },
                 "browse" => "Open in YouTube",
                 "back" => matterless_layout::marks::BACK,
+                "page-back" => matterless_layout::marks::CHEVRON_UP,
+                "page-on" => matterless_layout::marks::CHEVRON_DOWN,
                 _ => matterless_layout::marks::NEXT,
             };
             // The arrows are marks and "Save" is a word, so they are neither
             // the same size nor from the same family, and only the word can be
             // measured with the text metrics.
-            let mark = name == "back" || name == "next";
+            let mark = matches!(name, "back" | "next" | "page-back" | "page-on");
             let wide = if mark {
                 15.0
             } else {
@@ -1097,6 +1191,10 @@ impl Viewer {
     }
 }
 
+/// How far the wheel goes to turn a page: less than one notch of it, which
+/// the window delivers over a few frames.
+const WHEELED: f32 = 40.0;
+
 /// How wide the time under a video is kept: "1:02:03 / 1:02:03".
 const TIME: f32 = 116.0;
 
@@ -1123,6 +1221,7 @@ mod tests {
                 linked: false,
                 video: false,
                 text: false,
+                pdf: false,
                 youtube: None,
             })
             .collect()
@@ -1343,6 +1442,54 @@ mod tests {
         beside.apply(matterless_ui::input::Event::PointerPressed, &placed);
         beside.apply(matterless_ui::input::Event::PointerReleased, &placed);
         assert_eq!(viewer.react(&beside, window()), Some(Did::Close));
+    }
+
+    /// A PDF turns a page at a time under the keys and the wheel, never past
+    /// its first or its last, and keeps the page showing until the next one
+    /// arrives; stepping to another attachment starts that at its first page.
+    #[test]
+    fn a_pdf_turns_within_its_pages() {
+        use matterless_ui::input::Event;
+        let key = |viewer: &mut Viewer, key: Key| {
+            let mut input = Input::default();
+            input.apply(Event::Key { key, down: true }, &[]);
+            viewer.react(&input, window())
+        };
+        let mut all = three();
+        all[0].name = "notes.pdf".into();
+        all[0].pdf = true;
+        let mut viewer = Viewer::default();
+        viewer.show(all, "f0");
+        assert_eq!(key(&mut viewer, Key::Down), None, "no count yet");
+        viewer.paged("f0", 3);
+        viewer.arrived("f0", (600, 800));
+
+        assert!(matches!(key(&mut viewer, Key::Down), Some(Did::Turn(one)) if one.file_id == "f0"));
+        assert_eq!(viewer.sheet(), 1);
+        assert!(
+            viewer.arrived_yet(),
+            "the last page stays until this one lands"
+        );
+        assert!(key(&mut viewer, Key::End).is_some());
+        assert_eq!(viewer.sheet(), 2);
+        assert_eq!(
+            key(&mut viewer, Key::PageDown),
+            None,
+            "no further than the last"
+        );
+        assert!(key(&mut viewer, Key::Home).is_some());
+        assert_eq!(key(&mut viewer, Key::Up), None, "nor before the first");
+
+        let placed = viewer.boxes(window());
+        let mut input = Input::default();
+        input.apply(Event::PointerMoved { x: 500.0, y: 300.0 }, &placed);
+        input.apply(Event::Wheel { x: 0.0, y: -60.0 }, &placed);
+        assert!(viewer.react(&input, window()).is_some());
+        assert_eq!(viewer.sheet(), 1, "a notch is one page");
+
+        assert!(matches!(key(&mut viewer, Key::Right), Some(Did::Show(_))));
+        assert_eq!(viewer.sheet(), 0);
+        assert_eq!(key(&mut viewer, Key::Down), None, "a picture has no pages");
     }
 
     /// A shut viewer answers nothing and places nothing.

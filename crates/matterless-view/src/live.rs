@@ -209,6 +209,16 @@ pub enum Update {
     /// And the picture could not be had, so the viewer can say so rather than
     /// showing an empty window.
     LookFailed { file_id: String, why: String },
+    /// A page of a PDF, for the viewer's texture, and how many it has.
+    Page {
+        file_id: String,
+        page: usize,
+        pages: usize,
+        within: (u32, u32),
+        width: u32,
+        height: u32,
+        rgba: Vec<u8>,
+    },
     /// A video is on the disk, ready to be opened.
     Film {
         file_id: String,
@@ -275,6 +285,12 @@ pub enum Ask {
     Film { file_id: String },
     /// Fetch a text file, to be read. Its name says what grammar colours it.
     Read { file_id: String, name: String },
+    /// Render one page of a PDF, as large as fits `within`.
+    Page {
+        file_id: String,
+        page: usize,
+        within: (u32, u32),
+    },
     /// Fetch one attachment at full size, to be looked at.
     ///
     /// `within` is how big the window is: the picture is scaled down to fit it
@@ -1903,6 +1919,73 @@ async fn run(
                                 },
                             };
                             wake.wake(update);
+                        });
+                    }
+                    Ask::Page {
+                        file_id,
+                        page,
+                        within,
+                    } => {
+                        let rest = rest.clone();
+                        let wake = wake.clone();
+                        tokio::spawn(async move {
+                            let key = format!("file/{file_id}");
+                            // The document held open, then the disk, then the
+                            // server: kept as an opened original is, under
+                            // the same name.
+                            let id = file_id.clone();
+                            let looked = key.clone();
+                            let bytes = off_the_loop(move || match crate::pdf::holds(&id) {
+                                true => Some(None),
+                                false => crate::filecache::looked()
+                                    .and_then(|held| held.read(&looked))
+                                    .map(|(bytes, _)| Some(bytes)),
+                            })
+                            .await
+                            .flatten();
+                            let (bytes, fetched) = match bytes {
+                                Some(bytes) => (bytes, false),
+                                None => match rest.fetch_bytes(&format!("/files/{file_id}")).await {
+                                    Ok(Some((bytes, _))) => (Some(bytes), true),
+                                    Ok(None) => {
+                                        return wake.wake(Update::LookFailed {
+                                            file_id,
+                                            why: "the server has no such file".to_string(),
+                                        });
+                                    }
+                                    Err(error) => {
+                                        return wake.wake(Update::LookFailed {
+                                            file_id,
+                                            why: error.to_string(),
+                                        });
+                                    }
+                                },
+                            };
+                            let id = file_id.clone();
+                            let rendered = off_the_loop(move || {
+                                let rendered = crate::pdf::render(&id, bytes.as_deref(), page, within);
+                                if fetched
+                                    && rendered.is_ok()
+                                    && let (Some(bytes), Some(held)) = (&bytes, crate::filecache::looked())
+                                {
+                                    held.write(&key, bytes, "application/pdf");
+                                }
+                                rendered
+                            })
+                            .await;
+                            match rendered {
+                                Some(Ok(one)) => wake.wake(Update::Page {
+                                    file_id,
+                                    page,
+                                    pages: one.pages,
+                                    within,
+                                    width: one.width,
+                                    height: one.height,
+                                    rgba: one.rgba,
+                                }),
+                                Some(Err(why)) => wake.wake(Update::LookFailed { file_id, why }),
+                                None => {}
+                            }
                         });
                     }
                     // Behind everything the reader is actually looking at.
