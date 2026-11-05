@@ -469,6 +469,17 @@ impl Store {
         )?)
     }
 
+    /// How many posts of a channel are from `at` on, replies and all: how deep
+    /// a page of it has to go to hold a message said then.
+    pub fn posts_since(&self, channel_id: &str, at: Timestamp) -> Result<i64> {
+        let connection = self.lock();
+        Ok(connection.query_row(
+            "SELECT COUNT(*) FROM posts WHERE channel_id = ?1 AND create_at >= ?2",
+            params![channel_id, at],
+            |row| row.get(0),
+        )?)
+    }
+
     // ----------------------------------------------------------------- posts
 
     /// Roots of followed threads, as the thread list sends them: with no

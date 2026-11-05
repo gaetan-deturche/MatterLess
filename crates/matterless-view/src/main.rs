@@ -2697,10 +2697,12 @@ impl App {
                 }
                 // After the thread opens, which narrows the channel beside it.
                 let within = self.stream_rect();
-                if !self.stream.to_post(&mut self.fonts, &target, within) {
-                    // Older than the pages loaded so far. Saying so beats
-                    // leaving the reader somewhere arbitrary and silent.
-                    println!("{target} is further back than this channel is loaded");
+                if !self.stream.to_post(&mut self.fonts, &target, within)
+                    && !self.deepen_to(&channel_id, &target)
+                {
+                    // Not in the store either. Saying so beats leaving the
+                    // reader somewhere arbitrary and silent.
+                    println!("{target} is further back than this channel is held");
                 }
                 if root.is_some()
                     && let Some(within) = self.thread_stream_rect()
@@ -6042,6 +6044,36 @@ impl App {
         }
     }
 
+    /// Reads the open channel deep enough to hold `post_id`, and scrolls to it.
+    ///
+    /// A channel opens at its newest page, and a message search found or a link
+    /// points at can be a thousand posts further back -- in the store all the
+    /// same, with only the depth between it and the reader. A little more than
+    /// that, so it has a conversation above it to be read in.
+    fn deepen_to(&mut self, channel_id: &str, post_id: &str) -> bool {
+        let Some(store) = self.store.clone() else {
+            return false;
+        };
+        let Some(newer) = store
+            .post(post_id)
+            .ok()
+            .flatten()
+            .and_then(|post| store.posts_since(channel_id, post.create_at).ok())
+        else {
+            return false;
+        };
+        let wanted = u32::try_from(newer)
+            .unwrap_or(u32::MAX)
+            .saturating_add(matterless_view::feed::PAGE / 4);
+        if wanted <= self.depth {
+            return false;
+        }
+        self.depth = wanted;
+        self.hold_place();
+        let within = self.stream_rect();
+        self.stream.to_post(&mut self.fonts, post_id, within)
+    }
+
     /// Asks for another page of history when the reader nears the top.
     ///
     /// Guarded so the same page is not asked for once per frame while they sit
@@ -8404,11 +8436,14 @@ impl App {
             if let Some(matterless_view::search::Did::Open(hit)) = did {
                 self.search.hide(&mut input);
                 self.input = input;
-                // Opened at the channel it was said in. Landing on the message
-                // itself needs an anchor the window cannot ask for yet, so it
-                // opens where the reader can find it rather than pretending.
-                self.sidebar.selected = Some(hit.channel_id.clone());
-                self.open_channel(&hit.channel_id);
+                // At the message, as following a link to it is.
+                self.press(
+                    matterless_layout::row::Press::Post {
+                        channel_id: hit.channel_id,
+                        post_id: hit.post_id,
+                    },
+                    None,
+                );
                 return;
             }
             self.input = input;
@@ -8855,6 +8890,11 @@ impl App {
         self.followed.hide();
         // Before anything marks it read, which is what this is for.
         self.recall_watermark(channel, &store);
+        // A different channel starts from its newest page, before it is read:
+        // read at the depth a jump took the last one to, it loaded thousands.
+        if switched {
+            self.depth = matterless_view::feed::PAGE;
+        }
         match matterless_view::feed::rows_of(
             &store,
             channel,

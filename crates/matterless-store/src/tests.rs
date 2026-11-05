@@ -317,6 +317,29 @@ fn only_real_messages_explain_an_unread_count() {
     assert_eq!(store.held_unread_after("c1", "me", 400).unwrap(), 1);
 }
 
+/// A page as deep as the count reaches holds the message it was counted from:
+/// what jumping to an old message relies on.
+#[test]
+fn a_page_as_deep_as_the_count_holds_the_message() {
+    let store = store();
+    let mut reply = post("reply", "c1", 350, 350);
+    reply.root_id = "old".into();
+    store
+        .upsert_posts(&[
+            post("older", "c1", 100, 100),
+            post("old", "c1", 200, 200),
+            reply,
+            post("new", "c1", 400, 400),
+            post("elsewhere", "c2", 300, 300),
+        ])
+        .unwrap();
+    let deep = store.posts_since("c1", 200).unwrap();
+    assert_eq!(deep, 3, "replies count, other channels do not");
+    let page = store.channel_page("c1", None, deep as u32).unwrap();
+    assert!(page.iter().any(|post| post.id == "old"));
+    assert!(!page.iter().any(|post| post.id == "older"));
+}
+
 #[test]
 fn local_search_finds_a_post_and_skips_tombstones() {
     let store = store();
