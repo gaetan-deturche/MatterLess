@@ -1864,7 +1864,7 @@ mod tests {
             })
             .collect();
         assert!(
-            pressed.contains(&&Press::Person("ada.lovelace".into())),
+            pressed.contains(&&Press::Author("u1".into())),
             "the author is not pressable in the draw list: {pressed:?}"
         );
         // And quietly: whoever draws the pill behind a mention has to be able

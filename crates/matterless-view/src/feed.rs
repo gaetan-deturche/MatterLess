@@ -189,9 +189,10 @@ pub fn rows_of(
     options.channel_names = store.channel_names().unwrap_or_default();
     options.not_emoji = store.not_custom_emoji().unwrap_or_default();
     (options.reader_name, options.reader_words) = reader_words(store, me_id);
+    let shown = store.name_display(me_id);
     options.author_names = people
         .iter()
-        .map(|(id, user)| (id.clone(), user.username.clone()))
+        .map(|(id, user)| (id.clone(), matterless_render::display_name(user, &shown)))
         .collect();
     options.author_avatars = people
         .iter()
@@ -322,9 +323,10 @@ pub fn rows_in(
     options.channel_names = store.channel_names().unwrap_or_default();
     options.not_emoji = store.not_custom_emoji().unwrap_or_default();
     (options.reader_name, options.reader_words) = reader_words(store, me_id);
+    let shown = store.name_display(me_id);
     options.author_names = people
         .iter()
-        .map(|(id, user)| (id.clone(), user.username.clone()))
+        .map(|(id, user)| (id.clone(), matterless_render::display_name(user, &shown)))
         .collect();
     options.author_avatars = people
         .iter()

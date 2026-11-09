@@ -363,6 +363,9 @@ pub enum Press {
     Link(String),
     /// Somebody, by username.
     Person(String),
+    /// Who wrote a message, by user id: the name shown for them is whichever
+    /// the reader goes by, and need not be one to look an account up with.
+    Author(String),
     /// A conversation, by its name rather than its id -- which is all a
     /// `~channel` in a message carries.
     Channel(String),
@@ -1471,7 +1474,7 @@ pub fn lay_out_opened(fonts: &mut Fonts, row: &Row, theme: &Theme, opened: bool)
                 // fail.
                 press: match post.bot {
                     true => None,
-                    false => Some(Press::Person(post.author_name.clone())),
+                    false => Some(Press::Author(post.author_id.clone())),
                 },
                 faint: false,
                 emoji: None,
@@ -2930,13 +2933,14 @@ mod tests {
         assert_eq!(code.wrap, theme.text_width() - theme.code_padding * 2.0);
     }
 
-    /// Pressing who said it opens them, the way pressing an `@name` does.
+    /// Pressing who said it opens them, the way pressing an `@name` does --
+    /// by their id, since the name shown can be their full name.
     #[test]
     fn the_author_of_a_message_can_be_pressed() {
         let mut fonts = Fonts::new();
         let theme = Theme::default();
         let mut post = post(vec![text("morning")]);
-        post.author_name = "ada.lovelace".into();
+        post.author_name = "Ada Lovelace".into();
         let laid = lay_out(&mut fonts, &Row::Post { post }, &theme);
         let header = laid
             .blocks
@@ -2950,7 +2954,7 @@ mod tests {
             .collect();
         assert_eq!(
             pressed,
-            vec![&Press::Person("ada.lovelace".into())],
+            vec![&Press::Author("u1".into())],
             "the name, and only the name: a timestamp leads nowhere"
         );
     }

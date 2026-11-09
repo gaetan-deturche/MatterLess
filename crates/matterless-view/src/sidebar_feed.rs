@@ -37,14 +37,12 @@ pub fn groups(
     // out of its membership: reading who you are in every row that lists the
     // people you are talking to is noise.
     counterparts.push(me_id.to_string());
-    // The server's `TeammateNameDisplay` reaches the app through bootstrap,
-    // which this window does not run. Phase 0 measured this deployment on
-    // `username`, which is what an empty mode resolves to.
+    let shown = store.name_display(me_id);
     let names: HashMap<String, String> = store
         .users_by_ids(&counterparts)
         .unwrap_or_default()
         .into_iter()
-        .map(|(id, user)| (id, matterless_render::display_name(&user, "")))
+        .map(|(id, user)| (id, matterless_render::display_name(&user, &shown)))
         .collect();
 
     let summaries: Vec<ChannelSummary> = channels

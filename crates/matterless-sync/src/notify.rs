@@ -782,7 +782,11 @@ pub fn announce(store: &matterless_store::Store, post_id: &str, me_id: &str) -> 
     let known = store
         .users_by_ids(std::slice::from_ref(&post.user_id))
         .ok()
-        .and_then(|found| found.get(&post.user_id).map(|user| user.username.clone()));
+        .and_then(|found| {
+            found
+                .get(&post.user_id)
+                .map(|user| matterless_render::display_name(user, &store.name_display(me_id)))
+        });
     // The reader's own name, so it can be taken out of a group's membership:
     // a group is called by everybody in it *except* you, and reading your own
     // name in the title of a notification addressed to you says nothing.

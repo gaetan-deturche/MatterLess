@@ -249,9 +249,10 @@ pub fn found_for(
     people.sort();
     people.dedup();
     let known = store.users_by_ids(&people).unwrap_or_default();
+    let shown = store.name_display(me);
     let names: std::collections::HashMap<String, String> = known
         .iter()
-        .map(|(id, user)| (id.clone(), user.username.clone()))
+        .map(|(id, user)| (id.clone(), matterless_render::display_name(user, &shown)))
         .collect();
 
     posts
@@ -354,9 +355,10 @@ pub fn followed(store: &Store, me: &str, limit: u32) -> Vec<Found> {
     people.sort();
     people.dedup();
     let known = store.users_by_ids(&people).unwrap_or_default();
+    let shown = store.name_display(me);
     let names: std::collections::HashMap<String, String> = known
         .iter()
-        .map(|(id, user)| (id.clone(), user.username.clone()))
+        .map(|(id, user)| (id.clone(), matterless_render::display_name(user, &shown)))
         .collect();
     let face = |user_id: &str| {
         (

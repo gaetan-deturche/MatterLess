@@ -15,6 +15,11 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Mutex;
 
+/// The server's `TeammateNameDisplay` and `LockTeammateNameDisplay`, kept as
+/// settings: they come from its client config, which nothing else stores.
+pub const SERVER_NAME_DISPLAY: &str = "server-name-display";
+pub const SERVER_NAME_DISPLAY_LOCKED: &str = "server-name-display-locked";
+
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
     #[error("sqlite: {0}")]
@@ -2255,6 +2260,22 @@ impl Store {
                 |row| row.get::<_, String>(0),
             )
             .optional()?)
+    }
+
+    /// Which name people are shown by: the server's setting, as the last
+    /// membership pull kept it, and the reader's own display preference.
+    pub fn name_display(&self, me_id: &str) -> String {
+        let server = self.setting(SERVER_NAME_DISPLAY).ok().flatten();
+        let locked = self.setting(SERVER_NAME_DISPLAY_LOCKED).ok().flatten();
+        let chosen = self
+            .preference(me_id, "display_settings", "name_format")
+            .ok()
+            .flatten();
+        matterless_core::resolve_name_display(
+            server.as_deref(),
+            locked.as_deref() == Some("true"),
+            chosen.as_deref(),
+        )
     }
 
     /// Remembers one, for the next run of this copy of the program.

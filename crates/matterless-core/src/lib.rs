@@ -40,10 +40,44 @@ pub fn resolve_thread_mode(
     ThreadMode::resolve(server, user)
 }
 
+/// Which name people are shown by, as the official client works it out: the
+/// server's `TeammateNameDisplay`, unless the reader chose their own in their
+/// display settings and the server does not lock it. `username` when neither
+/// says, which is the server's own default.
+pub fn resolve_name_display(server: Option<&str>, locked: bool, chosen: Option<&str>) -> String {
+    let server = server.filter(|mode| !mode.is_empty()).unwrap_or("username");
+    chosen
+        .filter(|mode| !mode.is_empty() && !locked)
+        .unwrap_or(server)
+        .to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    #[test]
+    fn the_name_shown_is_the_readers_choice_unless_the_server_locks_it() {
+        assert_eq!(resolve_name_display(None, false, None), "username");
+        assert_eq!(
+            resolve_name_display(Some("full_name"), false, None),
+            "full_name"
+        );
+        assert_eq!(
+            resolve_name_display(Some("full_name"), false, Some("nickname_full_name")),
+            "nickname_full_name"
+        );
+        assert_eq!(
+            resolve_name_display(Some("full_name"), true, Some("username")),
+            "full_name",
+            "locked"
+        );
+        assert_eq!(
+            resolve_name_display(Some("full_name"), false, Some("")),
+            "full_name"
+        );
+    }
 
     #[test]
     fn thread_mode_comes_from_both_sources() {

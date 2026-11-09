@@ -2667,6 +2667,18 @@ impl App {
                 }
             }
             Press::Person(username) => self.show_profile(&username, at),
+            Press::Author(user_id) => {
+                let username = self
+                    .store
+                    .as_ref()
+                    .and_then(|store| store.users_by_ids(std::slice::from_ref(&user_id)).ok())
+                    .and_then(|mut known| known.remove(&user_id))
+                    .map(|user| user.username);
+                match username {
+                    Some(username) => self.show_profile(&username, at),
+                    None => println!("nobody with id {user_id} in the local store"),
+                }
+            }
             // Inside the app rather than out of it: the message is on this
             // server and in this store, so following a quoted card is a scroll
             // and not a browser.
@@ -3141,7 +3153,12 @@ impl App {
                     .users_by_ids(std::slice::from_ref(&user_id.to_string()))
                     .ok()
             })
-            .and_then(|known| known.get(user_id).map(|user| user.username.clone()));
+            .and_then(|known| {
+                let shown = self.store.as_ref()?.name_display(&self.me);
+                known
+                    .get(user_id)
+                    .map(|user| matterless_render::display_name(user, &shown))
+            });
         if let Some(name) = known {
             self.typing_names.insert(user_id.to_string(), name);
         }
@@ -4542,7 +4559,8 @@ impl App {
                 // The words say it themselves -- "Show the other 40 lines" --
                 // so a tooltip repeating them is one more thing to read.
                 matterless_layout::row::Press::Whole(_) => return None,
-                matterless_layout::row::Press::Person(_) => "Show profile".to_string(),
+                matterless_layout::row::Press::Person(_)
+                | matterless_layout::row::Press::Author(_) => "Show profile".to_string(),
                 matterless_layout::row::Press::Channel(_) => "Go to channel".to_string(),
                 matterless_layout::row::Press::Post { .. } => "Go to the message".to_string(),
                 matterless_layout::row::Press::Link(href) => href.clone(),
@@ -6705,9 +6723,10 @@ impl App {
         options.not_emoji = store.not_custom_emoji().unwrap_or_default();
         (options.reader_name, options.reader_words) =
             matterless_view::feed::reader_words(store, &self.me);
+        let shown = store.name_display(&self.me);
         options.author_names = known
             .iter()
-            .map(|(id, user)| (id.clone(), user.username.clone()))
+            .map(|(id, user)| (id.clone(), matterless_render::display_name(user, &shown)))
             .collect();
         options.author_avatars = known
             .iter()

@@ -4121,6 +4121,20 @@ async fn membership(
     if let Err(error) = store.upsert_preferences(&preferences) {
         eprintln!("storing the preferences: {error}");
     }
+    // And which name people go by, which the window reads with the preference.
+    for (setting, key) in [
+        (matterless_store::SERVER_NAME_DISPLAY, "TeammateNameDisplay"),
+        (
+            matterless_store::SERVER_NAME_DISPLAY_LOCKED,
+            "LockTeammateNameDisplay",
+        ),
+    ] {
+        if let Some(value) = config.get(key)
+            && let Err(error) = store.remember_setting(setting, value)
+        {
+            eprintln!("storing {key}: {error}");
+        }
+    }
     Ok((
         counted,
         matterless_core::resolve_thread_mode(&config, &preferences),
