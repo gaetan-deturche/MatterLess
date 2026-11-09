@@ -53,8 +53,8 @@ pub struct Gpu {
 impl Gpu {
     /// Opens Direct3D for a window that already exists.
     ///
-    /// The adapter is chosen the way it always was: the chip in the processor
-    /// in preference to the card in the slot. A chat window has no business
+    /// The adapter is the chip in the processor in preference to the card in
+    /// the slot. A chat window has no business
     /// waking a discrete GPU to draw a few hundred quads, and on Direct3D that
     /// preference costs nothing -- which was the whole trouble with Vulkan.
     pub fn new(window: HWND, size: (u32, u32)) -> Result<Self, String> {
@@ -227,8 +227,29 @@ impl Gpu {
 
 /// The adapter to draw on: integrated first, then anything else.
 ///
+/// Windows says which one saves power. Memory of its own does not: a chip in
+/// the processor can be given a carve-out by the firmware, and this machine's
+/// reports two gigabytes, so it ranked with the card and lost the tie.
+///
 /// `None` when nothing can be told apart, which asks Direct3D to choose.
 fn pick(factory: &IDXGIFactory1) -> Option<IDXGIAdapter> {
+    use windows::Win32::Graphics::Dxgi::{DXGI_GPU_PREFERENCE_MINIMUM_POWER, IDXGIFactory6};
+    use windows::core::Interface;
+    if let Ok(factory) = factory.cast::<IDXGIFactory6>() {
+        let mut at = 0;
+        while let Ok(adapter) = unsafe {
+            factory
+                .EnumAdapterByGpuPreference::<IDXGIAdapter>(at, DXGI_GPU_PREFERENCE_MINIMUM_POWER)
+        } {
+            at += 1;
+            let software = unsafe { adapter.GetDesc() }.is_ok_and(|about| {
+                String::from_utf16_lossy(&about.Description).contains("Microsoft Basic")
+            });
+            if !software {
+                return Some(adapter);
+            }
+        }
+    }
     let mut best: Option<(IDXGIAdapter, u32)> = None;
     let mut at = 0;
     while let Ok(adapter) = unsafe { factory.EnumAdapters(at) } {

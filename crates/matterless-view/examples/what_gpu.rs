@@ -19,7 +19,11 @@ fn main() {
 
 #[cfg(windows)]
 fn look() -> Result<(), String> {
-    use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIFactory1};
+    use windows::Win32::Graphics::Dxgi::{
+        CreateDXGIFactory1, DXGI_GPU_PREFERENCE_MINIMUM_POWER, IDXGIAdapter, IDXGIFactory1,
+        IDXGIFactory6,
+    };
+    use windows::core::Interface;
 
     let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1() }.map_err(|why| why.to_string())?;
     let mut at = 0;
@@ -31,15 +35,26 @@ fn look() -> Result<(), String> {
         let named = String::from_utf16_lossy(&about.Description)
             .trim_end_matches(char::from(0))
             .to_string();
-        // No memory of its own is what an integrated chip looks like from
-        // here: it shares the machine's. That is the one the window prefers.
-        let kind = match about.DedicatedVideoMemory > 0 {
-            true => "discrete",
-            false => "integrated -- preferred",
-        };
+        // Memory of its own says little: a chip in the processor can be given
+        // a carve-out by the firmware, and this machine's has two gigabytes.
         println!(
-            "{named} ({kind}), {} MB of its own",
+            "{named}, {} MB of its own",
             about.DedicatedVideoMemory / (1024 * 1024)
+        );
+    }
+    // The one the window takes: what Windows calls the power saver.
+    if let Some(saver) = factory
+        .cast::<IDXGIFactory6>()
+        .ok()
+        .and_then(|six| unsafe {
+            six.EnumAdapterByGpuPreference::<IDXGIAdapter>(0, DXGI_GPU_PREFERENCE_MINIMUM_POWER)
+                .ok()
+        })
+        .and_then(|adapter| unsafe { adapter.GetDesc() }.ok())
+    {
+        println!(
+            "the window takes: {}",
+            String::from_utf16_lossy(&saver.Description).trim_end_matches(char::from(0))
         );
     }
     Ok(())
