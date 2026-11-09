@@ -317,6 +317,46 @@ fn only_real_messages_explain_an_unread_count() {
     assert_eq!(store.held_unread_after("c1", "me", 400).unwrap(), 1);
 }
 
+/// After a lost socket, only a channel the server says has moved past the
+/// newest message held is caught up, and from that message: not one that is
+/// level, nor one with nothing held to start from.
+#[test]
+fn only_channels_behind_the_server_are_caught_up() {
+    let store = store();
+    let channel = |id: &str, last_post_at: Timestamp| Channel {
+        id: id.into(),
+        team_id: "t1".into(),
+        channel_type: "O".into(),
+        name: id.into(),
+        display_name: id.into(),
+        total_msg_count: 1,
+        total_msg_count_root: 1,
+        last_post_at,
+        delete_at: 0,
+    };
+    store
+        .upsert_channels(&[
+            channel("behind", 900),
+            channel("level", 300),
+            channel("never-read", 900),
+        ])
+        .unwrap();
+    let mut gone = post("gone", "behind", 800, 800);
+    gone.delete_at = 850;
+    store
+        .upsert_posts(&[
+            post("old", "behind", 500, 500),
+            gone,
+            post("same", "level", 300, 300),
+        ])
+        .unwrap();
+    assert_eq!(
+        store.behind_the_server().unwrap(),
+        [("behind".to_string(), 500)],
+        "from the newest message still there"
+    );
+}
+
 /// A page as deep as the count reaches holds the message it was counted from:
 /// what jumping to an old message relies on.
 #[test]

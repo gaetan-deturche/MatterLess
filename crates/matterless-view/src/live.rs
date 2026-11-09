@@ -961,6 +961,9 @@ async fn run(
     again.tick().await;
     // Channels a membership pull was made for and did not bring back.
     let mut strangers: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // The socket asks for a resync on its first connection too, which sign-in
+    // has just done; only the ones after it are a hole.
+    let mut resyncs = 0usize;
 
     loop {
         tokio::select! {
@@ -2120,10 +2123,23 @@ async fn run(
                     Signal::Connected { .. } => wake.wake(Update::Connected(true)),
                     Signal::Disconnected { .. } => wake.wake(Update::Connected(false)),
                     // The socket came back without resuming, so history has a
-                    // hole. The window redraws from the store, which is the
-                    // honest answer until it can refetch the gap itself.
+                    // hole: the channel list again, for where each conversation
+                    // now ends, and what each missed fetched from there.
                     Signal::ResyncRequired => {
-                        wake.wake(Update::Changed(vec![Delta::ResyncRequired]))
+                        resyncs += 1;
+                        let mut deltas = vec![Delta::ResyncRequired];
+                        if resyncs > 1 {
+                            let me_id = context.me.id.clone();
+                            match membership(&rest, engine.store(), &me_id).await {
+                                Ok((_, mode)) => {
+                                    context.thread_mode = mode;
+                                    wake.wake(Update::Membership(mode));
+                                }
+                                Err(error) => eprintln!("membership after a lost socket: {error}"),
+                            }
+                            deltas.extend(catch_up(&rest, &engine, &context).await);
+                        }
+                        wake.wake(Update::Changed(deltas))
                     }
                     Signal::Event { event, .. } => {
                         // Every event by name, when asked for. Nothing else
@@ -4114,6 +4130,42 @@ async fn membership(
 /// Past this many unread, a channel is not checked: a message deleted among
 /// that many is not a badge with nothing behind it.
 const RECOUNT_UP_TO: i64 = 20;
+
+/// What the conversations missed while the socket was away and could not
+/// resume, from the newest message each holds: only those the server says have
+/// moved on since, so a reconnect costs a request per channel with news in it.
+/// Arriving as a resync, which never notifies.
+async fn catch_up(rest: &RestClient, engine: &SyncEngine, context: &SyncContext) -> Vec<Delta> {
+    let behind = match engine.store().behind_the_server() {
+        Ok(behind) => behind,
+        Err(error) => {
+            eprintln!("finding what the socket missed: {error}");
+            return Vec::new();
+        }
+    };
+    let mut deltas = Vec::new();
+    for (channel_id, newest) in &behind {
+        let list = match rest.posts_since(channel_id, newest.saturating_sub(1)).await {
+            Ok(list) => list,
+            Err(error) => {
+                eprintln!("catching up {channel_id}: {error}");
+                continue;
+            }
+        };
+        match engine.apply_post_list(
+            channel_id,
+            &list,
+            Arrival::Resync,
+            context,
+            crate::clock::now() * 1_000,
+        ) {
+            Ok(found) => deltas.extend(found),
+            Err(error) => eprintln!("catching up {channel_id}: {error}"),
+        }
+    }
+    println!("caught up {} channels after a lost socket", behind.len());
+    deltas
+}
 
 /// Brings the unread counts down to the messages the server still has.
 ///

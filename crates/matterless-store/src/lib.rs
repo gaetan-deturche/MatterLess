@@ -469,6 +469,24 @@ impl Store {
         )?)
     }
 
+    /// The channels whose newest message on the server is newer than the
+    /// newest one held, with that newest held: where a catch-up starts from.
+    /// Only channels with something held, since one never read has no place
+    /// to start from and is read whole when it is opened.
+    pub fn behind_the_server(&self) -> Result<Vec<(String, Timestamp)>> {
+        let connection = self.lock();
+        let mut statement = connection.prepare(
+            "SELECT id, newest FROM (
+                 SELECT id, last_post_at,
+                        (SELECT MAX(create_at) FROM posts
+                          WHERE posts.channel_id = channels.id AND posts.delete_at = 0) AS newest
+                   FROM channels WHERE delete_at = 0)
+              WHERE newest IS NOT NULL AND last_post_at > newest",
+        )?;
+        let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     /// How many posts of a channel are from `at` on, replies and all: how deep
     /// a page of it has to go to hold a message said then.
     pub fn posts_since(&self, channel_id: &str, at: Timestamp) -> Result<i64> {
