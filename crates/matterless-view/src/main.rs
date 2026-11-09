@@ -2902,9 +2902,8 @@ impl App {
 
     /// Does what a button inside a composer says.
     ///
-    /// Attach asks the platform for a file, which this window cannot do yet --
-    /// so it says what it would need rather than doing nothing and leaving the
-    /// reader to wonder whether the press registered.
+    /// Attach asks the platform for files, and each one chosen is put in the
+    /// box the button belongs to.
     fn pressed_in_composer(&mut self, button: composer::Button, root_id: &str) {
         match button {
             // The editor's own two, which never reach here: it answers its
