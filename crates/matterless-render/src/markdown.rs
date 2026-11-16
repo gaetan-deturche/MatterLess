@@ -1212,6 +1212,19 @@ mod tests {
         );
     }
 
+    /// The address may start on the next line, and a scheme is the reader's
+    /// to add, not the parser's.
+    #[test]
+    fn a_link_whose_address_starts_on_the_next_line_is_a_link() {
+        assert_eq!(
+            inline("[maps](\nnoclip.website/#okami/r102)"),
+            vec![Node::Link {
+                href: "noclip.website/#okami/r102".into(),
+                children: vec![text("maps")],
+            }]
+        );
+    }
+
     #[test]
     fn extensions_are_not_applied_inside_code() {
         // The whole reason the scanner runs on text runs, not on the source.

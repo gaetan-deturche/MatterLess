@@ -1094,8 +1094,21 @@ pub fn openable_link(href: &str) -> Option<Press> {
 pub const NEVER_OPENED: [&str; 4] = ["file", "javascript", "vbscript", "data"];
 
 fn openable(href: &str) -> Option<Press> {
-    let scheme = link_scheme(href)?;
+    let Some(scheme) = link_scheme(href) else {
+        return schemeless(href).then(|| Press::Link(format!("http://{href}")));
+    };
     (!NEVER_OPENED.contains(&scheme.as_str())).then(|| Press::Link(href.to_string()))
+}
+
+/// An address written without its scheme, `noclip.website/#...`, which the
+/// official client opens as the web. Not a path on the server, a place on the
+/// page, or a drive.
+fn schemeless(href: &str) -> bool {
+    let host = href.split('/').next().unwrap_or_default();
+    !host.is_empty()
+        && !href.starts_with('#')
+        && !host.contains([':', '\\'])
+        && !href.contains(char::is_whitespace)
 }
 
 /// A link's scheme, lowercased: a letter, then letters, digits, `+`, `-` or
@@ -2303,7 +2316,20 @@ mod tests {
             }),
             Some(Press::Link("curiosity://level_coords/Game/Zoo".into()))
         );
+        // Written without its scheme: the web, as the official client takes it.
+        assert_eq!(
+            pressed(Node::Link {
+                href: "noclip.website/#okami/r102;ShareData=AkGpM=dP*CWpgDk=el/nlX".into(),
+                children: words(),
+            }),
+            Some(Press::Link(
+                "http://noclip.website/#okami/r102;ShareData=AkGpM=dP*CWpgDk=el/nlX".into()
+            ))
+        );
         for refused in [
+            "/server/relative",
+            "#on-the-page",
+            "C:/Windows/notepad.exe",
             "file:///c:/windows",
             "FILE:///c:/windows",
             "javascript:alert(1)",
