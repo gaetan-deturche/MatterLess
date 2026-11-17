@@ -814,11 +814,37 @@ fn for_ratio(width: i32, height: i32, pixel_ratio: f32) -> (i32, i32) {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Attachment {
     pub color: Option<String>,
+    /// Who it is from, above the title: a poll's creator, a build's trigger.
+    pub author: Option<String>,
     pub pretext: Vec<Node>,
     pub title: Option<String>,
     pub title_link: Option<String>,
     pub text: Vec<Node>,
     pub fields: Vec<AttachmentField>,
+    /// What can be pressed under it: a poll's answers, a bot's choices.
+    pub buttons: Vec<AttachmentButton>,
+}
+
+/// One of an integration's buttons. Pressing it asks the server to run the
+/// action by `id` on the post; what it does is the integration's business.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct AttachmentButton {
+    pub id: String,
+    pub name: String,
+    /// `default`, `primary`, `danger`, ... as the integration wrote it.
+    pub style: String,
+    /// One of the reader's own answers, in a poll.
+    pub chosen: bool,
+}
+
+/// What a poll is to this reader, which the post does not say: matterpoll
+/// answers it from its own endpoint and after every vote.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PollSeen {
+    /// The answers the reader voted for, by name.
+    pub voted: Vec<String>,
+    /// Whether the reader may end or delete it.
+    pub manage: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -863,6 +889,9 @@ pub struct PostRow {
     /// webhook, and a webhook post's name is its own -- so the author's user
     /// record is the wrong thing to show for it.
     pub bot: bool,
+    /// The matterpoll poll this message is, which the window asks the plugin
+    /// about the first time it is on screen.
+    pub poll_id: Option<String>,
     /// True when the post is only a webhook payload, so the shell knows not to
     /// leave an empty message body.
     pub body_is_attachment_only: bool,
@@ -1033,6 +1062,9 @@ pub struct PlanOptions {
     /// an `@`, which are drawn as mentions. Empty when the caller cannot say.
     pub reader_name: String,
     pub reader_words: Vec<String>,
+    /// What each poll is to this reader, by poll id. A poll missing here shows
+    /// its answers and nothing only some readers may press.
+    pub polls: HashMap<String, PollSeen>,
 }
 
 impl PlanOptions {
@@ -1058,6 +1090,7 @@ impl PlanOptions {
             not_emoji: HashSet::new(),
             reader_name: String::new(),
             reader_words: Vec::new(),
+            polls: HashMap::new(),
         }
     }
 }
@@ -1149,7 +1182,65 @@ fn attachment_string(value: &serde_json::Value, key: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
-fn parse_attachments(props: &serde_json::Value) -> Vec<Attachment> {
+/// An attachment's buttons, the ones this reader can press.
+///
+/// Only buttons: a menu is another kind of action and is not drawn. A poll
+/// carries buttons not every reader sees -- ending and deleting it, for its
+/// owner -- and adding an answer, which opens a form this window has not got.
+fn buttons_of(
+    raw: &serde_json::Value,
+    poll: Option<&PollSeen>,
+    is_poll: bool,
+) -> Vec<AttachmentButton> {
+    let Some(actions) = raw.get("actions").and_then(|value| value.as_array()) else {
+        return Vec::new();
+    };
+    actions
+        .iter()
+        .filter_map(|action| {
+            let id = attachment_string(action, "id")?;
+            let name = attachment_string(action, "name")?;
+            let kind = attachment_string(action, "type").unwrap_or_else(|| "button".to_string());
+            let owners = kind == "custom_matterpoll_admin_button"
+                || (is_poll && matches!(id.as_str(), "endPoll" | "deletePoll"));
+            let shown = match () {
+                _ if is_poll && id == "addOption" => false,
+                _ if owners => poll.is_some_and(|poll| poll.manage),
+                _ => kind == "button",
+            };
+            if !shown {
+                return None;
+            }
+            // With progress on, an answer's name carries its count, which the
+            // reader's votes are not named with.
+            let answer = match name.rsplit_once(" (") {
+                Some((answer, count))
+                    if count.strip_suffix(')').is_some_and(|count| {
+                        !count.is_empty() && count.bytes().all(|byte| byte.is_ascii_digit())
+                    }) =>
+                {
+                    answer
+                }
+                _ => name.as_str(),
+            };
+            let chosen = is_poll
+                && id.starts_with("vote")
+                && poll.is_some_and(|poll| poll.voted.iter().any(|voted| voted == answer));
+            Some(AttachmentButton {
+                id,
+                style: attachment_string(action, "style").unwrap_or_else(|| "default".to_string()),
+                name,
+                chosen,
+            })
+        })
+        .collect()
+}
+
+fn parse_attachments(
+    props: &serde_json::Value,
+    poll: Option<&PollSeen>,
+    is_poll: bool,
+) -> Vec<Attachment> {
     props
         .get("attachments")
         .and_then(|value| value.as_array())
@@ -1158,6 +1249,7 @@ fn parse_attachments(props: &serde_json::Value) -> Vec<Attachment> {
                 .iter()
                 .map(|raw| Attachment {
                     color: attachment_string(raw, "color"),
+                    author: attachment_string(raw, "author_name"),
                     pretext: attachment_string(raw, "pretext")
                         .map(|text| markdown::parse(&text))
                         .unwrap_or_default(),
@@ -1204,10 +1296,18 @@ fn parse_attachments(props: &serde_json::Value) -> Vec<Attachment> {
                                 .collect()
                         })
                         .unwrap_or_default(),
+                    buttons: buttons_of(raw, poll, is_poll),
                 })
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// The matterpoll poll a post is, by its poll id.
+pub fn poll_of(post: &Post) -> Option<String> {
+    (post.post_type == "custom_matterpoll")
+        .then(|| prop(&post.props, "poll_id"))
+        .flatten()
 }
 
 /// A string from a post's props, empty treated as absent.
@@ -1420,7 +1520,9 @@ fn merged(run: &[&Post]) -> String {
 }
 
 fn build_post_row(post: &Post, options: &PlanOptions) -> PostRow {
-    let attachments = parse_attachments(&post.props);
+    let poll_id = poll_of(post);
+    let poll = poll_id.as_ref().and_then(|id| options.polls.get(id));
+    let attachments = parse_attachments(&post.props, poll, poll_id.is_some());
     let nodes = match options.parsed.get(&post.id) {
         // Arc::clone: a counter increment, not a tree copy.
         Some(cached) => Arc::clone(cached),
@@ -1496,6 +1598,7 @@ fn build_post_row(post: &Post, options: &PlanOptions) -> PostRow {
         root_id: post.root_id.clone(),
         author_name,
         bot,
+        poll_id,
         avatar_at: options
             .author_avatars
             .get(&post.user_id)
@@ -1760,6 +1863,7 @@ pub fn plan_thread(root: &Post, replies: &[Post], options: &PlanOptions) -> Vec<
         pixel_ratio: options.pixel_ratio,
         reader_name: options.reader_name.clone(),
         reader_words: options.reader_words.clone(),
+        polls: options.polls.clone(),
     };
     // The divider belongs here now: `threads.last_viewed_at` is a real
     // per-thread watermark from the server, where in Phase 3 there was nothing

@@ -587,7 +587,7 @@ impl SyncEngine {
                     channel_id: channel.id.clone(),
                 }])
             }
-            Event::Other { .. } => Ok(Vec::new()),
+            Event::Integration { .. } | Event::Other { .. } => Ok(Vec::new()),
         }
     }
 

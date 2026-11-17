@@ -62,6 +62,7 @@ fn post(author: &str, at: (i64, u32, u32), nodes: Vec<Node>) -> PostRow {
         attachments: Vec::new(),
         avatar_at: 0,
         bot: false,
+        poll_id: None,
         body_is_attachment_only: false,
         pending: false,
         failed: false,
@@ -599,6 +600,9 @@ struct App {
     /// Pictures already asked for, so a face on screen is fetched once rather
     /// than on every frame it is visible.
     asked: std::collections::HashSet<String>,
+    /// Polls already asked about, once a run: after that the plugin says when
+    /// one changes for this reader.
+    polls_asked: std::collections::HashSet<String>,
     /// Decoded pictures waiting to go into the atlas, which only the thread
     /// that owns the GPU may touch.
     arrived: Vec<(String, u32, u32, Vec<u8>)>,
@@ -1050,6 +1054,7 @@ impl App {
             film: None,
             outstanding: Arc::new(matterless_render::pending::PendingPosts::default()),
             asked: std::collections::HashSet::new(),
+            polls_asked: std::collections::HashSet::new(),
             arrived: Vec::new(),
             signin: matterless_view::signin::SignIn::default(),
             settings: matterless_view::settings::Settings::default(),
@@ -1965,6 +1970,32 @@ impl App {
             }
             Update::NoPreview { href } => {
                 matterless_view::open::link(&href);
+            }
+            Update::Poll => {
+                let open = self.sidebar.selected.clone().unwrap_or_default();
+                self.reread_channel(&open);
+                if let Some(root) = self.open_root() {
+                    self.reread_thread(&root);
+                }
+            }
+            Update::Dialog {
+                answer,
+                title,
+                submit,
+            } => {
+                use matterless_view::menu::{Anchor, Item, Style, Tint};
+                let (x, y) = self.input.pointer_at().unwrap_or_default();
+                self.menu.show(
+                    &answer.to_string(),
+                    Anchor::At(x, y),
+                    Style::channel(),
+                    vec![
+                        Item::new("dialog.submit", &format!("{title}: {submit}"))
+                            .tinted(Tint::Danger),
+                        Item::new("dialog.cancel", "Cancel"),
+                    ],
+                );
+                self.redraw();
             }
             Update::Membership(mode) => {
                 // Only when it actually moved. This arrives once per sign-in
@@ -3915,6 +3946,15 @@ impl App {
             self.act_on_spelling(about, rest);
             return;
         }
+        if let Some(rest) = chosen.strip_prefix("dialog.") {
+            if rest == "submit"
+                && let Ok(answer) = serde_json::from_str(about)
+                && let Some(link) = self.link.as_ref()
+            {
+                link.send(matterless_view::live::Ask::Dialog { answer });
+            }
+            return;
+        }
         if let Some(rest) = chosen.strip_prefix("scheme.") {
             let Some(scheme) = matterless_view::open::outside_the_web(about) else {
                 return;
@@ -4155,6 +4195,11 @@ impl App {
             }) => self.act(action, post_id, on),
             Some(Chose::Press { press, at }) => self.press(press, at),
             Some(Chose::Save { file_id, name }) => self.save_file(file_id, name),
+            Some(Chose::Action { post_id, action_id }) => {
+                if let Some(link) = self.link.as_ref() {
+                    link.send(matterless_view::live::Ask::Action { post_id, action_id });
+                }
+            }
             Some(Chose::React { post_id, emoji, on }) => {
                 if let Some(link) = self.link.as_ref() {
                     link.send(matterless_view::live::Ask::React { post_id, emoji, on });
@@ -5911,6 +5956,15 @@ impl App {
         let Some(link) = self.link.as_ref() else {
             return;
         };
+        let mut polls = self.stream.polls(self.stream_rect());
+        if let (Some(thread), Some(within)) = (&self.thread, self.thread_stream_rect()) {
+            polls.extend(thread.polls(within));
+        }
+        for poll_id in polls {
+            if self.polls_asked.insert(poll_id.clone()) {
+                link.send(matterless_view::live::Ask::Poll { poll_id });
+            }
+        }
         let mut wanted = self.stream.faces(self.stream_rect());
         if let (Some(thread), Some(within)) = (&self.thread, self.thread_stream_rect()) {
             wanted.extend(thread.faces(within));
@@ -6731,6 +6785,12 @@ impl App {
             .iter()
             .map(|(id, user)| (id.clone(), user.last_picture_update))
             .collect();
+        options.polls = matterless_view::feed::polls_seen(
+            store,
+            &std::iter::once(root.clone())
+                .chain(replies.iter().cloned())
+                .collect::<Vec<_>>(),
+        );
 
         let mut stream = Stream::new(thread_name(root_id));
         stream.rows = matterless_render::plan_thread(&root, &replies, &options);

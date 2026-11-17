@@ -64,6 +64,8 @@ pub enum Chose {
     /// through them without asking the stream again -- and because which
     /// others there are is what decides whether it offers to.
     Look { file_id: String, post_id: String },
+    /// Run one of an integration's buttons on a message: a poll's answer.
+    Action { post_id: String, action_id: String },
     /// Add or remove this reaction.
     React {
         post_id: String,
@@ -1249,6 +1251,18 @@ impl Stream {
                         });
                     }
                 }
+                for (ordinal, (block, _)) in self.answers(index).into_iter().enumerate() {
+                    placed.push(Placed {
+                        name: format!("{}/row/{index}/answer/{ordinal}", self.name),
+                        rect: Rect::new(
+                            inner.x + self.theme.gutter + block.x,
+                            top + block.y,
+                            block.wrap,
+                            block.height,
+                        ),
+                        depth: 3,
+                    });
+                }
                 for (ordinal, (block, _)) in self.pills(index).into_iter().enumerate() {
                     placed.push(Placed {
                         name: format!("{}/row/{index}/reaction/{ordinal}", self.name),
@@ -2130,6 +2144,15 @@ impl Stream {
             }
             return Some(Chose::Press { press, at: None });
         }
+        if let Some((index, ordinal)) = self.answer_at(clicked)
+            && let Some((_, button)) = self.answers(index).get(ordinal)
+            && let Some(post_id) = self.post_at(index)
+        {
+            return Some(Chose::Action {
+                post_id: post_id.to_string(),
+                action_id: button.id.clone(),
+            });
+        }
         // A pill next, because it sits inside a row and its name says so.
         if let Some((index, ordinal)) = self.reaction_at(clicked)
             && let Some(Row::Post { post } | Row::Continuation { post }) = self.rows.get(index)
@@ -2244,6 +2267,14 @@ impl Stream {
         Some((index.parse().ok()?, ordinal.parse().ok()?))
     }
 
+    /// The row and button an answer's name refers to, if it is one of this
+    /// panel's.
+    fn answer_at(&self, name: &str) -> Option<(usize, usize)> {
+        let rest = name.strip_prefix(&format!("{}/row/", self.name))?;
+        let (index, ordinal) = rest.split_once("/answer/")?;
+        Some((index.parse().ok()?, ordinal.parse().ok()?))
+    }
+
     /// Which row a message is, if it is still in the plan.
     fn index_of_post(&self, post_id: &str) -> Option<usize> {
         self.rows.iter().position(|row| {
@@ -2281,6 +2312,7 @@ impl Stream {
             .or_else(|| self.tool_at(name).map(|(index, _)| index))
             .or_else(|| self.favourite_at(name).map(|(index, _)| index))
             .or_else(|| self.reaction_at(name).map(|(index, _)| index))
+            .or_else(|| self.answer_at(name).map(|(index, _)| index))
             .or_else(|| {
                 let rest = name.strip_prefix(&format!("{}/row/", self.name))?;
                 rest.split_once("/preview/")
@@ -2321,6 +2353,24 @@ impl Stream {
             top = bottom;
         }
         here
+    }
+
+    /// The polls on screen, by poll id, for the caller to ask about.
+    pub fn polls(&self, within: Rect) -> Vec<String> {
+        let mut found = Vec::new();
+        let mut top = self.first_row_at(within);
+        for (index, laid) in self.laid.iter().enumerate() {
+            let bottom = top + laid.height;
+            if bottom >= within.y
+                && top <= within.bottom()
+                && let Some(Row::Post { post } | Row::Continuation { post }) = self.rows.get(index)
+                && let Some(poll_id) = &post.poll_id
+            {
+                found.push(poll_id.clone());
+            }
+            top = bottom;
+        }
+        found
     }
 
     pub fn faces(&self, within: Rect) -> Vec<(String, u32, u32)> {
@@ -2575,6 +2625,83 @@ impl Stream {
             .filter(|block| block.kind == matterless_layout::row::Kind::Reactions)
             .zip(post.reactions.iter())
             .collect()
+    }
+
+    /// A row's button blocks, paired with the buttons they were built from: the
+    /// layout emits one per button, across the attachments in order.
+    fn answers(
+        &self,
+        index: usize,
+    ) -> Vec<(
+        &matterless_layout::row::Block,
+        &matterless_render::AttachmentButton,
+    )> {
+        let Some(Row::Post { post } | Row::Continuation { post }) = self.rows.get(index) else {
+            return Vec::new();
+        };
+        let Some(laid) = self.laid.get(index) else {
+            return Vec::new();
+        };
+        laid.blocks
+            .iter()
+            .filter(|block| block.kind == matterless_layout::row::Kind::Button)
+            .zip(
+                post.attachments
+                    .iter()
+                    .flat_map(|attached| &attached.buttons),
+            )
+            .collect()
+    }
+
+    /// Draws an attachment's buttons, as matterpoll styles them: the style's
+    /// colour faint behind its words, and solid behind an answer the reader
+    /// chose.
+    fn answered(&self, into: &mut Canvas<'_>, index: usize, top: f32, left: f32) {
+        let Canvas {
+            scene,
+            painter,
+            fonts,
+            palette,
+        } = into;
+        for (block, button) in self.answers(index) {
+            let x = left + self.theme.gutter + block.x;
+            let y = top + block.y;
+            let colour = match button.style.as_str() {
+                "primary" => palette.signal,
+                "danger" => palette.danger,
+                "good" | "success" => palette.ok,
+                "warning" => palette.flag,
+                _ => palette.ink,
+            };
+            let [red, green, blue] =
+                palette.dimmed(colour, if button.chosen { 0.92 } else { 0.08 });
+            scene.rounded(
+                x,
+                y,
+                block.wrap,
+                block.height,
+                [red, green, blue, 255],
+                CARD,
+            );
+            let label = painter.run(
+                fonts,
+                &button.name,
+                x + self.theme.card_padding,
+                (y + (block.height - self.theme.pill_line) / 2.0).round(),
+                Run {
+                    bold: true,
+                    ..pill_run(&self.theme)
+                },
+            );
+            let ink = match button.chosen {
+                true => {
+                    let [red, green, blue, _] = palette.ground;
+                    [red, green, blue]
+                }
+                false => colour,
+            };
+            scene.glyphs(label, ink, palette.faint);
+        }
     }
 
     /// Draws the panel behind each reaction, before the text goes on top.
@@ -3014,6 +3141,7 @@ impl Stream {
                     // And before it for the same reason: a ground painted
                     // after the words it is meant to be behind covers them.
                     self.attached(&mut canvas, index, top, inner.x);
+                    self.answered(&mut canvas, index, top, inner.x);
                     self.quote_bars(&mut canvas, index, top, inner.x, input);
                 }
                 let pieces = painter.pieces_of(fonts, row, top, &self.theme, palette, &self.custom);
@@ -3814,6 +3942,7 @@ mod pills {
             attachments: Vec::new(),
             avatar_at: 0,
             bot: false,
+            poll_id: None,
             body_is_attachment_only: false,
             pending: false,
             failed: false,

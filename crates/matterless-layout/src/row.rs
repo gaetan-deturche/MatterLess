@@ -88,6 +88,8 @@ pub struct Theme {
     /// The square a custom emoji is drawn in, which has no character to shape.
     pub emoji_size: f32,
     pub reaction_height: f32,
+    /// One of an integration's buttons, a poll's answers among them.
+    pub button_height: f32,
     pub separator_height: f32,
     pub footer_height: f32,
     /// How far a list item or a quote is pushed in: `padding-left: 22px`.
@@ -154,6 +156,7 @@ impl Default for Theme {
             system_size: 12.5,
             emoji_size: 16.0,
             reaction_height: 25.0,
+            button_height: 28.0,
             separator_height: 34.0,
             footer_height: 26.0,
             indent: 22.0,
@@ -210,6 +213,7 @@ impl Theme {
             self.pill_line,
             self.emoji_size,
             self.reaction_height,
+            self.button_height,
             self.separator_height,
             self.footer_height,
             self.indent,
@@ -306,6 +310,9 @@ pub enum Kind {
     /// step quieter.
     Quote,
     Reactions,
+    /// One of an attachment's buttons. The nth is the nth of the post's
+    /// buttons, counted across its attachments in order.
+    Button,
     /// The line that says where a reader stopped last time. Its own kind
     /// rather than a separator with a flag on it, because what it is drawn in
     /// is the whole of the difference.
@@ -1714,6 +1721,29 @@ pub fn lay_out_opened(fonts: &mut Fonts, row: &Row, theme: &Theme, opened: bool)
         let inset = theme.quote_bar + theme.indent / 2.0;
         let inner = (theme.text_width() - inset - theme.indent / 2.0).max(40.0);
         let first = y;
+        if let Some(author) = attached
+            .author
+            .as_deref()
+            .filter(|author| !author.trim().is_empty())
+        {
+            y = words(
+                fonts,
+                author,
+                false,
+                None,
+                inset,
+                inner,
+                y,
+                theme,
+                &mut blocks,
+            );
+            if let Some(said) = blocks.last_mut() {
+                for span in &mut said.spans {
+                    span.faint = true;
+                }
+            }
+            y += theme.block_gap;
+        }
         if let Some(title) = attached
             .title
             .as_deref()
@@ -1757,6 +1787,44 @@ pub fn lay_out_opened(fonts: &mut Fonts, row: &Row, theme: &Theme, opened: bool)
             said,
             &mut blocks,
         );
+        // Wrapped by hand, as the pills are: a row of boxes, each its own
+        // thing to press.
+        if !attached.buttons.is_empty() {
+            let mut x = inset;
+            for button in &attached.buttons {
+                let width = (crate::extent_of(
+                    fonts,
+                    &button.name,
+                    f32::MAX,
+                    crate::Style {
+                        size: theme.pill_size,
+                        line_height: theme.pill_line,
+                        bold: true,
+                        italic: false,
+                        mono: false,
+                    },
+                )
+                .width
+                    + theme.card_padding * 2.0)
+                    .min(inner);
+                if x > inset && x + width > inset + inner {
+                    x = inset;
+                    y += theme.button_height + theme.pill_gap;
+                }
+                blocks.push(Block {
+                    y,
+                    x,
+                    height: theme.button_height,
+                    lines: 1,
+                    kind: Kind::Button,
+                    spans: vec![plain(button.name.clone())],
+                    size: theme.pill_size,
+                    wrap: width,
+                });
+                x += width + theme.pill_gap;
+            }
+            y += theme.button_height + theme.block_gap;
+        }
         // Every piece leaves a gap after itself for whatever follows, and what
         // follows the last one is the card's own padding instead.
         if y > first {
@@ -2221,6 +2289,7 @@ mod tests {
             attachments: Vec::new(),
             avatar_at: 0,
             bot: false,
+            poll_id: None,
             body_is_attachment_only: false,
             pending: false,
             failed: false,
@@ -3563,6 +3632,7 @@ mod tests {
         said.author_name = "northwindbot".into();
         said.body_is_attachment_only = true;
         said.attachments = vec![matterless_render::Attachment {
+            author: None,
             color: None,
             pretext: Vec::new(),
             title: None,
@@ -3579,6 +3649,7 @@ mod tests {
             }],
             title_link: None,
             fields: Vec::new(),
+            buttons: Vec::new(),
         }];
         lay_out(fonts, &Row::Post { post: said }, theme)
     }
@@ -3640,12 +3711,14 @@ mod tests {
         said.author_name = "jira".into();
         said.body_is_attachment_only = true;
         said.attachments = vec![matterless_render::Attachment {
+            author: None,
             color: Some("#e01e5a".into()),
             pretext: Vec::new(),
             title: title.map(|(title, _)| title.to_string()),
             title_link: title.and_then(|(_, link)| link.map(str::to_string)),
             text: matterless_render::markdown::parse(text),
             fields,
+            buttons: Vec::new(),
         }];
         lay_out(fonts, &Row::Post { post: said }, theme)
     }
@@ -3739,6 +3812,66 @@ mod tests {
             .find(|span| span.text == "Run me")
             .expect("the title");
         assert_eq!(title.press, None);
+    }
+
+    /// A poll's answers are buttons inside its card, one block each in the
+    /// order they came, wrapping when the card runs out of room.
+    #[test]
+    fn an_attachments_buttons_sit_inside_its_card() {
+        let mut fonts = Fonts::new();
+        let theme = Theme {
+            width: 260.0,
+            ..Theme::default()
+        };
+        let mut said = post(Vec::new());
+        said.body_is_attachment_only = true;
+        let button = |id: &str, name: &str| matterless_render::AttachmentButton {
+            id: id.into(),
+            name: name.into(),
+            style: "default".into(),
+            chosen: false,
+        };
+        said.attachments = vec![matterless_render::Attachment {
+            author: None,
+            color: None,
+            pretext: Vec::new(),
+            title: Some("Quelle machine ?".into()),
+            title_link: None,
+            text: Vec::new(),
+            fields: Vec::new(),
+            buttons: vec![
+                button("vote0", "Machine de gauche"),
+                button("vote1", "Machine de droite"),
+                button("resetVote", "Reset your vote"),
+            ],
+        }];
+        let laid = lay_out(&mut fonts, &Row::Post { post: said }, &theme);
+        let card = laid
+            .blocks
+            .iter()
+            .find(|block| block.kind == Kind::Card)
+            .expect("a card");
+        let buttons: Vec<&Block> = laid
+            .blocks
+            .iter()
+            .filter(|block| block.kind == Kind::Button)
+            .collect();
+        assert_eq!(
+            buttons
+                .iter()
+                .map(|block| block.spans[0].text.as_str())
+                .collect::<Vec<_>>(),
+            ["Machine de gauche", "Machine de droite", "Reset your vote"]
+        );
+        assert!(buttons.iter().all(|block| {
+            block.y >= card.y
+                && block.y + block.height <= card.y + card.height
+                && block.x + block.wrap <= theme.text_width()
+        }));
+        assert!(
+            buttons.iter().any(|block| block.y > buttons[0].y),
+            "a narrow card wraps them"
+        );
     }
 
     /// Two short fields share a row, name over value; a long one takes the

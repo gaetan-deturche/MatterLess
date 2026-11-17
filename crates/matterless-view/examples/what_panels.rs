@@ -162,6 +162,7 @@ fn post(id: &str) -> matterless_render::PostRow {
         attachments: Vec::new(),
         avatar_at: 0,
         bot: false,
+        poll_id: None,
         body_is_attachment_only: false,
         pending: false,
         failed: false,

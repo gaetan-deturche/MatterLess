@@ -1010,6 +1010,77 @@ fn a_post_that_is_only_an_attachment_says_so() {
     assert!(post_row(&rows).body_is_attachment_only);
 }
 
+/// A matterpoll poll as the plugin posts it: its answers are buttons, the
+/// reader's own vote is marked once the plugin has said what it is, and
+/// ending or deleting it is offered only to whoever may.
+#[test]
+fn a_polls_buttons_are_the_ones_this_reader_can_press() {
+    let action = |id: &str, name: &str, kind: &str| serde_json::json!({ "id": id, "name": name, "style": "default", "type": kind });
+    let mut subject = with_props(
+        post("poll", "bot", 1_000),
+        serde_json::json!({
+            "poll_id": "p1",
+            "attachments": [{
+                "author_name": "Pya",
+                "title": "Quelle machine ?",
+                "actions": [
+                    action("vote0", "Machine de gauche (5)", "button"),
+                    action("vote1", "Machine de droite (3)", "button"),
+                    action("resetVote", "Reset your vote", "button"),
+                    action("addOption", "Add Option", "button"),
+                    action("endPoll", "End Poll", "custom_matterpoll_admin_button"),
+                    action("deletePoll", "Delete Poll", "custom_matterpoll_admin_button"),
+                    action("pick", "A menu", "select"),
+                ],
+            }],
+        }),
+    );
+    subject.post_type = "custom_matterpoll".into();
+    let buttons = |options: &PlanOptions| {
+        let rows = plan_channel(std::slice::from_ref(&subject), &HashMap::new(), options);
+        let row = post_row(&rows).clone();
+        assert_eq!(row.poll_id.as_deref(), Some("p1"));
+        assert_eq!(row.attachments[0].author.as_deref(), Some("Pya"));
+        row.attachments[0]
+            .buttons
+            .iter()
+            .map(|button| (button.id.clone(), button.chosen))
+            .collect::<Vec<_>>()
+    };
+    let owned = |ids: &[(&str, bool)]| {
+        ids.iter()
+            .map(|(id, chosen)| (id.to_string(), *chosen))
+            .collect::<Vec<_>>()
+    };
+
+    // Before the plugin has said anything: the answers and the reset.
+    let mut seen = options(ThreadMode::Flat);
+    assert_eq!(
+        buttons(&seen),
+        owned(&[("vote0", false), ("vote1", false), ("resetVote", false)])
+    );
+
+    // The reader's vote, matched without the count progress puts on a name,
+    // and the owner's buttons for someone who may use them.
+    seen.polls.insert(
+        "p1".into(),
+        PollSeen {
+            voted: vec!["Machine de droite".into()],
+            manage: true,
+        },
+    );
+    assert_eq!(
+        buttons(&seen),
+        owned(&[
+            ("vote0", false),
+            ("vote1", true),
+            ("resetVote", false),
+            ("endPoll", false),
+            ("deletePoll", false),
+        ])
+    );
+}
+
 #[test]
 fn system_messages_read_as_sentences() {
     let cases = [

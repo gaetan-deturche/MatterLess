@@ -21,6 +21,44 @@ pub const PAGE: u32 = 400;
 
 /// The reader's username, and the words that name them without an `@`: drawn
 /// as mentions of them, so a bot's "by gaetan.deturche" is seen.
+/// Where what a poll is to this reader is kept.
+pub fn poll_setting(poll_id: &str) -> String {
+    format!("poll/{poll_id}")
+}
+
+/// What each poll among these posts is to this reader, as matterpoll last
+/// said: the answers they voted for, and whether they may end it.
+pub fn polls_seen(
+    store: &Store,
+    posts: &[matterless_core::model::Post],
+) -> HashMap<String, matterless_render::PollSeen> {
+    posts
+        .iter()
+        .filter_map(matterless_render::poll_of)
+        .filter_map(|poll_id| {
+            let saved = store.setting(&poll_setting(&poll_id)).ok().flatten()?;
+            let said: serde_json::Value = serde_json::from_str(&saved).ok()?;
+            let seen = matterless_render::PollSeen {
+                voted: said
+                    .get("voted_answers")
+                    .and_then(|voted| voted.as_array())
+                    .map(|voted| {
+                        voted
+                            .iter()
+                            .filter_map(|answer| answer.as_str().map(str::to_string))
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                manage: said
+                    .get("can_manage_poll")
+                    .and_then(|manage| manage.as_bool())
+                    .unwrap_or(false),
+            };
+            Some((poll_id, seen))
+        })
+        .collect()
+}
+
 pub fn reader_words(store: &Store, me_id: &str) -> (String, Vec<String>) {
     store
         .users_by_ids(&[me_id.to_string()])
@@ -194,6 +232,7 @@ pub fn rows_of(
         .iter()
         .map(|(id, user)| (id.clone(), matterless_render::display_name(user, &shown)))
         .collect();
+    options.polls = polls_seen(store, &posts);
     options.author_avatars = people
         .iter()
         .map(|(id, user)| (id.clone(), user.last_picture_update))
@@ -328,6 +367,7 @@ pub fn rows_in(
         .iter()
         .map(|(id, user)| (id.clone(), matterless_render::display_name(user, &shown)))
         .collect();
+    options.polls = polls_seen(store, &posts);
     options.author_avatars = people
         .iter()
         .map(|(id, user)| (id.clone(), user.last_picture_update))
@@ -605,6 +645,7 @@ mod tests {
                 attachments: Vec::new(),
                 avatar_at: 0,
                 bot: false,
+                poll_id: None,
                 body_is_attachment_only: false,
                 pending: false,
                 failed: false,

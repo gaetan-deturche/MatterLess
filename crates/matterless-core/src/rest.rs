@@ -924,6 +924,53 @@ impl RestClient {
         }
     }
 
+    // ---------------------------------------------------------- integrations
+
+    /// Runs one of an integration's buttons on a post, as the reader pressing
+    /// it. What follows comes back on the socket: the post changed in place, a
+    /// line only the reader sees, or a dialog.
+    pub async fn post_action(&self, post_id: &str, action_id: &str) -> Result<()> {
+        let _: serde_json::Value = self
+            .post_json(
+                &format!("/posts/{post_id}/actions/{action_id}"),
+                &serde_json::json!({}),
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Answers a dialog an integration opened.
+    pub async fn submit_dialog(&self, answer: &serde_json::Value) -> Result<()> {
+        let response = self
+            .send(
+                self.builder(Method::POST, "/actions/dialogs/submit")?
+                    .json(answer),
+            )
+            .await?;
+        if response.status().is_success() {
+            Ok(())
+        } else {
+            Err(Error::Protocol(format!(
+                "submitting a dialog: {}",
+                response.status()
+            )))
+        }
+    }
+
+    /// A matterpoll poll as this reader sees it: what they voted for, and
+    /// whether they may end or delete it. The plugin's own route, outside the
+    /// API.
+    pub async fn poll_metadata(&self, poll_id: &str) -> Result<serde_json::Value> {
+        let url = self.base_url().join(&format!(
+            "/plugins/com.github.matterpoll.matterpoll/api/v1/polls/{poll_id}/metadata"
+        ))?;
+        let mut builder = self.http.get(url);
+        if let Some(token) = self.token() {
+            builder = builder.bearer_auth(token.bearer());
+        }
+        Self::decode(self.send(builder).await?).await
+    }
+
     // ------------------------------------------------------- message actions
 
     /// Pins or unpins a post. Channel-wide: everyone sees the result.

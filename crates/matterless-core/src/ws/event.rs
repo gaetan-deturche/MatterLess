@@ -151,6 +151,13 @@ pub enum Event {
     UserUpdated {
         user_id: String,
     },
+    /// What an integration sends: a plugin's own event (`custom_<plugin>_...`)
+    /// or a dialog it opens. Kept whole, since only the window knows which it
+    /// answers.
+    Integration {
+        name: String,
+        data: serde_json::Value,
+    },
     /// Kept rather than dropped so an unhandled event is visible in a soak run.
     Other {
         name: String,
@@ -182,7 +189,7 @@ impl Event {
             Event::ChannelUpdated { .. } => "channel_updated",
             Event::EmojiAdded { .. } => "emoji_added",
             Event::UserUpdated { .. } => "user_updated",
-            Event::Other { name } => name,
+            Event::Integration { name, .. } | Event::Other { name } => name,
         }
     }
 
@@ -447,6 +454,10 @@ pub fn parse(envelope: &Envelope) -> Result<Option<Event>> {
         "user_updated" => Event::UserUpdated {
             user_id: nested_id(data, "user"),
         },
+        other if other == "open_dialog" || other.starts_with("custom_") => Event::Integration {
+            name: other.into(),
+            data: data.cloned().unwrap_or_default(),
+        },
         other => Event::Other { name: other.into() },
     };
     Ok(Some(event))
@@ -507,6 +518,35 @@ mod tests {
             Some(Vec::new()),
             "nobody, said by leaving it out"
         );
+    }
+
+    /// A plugin's own event and a dialog are kept with what they carry: only
+    /// the window knows what to make of them.
+    #[test]
+    fn what_an_integration_sends_is_kept_whole() {
+        for (name, data) in [
+            (
+                "custom_com.github.matterpoll.matterpoll_has_voted",
+                r#"{"poll_id": "p1", "voted_answers": ["A"]}"#,
+            ),
+            ("open_dialog", r#"{"dialog": "{\"url\": \"/x\"}"}"#),
+        ] {
+            let frame = format!(r#"{{"event": "{name}", "data": {data}, "seq": 4}}"#);
+            let envelope: Envelope = serde_json::from_str(&frame).unwrap();
+            match parse(&envelope).unwrap().unwrap() {
+                Event::Integration {
+                    name: said,
+                    data: kept,
+                } => {
+                    assert_eq!(said, name);
+                    assert_eq!(
+                        kept,
+                        serde_json::from_str::<serde_json::Value>(data).unwrap()
+                    );
+                }
+                other => panic!("expected Integration, got {other:?}"),
+            }
+        }
     }
 
     #[test]

@@ -1131,7 +1131,7 @@ impl Painter {
                 // knows which emoji is which; a thread footer is faces and a
                 // count and only the caller has the faces. Neither is a run of
                 // text, which is all this can draw.
-                Kind::Reactions | Kind::Footer => {}
+                Kind::Reactions | Kind::Button | Kind::Footer => {}
                 Kind::Attachment => {
                     if block.height >= 1.0 {
                         pieces.push(Piece::Fill {
@@ -1655,6 +1655,7 @@ mod tests {
             attachments: Vec::new(),
             avatar_at: 0,
             bot: false,
+            poll_id: None,
             body_is_attachment_only: false,
             pending: false,
             failed: false,

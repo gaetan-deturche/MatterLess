@@ -161,6 +161,15 @@ pub enum Update {
     /// The sidebar's channels and counts have been refreshed in the store,
     /// and here is how this reader reads threads.
     Membership(matterless_core::model::ThreadMode),
+    /// What a poll is to this reader has been written to the store.
+    Poll,
+    /// An integration asks the reader to confirm something: the answer to
+    /// send when they do, already filled in, and what to say.
+    Dialog {
+        answer: serde_json::Value,
+        title: String,
+        submit: String,
+    },
     /// A titled list of messages, for the panel that asked for it.
     Listed {
         title: String,
@@ -238,6 +247,12 @@ pub enum Update {
 /// What the window asks the socket thread to do.
 #[derive(Debug)]
 pub enum Ask {
+    /// Run one of an integration's buttons on a message.
+    Action { post_id: String, action_id: String },
+    /// What a matterpoll poll is to this reader.
+    Poll { poll_id: String },
+    /// Answer a dialog an integration opened.
+    Dialog { answer: serde_json::Value },
     /// Post a message. The pending id is the window's own, so the row it
     /// already drew and the answer that comes back name the same thing.
     Send {
@@ -961,6 +976,8 @@ async fn run(
     again.tick().await;
     // Channels a membership pull was made for and did not bring back.
     let mut strangers: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // The conversation and team of the last button pressed.
+    let mut pressed_in = (String::new(), String::new());
     // The socket asks for a resync on its first connection too, which sign-in
     // has just done; only the ones after it are a hole.
     let mut resyncs = 0usize;
@@ -1020,6 +1037,36 @@ async fn run(
                             failed,
                         });
                     }
+                    Ask::Action { post_id, action_id } => {
+                        // Where it was pressed, for the dialog the press may
+                        // open: the server says which, and only the window
+                        // knows the conversation.
+                        if let Ok(Some(post)) = engine.store().post(&post_id) {
+                            let team = engine
+                                .store()
+                                .channel(&post.channel_id)
+                                .ok()
+                                .flatten()
+                                .map(|channel| channel.team_id)
+                                .unwrap_or_default();
+                            pressed_in = (post.channel_id, team);
+                        }
+                        match rest.post_action(&post_id, &action_id).await {
+                            Ok(()) => println!("pressed {action_id} on {post_id}"),
+                            Err(error) => eprintln!("pressing {action_id} on {post_id}: {error}"),
+                        }
+                    }
+                    Ask::Poll { poll_id } => match rest.poll_metadata(&poll_id).await {
+                        Ok(seen) => {
+                            remember_poll(engine.store(), &poll_id, &seen);
+                            wake.wake(Update::Poll);
+                        }
+                        Err(error) => eprintln!("poll {poll_id}: {error}"),
+                    },
+                    Ask::Dialog { answer } => match rest.submit_dialog(&answer).await {
+                        Ok(()) => println!("answered a dialog"),
+                        Err(error) => eprintln!("answering a dialog: {error}"),
+                    },
                     Ask::React { post_id, emoji, on } => {
                         let done = if on {
                             rest.add_reaction(&me_id, &post_id, &emoji).await.map(|_| ())
@@ -2168,6 +2215,19 @@ async fn run(
                                     post.id, post.delete_at, post.update_at
                                 ),
                                 event => println!("socket: {}", event.name()),
+                            }
+                        }
+                        if let matterless_core::Event::Integration { name, data } = &event {
+                            if name.ends_with(POLL_VOTED)
+                                && let Some(poll_id) = data.get("poll_id").and_then(|id| id.as_str())
+                            {
+                                remember_poll(engine.store(), poll_id, data);
+                                wake.wake(Update::Poll);
+                            }
+                            if name == "open_dialog"
+                                && let Some(asked) = opened_dialog(data, &context.me.id, &pressed_in)
+                            {
+                                wake.wake(asked);
                             }
                         }
                         match engine.apply_event(&event, &context) {
@@ -4179,6 +4239,65 @@ async fn catch_up(rest: &RestClient, engine: &SyncEngine, context: &SyncContext)
     }
     println!("caught up {} channels after a lost socket", behind.len());
     deltas
+}
+
+/// The event matterpoll sends a voter once their vote is in, after the
+/// `custom_<plugin id>` the server puts in front of it.
+const POLL_VOTED: &str = "_has_voted";
+
+/// Keeps what matterpoll says a poll is to this reader, where the plans read it.
+fn remember_poll(store: &matterless_store::Store, poll_id: &str, seen: &serde_json::Value) {
+    if let Err(error) =
+        store.remember_setting(&crate::feed::poll_setting(poll_id), &seen.to_string())
+    {
+        eprintln!("storing poll {poll_id}: {error}");
+    }
+}
+
+/// A dialog an integration opened, as the confirmation the window can ask
+/// for: one with no fields to fill in. Matterpoll opens one to end a poll and
+/// one to delete it.
+fn opened_dialog(
+    data: &serde_json::Value,
+    me_id: &str,
+    pressed_in: &(String, String),
+) -> Option<Update> {
+    let opened: serde_json::Value = serde_json::from_str(data.get("dialog")?.as_str()?).ok()?;
+    let dialog = opened.get("dialog")?;
+    let text = |value: &serde_json::Value, key: &str| {
+        value
+            .get(key)
+            .and_then(|found| found.as_str())
+            .unwrap_or_default()
+            .to_string()
+    };
+    if dialog
+        .get("elements")
+        .and_then(|elements| elements.as_array())
+        .is_some_and(|elements| !elements.is_empty())
+    {
+        eprintln!(
+            "a dialog with fields to fill in, which this window cannot show: {}",
+            text(dialog, "title")
+        );
+        return None;
+    }
+    Some(Update::Dialog {
+        answer: serde_json::json!({
+            "url": text(&opened, "url"),
+            "callback_id": text(dialog, "callback_id"),
+            "state": text(dialog, "state"),
+            "user_id": me_id,
+            "channel_id": pressed_in.0,
+            "team_id": pressed_in.1,
+            "submission": {},
+            "cancelled": false,
+        }),
+        title: text(dialog, "title"),
+        submit: Some(text(dialog, "submit_label"))
+            .filter(|label| !label.is_empty())
+            .unwrap_or_else(|| "Submit".to_string()),
+    })
 }
 
 /// Brings the unread counts down to the messages the server still has.
