@@ -3008,6 +3008,12 @@ impl App {
                     &mut self.thread_composer
                 };
                 box_of.mark_up(how, &mut self.fonts);
+                // Back to the box: the press gave focus to the button, so the
+                // address typed over a link's `url` went nowhere.
+                self.input.focus_on(match root_id.is_empty() {
+                    true => composer::NAME,
+                    false => THREAD_COMPOSER,
+                });
                 self.relayout();
             }
             composer::Button::Unattach(at) => {
@@ -12179,6 +12185,41 @@ mod tests {
             .apply(super::UiEvent::Typed(text.to_string()), &[]);
         app.react();
         app.input.spent_keys();
+    }
+
+    /// A formatting button gives the caret back to its box. The press put it
+    /// on the button, so the address typed over a link's `url` went nowhere
+    /// and the button looked as if it did nothing.
+    #[test]
+    fn a_link_pressed_over_a_selection_takes_the_address_typed_next() {
+        use super::{Key, Mods, THREAD_COMPOSER, UiEvent, composer};
+        let mut app = window_with_two_threads();
+        app.open_thread("root-a");
+        app.thread_composer.fill("see", &mut app.fonts);
+        app.input.focus_on(THREAD_COMPOSER);
+        let held = |command: bool| {
+            UiEvent::Modifiers(Mods {
+                shift: false,
+                command,
+                alt: false,
+            })
+        };
+        app.input.apply(held(true), &[]);
+        app.input.apply(
+            UiEvent::Key {
+                key: Key::Char('a'),
+                down: true,
+            },
+            &[],
+        );
+        app.react();
+        app.input.spent_keys();
+        app.input.apply(held(false), &[]);
+        // Where a real press leaves the focus.
+        app.input.focus_on(format!("{THREAD_COMPOSER}/mark/link"));
+        app.pressed_in_composer(composer::Button::Mark(composer::Format::Link), "root-a");
+        typed(&mut app, "https://x.y");
+        assert_eq!(app.thread_composer.text(), "[see](https://x.y)");
     }
 
     /// The editor takes what is typed while it has the caret.
