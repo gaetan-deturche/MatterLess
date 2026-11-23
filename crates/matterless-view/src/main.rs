@@ -5781,7 +5781,16 @@ impl App {
             .ok()
             .flatten()
             .is_some_and(|(replies, mentions)| replies > 0 || mentions > 0);
-        if !waiting {
+        // The root is a message in its channel too, and one the channel has
+        // not been read past keeps it unread however read the thread is.
+        let root_unread = store.post(root_id).ok().flatten().is_some_and(|root| {
+            store
+                .last_viewed_at(&root.channel_id, &self.me)
+                .ok()
+                .flatten()
+                .is_some_and(|viewed| root.create_at > viewed)
+        });
+        if !waiting && !root_unread {
             return;
         }
         let newest = store

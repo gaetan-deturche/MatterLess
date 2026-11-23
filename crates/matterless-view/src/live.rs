@@ -1776,7 +1776,12 @@ async fn run(
                         if let Err(error) = store.set_thread_read(&root_id, read_to, 0, 0) {
                             eprintln!("keeping thread {root_id} read: {error}");
                         }
-                        wake.wake(Update::Changed(vec![Delta::ThreadChanged { root_id, channel_id }]));
+                        let past_root = read_past_root(&rest, store, &me_id, &channel_id, &root_id).await;
+                        wake.wake(Update::Changed(
+                            std::iter::once(Delta::ThreadChanged { root_id, channel_id })
+                                .chain(past_root)
+                                .collect(),
+                        ));
                     }
                     Ask::MarkRead { channel_id } => {
                         if !known(engine.store(), &channel_id) {
@@ -4239,6 +4244,78 @@ async fn catch_up(rest: &RestClient, engine: &SyncEngine, context: &SyncContext)
     }
     println!("caught up {} channels after a lost socket", behind.len());
     deltas
+}
+
+/// Reads a thread's channel past its root, when the root is a message the
+/// channel has not been read past.
+///
+/// Opened from the Threads view, a thread was marked read and its channel
+/// stayed unread: under collapsed threads a channel's count is its roots, and
+/// this one was among them. Up to the root and no further -- a newer root in
+/// the channel stays unread, as the reader has not seen it.
+async fn read_past_root(
+    rest: &RestClient,
+    store: &matterless_store::Store,
+    me_id: &str,
+    channel_id: &str,
+    root_id: &str,
+) -> Option<Delta> {
+    let root = store.post(root_id).ok().flatten()?;
+    let viewed = store.last_viewed_at(channel_id, me_id).ok().flatten()?;
+    if root.create_at <= viewed || !root.root_id.is_empty() {
+        return None;
+    }
+    const PAGE: u32 = 200;
+    let after = match rest.posts_after(channel_id, root_id, PAGE).await {
+        Ok(after) => after,
+        Err(error) => {
+            eprintln!("reading {channel_id} past {root_id}: {error}");
+            return None;
+        }
+    };
+    let next = after
+        .posts
+        .values()
+        .filter(|post| {
+            post.root_id.is_empty() && post.delete_at == 0 && post.create_at > root.create_at
+        })
+        .min_by_key(|post| post.create_at);
+    match next {
+        // Unread from the next root on, which reads everything before it.
+        Some(next) => match rest.set_post_unread(me_id, &next.id).await {
+            Ok(member) => {
+                if let Err(error) = store.upsert_channel_members(&[member]) {
+                    eprintln!("storing the membership: {error}");
+                }
+            }
+            Err(error) => {
+                eprintln!("reading {channel_id} up to {}: {error}", next.id);
+                return None;
+            }
+        },
+        // Nothing newer: the root was the last unread thing in it.
+        None if after.order.len() < PAGE as usize => {
+            if let Err(error) = rest.view_channel(me_id, channel_id).await {
+                eprintln!("marking {channel_id} read: {error}");
+                return None;
+            }
+            let watermark = store.newest_post_at(channel_id).unwrap_or(0);
+            if let Err(error) = store.mark_channel_viewed(channel_id, me_id, watermark) {
+                eprintln!("recording that {channel_id} was read: {error}");
+            }
+        }
+        // A page of replies and no root in it: too far behind to say.
+        None => return None,
+    }
+    let unread = store
+        .unread(channel_id, me_id)
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    Some(Delta::UnreadChanged {
+        channel_id: channel_id.to_string(),
+        unread,
+    })
 }
 
 /// The event matterpoll sends a voter once their vote is in, after the
