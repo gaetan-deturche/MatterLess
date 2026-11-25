@@ -38,6 +38,7 @@ jobs:
 
       - name: Videos to read
         run: |
+          sudo apt-get update
           sudo apt-get install -y --no-install-recommends ffmpeg
           mkdir -p out/clips && cd out/clips
           picture="-f lavfi -i testsrc2=size=640x360:rate=30 -f lavfi -i sine=frequency=440 -t 2"
