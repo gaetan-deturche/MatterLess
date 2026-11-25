@@ -88,7 +88,7 @@ fn conversation() -> Vec<Row> {
                         text(", she set it up"),
                     ]),
                     Node::List {
-                        ordered: false,
+                        ordered: None,
                         items: vec![
                             vec![para(vec![text("we can reach the runner itself")])],
                             vec![para(vec![text("but not the box its cache lives on")])],

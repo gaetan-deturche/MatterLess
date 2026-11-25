@@ -115,7 +115,9 @@ pub enum Node {
         children: Vec<Node>,
     },
     List {
-        ordered: bool,
+        /// The number the first item carries, for a numbered list: a list
+        /// split by a code block goes on at `2.`. `None` for bullets.
+        ordered: Option<u64>,
         items: Vec<Vec<Node>>,
     },
     Table {
@@ -708,7 +710,7 @@ enum Frame {
     },
     Blockquote(Vec<Node>),
     List {
-        ordered: bool,
+        ordered: Option<u64>,
         items: Vec<Vec<Node>>,
     },
     ListItem(Vec<Node>),
@@ -886,7 +888,7 @@ pub fn parse(source: &str) -> Vec<Node> {
                 }),
                 Tag::BlockQuote(_) => stack.push(Frame::Blockquote(Vec::new())),
                 Tag::List(first) => stack.push(Frame::List {
-                    ordered: first.is_some(),
+                    ordered: first,
                     items: Vec::new(),
                 }),
                 Tag::Item => stack.push(Frame::ListItem(Vec::new())),
@@ -1351,7 +1353,7 @@ mod tests {
         assert_eq!(
             parse("- one\n- two"),
             vec![Node::List {
-                ordered: false,
+                ordered: None,
                 items: vec![vec![text("one")], vec![text("two")],],
             }]
         );
@@ -1383,6 +1385,21 @@ mod tests {
             .filter(|node| matches!(node, Node::List { .. }))
             .count();
         assert_eq!(nested, 1, "it belongs under the second: {:?}", items[1]);
+    }
+
+    /// A numbered list split by a code block goes on where it left off: the
+    /// second half is its own list, starting at the number its author wrote.
+    #[test]
+    fn a_numbered_list_split_by_code_keeps_its_numbers() {
+        let nodes = parse("1. first\n\n```\ncode\n```\n\n2. second");
+        let starts: Vec<Option<u64>> = nodes
+            .iter()
+            .filter_map(|node| match node {
+                Node::List { ordered, .. } => Some(*ordered),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(starts, vec![Some(1), Some(2)], "{nodes:?}");
     }
 
     /// Depth is read as a rank, not as a count of spaces, so a list written

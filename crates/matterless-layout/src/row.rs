@@ -750,9 +750,9 @@ struct Line {
 /// The shapes the official client uses, and they have to differ by depth: a
 /// sub-list drawn with the same dot as its parent is a sub-list nobody can see
 /// is one.
-fn marker_for(ordered: bool, at: usize, depth: f32) -> String {
-    if ordered {
-        return format!("{}.", at + 1);
+fn marker_for(ordered: Option<u64>, at: usize, depth: f32) -> String {
+    if let Some(first) = ordered {
+        return format!("{}.", first + at as u64);
     }
     match depth as usize {
         0 => "\u{2022}".to_string(),
@@ -2473,7 +2473,7 @@ mod tests {
                 0 => vec![text("ok")],
                 1 => vec![text(&"a sentence with a fair few words in it ".repeat(3))],
                 2 => vec![Node::List {
-                    ordered: false,
+                    ordered: None,
                     items: vec![vec![text("one")], vec![text("two")], vec![text("three")]],
                 }],
                 _ => vec![Node::CodeBlock {
@@ -3155,7 +3155,7 @@ mod tests {
             &mut fonts,
             &Row::Post {
                 post: post(vec![Node::List {
-                    ordered: false,
+                    ordered: None,
                     items: vec![item],
                 }]),
             },
@@ -3198,6 +3198,14 @@ mod tests {
                 >= 2,
             "the mentions stopped being pressable"
         );
+    }
+
+    /// A numbered list counts from the number it starts at, not from one.
+    #[test]
+    fn a_numbered_list_counts_from_its_first_number() {
+        assert_eq!(marker_for(Some(2), 0, 0.0), "2.");
+        assert_eq!(marker_for(Some(2), 1, 0.0), "3.");
+        assert_eq!(marker_for(Some(1), 0, 0.0), "1.");
     }
 
     /// Bold is wider, so the same words can need another line -- which a
@@ -4189,7 +4197,7 @@ mod tests {
         };
         let said = post(vec![
             Node::List {
-                ordered: false,
+                ordered: None,
                 items: vec![item("one"), item("two"), item("three")],
             },
             text("after the list"),

@@ -153,7 +153,7 @@ fn cache_day(rows: &mut Vec<Row>, day: i64) {
                     ],
                 },
                 Node::List {
-                    ordered: false,
+                    ordered: None,
                     items: vec![
                         vec![para("we can reach the runner itself")],
                         vec![para("but not the box its cache lives on")],
@@ -217,7 +217,7 @@ fn hardware_day(rows: &mut Vec<Row>, day: i64) {
                     ],
                 },
                 Node::List {
-                    ordered: false,
+                    ordered: None,
                     items: vec![
                         vec![para("every write falls back to the network share")],
                         vec![para("and the share is a long way from that rack")],

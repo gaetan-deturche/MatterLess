@@ -49,7 +49,7 @@ fn show(node: &Node, depth: usize) {
             }
         }
         Node::List { ordered, items } => {
-            println!("{pad}List ordered={ordered} ({} items)", items.len());
+            println!("{pad}List ordered={ordered:?} ({} items)", items.len());
             for (at, item) in items.iter().enumerate() {
                 println!("{pad}  item {at}");
                 for child in item {
