@@ -132,7 +132,23 @@ pub struct Sidebar {
     /// Counts only where the reader is mentioned: every other unread
     /// channel is bold and says no number.
     pub mentions_only: bool,
+    /// A channel row held down, and where the press began.
+    drag: Option<Drag>,
+    /// A channel dropped onto a category, by their ids, for the window to
+    /// move. Taken by whoever acts on it.
+    pub dropped: Option<(String, String)>,
 }
+
+/// A channel row held down, which becomes a drag once the pointer leaves where
+/// it went down.
+#[derive(Debug, Clone)]
+struct Drag {
+    channel: String,
+    from: (f32, f32),
+}
+
+/// How far the pointer goes before a press on a row is a drag, not a click.
+const DRAG_SLOP: f32 = 6.0;
 
 /// What the threads row is selected as.
 ///
@@ -171,7 +187,77 @@ impl Sidebar {
             bar: crate::scrollbar::Scrollbar::default(),
             only: None,
             mentions_only: false,
+            drag: None,
+            dropped: None,
         }
+    }
+
+    /// The channel being dragged and where the pointer is, once it has moved
+    /// far enough to be a drag.
+    fn dragging(&self, input: &Input) -> Option<(&str, (f32, f32))> {
+        let drag = self.drag.as_ref()?;
+        input.pressed()?;
+        let at = input.pointer_at()?;
+        let moved = (at.0 - drag.from.0).abs().max((at.1 - drag.from.1).abs());
+        (moved > DRAG_SLOP).then_some((drag.channel.as_str(), at))
+    }
+
+    /// Where a channel dropped at this point would go: the category whose
+    /// heading is above the row under the pointer, and the index of that
+    /// heading. Nothing over the gathered unreads, a team's name or direct
+    /// messages, over another team's groups, or over the group it is in.
+    fn drop_target(
+        &self,
+        placed: &[Placed],
+        at: (f32, f32),
+        dragged: &str,
+    ) -> Option<(usize, String)> {
+        let under = self.entries.iter().enumerate().position(|(index, entry)| {
+            let name = Self::name_of(entry, index);
+            placed.iter().any(|item| {
+                item.name == name
+                    && at.0 >= item.rect.x
+                    && at.0 < item.rect.right()
+                    && at.1 >= item.rect.y
+                    && at.1 < item.rect.bottom()
+            })
+        })?;
+        let heading = (0..=under).rev().find(|&index| {
+            matches!(
+                self.entries[index],
+                Entry::Heading { .. } | Entry::Team { .. }
+            )
+        })?;
+        let Entry::Heading {
+            fold: Some(fold),
+            directs: false,
+            ..
+        } = &self.entries[heading]
+        else {
+            return None;
+        };
+        let from = self
+            .entries
+            .iter()
+            .position(|entry| matches!(entry, Entry::Channel { id, .. } if id == dragged))?;
+        let team_of = |index: usize| {
+            (0..=index).rev().find_map(|at| match &self.entries[at] {
+                Entry::Team { id, .. } => Some(id.as_str()),
+                _ => None,
+            })
+        };
+        if let (Some(from), Some(to)) = (team_of(from), team_of(heading))
+            && from != to
+        {
+            return None;
+        }
+        let home = (0..=from)
+            .rev()
+            .find(|&index| matches!(self.entries[index], Entry::Heading { .. }));
+        if home == Some(heading) {
+            return None;
+        }
+        Some((heading, fold.category.clone()))
     }
 
     /// Whether a row with this many mentions carries its count.
@@ -525,6 +611,31 @@ impl Sidebar {
         if let Some((_, y)) = input.wheel_over(placed, |name| name == "sidebar") {
             self.scroll = (self.scroll - y).clamp(0.0, self.reach(within));
         }
+        // A press on a channel may be the start of a drag, which decides on
+        // the release: a drop where it lands, or a click if it never moved.
+        if let Some(id) = input
+            .pressed_now()
+            .and_then(|name| name.strip_prefix("sidebar/channel/"))
+            .filter(|id| *id != THREADS && *id != DRAFTS)
+            && let Some(at) = input.pointer_at()
+        {
+            self.drag = Some(Drag {
+                channel: id.to_string(),
+                from: at,
+            });
+        }
+        if self.drag.is_some() && input.pressed().is_none() {
+            let held = self.drag.take()?;
+            let at = input.pointer_at()?;
+            let moved = (at.0 - held.from.0).abs().max((at.1 - held.from.1).abs());
+            if moved > DRAG_SLOP {
+                self.dropped = self
+                    .drop_target(placed, at, &held.channel)
+                    .map(|(_, category)| (held.channel, category));
+                // A drag is not a click, wherever it ended.
+                return None;
+            }
+        }
         let clicked = input.clicked()?;
         let id = clicked.strip_prefix("sidebar/channel/")?;
         // Only inside the panel: a row scrolled above the top is still placed,
@@ -563,6 +674,21 @@ impl Sidebar {
             within.height,
             palette.surface,
         );
+        // Where a dragged channel would land: its group's heading, lit.
+        if let Some((dragged, at)) = self.dragging(input)
+            && let Some((heading, _)) = self.drop_target(placed, at, dragged)
+            && let Some(row) = placed
+                .iter()
+                .find(|item| item.name == Self::name_of(&self.entries[heading], heading))
+        {
+            scene.fill(
+                row.rect.x,
+                row.rect.y,
+                row.rect.width,
+                row.rect.height,
+                palette.signal_soft,
+            );
+        }
         // The rule between the sidebar and the conversation, which is what the
         // app draws and what says they are two surfaces rather than one.
         scene.fill(
@@ -1908,6 +2034,71 @@ mod tests {
 
     fn panel() -> Rect {
         Rect::new(0.0, 0.0, 260.0, 400.0)
+    }
+
+    /// A channel dragged onto another group is dropped into its category and
+    /// not opened; onto its own group it goes nowhere; and a press that
+    /// barely moves is still a click.
+    #[test]
+    fn a_channel_dragged_onto_a_group_is_dropped_into_it() {
+        let heading = |label: &str, category: &str| Entry::Heading {
+            label: label.into(),
+            directs: false,
+            fold: Some(Fold {
+                category: category.into(),
+                folded: false,
+            }),
+        };
+        let mut sidebar = channels();
+        sidebar.entries[0] = heading("Channels", "plain");
+        sidebar.entries.push(heading("Favorites", "fav"));
+        let placed = sidebar.boxes(panel());
+        let middle = |name: &str| {
+            let row = placed
+                .iter()
+                .find(|one| one.name == name)
+                .expect("placed")
+                .rect;
+            (row.x + 40.0, row.y + row.height / 2.0)
+        };
+        let favourites = format!("sidebar/heading/{}", sidebar.entries.len() - 1);
+        let drag = |sidebar: &mut Sidebar, from: (f32, f32), to: (f32, f32)| {
+            let mut input = Input::default();
+            input.apply(
+                Event::PointerMoved {
+                    x: from.0,
+                    y: from.1,
+                },
+                &placed,
+            );
+            input.apply(Event::PointerPressed, &placed);
+            let opened = sidebar.react(&input, &placed, panel());
+            input.settle();
+            input.apply(Event::PointerMoved { x: to.0, y: to.1 }, &placed);
+            input.apply(Event::PointerReleased, &placed);
+            opened.or(sidebar.react(&input, &placed, panel()))
+        };
+
+        let opened = drag(
+            &mut sidebar,
+            middle("sidebar/channel/one"),
+            middle(&favourites),
+        );
+        assert_eq!(opened, None, "a drag opens nothing");
+        assert_eq!(sidebar.dropped.take(), Some(("one".into(), "fav".into())));
+
+        let opened = drag(
+            &mut sidebar,
+            middle("sidebar/channel/one"),
+            middle("sidebar/channel/two"),
+        );
+        assert_eq!(opened, None);
+        assert_eq!(sidebar.dropped.take(), None, "its own group is no move");
+
+        let (x, y) = middle("sidebar/channel/two");
+        let opened = drag(&mut sidebar, (x, y), (x + 2.0, y + 1.0));
+        assert_eq!(opened, Some("two".into()), "a still press is a click");
+        assert_eq!(sidebar.dropped.take(), None);
     }
 
     #[test]

@@ -11461,7 +11461,11 @@ impl ApplicationHandler<Update> for App {
                     self.fold_team(&team, folded);
                 }
                 let stood_in = self.sidebar.selected.clone();
-                if let Some(channel) = self.sidebar.react(&self.input, &boxes, within) {
+                let chose = self.sidebar.react(&self.input, &boxes, within);
+                if let Some((channel_id, category_id)) = self.sidebar.dropped.take() {
+                    self.move_channel(&channel_id, &category_id);
+                }
+                if let Some(channel) = chose {
                     self.open_channel(&channel);
                     // The drafts row lists conversations to go back to rather
                     // than being one, so the reader has not moved: the strip
