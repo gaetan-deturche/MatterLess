@@ -1354,16 +1354,19 @@ async fn run(
                         team_id,
                         category_id,
                     } => {
+                        // Already moved in the list. The server echoes the
+                        // change on the socket; only a refusal needs the
+                        // categories read back, to put the channel where it is.
                         match moved(&rest, &me_id, &team_id, &channel_id, &category_id).await {
-                            Ok(()) => {
-                                println!("moved {channel_id}");
+                            Ok(()) => println!("moved {channel_id}"),
+                            Err(error) => {
+                                eprintln!("moving {channel_id}: {error}");
                                 if let Ok((_, mode)) =
                                     membership(&rest, engine.store(), &me_id).await
                                 {
                                     wake.wake(Update::Membership(mode));
                                 }
                             }
-                            Err(error) => eprintln!("moving {channel_id}: {error}"),
                         }
                     }
                     Ask::Fold {

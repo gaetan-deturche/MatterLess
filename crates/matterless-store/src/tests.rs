@@ -1407,6 +1407,63 @@ fn re_storing_a_team_replaces_its_categories_rather_than_adding_to_them() {
     assert_eq!(sidebar[0].1, vec!["c2".to_string()], "c1 moved out");
 }
 
+/// A move shows before the server answers: out of the category that held the
+/// channel, first in the new one, and no other team's categories touched.
+#[test]
+fn a_channel_moves_between_categories_at_once() {
+    let store = store();
+    store
+        .upsert_sidebar(
+            "t1",
+            &[
+                category("fav1", "t1", "favorites", "Favorites", 0, "manual", &["c3"]),
+                category(
+                    "cus1",
+                    "t1",
+                    "custom",
+                    "Meridian",
+                    10,
+                    "manual",
+                    &["c1", "c2"],
+                ),
+            ],
+        )
+        .unwrap();
+    store
+        .upsert_sidebar(
+            "t2",
+            &[category(
+                "cus2",
+                "t2",
+                "custom",
+                "Other",
+                0,
+                "manual",
+                &["c1"],
+            )],
+        )
+        .unwrap();
+
+    store.move_to_category("c1", "fav1").unwrap();
+
+    let held = |id: &str| {
+        store
+            .sidebar()
+            .unwrap()
+            .into_iter()
+            .find(|(category, _)| category.id == id)
+            .map(|(_, channels)| channels)
+            .unwrap()
+    };
+    assert_eq!(held("fav1"), vec!["c1".to_string(), "c3".to_string()]);
+    assert_eq!(held("cus1"), vec!["c2".to_string()]);
+    assert_eq!(
+        held("cus2"),
+        vec!["c1".to_string()],
+        "another team's left alone"
+    );
+}
+
 /// Each team is stored on its own, so refreshing one cannot drop the other's.
 #[test]
 fn teams_do_not_overwrite_each_other() {

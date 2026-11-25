@@ -4106,23 +4106,51 @@ impl App {
         }
     }
 
+    /// Moves a channel into one of the reader's categories: in the list at
+    /// once, and on the server after. Only somewhere the menu would offer --
+    /// a category of the channel's own team, not direct messages, and not the
+    /// one already holding it -- since a drop can land anywhere.
+    fn move_channel(&mut self, channel_id: &str, category_id: &str) {
+        let Some(store) = self.store.as_ref() else {
+            return;
+        };
+        let team_id = store
+            .channel(channel_id)
+            .ok()
+            .flatten()
+            .map(|channel| channel.team_id)
+            .unwrap_or_default();
+        let fits = store
+            .sidebar()
+            .unwrap_or_default()
+            .iter()
+            .any(|(category, held)| {
+                category.id == category_id
+                    && category.team_id == team_id
+                    && category.category_type != "direct_messages"
+                    && !held.iter().any(|id| id == channel_id)
+            });
+        if !fits {
+            return;
+        }
+        if let Err(error) = store.move_to_category(channel_id, category_id) {
+            eprintln!("moving {channel_id}: {error}");
+        }
+        self.rebuild_sidebar();
+        if let Some(link) = self.link.as_ref() {
+            link.send(matterless_view::live::Ask::Move {
+                channel_id: channel_id.to_string(),
+                team_id,
+                category_id: category_id.to_string(),
+            });
+        }
+    }
+
     /// Runs one item of the channel menu.
     fn act_on_channel_menu(&mut self, channel_id: &str, chosen: &str) {
         use matterless_view::live::Ask;
         if let Some(category_id) = chosen.strip_prefix("move.") {
-            let team_id = self
-                .store
-                .as_ref()
-                .and_then(|store| store.channel(channel_id).ok().flatten())
-                .map(|channel| channel.team_id)
-                .unwrap_or_default();
-            if let Some(link) = self.link.as_ref() {
-                link.send(Ask::Move {
-                    channel_id: channel_id.to_string(),
-                    team_id,
-                    category_id: category_id.to_string(),
-                });
-            }
+            self.move_channel(channel_id, category_id);
             return;
         }
         match chosen {

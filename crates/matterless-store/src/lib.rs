@@ -1391,6 +1391,30 @@ impl Store {
         Ok(())
     }
 
+    /// Moves a channel into a category ahead of the server agreeing: out of
+    /// whichever of that team's categories held it, and first in this one,
+    /// where the server puts it too.
+    pub fn move_to_category(&self, channel_id: &str, category_id: &str) -> Result<()> {
+        let mut connection = self.lock();
+        let transaction = connection.transaction()?;
+        transaction.execute(
+            "DELETE FROM sidebar_category_channels
+             WHERE channel_id = ?1
+               AND category_id IN (SELECT id FROM sidebar_categories
+                                   WHERE team_id = (SELECT team_id FROM sidebar_categories
+                                                    WHERE id = ?2))",
+            params![channel_id, category_id],
+        )?;
+        transaction.execute(
+            "INSERT INTO sidebar_category_channels (category_id, channel_id, position)
+             VALUES (?2, ?1, (SELECT COALESCE(MIN(position), 0) - 1
+                              FROM sidebar_category_channels WHERE category_id = ?2))",
+            params![channel_id, category_id],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
     /// Folds or unfolds a sidebar category ahead of the server agreeing.
     /// `direct_messages` stands for every team's, which the sidebar shows as
     /// one.
