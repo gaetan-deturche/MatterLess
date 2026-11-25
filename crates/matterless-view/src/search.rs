@@ -527,18 +527,12 @@ impl Search {
             }
         }
         if entered {
-            // Return under the strip asks for the rest of the results, which
-            // is what the pane is. Unless the reader has walked into the list,
-            // in which case they have already said which one they want.
-            if self.showing == Where::Under && self.chosen.is_none() {
-                return Some(Did::Widen);
-            }
-            return self
-                .found
-                .get(self.chosen.unwrap_or(0))
-                .cloned()
-                .map(Box::new)
-                .map(Did::Open);
+            // Return asks for the results, in the pane, and opens one only if
+            // the reader walked to it: the first match is not a pick.
+            let Some(at) = self.chosen else {
+                return (self.showing == Where::Under).then_some(Did::Widen);
+            };
+            return self.found.get(at).cloned().map(Box::new).map(Did::Open);
         }
         None
     }
@@ -882,6 +876,39 @@ mod tests {
             panic!("the second one, not the pane: {did:?}")
         };
         assert_eq!(hit.post_id, "p1");
+    }
+
+    /// Return in the pane with nothing picked out stays on the results: the
+    /// reader is reading them, and the first one is not a choice they made.
+    #[test]
+    fn return_in_the_pane_opens_nothing_until_a_result_is_picked() {
+        let mut fonts = Fonts::new();
+        let store = matterless_store::Store::open_in_memory().expect("a store");
+        let mut search = holding(Where::Pane, "boop", 3, &mut fonts);
+        let field = Rect::new(500.0, 6.0, 240.0, 28.0);
+        let mut ask = |search: &mut Search, key| {
+            search.react(
+                &mut fonts,
+                &struck(key),
+                Shown {
+                    pane: pane(),
+                    field,
+                },
+                &mut String::new(),
+                against(&store),
+            )
+        };
+
+        assert_eq!(ask(&mut search, Key::Enter), None, "nothing picked");
+        assert!(search.open(), "and the results stay up");
+        assert_eq!(search.query.text(), "boop");
+
+        ask(&mut search, Key::Down);
+        let did = ask(&mut search, Key::Enter);
+        let Some(Did::Open(hit)) = did else {
+            panic!("the one walked to: {did:?}")
+        };
+        assert_eq!(hit.post_id, "p0");
     }
 
     /// Up off the top of the list lets go of it rather than sticking on the
