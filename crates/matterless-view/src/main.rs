@@ -555,6 +555,12 @@ struct App {
     /// answers -- which for anything large was several seconds of a window
     /// that had visibly done nothing with what was dropped on it.
     attaching: std::collections::HashMap<String, Vec<std::path::PathBuf>>,
+    /// Files that did not go up, with why, by conversation.
+    ///
+    /// Their tiles stay until the reader takes them off or sends: a 165 MB
+    /// deck used to show a spinner for a few frames and vanish without a
+    /// word, which reads as the drop having missed.
+    refused: std::collections::HashMap<String, Vec<(std::path::PathBuf, String)>>,
     /// Messages sent while a file for them was still uploading, by the
     /// conversation they wait on: sent with their files once the last upload
     /// is done. On screen meanwhile when they say something; one with no
@@ -1038,6 +1044,7 @@ impl App {
             drafts: std::collections::HashMap::new(),
             attached: std::collections::HashMap::new(),
             attaching: std::collections::HashMap::new(),
+            refused: std::collections::HashMap::new(),
             held: Vec::new(),
             began: std::time::Instant::now(),
             laid_against: (0.0, 0.0),
@@ -1942,8 +1949,12 @@ impl App {
                     true => channel_id,
                     false => thread_name(&root_id),
                 };
-                eprintln!("{why}");
+                eprintln!("{} did not go up: {why}", path.display());
                 self.no_longer_on_its_way(&under, &path);
+                self.refused
+                    .entry(under.clone())
+                    .or_default()
+                    .push((path, why));
                 self.release_held(&under);
                 self.relayout();
                 self.redraw();
@@ -3024,11 +3035,19 @@ impl App {
                 // Off the message only. The upload stays on the server, where
                 // nothing claims it and nothing is served from it -- the same
                 // state a send that failed leaves behind.
+                let arrived = self.attached.get(&under).map_or(0, Vec::len);
                 if let Some(held) = self.attached.get_mut(&under)
                     && at < held.len()
                 {
                     let gone = held.remove(at);
                     println!("{} is no longer going with this message", gone.name);
+                } else if let Some(refused) = self.refused.get_mut(&under)
+                    && at - arrived < refused.len()
+                {
+                    refused.remove(at - arrived);
+                    if refused.is_empty() {
+                        self.refused.remove(&under);
+                    }
                 }
                 self.relayout();
             }
@@ -3063,6 +3082,7 @@ impl App {
                             picture: None,
                             shape: (1.0, 1.0),
                             on_its_way: true,
+                            refused: None,
                         })
                         .collect::<Vec<_>>()
                 })
@@ -3087,23 +3107,41 @@ impl App {
                                 .then(|| matterless_view::stream::picture_key(&shown)),
                             shape: (shown.box_width as f32, shown.box_height as f32),
                             on_its_way: false,
+                            refused: None,
                         }
                     })
                     .collect()
             })
             .unwrap_or_default()
         };
+        let refused = |held: Option<&Vec<(std::path::PathBuf, String)>>| {
+            held.into_iter()
+                .flatten()
+                .map(|(path, why)| composer::Waiting {
+                    name: path
+                        .file_name()
+                        .map(|name| name.to_string_lossy().to_string())
+                        .unwrap_or_default(),
+                    picture: None,
+                    shape: (1.0, 1.0),
+                    on_its_way: false,
+                    refused: Some(why.clone()),
+                })
+                .collect::<Vec<_>>()
+        };
         let channel = self.sidebar.selected.clone().unwrap_or_default();
         // Arrived first, then the ones still going up: a tile that jumped
         // along the row when its upload finished would move the cross the
         // reader was about to press.
         let mut waiting: Vec<composer::Waiting> = named(self.attached.get(&channel));
+        waiting.extend(refused(self.refused.get(&channel)));
         waiting.extend(going_up(self.attaching.get(&channel)));
         self.composer.waiting = waiting;
         let thread = self.open_root().map(|root| thread_name(&root));
         self.thread_composer.waiting = match thread {
             Some(name) => {
                 let mut waiting: Vec<composer::Waiting> = named(self.attached.get(&name));
+                waiting.extend(refused(self.refused.get(&name)));
                 waiting.extend(going_up(self.attaching.get(&name)));
                 waiting
             }
@@ -5644,6 +5682,10 @@ impl App {
             true => Vec::new(),
             false => self.attached.remove(&under).unwrap_or_default(),
         };
+        // Sent without them, which the reader has seen: the tile said so.
+        if !waiting {
+            self.refused.remove(&under);
+        }
         if self.link.is_none() {
             eprintln!("offline, so nothing was sent");
             return;

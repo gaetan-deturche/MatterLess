@@ -1226,16 +1226,16 @@ async fn run(
                         root_id,
                         path,
                     } => match put(&rest, &channel_id, &path).await {
-                        Some(file) => wake.wake(Update::Attached {
+                        Ok(file) => wake.wake(Update::Attached {
                             channel_id,
                             root_id,
                             file: Box::new(file),
                             path,
                         }),
-                        None => wake.wake(Update::NotAttached {
+                        Err(why) => wake.wake(Update::NotAttached {
                             channel_id,
                             root_id,
-                            why: format!("{} did not go up", path.display()),
+                            why,
                             path,
                         }),
                     },
@@ -4545,14 +4545,6 @@ async fn discover(
     found
 }
 
-/// The largest file this window will send.
-///
-/// The server's own limit is in its client config and is larger than this on
-/// this deployment; the point of a cap here is that a file is read into memory
-/// whole, so an accidental drop of something enormous is refused rather than
-/// spending a gigabyte finding out the server would refuse it too.
-const LARGEST: u64 = 100 * 1024 * 1024;
-
 /// Sends a file, then a message carrying it.
 ///
 /// Two steps because the server's are two: the bytes go up and come back with
@@ -4572,7 +4564,7 @@ pub async fn upload(
     root_id: &str,
     path: &std::path::Path,
 ) {
-    let Some(file) = put(rest, channel_id, path).await else {
+    let Ok(file) = put(rest, channel_id, path).await else {
         return;
     };
     let name = file.name.clone();
@@ -4601,52 +4593,59 @@ pub async fn upload(
     }
 }
 
-/// Puts one file on the server and says what it became.
+/// Puts one file on the server and says what it became, or in a few words
+/// why it did not.
 ///
 /// The half both errands share: dropping a file posts it at once and pasting
-/// one leaves it waiting, but each has to get the bytes up there first and
-/// each refuses the same things for the same reasons.
+/// one leaves it waiting, but each has to get the bytes up there first. The
+/// words are for the tile the file leaves behind, so they are short; the
+/// whole error goes to the log.
 async fn put(
     rest: &matterless_core::rest::RestClient,
     channel_id: &str,
     path: &std::path::Path,
-) -> Option<matterless_core::model::FileInfo> {
-    let name = path.file_name().and_then(|name| name.to_str())?;
-    match std::fs::metadata(path) {
-        Ok(held) if held.len() > LARGEST => {
-            eprintln!(
-                "{name} is {} MB, which is too large",
-                held.len() / 1_048_576
-            );
-            return None;
-        }
-        Err(error) => {
-            eprintln!("{name}: {error}");
-            return None;
-        }
-        _ => {}
-    }
-    let bytes = match std::fs::read(path) {
-        Ok(bytes) => bytes,
-        Err(error) => {
-            eprintln!("{name}: {error}");
-            return None;
-        }
-    };
-    println!("sending {name}, {} bytes", bytes.len());
+) -> Result<matterless_core::model::FileInfo, String> {
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| "No file name".to_string())?;
+    let size = std::fs::metadata(path).map_err(|error| {
+        eprintln!("{name}: {error}");
+        "Could not be read".to_string()
+    })?;
+    println!("sending {name}, {} bytes", size.len());
 
-    let sent = match rest.upload_file(channel_id, name, &bytes, None).await {
-        Ok(sent) => sent,
-        Err(error) => {
+    let sent = rest
+        .upload_from_disk(channel_id, name, path, None)
+        .await
+        .map_err(|error| {
             eprintln!("uploading {name}: {error}");
-            return None;
-        }
-    };
-    let file = sent.file_infos.into_iter().next();
-    if file.is_none() {
+            why_not_sent(&error)
+        })?;
+    sent.file_infos.into_iter().next().ok_or_else(|| {
         eprintln!("{name} uploaded but the server named no file");
+        "Not taken by the server".to_string()
+    })
+}
+
+/// What a failed upload says on its tile.
+fn why_not_sent(error: &matterless_core::Error) -> String {
+    use matterless_core::Error;
+    let too_large = match error {
+        Error::Api(_, status) => *status == 413,
+        // A proxy's own refusal, with no envelope from the server behind it.
+        Error::Protocol(said) => said.starts_with("413"),
+        _ => false,
+    };
+    match (too_large, error) {
+        (true, _) => "Too large for the server",
+        (false, Error::Api(..)) => "Refused by the server",
+        // Also what a refusal looks like when the server shuts the door
+        // before the body has finished going up.
+        (false, Error::Transport(_)) => "The upload was cut off",
+        _ => "Did not go up",
     }
-    file
+    .to_string()
 }
 
 /// Where this machine keeps what a person downloads.

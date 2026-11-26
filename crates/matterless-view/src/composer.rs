@@ -441,6 +441,9 @@ pub struct Waiting {
     /// done nothing with what was dropped on it. The tile goes up first and
     /// fills in afterwards.
     pub on_its_way: bool,
+    /// Did not go up, and why in a few words. Drawn on the tile in place of
+    /// the spinner, which stays until the reader takes it off.
+    pub refused: Option<String>,
 }
 
 impl Waiting {
@@ -459,7 +462,7 @@ impl Waiting {
     /// picture: the tile is the feedback, and a row that changed height when
     /// the answer came back would move the whole box under the reader.
     fn tiled(&self) -> bool {
-        self.picture.is_some() || self.on_its_way
+        self.picture.is_some() || self.on_its_way || self.refused.is_some()
     }
 }
 
@@ -1110,13 +1113,30 @@ impl Composer {
                     // through is seconds of upload.
                     None => {
                         scene.rounded(chip.x, chip.y, chip.width, shown, palette.ground, 5.0);
-                        spinner(
-                            scene,
-                            chip.x + chip.width / 2.0,
-                            chip.y + shown / 2.0,
-                            self.spinning,
-                            palette,
-                        );
+                        match self.waiting[at].refused.as_deref() {
+                            Some(why) => {
+                                let glyphs = painter.run(
+                                    fonts,
+                                    why,
+                                    chip.x + 5.0,
+                                    chip.y + 20.0,
+                                    Run {
+                                        size: 11.0,
+                                        line_height: 13.0,
+                                        wrap: (chip.width - 10.0).max(8.0),
+                                        ..Run::label(f32::MAX)
+                                    },
+                                );
+                                scene.glyphs(glyphs, palette.danger, palette.faint);
+                            }
+                            None => spinner(
+                                scene,
+                                chip.x + chip.width / 2.0,
+                                chip.y + shown / 2.0,
+                                self.spinning,
+                                palette,
+                            ),
+                        }
                     }
                 }
                 // Its name under it. A preview alone is not enough -- two
@@ -2442,6 +2462,7 @@ mod tests {
             picture: Some(format!("thumb/{name}")),
             shape: (wide, tall),
             on_its_way: false,
+            refused: None,
         }
     }
 
@@ -2734,6 +2755,55 @@ mod tests {
             })
             .count();
         assert_eq!(spokes, 8, "a tile with nothing to draw is not saying so");
+    }
+
+    /// Reported 2026-11-26: a 165 MB deck showed its tile for a few frames
+    /// and was gone, with nothing to say it had been refused. A file that did
+    /// not go up keeps its tile, says why in place of the spinner, and can
+    /// still be taken off.
+    #[test]
+    fn a_file_that_did_not_go_up_says_so_on_its_tile() {
+        use matterless_paint::{Painter, Palette, Piece, Scene};
+
+        let mut fonts = Fonts::new();
+        let mut composer = Composer::new("composer");
+        composer.waiting = vec![Waiting {
+            refused: Some("Too large for the server".to_string()),
+            ..named("FromVoxelsToPixels.pptx")
+        }];
+        let within = Rect::new(0.0, 0.0, 600.0, composer.height());
+        let mut scene = Scene::default();
+        let mut painter = Painter::new();
+        let palette = Palette::default();
+        composer.draw_over(
+            &mut matterless_widgets::Canvas {
+                scene: &mut scene,
+                painter: &mut painter,
+                fonts: &mut fonts,
+                palette: &palette,
+            },
+            &matterless_ui::input::Input::default(),
+            within,
+        );
+        let pieces: Vec<&Piece> = scene
+            .layers
+            .iter()
+            .flat_map(|layer| layer.pieces.iter())
+            .collect();
+        let spokes = pieces
+            .iter()
+            .filter(|piece| {
+                matches!(piece, Piece::Fill { radius, .. } if *radius > 2.0 && *radius < 3.0)
+            })
+            .count();
+        assert_eq!(spokes, 0, "a refused file is not on its way");
+        assert!(
+            pieces
+                .iter()
+                .any(|piece| matches!(piece, Piece::Text { ink, .. } if *ink == palette.danger)),
+            "the reason is not on the tile"
+        );
+        assert!(composer.waiting[0].tiled(), "the tile went away");
     }
 
     /// Marking up wraps what is chosen, and opens the marks when nothing is.

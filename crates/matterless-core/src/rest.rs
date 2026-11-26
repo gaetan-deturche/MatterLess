@@ -1041,8 +1041,101 @@ impl RestClient {
         bytes: &[u8],
         progress: Option<UploadProgress>,
     ) -> Result<FileUploadResponse> {
-        let name = sanitise_filename(filename);
         let boundary = multipart_boundary(bytes);
+        let payload = bytes::Bytes::copy_from_slice(bytes);
+        let total = payload.len() as u64;
+        let chunks = futures_util::stream::unfold((payload, 0usize), |(payload, at)| async move {
+            if at >= payload.len() {
+                return None;
+            }
+            let end = (at + UPLOAD_CHUNK).min(payload.len());
+            // Zero-copy: a slice of the same allocation, not a second one.
+            Some((Ok(payload.slice(at..end)), (payload, end)))
+        });
+        self.upload(channel_id, filename, boundary, total, chunks, progress)
+            .await
+    }
+
+    /// Uploads a file straight from the disk, never holding it whole.
+    ///
+    /// What the window sends with: a file is read into memory whole by
+    /// `upload_file`, which is why the window used to refuse anything over
+    /// 100 MB of its own accord -- a 165 MB deck was dropped without a word
+    /// before the server was ever asked. Now the server decides.
+    pub async fn upload_from_disk(
+        &self,
+        channel_id: &str,
+        filename: &str,
+        path: &std::path::Path,
+        progress: Option<UploadProgress>,
+    ) -> Result<FileUploadResponse> {
+        let held = path.to_path_buf();
+        let opened = tokio::task::spawn_blocking(move || -> std::io::Result<_> {
+            let total = std::fs::metadata(&held)?.len();
+            let boundary = file_boundary(&held)?;
+            Ok((boundary, std::fs::File::open(&held)?, total))
+        })
+        .await
+        .map_err(|why| Error::Protocol(why.to_string()))?;
+        let (boundary, file, total) =
+            opened.map_err(|why| Error::Protocol(format!("{}: {why}", path.display())))?;
+        // Read a chunk at a time off the loop, and never past the length the
+        // request declared: a file that grows while it goes up is sent as it
+        // was measured, and one that shrinks fails rather than lying about it.
+        // The state goes to `None` after an error, so that is the last thing
+        // the stream says.
+        let chunks = futures_util::stream::unfold(Some((file, total)), |state| async move {
+            let (file, left) = state?;
+            if left == 0 {
+                return None;
+            }
+            let wanted = left.min(UPLOAD_CHUNK as u64) as usize;
+            let read = tokio::task::spawn_blocking(move || {
+                use std::io::Read;
+                let mut file = file;
+                let mut chunk = vec![0u8; wanted];
+                let got = file.read(&mut chunk).map(|got| {
+                    chunk.truncate(got);
+                    chunk
+                });
+                (file, got)
+            })
+            .await;
+            match read {
+                Ok((file, Ok(chunk))) if !chunk.is_empty() => {
+                    let left = left - chunk.len() as u64;
+                    Some((Ok(bytes::Bytes::from(chunk)), Some((file, left))))
+                }
+                Ok((_, Ok(_))) => Some((
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        "the file got shorter while it was being sent",
+                    )),
+                    None,
+                )),
+                Ok((_, Err(why))) => Some((Err(why), None)),
+                Err(why) => Some((Err(std::io::Error::other(why.to_string())), None)),
+            }
+        });
+        self.upload(channel_id, filename, boundary, total, chunks, progress)
+            .await
+    }
+
+    /// Sends one payload as the `files` part of a multipart upload.
+    async fn upload<S>(
+        &self,
+        channel_id: &str,
+        filename: &str,
+        boundary: String,
+        payload_length: u64,
+        payload: S,
+        progress: Option<UploadProgress>,
+    ) -> Result<FileUploadResponse>
+    where
+        S: futures_util::Stream<Item = std::io::Result<bytes::Bytes>> + Send + 'static,
+    {
+        use futures_util::StreamExt;
+        let name = sanitise_filename(filename);
         // Written out with an explicit CRLF: multipart is a wire format, and a
         // bare newline is not a line ending in it.
         const CRLF: &str = "\r\n";
@@ -1056,34 +1149,23 @@ impl RestClient {
         );
         let trailer = format!("{CRLF}--{boundary}--{CRLF}");
 
-        let mut body: Vec<u8> = Vec::with_capacity(bytes.len() + header.len() + trailer.len());
-        body.extend_from_slice(header.as_bytes());
-        body.extend_from_slice(bytes);
-        body.extend_from_slice(trailer.as_bytes());
-
         // Streamed rather than handed over whole, so the caller can be told how
         // far it has got. There is no resumable upload in Mattermost -- a large
         // file is one long request -- which is exactly why a reader needs to see
         // it moving and needs to be able to stop it.
-        const CHUNK: usize = 64 * 1024;
-        let total = body.len() as u64;
-        let body = bytes::Bytes::from(body);
-        let report = progress.clone();
-        let chunks = futures_util::stream::unfold((body, 0usize), move |(body, at)| {
-            let report = report.clone();
-            async move {
-                if at >= body.len() {
-                    return None;
+        let total = header.len() as u64 + payload_length + trailer.len() as u64;
+        let mut sent = 0u64;
+        let chunks = futures_util::stream::once(async move { Ok(bytes::Bytes::from(header)) })
+            .chain(payload)
+            .chain(futures_util::stream::once(async move {
+                Ok(bytes::Bytes::from(trailer))
+            }))
+            .inspect(move |chunk| {
+                if let (Ok(chunk), Some(report)) = (chunk, &progress) {
+                    sent += chunk.len() as u64;
+                    report(sent, total);
                 }
-                let end = (at + CHUNK).min(body.len());
-                // Zero-copy: a slice of the same allocation, not a second one.
-                let chunk = body.slice(at..end);
-                if let Some(report) = &report {
-                    report(end as u64, total);
-                }
-                Some((Ok::<_, std::io::Error>(chunk), (body, end)))
-            }
-        });
+            });
 
         let request = self
             .builder(Method::POST, "/files")?
@@ -1249,22 +1331,63 @@ fn sanitise_filename(name: &str) -> String {
 /// truncate the upload, and the bytes here are arbitrary -- a zip or a video can
 /// contain anything. The counter is only there to make the retry terminate.
 fn multipart_boundary(payload: &[u8]) -> String {
-    for attempt in 0..64u32 {
-        let candidate = format!(
+    boundaries()
+        .find(|candidate| !contains(payload, candidate.as_bytes()))
+        .unwrap_or_else(last_boundary)
+}
+
+/// The same, for a file on the disk, read through once a piece at a time.
+fn file_boundary(path: &std::path::Path) -> std::io::Result<String> {
+    for candidate in boundaries() {
+        if !file_contains(path, candidate.as_bytes())? {
+            return Ok(candidate);
+        }
+    }
+    Ok(last_boundary())
+}
+
+fn boundaries() -> impl Iterator<Item = String> {
+    (0..64u32).map(|attempt| {
+        format!(
             "----matterless{:x}{:x}",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|since| since.as_nanos())
                 .unwrap_or(0),
             attempt
-        );
-        if !contains(payload, candidate.as_bytes()) {
-            return candidate;
-        }
-    }
-    // 64 timestamped candidates all appearing in one payload is not a thing
-    // that happens; a length no candidate can match ends it regardless.
+        )
+    })
+}
+
+/// 64 timestamped candidates all appearing in one payload is not a thing that
+/// happens; a length no candidate can match ends it regardless.
+fn last_boundary() -> String {
     format!("----matterless{}", "z".repeat(70))
+}
+
+/// How much of an upload is read or sent at a time.
+const UPLOAD_CHUNK: usize = 64 * 1024;
+
+fn file_contains(path: &std::path::Path, needle: &[u8]) -> std::io::Result<bool> {
+    use std::io::Read;
+    let mut file = std::fs::File::open(path)?;
+    // Each read keeps the tail of the last one, so a needle split across two
+    // reads is still found.
+    let keep = needle.len().saturating_sub(1);
+    let mut window: Vec<u8> = Vec::with_capacity(keep + 1024 * 1024);
+    let mut piece = vec![0u8; 1024 * 1024];
+    loop {
+        let got = file.read(&mut piece)?;
+        if got == 0 {
+            return Ok(false);
+        }
+        window.extend_from_slice(&piece[..got]);
+        if contains(&window, needle) {
+            return Ok(true);
+        }
+        let tail = window.len().saturating_sub(keep);
+        window.drain(..tail);
+    }
 }
 
 fn contains(haystack: &[u8], needle: &[u8]) -> bool {
@@ -1301,6 +1424,24 @@ mod file_tests {
         let hostile = format!("padding{boundary}padding").into_bytes();
         let second = multipart_boundary(&hostile);
         assert!(!contains(&hostile, second.as_bytes()));
+    }
+
+    /// The file is read a megabyte at a time, and a boundary sitting across
+    /// two reads is in the file all the same.
+    #[test]
+    fn a_needle_across_two_reads_is_found() {
+        let dir = std::env::temp_dir().join(format!("matterless-needle-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let path = dir.join("split.bin");
+        let mut bytes = vec![b'.'; 1024 * 1024 - 3];
+        bytes.extend_from_slice(b"needle");
+        bytes.extend_from_slice(&[b'.'; 10]);
+        std::fs::write(&path, &bytes).expect("write");
+        assert!(file_contains(&path, b"needle").expect("read"));
+        assert!(!file_contains(&path, b"haystack").expect("read"));
+        let boundary = file_boundary(&path).expect("boundary");
+        assert!(!contains(&bytes, boundary.as_bytes()));
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
 
@@ -1402,5 +1543,29 @@ mod send_tests {
         // rather than just the payload.
         assert_eq!(reached.load(Ordering::SeqCst), whole.load(Ordering::SeqCst));
         assert!(whole.load(Ordering::SeqCst) > payload.len() as u64);
+    }
+
+    /// From the disk, never whole in memory, and every byte of it there: more
+    /// than one chunk, so the reads are stitched together in order.
+    #[tokio::test]
+    async fn a_file_on_the_disk_goes_up_whole() {
+        let (base, served) = one_shot_server().await;
+        let client = RestClient::new(&base).expect("client");
+        let dir = std::env::temp_dir().join(format!("matterless-upload-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let path = dir.join("deck.pptx");
+        let payload: Vec<u8> = (0..UPLOAD_CHUNK * 3 + 17)
+            .map(|at| (at % 251) as u8)
+            .collect();
+        std::fs::write(&path, &payload).expect("write");
+
+        client
+            .upload_from_disk("channel-id", "deck.pptx", &path, None)
+            .await
+            .expect("the upload is sent");
+        let request = served.await.expect("server");
+        assert!(contains(&request, &payload));
+        assert!(contains(&request, b"filename=\"deck.pptx\""));
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
