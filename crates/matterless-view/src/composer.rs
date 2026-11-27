@@ -1683,7 +1683,9 @@ impl Composer {
             && let Some(text) = self.editor.copy_selection()
         {
             *clipboard = text;
+            self.editor.start_change();
             self.editor.delete_selection();
+            self.remember();
             self.touched = true;
         }
         // The chords everybody arrives with. Taken before the paste, and
@@ -1706,7 +1708,11 @@ impl Composer {
         }
         if input.chord(Key::Char('v')) && !clipboard.is_empty() {
             let pasted = clipboard.clone();
+            // Remembered like any edit: a paste left out of the history made
+            // the next undo reach past it, against a text that had moved.
+            self.editor.start_change();
             self.editor.insert_string(&pasted, None);
+            self.remember();
             self.touched = true;
         }
 
@@ -2160,6 +2166,7 @@ impl Composer {
         self.editor.shape_as_needed(fonts.system_mut(), false);
         self.touched = false;
         self.scroll = 0.0;
+        self.forget();
     }
 
     /// Puts text in it, with the caret at the end.
@@ -2185,6 +2192,17 @@ impl Composer {
         // Already said something, so an empty box reads as emptied on purpose
         // rather than never filled.
         self.touched = true;
+        self.forget();
+    }
+
+    /// Drops the history, for a text that was replaced rather than edited.
+    ///
+    /// The changes are positions in the old text. Kept, an undo replayed them
+    /// against a sent message's empty box or another conversation's draft,
+    /// and the editor panicked on a place that was not in the text.
+    fn forget(&mut self) {
+        self.done.clear();
+        self.undone.clear();
     }
 
     /// Draws the box, the text, the selection and the caret.

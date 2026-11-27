@@ -531,6 +531,79 @@ fn undo_steps_back_one_edit_and_redo_forward() {
     assert_eq!(composer.text(), "hello ", "redo did not come back");
 }
 
+/// Reported 2026-11-27: undo did not take a paste back. A paste went into
+/// the text without being remembered, so the first undo after it reached
+/// past it to the typing before -- against a text that no longer matched.
+#[test]
+fn undo_takes_a_paste_back_and_a_cut_too() {
+    let mut fonts = Fonts::new();
+    let (mut composer, mut input) = ready(&mut fonts);
+    type_text(&mut composer, &mut fonts, &mut input, "keep ");
+    let mut clipboard = "pasted".to_string();
+    holding(&mut input, command());
+    press(&mut input, Key::Char('v'));
+    composer.react(&mut fonts, &input, panel(), &mut clipboard);
+    input.settle();
+    composer.lay_out(&mut fonts, panel().width);
+    assert_eq!(composer.text(), "keep pasted");
+
+    press(&mut input, Key::Char('z'));
+    frame(&mut composer, &mut fonts, &mut input);
+    assert_eq!(composer.text(), "keep ", "undo did not take the paste back");
+
+    press(&mut input, Key::Char('a'));
+    frame(&mut composer, &mut fonts, &mut input);
+    press(&mut input, Key::Char('x'));
+    composer.react(&mut fonts, &input, panel(), &mut clipboard);
+    input.settle();
+    composer.lay_out(&mut fonts, panel().width);
+    assert_eq!(composer.text(), "");
+    press(&mut input, Key::Char('z'));
+    frame(&mut composer, &mut fonts, &mut input);
+    assert_eq!(composer.text(), "keep ", "undo did not take the cut back");
+}
+
+/// Reported 2026-11-27: undo with nothing to undo killed the window. The box
+/// is emptied on a send and refilled on a move to another conversation, and
+/// the history of the old text stayed behind -- so undo replayed it against
+/// a text it was never made on, and the editor panicked.
+#[test]
+fn undo_after_the_box_is_emptied_or_refilled_does_nothing() {
+    let mut fonts = Fonts::new();
+    let (mut composer, mut input) = ready(&mut fonts);
+    type_text(
+        &mut composer,
+        &mut fonts,
+        &mut input,
+        "a long first message",
+    );
+    composer.clear(&mut fonts);
+    holding(&mut input, command());
+    press(&mut input, Key::Char('z'));
+    frame(&mut composer, &mut fonts, &mut input);
+    assert_eq!(composer.text(), "", "a sent message came back");
+
+    holding(&mut input, Mods::default());
+    type_text(
+        &mut composer,
+        &mut fonts,
+        &mut input,
+        "another one, longer still",
+    );
+    composer.fill("hi", &mut fonts);
+    holding(&mut input, command());
+    press(&mut input, Key::Char('z'));
+    frame(&mut composer, &mut fonts, &mut input);
+    assert_eq!(
+        composer.text(),
+        "hi",
+        "the draft was walked by another's history"
+    );
+    press(&mut input, Key::Char('y'));
+    frame(&mut composer, &mut fonts, &mut input);
+    assert_eq!(composer.text(), "hi");
+}
+
 /// Typing after an undo throws away what was undone.
 ///
 /// A reader who undid something and then wrote has chosen a different future;
